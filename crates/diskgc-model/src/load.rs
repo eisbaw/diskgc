@@ -209,6 +209,13 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
         require_normal("state_dir", dir)?;
         state.state_dir = Some(dir.clone());
     }
+    if let Some(dir) = &model.runtime_dir {
+        require_normal("runtime_dir", dir)?;
+    }
+    state.user_lock_dir = diskgc_core::hostlock::user_lock_dir(
+        model.runtime_dir.as_deref().map(std::path::Path::as_os_str),
+        model.state_dir.as_deref(),
+    );
     if let Some(id) = &model.boot_id {
         state.boot_id = id.clone();
     }

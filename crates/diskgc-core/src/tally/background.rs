@@ -6,8 +6,9 @@
 //!   information; without it, the duty cycle alone applies (one
 //!   [`Event::NoPsi`]);
 //! - before each batch it tests, without waiting, whether anyone holds the
-//!   host lock ([`hostlock::held_by_another`]); if so a reclaim is running
-//!   and it touches nothing, polling every [`LOCK_POLL`];
+//!   lock a reclaim takes, the host lock or this user's per-user lock
+//!   ([`hostlock::held_by_another`]); if so a reclaim is running and it
+//!   touches nothing, polling every [`LOCK_POLL`];
 //! - then it reads the pressure; under pressure the batch is skipped and
 //!   the sleep doubles ([`Pace`]);
 //! - a batch ([`Budget::batch`]: at most 50 ms or 2,000 operations) does the
@@ -37,7 +38,7 @@ use super::schedule::{
 use super::size::reach;
 use super::{Rounded, Sizing, TallyState};
 use crate::host::{Host, HostError, MonoTime, Pressure};
-use crate::hostlock::{self, LockError};
+use crate::hostlock::{self, LockError, ReclaimLock};
 use crate::index::{Identity, MountKey, UnitRef};
 
 /// How often a paused tally tests the host lock again.
@@ -64,9 +65,10 @@ pub enum Event {
     /// A pressure read failed after the start: that batch ran unbraked.
     /// Once per run.
     PsiUnreadable(HostError),
-    /// Another process holds the host lock: nothing done, polling.
-    Paused,
-    /// The host lock cannot be tested (missing: no reclaim can run either;
+    /// Another process holds this lock: nothing done, polling.
+    Paused(ReclaimLock),
+    /// The lock cannot be tested (the host lock missing for root, or a
+    /// per-user lock refused: no reclaim of this user can run either;
     /// otherwise the tally pauses). Once per kind of error.
     HostLockUnusable(LockError),
     /// Under pressure: the batch skipped.
@@ -193,21 +195,23 @@ impl Background {
         // pressure read count towards the duty cycle like the batch.
         let start = host.now();
         match hostlock::held_by_another(host) {
-            Ok(false) => {}
-            Ok(true) => {
-                log(Event::Paused);
+            Ok(None) => {}
+            Ok(Some(lock)) => {
+                log(Event::Paused(lock));
                 return LOCK_POLL;
             }
             Err(e) => {
-                let missing = matches!(e, LockError::Missing { .. });
+                let no_reclaim =
+                    matches!(e, LockError::Missing { .. } | LockError::UserLockRefused(_));
                 let kind = std::mem::discriminant(&e);
                 if self.lock_error_logged != Some(kind) {
                     self.lock_error_logged = Some(kind);
                     log(Event::HostLockUnusable(e));
                 }
-                // Missing: not provisioned, so no reclaim can hold it.
-                // Anything else: it cannot be told, so do nothing.
-                if !missing {
+                // Missing for root, or a per-user lock refused: no reclaim
+                // of this user can hold it. Anything else: it cannot be
+                // told, so do nothing.
+                if !no_reclaim {
                     return LOCK_POLL;
                 }
             }

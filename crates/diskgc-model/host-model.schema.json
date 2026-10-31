@@ -152,6 +152,13 @@
         "$ref": "#/$defs/ProcessSpec"
       }
     },
+    "runtime_dir": {
+      "description": "`$XDG_RUNTIME_DIR` as the binary reads it: with it the per-user\nlock directory is `<runtime_dir>/diskgc`, otherwise `state_dir`\n(`diskgc_core::hostlock::user_lock_dir`; docs/safety.md, Host\nlock). Absent, and no `state_dir`: `user_lock` refuses (no place).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "sandbox_gate": {
       "description": "The pre-release sandbox gate as `LinuxHost` has it (docs/safety.md):\n`open` (the default; the model deletes nothing real), `closed`\n(outside a test container: `may_delete`, `unlinkat`, `fchmod` and\n`run_command` are refused with `Cause::SandboxGate`, nothing is\nattempted), or\n`refuses_deletes` (`may_delete` answers open but the deleting calls\nare refused: what a caller that asked first must still survive).",
       "$ref": "#/$defs/GateSpec"
@@ -1096,7 +1103,8 @@
         "boot_id",
         "state_lock",
         "state_read",
-        "state_write"
+        "state_write",
+        "user_lock"
       ]
     },
     "OtherUsedSpec": {

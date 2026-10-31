@@ -839,6 +839,9 @@ pub(crate) mod tests {
         ) -> Result<crate::host::StateLock<Self::Fd>, HostError> {
             unreachable!()
         }
+        fn user_lock(&self) -> Result<crate::host::UserLock<Self::Fd>, HostError> {
+            unreachable!()
+        }
 
         fn state_read(
             &self,

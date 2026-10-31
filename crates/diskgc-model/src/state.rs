@@ -416,6 +416,9 @@ pub struct State {
     pub fs_uuids: BTreeMap<Dev, String>,
     /// diskgc's state directory (`state_*` operations), if any.
     pub state_dir: Option<PathBuf>,
+    /// The per-user lock directory (`user_lock`), if any: derived from
+    /// `runtime_dir` and `state_dir` as the binary derives it.
+    pub user_lock_dir: Option<PathBuf>,
     pub boot_id: String,
 }
 
@@ -454,6 +457,7 @@ impl State {
             elapsed: Duration::ZERO,
             fs_uuids: BTreeMap::new(),
             state_dir: None,
+            user_lock_dir: None,
             boot_id: DEFAULT_BOOT_ID.to_owned(),
         }
     }

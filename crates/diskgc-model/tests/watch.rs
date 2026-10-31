@@ -305,6 +305,112 @@ fn watch_reclaims_below_min_free_to_target_free() {
     assert_eq!(run.count("cycle 1 ended met"), 1, "{:?}", run.lines);
 }
 
+// ---- TASK-277: a user's watch without the host lock ----
+
+/// A non-root watch on a host without `/run/diskgc/lock` starts, says once
+/// that its reclaims take the per-user lock (in the state directory here:
+/// no `$XDG_RUNTIME_DIR`) and do not serialise with other users', and its
+/// cycle reclaims under that lock, made inheritable as the host lock is.
+#[test]
+fn a_user_watch_without_the_host_lock_reclaims_under_its_per_user_lock() {
+    const USER_LOCK: &str = "/home/u/.local/state/diskgc/lock";
+    let events = "events:\n  - {at: {elapsed: 90s}, other_used: {mount: /tmp, bytes: 6656M}}\n  \
+                  - {at: {elapsed: 10m}, signal: term}\n";
+    let model = yaml("4G", &old_candidates(10, "300M"), events)
+        .replace("  /run/diskgc/lock: {uid: 0, gid: 0}\n", "");
+    let host = host(&model);
+    let run = watch(&host, &reclaim("1G", "2G", "10s"));
+    assert_eq!(
+        run.ended,
+        Ok(Ended::Stopped(Signal::Term)),
+        "{:?}",
+        run.lines
+    );
+    assert_eq!(
+        run.count(&format!(
+            "reclaims take the per-user lock {USER_LOCK} instead"
+        )),
+        1,
+        "{:?}",
+        run.lines
+    );
+    assert_eq!(run.records.len(), 1, "{:?}", run.records);
+    assert_eq!(run.records[0].1["status"], "met");
+    assert!(deletions(&host) > 0);
+    assert_eq!(host_locks(&host), 1, "taken once and made inheritable");
+    let taken = host
+        .trace()
+        .into_iter()
+        .filter(|c| c.op == Op::Flock && c.result == "acquired")
+        .filter_map(|c| c.path)
+        .filter(|p| p.ends_with("lock") && !p.ends_with("index-dev-0-42.lock"))
+        .collect::<Vec<_>>();
+    assert!(
+        taken.iter().all(|p| p == Path::new(USER_LOCK)) && !taken.is_empty(),
+        "{taken:?}"
+    );
+    assert!(
+        run.has(&format!("per-user lock {USER_LOCK} taken after")),
+        "{:?}",
+        run.lines
+    );
+    let stat = host.stat_path(Path::new(USER_LOCK)).expect("made");
+    assert_eq!((stat.uid, stat.perm), (Some(1000), Some(0o600)));
+}
+
+/// Root (`--allow-root`) never falls back: a watch without the host lock
+/// exits 2 (`provisioning`) at start in reclaim mode, makes no per-user
+/// lock, and `--tally-only` starts with a warning.
+#[test]
+fn watch_as_root_without_the_host_lock_exits_2_at_start() {
+    let config = "version: 1\nowners: [tester]\nprofiles:\n  - {name: tmp-a, find: {roots: [/tmp], paths: [\"a*\"], type: dir}, action: delete, examples: {match: [/tmp/a0]}}\ngroups:\n  - name: g\n    tiers:\n      - {name: a, select: \"profile:tmp-a && filter:idle-1h\"}\n";
+    let file = ConfigFile::Read {
+        path: PathBuf::from("/etc/diskgc/config.yaml"),
+        bytes: config.as_bytes().to_vec(),
+    };
+    let selection = Selection {
+        select: None,
+        allow_root: true,
+        ..selection()
+    };
+    let model = yaml(
+        "5G",
+        "  /run/user/0: {.: {uid: 0, mode: \"0700\"}}\n",
+        "own_uid: 0\nusers: {tester: 2000}\nruntime_dir: /run/user/0\nevents:\n  - {at: {elapsed: 1m}, signal: term}\n",
+    )
+    .replace("  /run/diskgc/lock: {uid: 0, gid: 0}\n", "");
+    let root = host(&model);
+    let run = watch_with(&root, &reclaim("2G", "3G", "10s"), &selection, &file);
+    assert_eq!(run.ended, Err(2), "{:?}", run.lines);
+    assert!(run.has("\"cause\":\"provisioning\""), "{:?}", run.lines);
+    assert!(
+        run.has("host lock /run/diskgc/lock is missing"),
+        "{:?}",
+        run.lines
+    );
+    assert_eq!(root.trace_count(Op::UserLock), 0);
+    assert!(root.stat_path(Path::new("/run/user/0/diskgc")).is_none());
+    let root = host(&model);
+    let run = watch_with(
+        &root,
+        &Mode::TallyOnly { min_free: None },
+        &selection,
+        &file,
+    );
+    assert_eq!(
+        run.ended,
+        Ok(Ended::Stopped(Signal::Term)),
+        "{:?}",
+        run.lines
+    );
+    assert!(
+        run.has("warning: the host lock /run/diskgc/lock is missing"),
+        "{:?}",
+        run.lines
+    );
+    assert_eq!(root.trace_count(Op::UserLock), 0);
+}
+
 // ---- AC #2: back-off ----
 
 /// An `exhausted` cycle (every candidate fresh): sampling continues, but
@@ -629,13 +735,25 @@ fn watch_start_refusals() {
         watch(&host2, &Mode::TallyOnly { min_free: None }).ended,
         Ok(Ended::Stopped(Signal::Term))
     );
-    // A missing host lock file: exit 2 (provisioning); --tally-only warns.
-    let unprovisioned = yaml("5G", "", "events:\n  - {at: {elapsed: 1m}, signal: term}\n")
-        .replace("  /run/diskgc/lock: {uid: 0, gid: 0}\n", "");
+    // No host lock file and a per-user lock that is refused (its
+    // directory a symlink): exit 2 (provisioning); --tally-only warns.
+    // (Root without the host lock: watch_as_root_without_the_host_lock_*;
+    // a user's usable per-user lock: a_user_watch_without_the_host_lock_*.)
+    let unprovisioned = yaml(
+        "5G",
+        "  /run/user/1000: {.: {mode: \"0700\"}, x: {.: {mode: \"0700\"}}, diskgc: {symlink: /run/user/1000/x}}\n",
+        "runtime_dir: /run/user/1000\nevents:\n  - {at: {elapsed: 1m}, signal: term}\n",
+    )
+    .replace("  /run/diskgc/lock: {uid: 0, gid: 0}\n", "");
     let host3 = host(&unprovisioned);
     let run = watch(&host3, &reclaim("2G", "3G", "10s"));
     assert_eq!(run.ended, Err(2));
     assert!(run.has("\"cause\":\"provisioning\""), "{:?}", run.lines);
+    assert!(
+        run.has("per-user lock directory is a symlink"),
+        "{:?}",
+        run.lines
+    );
     let host4 = host(&unprovisioned);
     let run = watch(&host4, &Mode::TallyOnly { min_free: None });
     assert_eq!(run.ended, Ok(Ended::Stopped(Signal::Term)));

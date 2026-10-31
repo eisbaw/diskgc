@@ -789,9 +789,10 @@ fn work_dir(ctx: &Ctx) -> TestResult {
 }
 
 /// AC #1 and exit 0: already above `--min-free`, `ensure` exits 0 without
-/// taking the lock. The lock file is removed first, so a run that tried to
-/// take it would exit 2; human mode prints nothing, `--json` says `met`
-/// with the mount resolved.
+/// taking a lock. The host lock file is removed first, so a run that tried
+/// to take a lock would make tester's per-user lock (TASK-277), and none is
+/// made; human mode prints nothing, `--json` says `met` with the mount
+/// resolved.
 pub fn ensure_above_min_free_exits_0_without_the_host_lock(ctx: &Ctx) -> TestResult {
     work_dir(ctx)?;
     unprovision(ctx)?;
@@ -823,7 +824,22 @@ pub fn ensure_above_min_free_exits_0_without_the_host_lock(ctx: &Ctx) -> TestRes
     ensure!(r["target_met"] == true, "{r}");
     ensure!(r["avail_before_bytes"] == r["avail_after_bytes"], "{r}");
     ensure!(column(&r, "actions", "candidate").is_empty(), "{r}");
+    no_user_lock_made()?;
     judged.assert_clean()
+}
+
+/// tester's per-user lock (docs/safety.md, Host lock): in the state
+/// directory, since the harness gives tester no `$XDG_RUNTIME_DIR`.
+const USER_LOCK: &str = "/home/tester/.local/state/diskgc/lock";
+
+/// No per-user lock was made: a run that needed no reclaim (or a dry run)
+/// makes none, a state write.
+fn no_user_lock_made() -> TestResult {
+    ensure!(
+        !Path::new(USER_LOCK).exists(),
+        "{USER_LOCK} was made by a run that takes no lock"
+    );
+    Ok(())
 }
 
 /// A dry run must return while another process owns the host lock. The
@@ -931,28 +947,39 @@ pub fn ensure_flag_errors_are_single_json_reports(ctx: &Ctx) -> TestResult {
     judged.assert_clean()
 }
 
-/// AC #2 and exit 2: below `--min-free` without `/run/diskgc/lock`, exit 2
-/// with cause `provisioning`, printing the two tmpfiles lines (docs/safety.md,
-/// Host lock) and the commands that apply them; nothing is deleted.
-pub fn ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines(
+/// AC #2 and exit 2, as root: below `--min-free` without
+/// `/run/diskgc/lock`, `ensure --allow-root` exits 2 with cause
+/// `provisioning`, printing the two tmpfiles lines (docs/safety.md, Host
+/// lock) and the commands that apply them; nothing is deleted. Root never
+/// falls back to a per-user lock (TASK-277); a user does
+/// ([`ensure_as_a_user_without_the_host_lock_reclaims_under_a_per_user_lock`]).
+pub fn ensure_as_root_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines(
     ctx: &Ctx,
 ) -> TestResult {
     work_dir(ctx)?;
     unprovision(ctx)?;
+    // A protected root policy (root-owned under the root-owned /run/diskgc),
+    // as root mode requires; its owner is tester.
+    let config = b"version: 1\nowners: [tester]\nprofiles:\n  - name: root-lock-fixture\n    find: {roots: [/tmp], paths: [w], type: dir}\n    action: delete\n    examples: {match: [/tmp/w]}\n";
+    ctx.run_diskgc
+        .write_file("root-lock.yaml", config, 0o600, ROOT)?;
     let oracle = Oracle::arm(Fixture::new())?;
-    let run = ensure_run(
-        ctx,
+    let run = ctx.run_as_root(
+        &ctx.diskgc(),
         &[
+            "ensure",
+            "--allow-root",
             "--min-free",
             "100%",
             "--json",
+            "--config",
+            "/run/diskgc/root-lock.yaml",
             "--select",
-            "profile:cargo-target",
-            "--roots",
-            "/tmp/w",
+            "profile:root-lock-fixture",
             "/tmp/w",
         ],
     )?;
+    info!("as root without the host lock: {}", run.stderr);
     let judged = oracle.judge(&run)?;
     run.expect_code(2)?;
     for line in [
@@ -974,22 +1001,108 @@ pub fn ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines(
             .is_some_and(|errors| errors.iter().any(|e| {
                 e["cause"] == "provisioning"
                     && e["message"].as_str().is_some_and(|m| {
-                        m.contains("sudo systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf")
+                        m.contains("host lock /run/diskgc/lock is missing")
+                            && m.contains(
+                                "sudo systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf",
+                            )
                     })
             })),
         "no provisioning error with the fix-it command: {r}"
     );
+    ensure!(
+        !Path::new("/root/.local/state/diskgc/lock").exists(),
+        "root made a per-user lock"
+    );
     judged.assert_clean()
 }
 
+/// TASK-277 (Mark: "any user shall be able to garbage collect his own
+/// files"): on a host without `/run/diskgc/lock`, tester's reclaiming
+/// `ensure` makes its per-user lock (`$XDG_RUNTIME_DIR` is unset here, so
+/// in the state directory: directory 0700, file 0600, tester's), takes it,
+/// deletes the one eligible candidate and exits 0 at the goal, saying in
+/// one line which lock it took and that other users' reclaims are not
+/// serialised with it. The deletion oracle allows only the candidate (and
+/// diskgc's own state directory) to change.
+pub fn ensure_as_a_user_without_the_host_lock_reclaims_under_a_per_user_lock(
+    ctx: &Ctx,
+) -> TestResult {
+    let scratch = &ctx.scratch;
+    work_dir(ctx)?;
+    unprovision(ctx)?;
+    scratch.mkdir("userlock-1", 0o755, TESTER)?;
+    scratch.write_file("userlock-1/payload", &[5; 16384], 0o644, TESTER)?;
+    ctx.home.write_file(
+        "diskgc-userlock.yaml",
+        b"version: 1\nprofiles:\n  - name: userlock-source\n    find: {roots: [/tmp], paths: [\"userlock-*\"], type: dir}\n    action: delete\n    examples: {match: [/tmp/userlock-1]}\ngroups:\n  - name: userlock\n    tiers:\n      - name: userlock-tier\n        select: profile:userlock-source\n",
+        0o600,
+        TESTER,
+    )?;
+    // A goal 4 KiB above what is available now: met once the 16 KiB
+    // candidate is gone, not before.
+    let goal = format!("{}K", (avail(Path::new("/tmp"))? + 4096).div_ceil(1024));
+    let oracle = Oracle::arm(Fixture::new().eligible(scratch.path("userlock-1")))?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--config",
+            "/home/tester/diskgc-userlock.yaml",
+            "--min-free",
+            &goal,
+            "--timeout",
+            "20s",
+            "/tmp/w",
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    judged.assert_clean()?;
+    let r = report(&run)?;
+    ensure!(r["status"] == "met" && r["target_met"] == true, "{r}");
+    ensure!(
+        column(&r, "actions", "candidate") == [&Value::from("/tmp/userlock-1")],
+        "{r}"
+    );
+    ensure!(
+        !scratch.path("userlock-1").exists(),
+        "the candidate is still there"
+    );
+    let taken: Vec<&str> = run
+        .stderr
+        .lines()
+        .filter(|l| l.contains(&format!("per-user lock {USER_LOCK} taken after")))
+        .collect();
+    ensure!(
+        taken.len() == 1
+            && taken[0].contains("reclaims by other users are not serialised with this one")
+            && !run.stderr.contains("sudo"),
+        "one line names the per-user lock, without sudo:\n{}",
+        run.stderr
+    );
+    ensure!(!Path::new(HOST_LOCK).exists(), "{HOST_LOCK} appeared");
+    for (path, mode) in [(crate::oracle::DISKGC_STATE_DIR, 0o700), (USER_LOCK, 0o600)] {
+        let meta = std::fs::symlink_metadata(path).map_err(|e| format!("{path}: {e}"))?;
+        ensure!(
+            meta.mode() & 0o7777 == mode && meta.uid() == TESTER.uid,
+            "{path}: mode {:o}, owner {}",
+            meta.mode() & 0o7777,
+            meta.uid()
+        );
+    }
+    Ok(())
+}
+
 /// A met goal still checks host-lock provisioning without taking the lock.
-/// Missing and nonregular lock objects warn on stderr while JSON stays met.
+/// A nonregular lock object warns on stderr while JSON stays met. A missing
+/// one does not, for tester: a reclaim would fall back to a per-user lock
+/// (TASK-277), which the met run neither makes nor mentions.
 pub fn ensure_goal_met_warns_about_an_unready_host_lock(ctx: &Ctx) -> TestResult {
     work_dir(ctx)?;
     unprovision(ctx)?;
     for (case, expected) in [
-        ("missing", "host lock /run/diskgc/lock is missing"),
-        ("fifo", "host lock /run/diskgc/lock is unusable"),
+        ("missing", None),
+        ("fifo", Some("host lock /run/diskgc/lock is unusable")),
     ] {
         if case == "fifo" {
             ctx.run_diskgc.fifo("lock", 0o644, ROOT)?;
@@ -1010,11 +1123,20 @@ pub fn ensure_goal_met_warns_about_an_unready_host_lock(ctx: &Ctx) -> TestResult
         )?;
         oracle.judge(&run)?.assert_clean()?;
         run.expect_code(0)?;
-        ensure!(
-            run.stderr.contains("warning: host lock is not ready") && run.stderr.contains(expected),
-            "{case}: no provisioning warning: {}",
-            run.stderr
-        );
+        match expected {
+            Some(expected) => ensure!(
+                run.stderr.contains("warning: host lock is not ready")
+                    && run.stderr.contains(expected),
+                "{case}: no provisioning warning: {}",
+                run.stderr
+            ),
+            None => ensure!(
+                !run.stderr.contains("warning") && !run.stderr.contains("per-user lock"),
+                "{case}: a met run said something about the lock: {}",
+                run.stderr
+            ),
+        }
+        no_user_lock_made()?;
         let report = report(&run)?;
         ensure!(
             report["status"] == "met"
@@ -2381,8 +2503,9 @@ fn reclaimable_paths(target: &Path) -> Result<Vec<std::path::PathBuf>, String> {
 }
 
 /// `--dry-run` on real targets: it plans and deletes nothing, takes no
-/// lock (the host lock file is removed, which a lock attempt would turn
-/// into exit 2), and prints even with the goal met: exit 0, status
+/// lock (the host lock file is removed, so a lock attempt would make
+/// tester's per-user lock, and none is made), and prints even with the
+/// goal met: exit 0, status
 /// `dry_run`, the plan listing `old` eligible (sized) before `new`, which a
 /// keep marker in its target makes `keep_marker`. The oracle allows nothing to
 /// go; the strace record holds no unlink.
@@ -2457,6 +2580,17 @@ pub fn ensure_dry_run_plans_real_targets_and_deletes_nothing(
             .count();
         ensure!(unlinks == 0, "a dry run made {unlinks} unlink calls");
     }
+    // TASK-277: it says what a reclaim would lock, without sudo.
+    ensure!(
+        human
+            .stderr
+            .contains("the host lock /run/diskgc/lock is not provisioned")
+            && human.stderr.contains("per-user lock")
+            && !human.stderr.contains("sudo"),
+        "the dry run's lock note: {}",
+        human.stderr
+    );
+    no_user_lock_made()?;
     judged.assert_clean()
 }
 

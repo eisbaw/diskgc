@@ -1,24 +1,34 @@
-//! The host lock (docs/safety.md, Host lock): one reclaim per host at a
-//! time, by an exclusive `flock` on the fixed path `/run/diskgc/lock`,
-//! which whatever installs diskgc provisions (the tmpfiles lines in
-//! [`TMPFILES_LINES`]).
+//! The lock a reclaim takes (docs/safety.md, Host lock). The provisioned
+//! host lock, an exclusive `flock` on the fixed path `/run/diskgc/lock`
+//! that whatever installs diskgc provisions (the tmpfiles lines in
+//! [`TMPFILES_LINES`]), lets one reclaim run per host at a time. A non-root
+//! run on a host without it (the file or `/run/diskgc` missing) takes a
+//! per-user lock instead, which diskgc makes itself ([`Host::user_lock`],
+//! in [`user_lock_dir`]): one reclaim per user at a time, and reclaims of
+//! different users are not serialised. Root (and so `--allow-root`, which
+//! is for root) never falls back. Anything else at the host lock's path
+//! (not a regular file, reached through a symlink) is refused for everyone,
+//! never fallen back from. Which lock it is, is decided afresh at every
+//! use ([`ReclaimLock`]).
 //!
-//! [`acquire`] reaches the file without following a symlink or crossing a
-//! mount ([`resolve`] of `/run/diskgc`, then the name below it), checks
-//! that it is a regular file on the `O_PATH` fd and reopens that object
-//! read-only through the fd ([`Host::reopen_regular`]), so a FIFO or a
-//! device standing at the path is never opened. It then waits for the lock
-//! until the deadline ([`Host::flock_wait`]: non-blocking attempts, so the
-//! deadline and an observed interruption both stop the wait) and makes the held fd inheritable by
-//! every child ([`Host::inherit_lock`]), so the lock stays held until the
-//! last child exits. It is released only by dropping the [`HostLock`]
-//! (closing the fd); the port has no unlock.
+//! [`acquire`] reaches the host lock without following a symlink or
+//! crossing a mount ([`resolve`] of `/run/diskgc`, then the name below
+//! it), checks that it is a regular file on the `O_PATH` fd and reopens
+//! that object read-only through the fd ([`Host::reopen_regular`]), so a
+//! FIFO or a device standing at the path is never opened. It then waits
+//! for the lock until the deadline ([`Host::flock_wait`]: non-blocking
+//! attempts, so the deadline and an observed interruption both stop the
+//! wait) and makes the held fd inheritable by every child
+//! ([`Host::inherit_lock`]), so the lock stays held until the last child
+//! exits. It is released only by dropping the [`HeldLock`] (closing the
+//! fd); the port has no unlock. The per-user lock is held the same way.
 
+use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::host::{
-    Access, FileType, Host, HostError, LockMode, Locked, MonoTime, TryLock, WaitLock,
+    Access, Cause, FileType, Host, HostError, LockMode, Locked, MonoTime, TryLock, WaitLock,
 };
 use crate::report::Signal;
 use crate::resolve::{ResolveError, Want, open_beneath, resolve};
@@ -69,37 +79,97 @@ impl fmt::Display for FixIt {
     }
 }
 
-/// The held host lock. Dropping it closes the fd, which releases the lock
-/// once every child that inherited a copy has closed its copy too.
+/// The per-user lock's file name in [`user_lock_dir`].
+pub const USER_LOCK_NAME: &str = "lock";
+
+/// The directory of the per-user lock (docs/safety.md, Host lock):
+/// `$XDG_RUNTIME_DIR/diskgc` when `runtime_dir` (`$XDG_RUNTIME_DIR`) is
+/// absolute, otherwise `state_dir`, diskgc's state directory; `None`
+/// without either. The binary decides it from its environment and gives
+/// it to `LinuxHost`; the model derives it the same way.
+pub fn user_lock_dir(runtime_dir: Option<&OsStr>, state_dir: Option<&Path>) -> Option<PathBuf> {
+    match runtime_dir.map(Path::new) {
+        Some(dir) if dir.is_absolute() => Some(dir.join("diskgc")),
+        _ => state_dir.map(Path::to_path_buf),
+    }
+}
+
+/// Which lock a reclaim takes: the provisioned host lock, or this user's
+/// per-user lock at its path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReclaimLock {
+    Host,
+    User(PathBuf),
+}
+
+impl ReclaimLock {
+    pub fn path(&self) -> PathBuf {
+        match self {
+            Self::Host => host_lock_path(),
+            Self::User(path) => path.clone(),
+        }
+    }
+}
+
+impl fmt::Display for ReclaimLock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Host => write!(f, "host lock {}", host_lock_path().display()),
+            Self::User(path) => write!(f, "per-user lock {}", path.display()),
+        }
+    }
+}
+
+/// What a reclaim would lock, as [`readiness`] finds it without taking or
+/// making anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readiness {
+    /// The provisioned host lock is there and usable.
+    Host,
+    /// It is not provisioned, and this non-root run falls back to its
+    /// per-user lock (made, if need be, by the reclaim).
+    FallsBack,
+}
+
+/// The held lock. Dropping it closes the fd, which releases the lock once
+/// every child that inherited a copy has closed its copy too.
 #[derive(Debug)]
-pub struct HostLock<F> {
+pub struct HeldLock<F> {
     locked: Locked<F>,
+    /// Which lock it is.
+    pub lock: ReclaimLock,
     /// How long [`acquire`] waited for it.
     pub waited: std::time::Duration,
 }
 
-impl<F> HostLock<F> {
+impl<F> HeldLock<F> {
     /// The held fd (for the record only: it must never be `flock`ed again).
     pub fn locked(&self) -> &Locked<F> {
         &self.locked
     }
 }
 
-/// Why the host lock was not taken.
+/// Why the lock was not taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockError {
     /// `/run/diskgc/lock` (or its directory) does not exist: not
-    /// provisioned (exit 2, printing [`TMPFILES_LINES`]).
+    /// provisioned, and this run is root, which never falls back (exit 2,
+    /// printing [`TMPFILES_LINES`]).
     Missing { detail: String },
     /// Something other than a regular file stands at the path, or it cannot
     /// be reached safely (a symlink, a mount crossing): a provisioning
-    /// error too (exit 2).
+    /// error too (exit 2), for every user.
     Unusable { detail: String },
-    /// Another reclaim held it until the deadline.
-    DeadlinePassed,
+    /// The host lock is not provisioned and the per-user lock was refused
+    /// ([`Host::user_lock`]'s [`Cause::Invalid`]: a symlink, another
+    /// user's, open to others, or no place for it): a provisioning error
+    /// (exit 2).
+    UserLockRefused(HostError),
+    /// Another reclaim held this lock until the deadline.
+    DeadlinePassed(ReclaimLock),
     /// SIGINT or SIGTERM arrived before the lock could be used.
     Interrupted(Signal),
-    /// The host failed (opening, reopening, locking, `fcntl`).
+    /// The host failed (opening, making, reopening, locking, `fcntl`).
     Failed(HostError),
 }
 
@@ -121,32 +191,86 @@ impl fmt::Display for LockError {
                 FixIt,
                 path = path.display()
             ),
-            Self::DeadlinePassed => write!(
+            Self::UserLockRefused(e) => write!(
                 f,
-                "the host lock {} was still held by another reclaim at the deadline",
-                path.display()
+                "the host lock {} is not provisioned, and the per-user lock a reclaim by \
+                 this user takes instead is unusable: {e}. Fix the per-user lock (a directory \
+                 of yours, mode 0700, holding the regular file `{USER_LOCK_NAME}` of yours, \
+                 mode 0600, neither a symlink; in $XDG_RUNTIME_DIR/diskgc, otherwise in the \
+                 state directory $XDG_STATE_HOME/diskgc or ~/.local/state/diskgc), or have \
+                 root provision the host lock, which serialises every user's reclaims. {}",
+                path.display(),
+                FixIt
+            ),
+            Self::DeadlinePassed(lock) => write!(
+                f,
+                "the {lock} was still held by another reclaim at the deadline"
             ),
             Self::Interrupted(signal) => write!(
                 f,
-                "interrupted by {} while waiting for the host lock",
+                "interrupted by {} while waiting for the reclaim lock",
                 signal.name()
             ),
-            Self::Failed(e) => write!(f, "the host lock {}: {e}", path.display()),
+            Self::Failed(e) => write!(f, "taking the reclaim lock: {e}"),
         }
     }
 }
 
 impl std::error::Error for LockError {}
 
-/// Check that the provisioned lock can be opened without taking it. An
-/// already-met `ensure` uses this to report a broken installation early.
-pub fn readiness<H: Host>(host: &H) -> Result<(), LockError> {
-    drop(open_lock(host)?);
-    Ok(())
+/// Whether a missing host lock falls back to the per-user lock: only for a
+/// run that is not root (`--allow-root` is for root, docs/safety.md,
+/// Privileges, so it never falls back either).
+fn may_fall_back<H: Host>(host: &H) -> bool {
+    host.effective_uid() != 0
 }
 
-/// Reach and reopen exactly the lock object that [`acquire`] will flock.
-fn open_lock<H: Host>(host: &H) -> Result<H::Fd, LockError> {
+/// What a reclaim would lock, checked without taking or making anything:
+/// the provisioned host lock is opened as [`acquire`] opens it; when it is
+/// missing a non-root run falls back ([`Readiness::FallsBack`]) without
+/// making its per-user lock (a state write). An already-met `ensure` and
+/// a dry run use this to report a broken installation early.
+pub fn readiness<H: Host>(host: &H) -> Result<Readiness, LockError> {
+    match open_host_lock(host) {
+        Ok(fd) => {
+            drop(fd);
+            Ok(Readiness::Host)
+        }
+        Err(LockError::Missing { .. }) if may_fall_back(host) => Ok(Readiness::FallsBack),
+        Err(e) => Err(e),
+    }
+}
+
+/// Opens the lock a reclaim takes, making the per-user lock if this run
+/// falls back to it, without taking it: `watch` checks at start that its
+/// cycles can lock, so a refused per-user lock stops it there (exit 2).
+pub fn prepare<H: Host>(host: &H) -> Result<ReclaimLock, LockError> {
+    open_lock(host).map(|(fd, lock)| {
+        drop(fd);
+        lock
+    })
+}
+
+/// The lock a reclaim takes, open and readable for `flock`: the host lock
+/// ([`open_host_lock`]), or, when it is missing and this run is not root,
+/// the per-user lock ([`Host::user_lock`], made if absent).
+fn open_lock<H: Host>(host: &H) -> Result<(H::Fd, ReclaimLock), LockError> {
+    match open_host_lock(host) {
+        Ok(fd) => Ok((fd, ReclaimLock::Host)),
+        Err(LockError::Missing { .. }) if may_fall_back(host) => {
+            let opened = host.user_lock().map_err(|e| match e.cause {
+                Cause::Invalid => LockError::UserLockRefused(e),
+                Cause::Errno(_) | Cause::SandboxGate => LockError::Failed(e),
+            })?;
+            Ok((opened.fd, ReclaimLock::User(opened.path)))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Reach and reopen exactly the host lock object that [`acquire`] will
+/// flock.
+fn open_host_lock<H: Host>(host: &H) -> Result<H::Fd, LockError> {
     let dir = resolve(host, Path::new(HOST_LOCK_DIR), Want::Directory).map_err(unreachable)?;
     let (fd, stat) = open_beneath(
         host,
@@ -174,60 +298,62 @@ fn open_lock<H: Host>(host: &H) -> Result<H::Fd, LockError> {
     Ok(readable)
 }
 
-/// Takes the host lock, waiting for it until `deadline` (`None`: no
-/// deadline). See the module docs.
+/// Takes the lock a reclaim takes, waiting for it until `deadline`
+/// (`None`: no deadline). See the module docs.
 pub fn acquire<H: Host>(
     host: &H,
     deadline: Option<MonoTime>,
-) -> Result<HostLock<H::Fd>, LockError> {
+) -> Result<HeldLock<H::Fd>, LockError> {
     if let Some(signal) = host.interrupted() {
         return Err(LockError::Interrupted(signal));
     }
     let started = host.now();
-    let readable = open_lock(host)?;
+    let (readable, lock) = open_lock(host)?;
     if let Some(signal) = host.interrupted() {
         return Err(LockError::Interrupted(signal));
     }
-    // Read-only is enough for flock, and is what the file's mode (0644
-    // root) gives every user (docs/safety.md, Host lock).
+    // Read-only is enough for flock, and is what the host lock's mode
+    // (0644 root) gives every user (docs/safety.md, Host lock).
     let locked = match host
         .flock_wait(readable, LockMode::Exclusive, deadline)
         .map_err(LockError::Failed)?
     {
         WaitLock::Acquired(locked) => locked,
-        WaitLock::DeadlinePassed(_) => return Err(LockError::DeadlinePassed),
+        WaitLock::DeadlinePassed(_) => return Err(LockError::DeadlinePassed(lock)),
         WaitLock::Interrupted(signal) => return Err(LockError::Interrupted(signal)),
     };
     if let Some(signal) = host.interrupted() {
         return Err(LockError::Interrupted(signal));
     }
     host.inherit_lock(&locked).map_err(LockError::Failed)?;
-    Ok(HostLock {
+    Ok(HeldLock {
         locked,
+        lock,
         waited: host.now().saturating_since(started),
     })
 }
 
-/// Whether another process (or another part of this one) holds the host
-/// lock now, tested without waiting and without taking it for longer than
-/// the test: a shared `flock` attempt on a fresh open of the lock file,
-/// released at once by closing it. Busy means a reclaim holds it (they take
-/// it exclusively). For the background tally's pause (docs/architecture.md,
+/// Whether another process (or another part of this one) holds the lock a
+/// reclaim of this run's user takes ([`open_lock`]: the host lock, or the
+/// per-user lock, made if absent), tested without waiting and without
+/// taking it for longer than the test: a shared `flock` attempt on a fresh
+/// open of the lock file, released at once by closing it. Busy means a
+/// reclaim holds it (they take it exclusively): which lock is returned. For the background tally's pause (docs/architecture.md,
 /// The tally: Pausing), which polls: a lock released by its holder can
 /// still look held for a moment (docs/safety.md, Host lock). A reclaim
 /// trying the lock in that instant finds it busy once and tries again (it
 /// waits by polling, [`Host::flock_wait`]).
-pub fn held_by_another<H: Host>(host: &H) -> Result<bool, LockError> {
-    let readable = open_lock(host)?;
+pub fn held_by_another<H: Host>(host: &H) -> Result<Option<ReclaimLock>, LockError> {
+    let (readable, lock) = open_lock(host)?;
     match host
         .flock_try(readable, LockMode::Shared)
         .map_err(LockError::Failed)?
     {
         TryLock::Acquired(probe) => {
             drop(probe);
-            Ok(false)
+            Ok(None)
         }
-        TryLock::Busy(_) => Ok(true),
+        TryLock::Busy(_) => Ok(Some(lock)),
     }
 }
 
@@ -274,6 +400,37 @@ mod tests {
             assert!(text.contains(line), "{text}");
         }
         assert_eq!(host_lock_path(), Path::new("/run/diskgc/lock"));
+    }
+
+    /// TASK-277: `$XDG_RUNTIME_DIR/diskgc` when it is absolute, otherwise
+    /// the state directory; an empty or relative value counts as unset.
+    #[test]
+    fn the_per_user_lock_directory_prefers_an_absolute_runtime_dir() {
+        let state = Path::new("/home/u/.local/state/diskgc");
+        let runtime = |v: &str| user_lock_dir(Some(OsStr::new(v)), Some(state));
+        assert_eq!(
+            runtime("/run/user/1000"),
+            Some(PathBuf::from("/run/user/1000/diskgc"))
+        );
+        for unusable in ["", "run/user/1000"] {
+            assert_eq!(runtime(unusable), Some(state.to_path_buf()), "{unusable:?}");
+        }
+        assert_eq!(user_lock_dir(None, Some(state)), Some(state.to_path_buf()));
+        assert_eq!(user_lock_dir(Some(OsStr::new("rel")), None), None);
+        assert_eq!(user_lock_dir(None, None), None);
+    }
+
+    /// The refusal of a per-user lock names it and how to fix it, and
+    /// still offers the provisioning commands, for whoever is root.
+    #[test]
+    fn a_refused_per_user_lock_says_how_to_fix_it() {
+        let text =
+            LockError::UserLockRefused(HostError::invalid("open", "/run/user/1000/diskgc", "x"))
+                .to_string();
+        assert!(text.contains("not provisioned"), "{text}");
+        assert!(text.contains("per-user lock"), "{text}");
+        assert!(text.contains("open /run/user/1000/diskgc: x"), "{text}");
+        assert!(text.contains(TMPFILES_LINES[1]), "{text}");
     }
 
     /// TASK-151: the refusal prints commands an operator can paste, and

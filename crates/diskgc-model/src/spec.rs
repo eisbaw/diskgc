@@ -125,6 +125,12 @@ pub struct HostModel {
     /// `state_lock` (mode 0700, diskgc's own uid).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_dir: Option<PathBuf>,
+    /// `$XDG_RUNTIME_DIR` as the binary reads it: with it the per-user
+    /// lock directory is `<runtime_dir>/diskgc`, otherwise `state_dir`
+    /// (`diskgc_core::hostlock::user_lock_dir`; docs/safety.md, Host
+    /// lock). Absent, and no `state_dir`: `user_lock` refuses (no place).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_dir: Option<PathBuf>,
     /// What `boot_id` reports; default a fixed id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_id: Option<String>,
@@ -797,6 +803,7 @@ pub enum Op {
     StateLock,
     StateRead,
     StateWrite,
+    UserLock,
 }
 
 impl Op {
@@ -850,6 +857,7 @@ impl Op {
             Self::StateLock => "state_lock",
             Self::StateRead => "state_read",
             Self::StateWrite => "state_write",
+            Self::UserLock => "user_lock",
         }
     }
 }

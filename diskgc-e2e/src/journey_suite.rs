@@ -534,30 +534,26 @@ pub fn journey_ci_operator_frees_space_with_ensure(ctx: &Ctx, toolchain: &Toolch
         );
     }
 
-    // A runner set up without the host lock: diskgc itself warns on the
-    // already-met path, so the hook needs no duplicate provisioning check.
+    // A runner set up without the host lock: the runner user's reclaims
+    // fall back to its per-user lock (TASK-277), so the already-met path
+    // stays an instant, quiet no-op that makes no lock.
     unprovision(ctx)?;
     let oracle = Oracle::arm(Fixture::new())?;
     let unprovisioned = pre_job(ctx, "unprovisioned", &[("DISKGC_MIN_FREE", Some("1K"))])?;
     let run = unprovisioned.run;
     oracle.judge(&run)?.assert_clean()?;
     run.expect_code(0)?;
-    for line in [
-        "d /run/diskgc      0755 root root -",
-        "f /run/diskgc/lock 0644 root root -",
-    ] {
-        ensure!(
-            run.stderr.contains(line),
-            "diskgc warns with the tmpfiles line {line:?}: {}",
-            run.stderr
-        );
-    }
     ensure!(
-        run.stderr.contains("warning: host lock is not ready")
+        !run.stderr.contains("warning")
+            && !run.stderr.contains("per-user lock")
             && run.stdout.contains("diskgc ensure exited 0"),
-        "the hook did not pass on diskgc's warning: {}{}",
+        "an unprovisioned runner's met hook: {}{}",
         run.stderr,
         run.stdout
+    );
+    ensure!(
+        !Path::new("/home/tester/.local/state/diskgc/lock").exists(),
+        "the met hook made a per-user lock"
     );
     let report = unprovisioned.report?;
     ensure!(report["status"] == "met", "{report}");

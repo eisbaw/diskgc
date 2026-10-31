@@ -1063,16 +1063,36 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
         matches: 1,
     },
     // diskgc's own state (docs/architecture.md, The Host port: diskgc's
-    // own state): the only writes, creations and renames outside `Delete`.
+    // own state, and the per-user lock, docs/safety.md, Host lock): the
+    // only writes, creations and renames outside `Delete`.
+    Allowed {
+        file: "crates/diskgc-linux/src/state.rs",
+        function: "make_dirs_ungated",
+        gate: Gate::Ungated(
+            "mkdir -p (each 0700) of the state directory or the per-user lock directory's \
+             parent, both chosen by the binary, never a name from a caller; makes no file",
+        ),
+        matches: 1, // mkdir
+    },
     Allowed {
         file: "crates/diskgc-linux/src/state.rs",
         function: "open_lock_file_ungated",
         gate: Gate::Ungated(
-            "creates only diskgc's state directory (0700) and the snapshot's lock file \
-             index-<fs>.lock (0600, read-only open, O_NOFOLLOW) named by a typed FsKey; \
-             diskgc's cache, never user data",
+            "creates only the snapshot's lock file index-<fs>.lock (0600, read-only open, \
+             O_NOFOLLOW) named by a typed FsKey in the state directory (made by \
+             make_dirs_ungated); diskgc's cache, never user data",
         ),
-        matches: 2, // mkdir, CREATE
+        matches: 1, // CREATE
+    },
+    Allowed {
+        file: "crates/diskgc-linux/src/state.rs",
+        function: "open_user_lock_ungated",
+        gate: Gate::Ungated(
+            "creates only the per-user reclaim lock (TASK-277): the directory the binary \
+             chose (mkdirat 0700) and `lock` in it (0600, read-only open, O_NOFOLLOW), no \
+             name from a caller; diskgc's own state, never user data",
+        ),
+        matches: 2, // mkdirat, CREATE
     },
     Allowed {
         file: "crates/diskgc-linux/src/state.rs",

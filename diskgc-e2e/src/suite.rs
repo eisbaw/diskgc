@@ -1497,10 +1497,16 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::command_profile_deletes_only_an_eligible_file,
     },
     Test {
-        name: "ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines",
+        name: "ensure_as_root_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines",
         tier: Tier::Fast,
         expect: Expect::Pass,
-        run: ensure_suite::ensure_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines,
+        run: ensure_suite::ensure_as_root_without_the_host_lock_file_exits_2_printing_the_tmpfiles_lines,
+    },
+    Test {
+        name: "ensure_as_a_user_without_the_host_lock_reclaims_under_a_per_user_lock",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::ensure_as_a_user_without_the_host_lock_reclaims_under_a_per_user_lock,
     },
     Test {
         name: "ensure_goal_met_warns_about_an_unready_host_lock",

@@ -1,0 +1,40 @@
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
+# TASK-277: root (`--allow-root`) never falls back to a per-user lock.
+# Without the host lock file it exits 2 (`provisioning`) with the commands
+# that provision it, as before TASK-277, even with $XDG_RUNTIME_DIR set;
+# nothing deleted.
+profile_vector: 1
+allow_root: true
+config: |
+  version: 1
+  profiles:
+    - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+  owners: [tester]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:zephyr-tmp-probe}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  users: {tester: 1000}
+  clock: 2026-10-15T03:00:00Z
+  own_uid: 0
+  runtime_dir: /run/user/0
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/user/0: {.: {uid: 0, mode: "0700"}}
+    /tmp/zephyr-tester: {f: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /tmp/zephyr-tester}
+  reclaim_exit: 2
+  errors:
+    - {cause: provisioning, contains: "host lock /run/diskgc/lock is missing"}
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/zephyr-tester/f]

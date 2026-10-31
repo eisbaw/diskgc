@@ -781,9 +781,13 @@ fn touches(call: &Call, below: &str) -> bool {
     call.path.as_deref().is_some_and(|p| p.starts_with(below))
 }
 
-/// Nothing below `/run/diskgc` was opened, statted or locked.
-fn host_lock_untouched(host: &ModelHost) -> bool {
-    host.trace().iter().all(|c| !touches(c, "/run/diskgc"))
+/// Below `/run/diskgc` nothing was locked: only looked up (`openat2`,
+/// `statx`) and reopened read-only (`reopen_regular`), as the readiness
+/// check does (TASK-277).
+fn host_lock_only_looked_up(host: &ModelHost) -> bool {
+    host.trace().iter().all(|c| {
+        !touches(c, "/run/diskgc") || matches!(c.op, Op::Openat2 | Op::Statx | Op::ReopenRegular)
+    })
 }
 
 fn unlinked_below(host: &ModelHost, below: &str) -> usize {
@@ -799,15 +803,19 @@ fn exists(host: &ModelHost, path: &str) -> bool {
 
 /// An already-met ensure verifies provisioning but never takes the lock.
 /// Missing and unusable lock objects produce a warning, not a false setup
-/// success or an exit failure.
+/// success or an exit failure. A missing one warns only root: a user's
+/// reclaim falls back to its per-user lock (TASK-277), which a met ensure
+/// neither makes nor mentions.
 #[test]
 fn above_min_free_warns_about_missing_or_unusable_lock_without_taking_it() {
-    for (case, model, expected) in [
+    for (case, model, root, expected) in [
         (
-            "missing",
-            yaml(false, ""),
+            "missing, root",
+            format!("own_uid: 0\n{}", yaml(false, "")),
+            true,
             "host lock /run/diskgc/lock is missing",
         ),
+        ("missing, user", yaml(false, ""), false, ""),
         (
             "fifo",
             yaml(false, "").replacen(
@@ -815,33 +823,40 @@ fn above_min_free_warns_about_missing_or_unusable_lock_without_taking_it() {
                 "tree:\n  /run/diskgc/lock: {type: fifo, uid: 0}\n",
                 1,
             ),
+            false,
             "host lock /run/diskgc/lock is unusable",
         ),
-        ("ready", yaml(true, ""), ""),
+        ("ready", yaml(true, ""), false, ""),
     ] {
         let host = host(&model);
-        let uid = executor::privileges(&host, false).unwrap();
+        let uid = executor::privileges(&host, root).unwrap();
+        let owners = if root { vec![1000] } else { vec![uid] };
         let mut lines = Vec::new();
-        let report = executor::ensure(&host, &cargo("1G", None), &[uid], &mut |line| {
+        let report = executor::ensure(&host, &cargo("1G", None), &owners, &mut |line| {
             lines.push(line.to_owned());
         });
         let output = lines.join("\n");
         assert_eq!(report.status, Status::Met, "{case}: {report:?}");
         assert_eq!(report.exit_code(), 0);
-        if case == "ready" {
-            assert!(!output.contains("host lock is not ready"), "{output}");
+        if expected.is_empty() {
+            assert!(
+                !output.contains("host lock is not ready"),
+                "{case}: {output}"
+            );
+            assert!(!output.contains("per-user lock"), "{case}: {output}");
         } else {
             assert!(
                 output.contains("warning: host lock is not ready"),
-                "{output}"
+                "{case}: {output}"
             );
-            assert!(output.contains(expected), "{output}");
+            assert!(output.contains(expected), "{case}: {output}");
         }
         assert!(
             calls(&host, Op::Flock).is_empty(),
             "{case}: {:#?}",
             host.trace()
         );
+        assert!(calls(&host, Op::UserLock).is_empty(), "{case}: a lock made");
         assert!(calls(&host, Op::Unlinkat).is_empty(), "{case}");
         assert_eq!(report.avail_after_bytes, report.avail_before_bytes);
         assert_eq!(report.mount.as_deref(), Some(Path::new("/home")));
@@ -849,13 +864,16 @@ fn above_min_free_warns_about_missing_or_unusable_lock_without_taking_it() {
     }
 }
 
-/// AC #2: below `--min-free` with no `/run/diskgc/lock`: exit 2, the
-/// message carries both tmpfiles lines, nothing is deleted or locked.
+/// AC #2: root below `--min-free` with no `/run/diskgc/lock`: exit 2, the
+/// message carries both tmpfiles lines, nothing is deleted or locked. (A
+/// user falls back to a per-user lock instead, TASK-277: user_lock.rs.)
 #[test]
 fn a_missing_host_lock_is_exit_2_with_the_tmpfiles_lines() {
-    let host = host(&yaml(false, ""));
-    let report = ensure(&host, &cargo("12G", None));
+    let host = host(&format!("own_uid: 0\n{}", yaml(false, "")));
+    assert_eq!(executor::privileges(&host, true), Ok(0));
+    let report = executor::ensure(&host, &cargo("12G", None), &[1000], &mut |_| {});
     assert_eq!(report.status, Status::UsageError);
+    assert_eq!(report.errors[0].cause, ErrorCause::Provisioning);
     assert_eq!(report.exit_code(), 2);
     let message = &report.errors[0].message;
     for line in TMPFILES_LINES {
@@ -2128,8 +2146,9 @@ fn a_gate_refusal_at_the_delete_stops_the_run() {
 
 /// `--dry-run` (docs/reference.md): plans every target, eligible first in
 /// the order ensure takes them, even with the goal met; no lock of any
-/// kind (no flock at all), no gate question, nothing unlinked, and
-/// `/run/diskgc` not reached (the model has none).
+/// kind (no flock at all), no gate question, nothing unlinked, and no lock
+/// made: `/run/diskgc` (the model has none) is only looked up, to say what
+/// a reclaim would lock (TASK-277), and no per-user lock is made.
 #[test]
 fn a_dry_run_plans_every_target_and_locks_and_deletes_nothing() {
     let host = host(&yaml(false, ""));
@@ -2169,7 +2188,11 @@ fn a_dry_run_plans_every_target_and_locks_and_deletes_nothing() {
     ] {
         assert!(calls(&host, op).is_empty(), "{op} in a dry run");
     }
-    assert!(host_lock_untouched(&host));
+    assert!(host_lock_only_looked_up(&host));
+    assert!(
+        calls(&host, Op::UserLock).is_empty(),
+        "a per-user lock made"
+    );
     assert!(report.actions.is_empty() && report.skipped.is_empty());
     let text = report.summary().expect("a dry run always prints");
     assert!(

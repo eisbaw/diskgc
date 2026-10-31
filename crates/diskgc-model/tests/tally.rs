@@ -17,6 +17,7 @@ use common::host;
 use diskgc_core::config::Order;
 use diskgc_core::fs_kind::Find;
 use diskgc_core::host::{Dev, Host, MonoTime};
+use diskgc_core::hostlock::ReclaimLock;
 use diskgc_core::index::{Family, Finder, Index, MountKey, UnitRef};
 use diskgc_core::profile::{EntryType, Where};
 use diskgc_core::tally::background::{
@@ -231,22 +232,56 @@ fn a_batch_budget_ends_at_2000_operations() {
 /// `/tmp`; it polls every second and starts within a poll of the release.
 #[test]
 fn background_pauses_while_another_process_holds_the_host_lock() {
-    let extra = "processes:\n  - {pid: 4242, exe: /usr/bin/diskgc, cwd: /}\n\
-                 locks:\n  - {path: /run/diskgc/lock, holder: 4242, mode: exclusive}\n\
-                 events:\n  - {at: {elapsed: 30s}, exit: 4242}\n\
-                 call_cost: 1ms\n";
-    let tree = format!("{}  /usr/bin/diskgc: {{}}\n", dirs("a", 3, 2));
-    let host = host(&yaml(&tree, extra));
+    let host = host(&yaml(
+        &format!("{}  /usr/bin/diskgc: {{}}\n", dirs("a", 3, 2)),
+        &held_until_30s("/run/diskgc/lock"),
+    ));
+    pauses_until_the_release(&host, &ReclaimLock::Host);
+}
+
+/// TASK-277: a non-root watch on a host without the host lock pauses for
+/// its own user's per-user lock (`$XDG_RUNTIME_DIR/diskgc/lock`) instead.
+#[test]
+fn background_pauses_while_another_process_holds_the_per_user_lock() {
+    const LOCK: &str = "/run/user/1000/diskgc/lock";
+    let tree = format!(
+        "{}  /usr/bin/diskgc: {{}}\n  /run/user/1000: {{.: {{mode: \"0700\"}}, diskgc: {{.: {{mode: \"0700\"}}, lock: {{mode: \"0600\"}}}}}}\n",
+        dirs("a", 3, 2)
+    );
+    let model = yaml(
+        &tree,
+        &format!("runtime_dir: /run/user/1000\n{}", held_until_30s(LOCK)),
+    )
+    .replace("  /run/diskgc/lock: {uid: 0, gid: 0}\n", "");
+    let host = host(&model);
+    pauses_until_the_release(&host, &ReclaimLock::User(PathBuf::from(LOCK)));
+}
+
+/// Process 4242 holds `lock` exclusively until it exits at 30 s.
+fn held_until_30s(lock: &str) -> String {
+    format!(
+        "processes:\n  - {{pid: 4242, exe: /usr/bin/diskgc, cwd: /}}\n\
+         locks:\n  - {{path: {lock}, holder: 4242, mode: exclusive}}\n\
+         events:\n  - {{at: {{elapsed: 30s}}, exit: 4242}}\n\
+         call_cost: 1ms\n"
+    )
+}
+
+/// The background tally on `host` (sources below `/tmp/a`) touches nothing
+/// below `/tmp` until the holder of `lock` exits at 30 s, polling every
+/// [`LOCK_POLL`], and starts within a poll of the release; its pause names
+/// `lock`.
+fn pauses_until_the_release(host: &ModelHost, lock: &ReclaimLock) {
     let sources = [source("a", "/tmp/a")];
     let mut state = state();
     let mut events = Vec::new();
     let mut log = |e: Event| events.push(e);
-    let mut background = Background::start(&host, &mut log);
+    let mut background = Background::start(host, &mut log);
     let mut first_tmp_call_at = None;
-    while at(&host) < Duration::from_secs(40) {
-        let before = at(&host);
+    while at(host) < Duration::from_secs(40) {
+        let before = at(host);
         let calls = host.trace().len();
-        let sleep = background.turn(&host, &mut state, &sources, &mut log);
+        let sleep = background.turn(host, &mut state, &sources, &mut log);
         let touched = host.trace()[calls..]
             .iter()
             .any(|c| c.path.as_ref().is_some_and(|p| p.starts_with("/tmp")));
@@ -267,7 +302,12 @@ fn background_pauses_while_another_process_holds_the_host_lock() {
         started < Duration::from_secs(30) + LOCK_POLL + Duration::from_millis(100),
         "started at {started:?}"
     );
-    assert!(events.iter().any(|e| matches!(e, Event::Paused)));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Paused(paused) if paused == lock)),
+        "{events:?}"
+    );
     assert!(state.listed_at(&sources[0].finder).is_some());
 }
 

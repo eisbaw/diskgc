@@ -7,7 +7,7 @@
 use crate::engine::Reason;
 use crate::fs_kind;
 use crate::host::{Dev, Host, MonoTime};
-use crate::hostlock;
+use crate::hostlock::{self, Readiness};
 use crate::report::{ErrorCause, ErrorEntry, Final, Report, SkipEntry, Status, conclude};
 use crate::resolve::{ResolveError, Resolved, Want, resolve_in, resolve_unscreened};
 use crate::units::Size;
@@ -259,20 +259,31 @@ pub(super) fn deadline_before_first_sample<H: Host>(
     report
 }
 
-pub(super) fn warn_if_host_lock_unready<H: Host>(host: &H, log: &mut dyn FnMut(&str)) {
-    if let Err(error) = hostlock::readiness(host) {
-        log(&format!("warning: host lock is not ready: {error}"));
+/// Warns when the lock a reclaim would take is not ready, without taking
+/// or making it ([`hostlock::readiness`]). A non-root run without the host
+/// lock is ready ([`Readiness::FallsBack`]): its reclaim makes and takes
+/// its per-user lock (docs/safety.md, Host lock).
+fn warn_if_host_lock_unready<H: Host>(host: &H, log: &mut dyn FnMut(&str)) -> Option<Readiness> {
+    match hostlock::readiness(host) {
+        Ok(readiness) => Some(readiness),
+        Err(error) => {
+            log(&format!("warning: host lock is not ready: {error}"));
+            None
+        }
     }
 }
 
+/// [`warn_if_host_lock_unready`], its time an overrun when it passes the
+/// deadline. An already-met `ensure` says nothing about a per-user
+/// fallback: it is not a fault, and the instant no-op stays quiet.
 pub(super) fn warn_if_host_lock_unready_timed<H: Host>(
     host: &H,
     report: &mut Report,
     deadline: Option<MonoTime>,
     log: &mut dyn FnMut(&str),
-) {
+) -> Option<Readiness> {
     let started = host.now();
-    warn_if_host_lock_unready(host, log);
+    let readiness = warn_if_host_lock_unready(host, log);
     record_deadline_overrun(
         host,
         report,
@@ -281,6 +292,27 @@ pub(super) fn warn_if_host_lock_unready_timed<H: Host>(
         "host_lock_readiness",
         &hostlock::host_lock_path(),
     );
+    readiness
+}
+
+/// The dry run's word on the lock its reclaim would take (it takes and
+/// makes none): [`warn_if_host_lock_unready_timed`], and for a non-root
+/// run without the host lock one note that its reclaims fall back to a
+/// per-user lock, without telling the user to provision anything.
+pub(super) fn say_lock_readiness<H: Host>(
+    host: &H,
+    report: &mut Report,
+    deadline: Option<MonoTime>,
+    log: &mut dyn FnMut(&str),
+) {
+    if warn_if_host_lock_unready_timed(host, report, deadline, log) == Some(Readiness::FallsBack) {
+        log(&format!(
+            "note: the host lock {} is not provisioned: a reclaim by this user takes a \
+             per-user lock instead, which does not serialise it with other users' reclaims \
+             (docs/safety.md, Host lock)",
+            hostlock::host_lock_path().display()
+        ));
+    }
 }
 
 /// A foreign source root cannot free space on PATH. Omit it from every

@@ -44,7 +44,7 @@ use diskgc_core::host::{
     LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MapEntry, MonoTime, MountEntry,
     OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace, Pressure, ProcError, ProcFd, ProcLink,
     ProcStatus, ProcView, Space, Stat, StateFile, StateLock, Timestamp, TryLock, UidMap, Unlink,
-    WaitLock, is_single_name, read_proc_view,
+    UserLock, WaitLock, is_single_name, read_proc_view,
 };
 use diskgc_core::report::Signal;
 use rustix::event::PollFlags;
@@ -186,6 +186,9 @@ pub struct LinuxHost {
     /// diskgc's state directory ([`LinuxHost::with_state_dir`]); `None`:
     /// the state operations fail, and no snapshot is read or written.
     state_dir: Option<PathBuf>,
+    /// The per-user lock directory ([`LinuxHost::with_user_lock_dir`]);
+    /// `None`: [`Host::user_lock`] refuses.
+    user_lock_dir: Option<PathBuf>,
 }
 
 impl LinuxHost {
@@ -256,6 +259,7 @@ impl LinuxHost {
             #[cfg(not(feature = "release-without-sandbox-gate"))]
             clock_offset_seconds,
             state_dir: None,
+            user_lock_dir: None,
         })
     }
 
@@ -267,6 +271,20 @@ impl LinuxHost {
     pub fn with_state_dir(mut self, dir: PathBuf) -> Self {
         assert!(dir.is_absolute(), "a state directory must be absolute");
         self.state_dir = Some(dir);
+        self
+    }
+
+    /// The host with its per-user lock directory at the absolute `dir`
+    /// (`$XDG_RUNTIME_DIR/diskgc` or the state directory, chosen by the
+    /// binary: `diskgc_core::hostlock::user_lock_dir`), where
+    /// [`Host::user_lock`] makes and opens `lock` (docs/safety.md, Host
+    /// lock). It never names anything else there.
+    pub fn with_user_lock_dir(mut self, dir: PathBuf) -> Self {
+        assert!(
+            dir.is_absolute(),
+            "a per-user lock directory must be absolute"
+        );
+        self.user_lock_dir = Some(dir);
         self
     }
 
@@ -2411,6 +2429,25 @@ impl Host for LinuxHost {
 
     fn state_read(&self, key: &FsKey, limit: u64) -> Result<Option<StateFile>, HostError> {
         crate::state::read_snapshot(self.state_dir()?, key, limit, self.proc.as_fd())
+    }
+
+    fn user_lock(&self) -> Result<UserLock<LinuxFd>, HostError> {
+        let dir = self.user_lock_dir.as_deref().ok_or_else(|| {
+            HostError::invalid(
+                "open",
+                "$XDG_RUNTIME_DIR/diskgc",
+                "no place for a per-user lock: neither $XDG_RUNTIME_DIR nor $XDG_STATE_HOME \
+                 nor $HOME is an absolute path",
+            )
+        })?;
+        let (fd, path) = crate::state::open_user_lock_ungated(dir)?;
+        Ok(UserLock {
+            fd: LinuxFd {
+                fd,
+                shown: path.clone(),
+            },
+            path,
+        })
     }
 
     fn state_write(
@@ -6580,6 +6617,115 @@ mod tests {
         });
         assert!(host.state_lock(&key).is_err());
         assert!(host.state_read(&key, 1).is_err());
+    }
+
+    // ---- The per-user lock (docs/safety.md, Host lock; TASK-277) ----
+
+    fn user_lock_host(dir: &Path) -> LinuxHost {
+        LinuxHost::new()
+            .expect("host setup")
+            .with_user_lock_dir(dir.join("run/diskgc"))
+    }
+
+    #[test]
+    fn user_lock_makes_a_private_directory_and_lock_file_and_reuses_them() {
+        let tmp = TempDir::new();
+        let host = user_lock_host(&tmp.0);
+        let first = host.user_lock().expect("made");
+        let dir = tmp.0.join("run/diskgc");
+        assert_eq!(first.path, dir.join("lock"));
+        let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o7777;
+        assert_eq!(
+            mode(&tmp.0.join("run")),
+            0o700,
+            "a missing parent is made 0700"
+        );
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("lock")), 0o600);
+        // Exclusive, so a second open of the same file is busy until dropped.
+        let TryLock::Acquired(held) = host
+            .flock_try(first.fd, LockMode::Exclusive)
+            .expect("flock")
+        else {
+            panic!("the per-user lock is busy");
+        };
+        let again = host.user_lock().expect("reused");
+        assert!(matches!(
+            host.flock_try(again.fd, LockMode::Shared).expect("flock"),
+            TryLock::Busy(_)
+        ));
+        drop(held);
+        assert_eq!(names_in(&dir), ["lock"]);
+    }
+
+    #[test]
+    fn user_lock_refuses_what_another_user_could_swap_or_hold() {
+        let symlinked_dir = |root: &Path| {
+            std::fs::create_dir_all(root.join("elsewhere")).expect("target");
+            std::fs::create_dir_all(root.join("run")).expect("run");
+            std::os::unix::fs::symlink(root.join("elsewhere"), root.join("run/diskgc"))
+                .expect("symlink");
+        };
+        let file_as_dir = |root: &Path| {
+            std::fs::create_dir_all(root.join("run")).expect("run");
+            std::fs::write(root.join("run/diskgc"), b"").expect("file");
+        };
+        let open_dir = |root: &Path| {
+            std::fs::create_dir_all(root.join("run/diskgc")).expect("dir");
+            std::fs::set_permissions(
+                root.join("run/diskgc"),
+                std::fs::Permissions::from_mode(0o777),
+            )
+            .expect("chmod");
+        };
+        let symlinked_lock = |root: &Path| {
+            std::fs::create_dir_all(root.join("run/diskgc")).expect("dir");
+            std::fs::write(root.join("target"), b"").expect("target");
+            std::os::unix::fs::symlink(root.join("target"), root.join("run/diskgc/lock"))
+                .expect("symlink");
+        };
+        let open_lock = |root: &Path| {
+            std::fs::create_dir_all(root.join("run/diskgc")).expect("dir");
+            std::fs::write(root.join("run/diskgc/lock"), b"").expect("lock");
+            std::fs::set_permissions(
+                root.join("run/diskgc/lock"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .expect("chmod");
+        };
+        let lock_dir = |root: &Path| {
+            std::fs::create_dir_all(root.join("run/diskgc/lock")).expect("a directory");
+        };
+        // (case, what to plant below the test root, why it is refused)
+        type Plant = dyn Fn(&Path);
+        let cases: [(&str, &Plant, &str); 6] = [
+            ("symlinked directory", &symlinked_dir, "is a symlink"),
+            ("a file as the directory", &file_as_dir, "not a directory"),
+            ("open directory", &open_dir, "writable by no one else"),
+            ("symlinked lock", &symlinked_lock, "is a symlink"),
+            ("lock others may open", &open_lock, "no one else may open"),
+            (
+                "a directory as the lock",
+                &lock_dir,
+                "must be a regular file",
+            ),
+        ];
+        for (case, plant, why) in cases {
+            let tmp = TempDir::new();
+            plant(&tmp.0);
+            let host = user_lock_host(&tmp.0);
+            let refused = host.user_lock().expect_err(case);
+            assert_eq!(refused.cause, Cause::Invalid, "{case}: {refused}");
+            assert!(refused.to_string().contains(why), "{case}: {refused}");
+        }
+    }
+
+    #[test]
+    fn without_a_per_user_lock_directory_user_lock_refuses() {
+        let host = LinuxHost::new().expect("host setup");
+        let refused = host.user_lock().expect_err("no directory");
+        assert_eq!(refused.cause, Cause::Invalid);
+        assert!(refused.to_string().contains("XDG_RUNTIME_DIR"), "{refused}");
     }
 
     #[test]

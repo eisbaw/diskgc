@@ -17,7 +17,7 @@
 //! state to the tally and taking it back is the same exclusion with a
 //! protocol of its own to get wrong), and the cycle's long hold is the
 //! pause the contract asks for, not contention. The tally additionally
-//! pauses while *another* process holds the host lock (its own probe,
+//! pauses while *another* process holds the reclaim lock (its own probe,
 //! [`crate::hostlock::held_by_another`]).
 //!
 //! **Never waiting on the tally.** The watcher takes the lock by
@@ -49,6 +49,7 @@ use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Duration;
 
 use crate::host::{Host, MonoTime};
+use crate::hostlock::ReclaimLock;
 use crate::tally::TallyState;
 use crate::tally::background::{Background, Event};
 use crate::tally::listing::TallySource;
@@ -89,7 +90,8 @@ pub trait LiveIndex {
 #[derive(Debug, Default)]
 pub struct TallyLog {
     braked: bool,
-    paused: bool,
+    /// The lock a pause is waiting for, while paused.
+    paused: Option<ReclaimLock>,
     /// Batches run (or skipped, while braked) since the last brake line.
     batches: u64,
 }
@@ -110,15 +112,18 @@ impl TallyLog {
                 "background tally: a pressure reading failed ({e}); that batch ran unbraked \
                  (said once)"
             ),
-            Event::Paused => {
-                if std::mem::replace(&mut self.paused, true) {
+            Event::Paused(lock) => {
+                if self.paused.replace(lock.clone()).is_some() {
                     return None;
                 }
-                "background tally paused: the host lock is held (a reclaim runs)".to_owned()
+                format!(
+                    "background tally paused: {} is held (a reclaim runs)",
+                    Named(lock)
+                )
             }
             Event::HostLockUnusable(e) => format!("background tally: {e}"),
             Event::Braked { reading, sleep } => {
-                self.paused = false;
+                self.paused = None;
                 if std::mem::replace(&mut self.braked, true) {
                     self.batches += 1;
                     return None;
@@ -134,22 +139,33 @@ impl TallyLog {
                 )
             }
             Event::Batch(_) => {
-                let resumed = std::mem::replace(&mut self.paused, false);
+                let resumed = self.paused.take();
                 if std::mem::replace(&mut self.braked, false) {
                     let n = std::mem::take(&mut self.batches);
                     self.batches = 1;
                     format!("background tally: pressure brake released after {n} skipped batch(es)")
                 } else {
                     self.batches += 1;
-                    if !resumed {
-                        return None;
-                    }
-                    "background tally resumed: the host lock is free".to_owned()
+                    let lock = resumed?;
+                    format!("background tally resumed: {} is free", Named(&lock))
                 }
             }
             Event::Failed(e) => format!("background tally: {e}"),
         };
         Some(text)
+    }
+}
+
+/// A lock as the pause lines name it: "the host lock" as before TASK-277,
+/// a per-user lock with its path.
+struct Named<'a>(&'a ReclaimLock);
+
+impl std::fmt::Display for Named<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            ReclaimLock::Host => f.write_str("the host lock"),
+            lock @ ReclaimLock::User(_) => write!(f, "the {lock}"),
+        }
     }
 }
 
@@ -491,8 +507,8 @@ mod tests {
     #[test]
     fn a_pause_is_one_line_and_the_resume_one_more() {
         let mut log = TallyLog::default();
-        assert!(log.line(&Event::Paused).is_some());
-        assert_eq!(log.line(&Event::Paused), None);
+        assert!(log.line(&Event::Paused(ReclaimLock::Host)).is_some());
+        assert_eq!(log.line(&Event::Paused(ReclaimLock::Host)), None);
         let resumed = log.line(&Event::Batch(BatchWork::default()));
         assert!(resumed.is_some_and(|l| l.contains("resumed")));
         assert_eq!(log.line(&Event::Batch(BatchWork::default())), None);

@@ -22,7 +22,7 @@ use super::{
     excluded, excluded_by, final_sample, held, is_misconfigured, is_misconfigured_source,
     measure_failure, measure_until, misconfigured_roots, nothing_searched, oldest_first, other_fs,
     overlaps_checked, preflight_roots, record_deadline_overrun, record_error, roots_text, rules,
-    run_error, safety_error, scan_protections, stop_error, timed_report, usage,
+    run_error, safety_error, say_lock_readiness, scan_protections, stop_error, timed_report, usage,
 };
 
 /// Plans what [`ensure`] would do, deleting nothing and taking no lock
@@ -34,8 +34,26 @@ pub fn dry_run<H: Host>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
+    dry_run_tier(host, request, owners, log, SayLock::Yes)
+}
+
+/// Whether a dry run says what its reclaim would lock: once per run, so a
+/// grouped plan says it for its first tier only.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SayLock {
+    Yes,
+    No,
+}
+
+fn dry_run_tier<H: Host>(
+    host: &H,
+    request: &Request,
+    owners: &[u32],
+    log: &mut dyn FnMut(&str),
+    say_lock: SayLock,
+) -> Report {
     timed_report(host, || {
-        let mut report = dry_run_inner(host, request, owners, log);
+        let mut report = dry_run_inner(host, request, owners, log, say_lock);
         if report.status == Status::DryRun && !report.errors.is_empty() {
             report.status = Status::Error;
         }
@@ -43,11 +61,12 @@ pub fn dry_run<H: Host>(
     })
 }
 
-pub(super) fn dry_run_inner<H: Host>(
+fn dry_run_inner<H: Host>(
     host: &H,
     request: &Request,
     owners: &[u32],
     log: &mut dyn FnMut(&str),
+    say_lock: SayLock,
 ) -> Report {
     let deadline = deadline_of(host, request.timeout);
     let mut report = request.report(Status::DryRun, true);
@@ -61,6 +80,10 @@ pub(super) fn dry_run_inner<H: Host>(
     };
     if host.interrupted().is_some() {
         return report;
+    }
+    // Read-only, as the plan: what the reclaim would lock (TASK-277).
+    if say_lock == SayLock::Yes {
+        say_lock_readiness(host, &mut report, deadline, log);
     }
     let tier = &request.tier;
     if deadline_passed(host, deadline) {
@@ -423,7 +446,7 @@ pub(super) fn dry_run_grouped_inner<H: Host>(
     let mut for_tier = request.clone();
     for_tier.tier = first.clone();
     for_tier.timeout = bounded_tier_timeout(host, run_deadline, tier_timeouts[0]);
-    let mut report = dry_run(host, &for_tier, owners, log);
+    let mut report = dry_run_tier(host, &for_tier, owners, log, SayLock::Yes);
     if matches!(report.status, Status::UsageError | Status::Error) {
         return report;
     }
@@ -453,7 +476,7 @@ pub(super) fn dry_run_grouped_inner<H: Host>(
         }
         for_tier.tier = tier.clone();
         for_tier.timeout = bounded_tier_timeout(host, run_deadline, *timeout);
-        let part = dry_run(host, &for_tier, owners, log);
+        let part = dry_run_tier(host, &for_tier, owners, log, SayLock::No);
         report.overruns.extend(part.overruns.iter().cloned());
         if matches!(part.status, Status::UsageError | Status::Error) {
             report.errors.extend(part.errors);

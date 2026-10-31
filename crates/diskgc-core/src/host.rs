@@ -1388,6 +1388,30 @@ pub trait Host {
         key: &FsKey,
         bytes: &[u8],
     ) -> Result<(), HostError>;
+
+    /// Opens diskgc's per-user reclaim lock, `lock` in the per-user lock
+    /// directory the implementation was given (`$XDG_RUNTIME_DIR/diskgc`,
+    /// otherwise the state directory: [`crate::hostlock::user_lock_dir`]),
+    /// creating the directory (mode 0700, with its missing parents) and the
+    /// file (mode 0600, read-only open, never written, never renamed) if
+    /// absent, for [`Host::flock_try`] or [`Host::flock_wait`] only
+    /// (docs/safety.md, Host lock). It takes no name from the caller. The
+    /// directory's own name and the file are reached without following a
+    /// symlink; the directory must be owned by diskgc's user and writable
+    /// by no one else, the file a regular file of that user that no one
+    /// else may open (`mode & 0o077 == 0`). Every such refusal, and having
+    /// no per-user lock directory at all, is [`Cause::Invalid`]; a kernel
+    /// failure carries its errno. Ungated, as [`Host::state_lock`]: one of
+    /// the three operations that create anything outside [`Delete`].
+    fn user_lock(&self) -> Result<UserLock<Self::Fd>, HostError>;
+}
+
+/// The per-user reclaim lock [`Host::user_lock`] opened (not locked yet),
+/// and its path, for the log line that names it.
+#[derive(Debug)]
+pub struct UserLock<F> {
+    pub fd: F,
+    pub path: PathBuf,
 }
 
 /// Which filesystem a snapshot is for: it names `index-<key>` and

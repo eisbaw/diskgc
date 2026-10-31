@@ -35,7 +35,7 @@ pub fn line(ms: u128, event: &Event) -> String {
         Event::PriorityNotLowered(e) => format!("{ms} priority -- {e}"),
         Event::NoPsi(e) => format!("{ms} no-psi -- {e}"),
         Event::PsiUnreadable(e) => format!("{ms} psi-unreadable -- {e}"),
-        Event::Paused => format!("{ms} paused"),
+        Event::Paused(_) => format!("{ms} paused"),
         Event::HostLockUnusable(e) => format!("{ms} lock -- {e}"),
         Event::Braked { reading, sleep } => format!(
             "{ms} braked io={} memory={} cpu={} sleep_ms={}",

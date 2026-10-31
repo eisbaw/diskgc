@@ -655,6 +655,10 @@ impl<H: Host> Host for Controlled<H> {
         self.before("state_lock");
         self.host.state_lock(key)
     }
+    fn user_lock(&self) -> Result<diskgc_core::host::UserLock<Self::Fd>, HostError> {
+        self.before("user_lock");
+        self.host.user_lock()
+    }
 
     fn state_read(
         &self,

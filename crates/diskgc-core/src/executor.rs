@@ -10,7 +10,8 @@
 //!   has no reclaim for, asks the pre-release sandbox gate
 //!   ([`Delete::may_delete`]), then measures; at or above `--min-free` it
 //!   returns at once, without the host lock. Otherwise it takes the host
-//!   lock ([`hostlock`]), measures again, and runs the tier: discovery
+//!   lock ([`hostlock`]; a non-root run without one, its per-user lock),
+//!   measures again, and runs the tier: discovery
 //!   below the roots, a read-only tally of each candidate for the `oldest`
 //!   order ([`cargo_target::tally`], [`fs_kind::tally`]), then the kind's
 //!   own reclaim protocol on each in that order ([`cargo_target::reclaim`],
@@ -65,7 +66,7 @@ pub use policy::overlaps_checked;
 use policy::{excluded_by, overlaps_checked_until, policy_skip, policy_verdict, scan_protections};
 use preflight::{
     Measured, deadline_before_first_sample, measure_failure, measure_until, nothing_searched,
-    preflight_roots, roots_text, warn_if_host_lock_unready_timed,
+    preflight_roots, roots_text, say_lock_readiness, warn_if_host_lock_unready_timed,
 };
 use tier::FsUnionSourceRef;
 
@@ -84,7 +85,7 @@ use crate::host::{
     Cause, CommandExit, CommandInvocation, CommandRun, Delete, Dev, Host, HostError, MonoTime,
     MountEntry, Space, Timestamp,
 };
-use crate::hostlock::{self, LockError};
+use crate::hostlock::{self, HeldLock, LockError, ReclaimLock};
 use crate::inuse::{Checker, REUSE_LIMIT};
 use crate::profile::{Action, IdleWindow};
 use crate::report::{
@@ -339,19 +340,20 @@ fn usage(report: Report, log: &mut dyn FnMut(&str), message: String) -> Report {
     report.usage_error(message)
 }
 
-/// A host lock that could not be taken for a reason other than the
+/// A reclaim lock that could not be taken for a reason other than the
 /// deadline or a signal: exit 2. A lock the installation did not provide
-/// (missing, or not the regular file the tmpfiles line makes) is
-/// `provisioning`, so a harness tells "alert ops" from "my call is wrong"
-/// without parsing the message (TASK-151).
+/// (the host lock missing for root, or not the regular file the tmpfiles
+/// line makes; a per-user lock refused) is `provisioning`, so a harness
+/// tells "alert ops" from "my call is wrong" without parsing the message
+/// (TASK-151, TASK-277).
 fn lock_refusal(
     request: &Request,
     report: Report,
     log: &mut dyn FnMut(&str),
     error: LockError,
 ) -> Report {
-    // In a `watch` cycle a usage error is only the host lock file gone
-    // (`provisioning`); a host failure while locking is the environment,
+    // In a `watch` cycle a usage error is only the lock file gone or
+    // refused (`provisioning`); a host failure while locking is the environment,
     // which may recover: status `error`, cause `host`, back-off `retry`
     // (docs/reference.md, The reclaim cycle).
     if request.watch.is_some()
@@ -367,17 +369,44 @@ fn lock_refusal(
         return report;
     }
     let cause = match &error {
-        LockError::Missing { .. } | LockError::Unusable { .. } => ErrorCause::Provisioning,
+        LockError::Missing { .. } | LockError::Unusable { .. } | LockError::UserLockRefused(_) => {
+            ErrorCause::Provisioning
+        }
         // Unchanged contract (exit 2, `usage`) for a host failure while
         // locking; a TASK-151 follow-up asks whether it should be `host`/3.
         LockError::Failed(_) => ErrorCause::Usage,
-        LockError::DeadlinePassed | LockError::Interrupted(_) => {
+        LockError::DeadlinePassed(_) | LockError::Interrupted(_) => {
             unreachable!("the caller handles the deadline and signals: {error}")
         }
     };
     let message = error.to_string();
     log(&format!("error: {message}"));
     report.usage_error_with_cause(cause, message)
+}
+
+/// The path of the lock [`hostlock::acquire`] took or waited for, for an
+/// overrun entry: the host lock's unless the per-user lock was reached.
+fn attempted_lock<F>(acquired: &Result<HeldLock<F>, LockError>) -> PathBuf {
+    match acquired {
+        Ok(held) => held.lock.path(),
+        Err(LockError::DeadlinePassed(lock)) => lock.path(),
+        Err(_) => hostlock::host_lock_path(),
+    }
+}
+
+/// The one line that says which lock the reclaim took (docs/safety.md,
+/// Host lock): a per-user lock says why and what it does not serialise.
+fn taken<F>(held: &HeldLock<F>) -> String {
+    let waited = held.waited.as_millis();
+    match &held.lock {
+        ReclaimLock::Host => format!("{} taken after {waited} ms", held.lock),
+        ReclaimLock::User(_) => format!(
+            "{} taken after {waited} ms: the host lock {} is not provisioned, so reclaims by \
+             other users are not serialised with this one",
+            held.lock,
+            hostlock::host_lock_path().display()
+        ),
+    }
 }
 
 /// The deadline `timeout` from now.
@@ -641,12 +670,12 @@ fn ensure_inner<H: Delete>(
         deadline,
         started,
         "host_lock",
-        &hostlock::host_lock_path(),
+        &attempted_lock(&acquired),
     );
     let lock = match acquired {
         Ok(lock) => lock,
-        Err(LockError::DeadlinePassed) => {
-            log(&LockError::DeadlinePassed.to_string());
+        Err(e @ LockError::DeadlinePassed(_)) => {
+            log(&e.to_string());
             // A fresh sample decides: the other holder may have freed enough.
             report.avail_after_bytes =
                 final_sample(host, &measured, deadline, &mut report, log, &request.tier);
@@ -665,11 +694,7 @@ fn ensure_inner<H: Delete>(
             return lock_refusal(request, report, log, e);
         }
     };
-    log(&format!(
-        "host lock {} taken after {} ms",
-        hostlock::host_lock_path().display(),
-        lock.waited.as_millis()
-    ));
+    log(&taken(&lock));
     if deadline_passed(host, deadline) {
         return deadline_before_reclaim(host, &measured, deadline, report, log, &request.tier);
     }
@@ -932,11 +957,11 @@ fn ensure_grouped_inner<H: Delete>(
         deadline,
         started,
         "host_lock",
-        &hostlock::host_lock_path(),
+        &attempted_lock(&acquired),
     );
     let lock = match acquired {
         Ok(lock) => lock,
-        Err(LockError::DeadlinePassed) => {
+        Err(LockError::DeadlinePassed(_)) => {
             report.avail_after_bytes =
                 final_sample(host, &measured, deadline, &mut report, log, first);
             report.status = after_lock_timeout(Final::of(report.avail_after_bytes, measured.min));
@@ -954,11 +979,7 @@ fn ensure_grouped_inner<H: Delete>(
             return lock_refusal(request, report, log, error);
         }
     };
-    log(&format!(
-        "host lock {} taken after {} ms",
-        hostlock::host_lock_path().display(),
-        lock.waited.as_millis()
-    ));
+    log(&taken(&lock));
     if deadline_passed(host, deadline) {
         return deadline_before_reclaim(host, &measured, deadline, report, log, first);
     }

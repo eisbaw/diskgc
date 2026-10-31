@@ -1,9 +1,12 @@
 # `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
-# Reclaim needs the host lock file (/run/diskgc/lock, provisioned by the
-# tmpfiles drop-in); without it reclaim is exit 2 (status usage_error)
-# with cause `provisioning` (TASK-151: the host, not the call, needs
-# fixing) and the commands that provision it; nothing deleted. The dry run
-# takes no lock and still plans.
+# Reclaim needs a lock (docs/safety.md, Host lock). Without the host lock
+# file (/run/diskgc/lock, provisioned by the tmpfiles drop-in) a non-root
+# run falls back to its per-user lock (TASK-277), but this host has no
+# place for one either: no $XDG_RUNTIME_DIR and no state directory. Exit 2
+# (status usage_error) with cause `provisioning` (TASK-151: the host, not
+# the call, needs fixing), naming the per-user lock (the message still
+# prints the commands that provision the host lock, for root); nothing
+# deleted. The dry run takes no lock and still plans.
 profile_vector: 1
 user_profiles:
   - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
@@ -23,7 +26,7 @@ expect:
   plan:
     - {candidate: /tmp/zephyr-a}
   reclaim_exit: 2
-  errors: [{cause: provisioning, contains: "sudo systemd-tmpfiles --create /etc/tmpfiles.d/diskgc.conf"}]
+  errors: [{cause: provisioning, contains: "no place for a per-user lock"}]
   actions: []
   removed: []
   skipped: []

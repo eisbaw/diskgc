@@ -42,7 +42,7 @@ use crate::executor::{
     self, MeasureFailure, WatchCycle, goal_bytes, reach_path, timed_report_from,
 };
 use crate::host::{Delete, Dev, Host, MonoTime, Timestamp};
-use crate::hostlock::{self, LockError};
+use crate::hostlock::{self, LockError, ReclaimLock};
 use crate::invocation::{ConfigFile, Platform, Prepared, Selection, prepare};
 use crate::report::json::Json;
 use crate::report::{ErrorCause, ErrorEntry, Report, Signal, Status};
@@ -301,10 +301,23 @@ pub fn start<H: Delete>(
         },
         (Mode::Reclaim { .. }, None) => unreachable!("a reclaiming watch has a goal"),
     };
-    // 4. The host lock file.
-    match (hostlock::readiness(host), goal.is_some()) {
-        (Ok(()), _) => {}
-        (Err(e @ (LockError::Missing { .. } | LockError::Unusable { .. })), true) => {
+    // 4. The lock reclaims take: the host lock, or (a non-root watch
+    // without it) the per-user lock, made now (docs/safety.md, Host lock).
+    match (hostlock::prepare(host), goal.is_some()) {
+        (Ok(ReclaimLock::Host), _) => {}
+        (Ok(lock @ ReclaimLock::User(_)), _) => log(&format!(
+            "the host lock {} is not provisioned: reclaims take the {lock} instead, so \
+             reclaims by other users are not serialised with this watch's",
+            hostlock::host_lock_path().display()
+        )),
+        (
+            Err(
+                e @ (LockError::Missing { .. }
+                | LockError::Unusable { .. }
+                | LockError::UserLockRefused(_)),
+            ),
+            true,
+        ) => {
             return Err(Refused::usage(
                 ErrorCause::Provisioning,
                 path,

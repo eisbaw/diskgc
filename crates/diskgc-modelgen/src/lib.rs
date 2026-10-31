@@ -289,6 +289,7 @@ pub fn host_model(
                 pressure: None,
                 call_cost: None,
                 state_dir: None,
+                runtime_dir: None,
                 boot_id: None,
                 events: Vec::new(),
                 expect: None,
