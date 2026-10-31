@@ -37,13 +37,13 @@ use super::{Acted, CandidateQueue, Reclaim, SourceKind, Tier, overlaps_checked, 
 use crate::config::Order;
 use crate::engine::{Reason, Skip};
 use crate::fs_kind::{self, Beneath, Find, Found};
-use crate::host::{Delete, Dev, DevIno, Host, MonoTime, Timestamp};
+use crate::host::{Delete, DevIno, Host, Timestamp};
 use crate::index::queue::{self, AgeFilter, QueueEntry, Queued, Source, TierQuery};
 use crate::index::{Family, Finder, FinderSetId, MountKey, name_family};
 use crate::inuse::Checker;
 use crate::outcome::Stop;
 use crate::report::Report;
-use crate::snapshot::RunIndex;
+use crate::snapshot::{Reclaimed, RunIndex};
 use crate::tally::listing::{SourceFind, TallySource, index_identity};
 use crate::tally::sync::{self, SyncTier};
 
@@ -129,13 +129,12 @@ pub(super) fn sync_tally<'t, H: Host>(
     host: &H,
     index: &mut RunIndex,
     tiers: impl IntoIterator<Item = &'t Tier>,
-    measured: (Dev, u64),
+    run: Reclaimed,
     budget: Option<Duration>,
-    deadline: Option<MonoTime>,
     report: &mut Report,
     log: &mut dyn FnMut(&str),
 ) -> SyncTallied {
-    let (dev, min_free) = measured;
+    let (dev, deadline) = (run.dev, run.deadline);
     let tiers = sync_tiers(tiers);
     if tiers.is_empty() {
         return SyncTallied {
@@ -149,7 +148,7 @@ pub(super) fn sync_tally<'t, H: Host>(
         .flat_map(|t| &t.sources)
         .map(|s| (&*s.finder.profile, s.finder.profile_hash))
         .collect();
-    index.seed(host, dev, min_free, deadline, &bound, log);
+    index.seed(host, run, &bound, log);
     let state = &mut index.state;
     let started = host.now();
     let budget_end = budget.and_then(|b| started.checked_add(b));

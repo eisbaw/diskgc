@@ -3399,8 +3399,16 @@ How it holds:
   - outside an allowlisted wrapper, none may delete or rename a name, open
     for writing or truncating (also `File::create`, `File::create_new`,
     `File::options`, `OpenOptions`, `fs::write`, `fs::copy`, `set_len`,
-    flags built from numbers), punch holes, change permissions (`chmod`,
-    `fchmod`, `chmodat`, `set_permissions`), start a child process
+    flags built from numbers), write through an fd (`io::write`,
+    `pwrite`, `pwritev`, `writev`), create a name (`mkdir`, `mkdirat`,
+    `create_dir`, `create_dir_all`, `DirBuilder`, `linkat`, `hard_link`,
+    `symlink`, `symlinkat`, `mknod`, `mknodat`), punch holes, change
+    permissions (`chmod`, `fchmod`, `chmodat`, `set_permissions`), owner
+    (`chown`, `fchown`, `lchown`, `chownat`), times (`utimensat`,
+    `futimens`, `utimes`, `set_times`, `set_modified`: a changed mtime
+    can make a tree look idle) or extended attributes (`setxattr`,
+    `fsetxattr`, `lsetxattr`, `removexattr`, `fremovexattr`,
+    `lremovexattr`), start a child process
     (`process::Command`, `fork`, `exec*`), change namespace or root, use
     `libc`, call `syscall`, or `include!` code. Each wrapper is marked
     gated (it must take the permit) or ungated with its reason; adding one

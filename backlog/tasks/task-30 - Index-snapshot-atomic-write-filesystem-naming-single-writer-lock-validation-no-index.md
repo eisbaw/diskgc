@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: 2026-10-16 22:41
-updated_date: '2026-10-30T22:54:00Z'
+updated_date: '2026-10-30T23:48:00Z'
 labels:
   - wave-3
   - architecture
@@ -64,4 +64,6 @@ AC rewrite: design settled in fe54fe6 + 076c5ec (branch index-design); Mark's de
 From TASK-31 review (2026-10-26, mped-architect on e2bb85d): (a) Refusal.at is a MonoTime; 'this run's refusal' = at >= run_started. Persisted across reboot a monotonic time can compare as this run and suppress a unit (fails safe, but it is a format decision): store wall time + boot id, or clear hints on load. (b) fs_kind::discover_beneath asserts an absolute path; a corrupted relative path in a loaded snapshot would crash the run: validate paths at load, treat bad entries as stale or discard the snapshot.
 
 Codex review of TASK-31 at 82cb9af (2026-10-30, finding 3, single event: one index corruption): Reclaim::rematch treats a refusal with at >= run_started as 'refused by this run's tally' and handled.paths then suppresses the tier's real discovery result for that path, so a pressure tier can run while an earlier tier's eligible candidate remains. Fix with the snapshot: refusals produced by this invocation are tracked separately from cached/persisted hints; a cached hint never suppresses discovery. Model test red first.
+
+TASK-30 implementer (branch t30-snapshot, 2026-10-31): AC1's watch-level assertion (a second watch exits 2 after its 10 s wait) is left to TASK-32, which builds watch. Implemented here: the single-writer lock primitive watch will use (Host::state_lock creates/opens index-<fs>.lock; flock_wait Exclusive), and ensure's side of it: it waits at most 100 ms (snapshot::LOCK_WAIT) and, still held, skips its write with one log line (model test a_second_writer_does_not_write). AC2's 'the report says so' is stderr only (index: snapshot ... ignored: <why>); the JSON index block (source: sync/snapshot) is TASK-244.
 <!-- SECTION:NOTES:END -->

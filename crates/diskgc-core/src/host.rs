@@ -445,6 +445,9 @@ pub struct Space {
     pub avail_bytes: u64,
     /// `f_blocks × f_frsize`.
     pub size_bytes: u64,
+    /// `f_frsize`: the unit a file's space is allocated in (a file of one
+    /// byte takes one block).
+    pub block_bytes: u64,
 }
 
 /// System-wide pressure stall information (`/proc/pressure/io`, `memory`
@@ -1443,10 +1446,12 @@ impl fmt::Display for FsKey {
 }
 
 /// The single-writer lock file [`Host::state_lock`] opened (not locked
-/// yet), and the device of the state directory's filesystem: a writer
-/// on the filesystem it reclaims guards the goal (docs/architecture.md,
-/// Snapshot: Never at the cost of the goal; [`Host::statvfs`] on `fd`
-/// samples that filesystem).
+/// yet), and the device of the state directory's filesystem as mountinfo
+/// names it (the superblock's, the same for every btrfs subvolume of one
+/// filesystem; not the file's `st_dev`, which differs per subvolume): a
+/// writer on the filesystem it reclaims guards the goal
+/// (docs/architecture.md, Snapshot: Never at the cost of the goal;
+/// [`Host::statvfs`] on `fd` samples that filesystem).
 #[derive(Debug)]
 pub struct StateLock<F> {
     pub fd: F,

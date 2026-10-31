@@ -499,19 +499,31 @@ the order of work.
   `$XDG_STATE_HOME/diskgc/index-<fs>` (`$HOME/.local/state/diskgc` when
   `XDG_STATE_HOME` is unset or not absolute; no snapshot at all when
   neither is absolute; mode 0600: it lists paths of the user's files, no
-  contents). The state directory is created mode 0700 when a writer first
-  needs it, and must be a directory of diskgc's user that no one else
-  may write to (otherwise nothing is read or written there, with a log
-  line). `<fs>` is `uuid-<uuid>`, the filesystem's UUID where the system
+  contents). The state directory (with the lock file) is created mode
+  0700 by a run that tallies, before its reclaim walk, and must be a
+  directory of diskgc's user that no one else may write to (otherwise
+  nothing is read or written there, said in one log line). It is
+  reached following symlinks, like the configuration file: a user's
+  `~/.local/state/diskgc` that is a symlink to another directory of
+  theirs is used, and only diskgc's own `index-<fs>` name is ever
+  replaced there (TASK-30 review: accepted). `<fs>` is `uuid-<uuid>`, the filesystem's UUID where the system
   names one (the udev link `/dev/disk/by-uuid` whose block device is the
   filesystem's device), otherwise `dev-<major>-<minor>`; not `f_fsid`,
   which is 0 on tmpfs on older kernels, and not the mount path. tmpfs,
   btrfs (whose files' `st_dev` is not its block device) and containers
   without udev links get the device number, so their snapshots are
-  valid within one boot only (Validity).
+  valid within one boot only (Validity). A UUID that cannot be read
+  (`EACCES` on the udev links) or used (not hex digits and dashes) falls
+  back to the device number with one log line.
   - **Who writes, when.** `watch` every 5 minutes and on exit. `ensure`
-    once, after its reclaim walk, when its run tallied, before its
-    deadline (never past it) and not after a terminating signal. A run that exits 0 at once because space is
+    once, after its reclaim walk and before the run's final space
+    sample (so the sample, the exit code, a signal's status and the
+    report's `duration_ms` include the write), when its run tallied,
+    before its deadline (never past it) and not after a terminating
+    signal; not on a run that ended before its walk (the host lock's
+    deadline, a refusal, an error before the walk). An index whose
+    encoding is larger than a snapshot may be (twice the budget) is
+    not written, with one log line. A run that exits 0 at once because space is
     already there stays an instant no-op (Mark, 2026-10-25): no tally,
     no snapshot write. Warmth on a machine that is rarely short of
     space comes from `watch` or `watch --tally-only`, not from
@@ -525,10 +537,18 @@ the order of work.
   - **Never at the cost of the goal.** The snapshot is usually on
     `/home`, possibly the filesystem just reclaimed. When the state
     directory is on the filesystem the run works on, the writer skips
-    the write (one log line) unless available space minus the
-    snapshot's size stays at or above `--min-free` (in `watch`, its
+    the write (one log line) unless available space minus what the
+    write takes stays at or above `--min-free` (in `watch`, its
     `--min-free`; in `watch --tally-only`, its optional `--min-free`,
-    and without one only a failed write skips it). The temporary file is an `O_TMPFILE` linked in only
+    and without one only a failed write skips it). What it takes is
+    its size rounded up to whole blocks (`f_frsize`) plus one block for
+    the new directory entry: a file of a few hundred bytes still takes
+    a block (TASK-30 review). The state directory and the lock file
+    are made before the walk (above), so what they take is already in
+    the samples the walk acts on. "The filesystem the run works on" is
+    compared by the device mountinfo names for each mount (the
+    superblock's), not by `st_dev`, which differs between btrfs
+    subvolumes of one filesystem. The temporary file is an `O_TMPFILE` linked in only
     when complete, so a failed write leaves nothing behind; `ENOSPC` or
     any other write error is one log line and never changes the exit
     code.
@@ -555,10 +575,8 @@ the order of work.
     leaves a complete `.new`, which the next write renames onto the
     snapshot before linking its own. There is no `fsync` (it can stall
     on unrelated I/O); a file torn by a crash fails its checksum and is
-    ignored. Two mounts with
-    one UUID (btrfs subvolumes) share a file name; the boot-independent
-    identity includes `st_dev`, so units of the other mount do not match
-    and cost only warmth.
+    ignored. Two filesystems never share a file name: a UUID names one
+    filesystem, and a device number one filesystem within a boot.
   - **Format.** Binary (paths are bytes, not UTF-8): a header (magic,
     format version, diskgc version, the `<fs>` key, the owner's uid,
     the boot id, the write time), a table of finders with each source's
@@ -567,7 +585,8 @@ the order of work.
     tampering: the file is the user's own and grants nothing). The byte
     layout is in `diskgc-core` `snapshot::format`. No fixed size beyond
     the budget: a file larger than twice the budget is refused unread.
-    Cursors and listing rounds are not written.
+    Cursors and listing rounds are not written. A single's `checked_at`
+    is written: `watch`'s background schedule reads it (TASK-32).
   - **Times.** Monotonic times mean nothing in another process's boot,
     so none is written: each is written as the wall-clock time it
     corresponds to at the write, and read back as the monotonic time
@@ -588,10 +607,14 @@ the order of work.
     canonical (no `.`, `..`, empty or doubled component, no trailing
     `/`), a unit strictly below its mount point and below each of its
     finders' roots, a block's site at or below its mount point, every
-    identity on its mount's device, every index in range: one entry that
-    is not is a bug or tampering, so the whole snapshot is ignored (the
-    index asserts these shapes; a loaded file must never reach that
-    assertion). A finder whose profile this run binds under another hash
+    identity on its mount's device, every index in range; no path longer
+    than 4,096 bytes or deeper than 256 components (the index's trie is
+    walked and dropped recursively, one level per component); members,
+    `est_bytes` and `files` summed over all units at most 2^62 each (so
+    no sum the index makes of them, plus what the run adds, overflows):
+    one entry that is not is a bug or tampering, so the whole snapshot
+    is ignored (the index asserts these shapes and its sums panic on
+    overflow; a loaded file must never reach either, TASK-30 review). A finder whose profile this run binds under another hash
     (the profile was edited) is dropped on load with its
     `discovered_at`, and a unit left without a finder is not restored
     (Finders); finders of profiles this run does not bind stay for the
@@ -670,7 +693,13 @@ reclaim(min, goal, filesystem, deadline):
   misorder it; it cannot name a path that the run's own sources would
   not find, nor skip a check. The one difference from a listing: a
   directory too large to list (`too_many_entries`) is not listed on the
-  way down to a unit, so not refused.
+  way down to a unit, so not refused. This holds for units of this
+  run's tally and equally for units seeded from an earlier run's
+  snapshot whose root was listed less than 5 minutes ago (a root that
+  grew past the listing limit since is not listed by this run's tally,
+  and its units are found again by name): `too_many_entries` is a
+  resource bound, not a safety check, and every per-candidate check
+  still applies to each (TASK-30 review: accepted).
 - **Found ahead.** The queue finds up to 64 candidates again before it
   judges the first of them, so that one in-use scan, started after all
   of them were found, can serve them (a liveness contract takes no scan

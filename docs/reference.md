@@ -135,16 +135,12 @@ process runs, even if that Cargo works in an unrelated directory; see
   found them, each judged in full under its own locks. A run that
   tallies starts from the index snapshot of `PATH`'s filesystem
   (`$XDG_STATE_HOME/diskgc/index-<fs>`, mode 0600) when a valid one
-  exists, and writes it after the run, so the next run starts warmer; a
-  goal already met reads and writes nothing, and `--dry-run` neither
-  reads nor writes it. Each step is one stderr line (`index: ...`): the
-  snapshot started from, or ignored and why (corrupt, another user's,
-  another diskgc version, filesystem or boot, a symlink, too large), and
-  written, or not written and why (a `watch` or another `ensure` holds
-  its lock, the write would take the filesystem below `--min-free`,
-  the run was interrupted or past its deadline, a write error); none of
-  them changes the exit code ([architecture.md](architecture.md#the-tally),
-  Snapshot). `--no-index` neither reads nor writes the snapshot: the
+  exists, and writes it after its reclaim walk, so the next run starts
+  warmer; when it is read, ignored, written or not written is in
+  [architecture.md](architecture.md#the-tally) (Snapshot). Each of those
+  is one stderr line (`index: ...`), and none changes the exit code
+  beyond the space the write takes, which the final sample includes.
+  `--no-index` neither reads nor writes the snapshot: the
   run's index starts empty and is discarded. A candidate a tally of this run refuses (e.g.
   kept, another user's, too many entries, unreadable) is skipped with
   that reason for the run and never locked; a refusal that stops being

@@ -1663,6 +1663,7 @@ impl Host for LinuxHost {
         Ok(Space {
             avail_bytes: bytes(s.f_bavail, "f_bavail")?,
             size_bytes: bytes(s.f_blocks, "f_blocks")?,
+            block_bytes: s.f_frsize,
         })
     }
 
@@ -2339,7 +2340,25 @@ impl Host for LinuxHost {
     }
 
     fn state_lock(&self, key: &FsKey) -> Result<StateLock<LinuxFd>, HostError> {
-        let (fd, shown, dir_dev) = crate::state::open_lock_file_ungated(self.state_dir()?, key)?;
+        let (fd, shown, _) = crate::state::open_lock_file_ungated(self.state_dir()?, key)?;
+        // The superblock's device, as mountinfo names it for the lock
+        // file's mount (btrfs subvolumes share it; their st_dev differ).
+        let mnt_id =
+            rustix::fs::statx(&fd, "", AtFlags::EMPTY_PATH, rustix::fs::StatxFlags::MNT_ID)
+                .map_err(|e| HostError::errno("statx", shown.display(), errno_of(e)))?
+                .stx_mnt_id;
+        let dir_dev = self
+            .mountinfo()?
+            .into_iter()
+            .find(|m| m.id == mnt_id)
+            .map(|m| m.dev)
+            .ok_or_else(|| {
+                HostError::invalid(
+                    "mountinfo",
+                    shown.display(),
+                    format!("no mount {mnt_id} for the state directory"),
+                )
+            })?;
         Ok(StateLock {
             fd: LinuxFd { fd, shown },
             dir_dev,
@@ -6454,6 +6473,21 @@ mod tests {
             "{refused}"
         );
         assert_eq!(host.state_read(&key, 1 << 20).expect("read"), None);
+    }
+
+    /// The space guard compares filesystems by the device mountinfo names
+    /// (the superblock's), as the reclaimed `PATH`'s mount does.
+    #[test]
+    fn the_state_lock_names_its_filesystem_as_mountinfo_does() {
+        let tmp = TempDir::new();
+        let host = state_host(&tmp.0);
+        let key = FsKey::dev(Dev {
+            major: 0,
+            minor: 42,
+        });
+        let lock = host.state_lock(&key).expect("lock file");
+        let dir = resolve(&host, &tmp.0.join("state/diskgc"), Want::Directory).expect("resolve");
+        assert_eq!(lock.dir_dev, dir.mount.dev);
     }
 
     #[test]

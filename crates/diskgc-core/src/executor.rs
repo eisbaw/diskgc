@@ -89,7 +89,7 @@ use crate::report::{
     after_lock_timeout, conclude, human_space_values, signed_bytes,
 };
 use crate::resolve::{Want, resolve};
-use crate::snapshot::RunIndex;
+use crate::snapshot::{Reclaimed, RunIndex};
 use crate::tally::TallyState;
 use crate::units::{Size, format_age, format_bytes};
 use tier_policy::{DeletePolicy, Protection};
@@ -348,11 +348,7 @@ pub fn ensure_with_index<H: Delete>(
     index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    let report = timed_report(host, || {
-        ensure_inner(host, request, owners, &mut *index, &mut *log)
-    });
-    index.finish(host, log);
-    report
+    timed_report(host, || ensure_inner(host, request, owners, index, log))
 }
 
 fn ensure_inner<H: Delete>(
@@ -553,9 +549,13 @@ fn ensure_inner<H: Delete>(
         host,
         index,
         [&request.tier],
-        (measured.dev, measured.min),
+        Reclaimed {
+            dev: measured.dev,
+            fs: measured.at.mount.dev,
+            min_free: measured.min,
+            deadline,
+        },
         request.tally_budget,
-        deadline,
         &mut report,
         log,
     );
@@ -702,6 +702,9 @@ fn ensure_inner<H: Delete>(
     };
     run.run(owners);
     let deadline_hit = run.deadline_hit;
+    // The snapshot, before the final sample: the sample and the exit code
+    // see the space it takes (docs/architecture.md, Snapshot).
+    index.finish(host, log);
     report.avail_after_bytes =
         final_sample(host, &measured, deadline, &mut report, log, &request.tier);
     report.status = conclude(
@@ -740,19 +743,9 @@ pub fn ensure_grouped_with_index<H: Delete>(
     index: &mut RunIndex,
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    let report = timed_report(host, || {
-        ensure_grouped_inner(
-            host,
-            request,
-            tiers,
-            tier_timeouts,
-            owners,
-            &mut *index,
-            &mut *log,
-        )
-    });
-    index.finish(host, log);
-    report
+    timed_report(host, || {
+        ensure_grouped_inner(host, request, tiers, tier_timeouts, owners, index, log)
+    })
 }
 
 fn ensure_grouped_inner<H: Delete>(
@@ -846,9 +839,13 @@ fn ensure_grouped_inner<H: Delete>(
         host,
         index,
         tiers,
-        (measured.dev, measured.min),
+        Reclaimed {
+            dev: measured.dev,
+            fs: measured.at.mount.dev,
+            min_free: measured.min,
+            deadline,
+        },
         request.tally_budget,
-        deadline,
         &mut report,
         log,
     );
@@ -1202,6 +1199,8 @@ fn ensure_grouped_inner<H: Delete>(
             break;
         }
     }
+    // The snapshot, before the final sample (see ensure_inner).
+    index.finish(host, log);
     report.avail_after_bytes = final_sample(host, &measured, deadline, &mut report, log, first);
     report.status = conclude(
         Final::of(report.avail_after_bytes, measured.min),

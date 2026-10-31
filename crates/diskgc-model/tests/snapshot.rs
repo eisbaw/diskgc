@@ -497,3 +497,87 @@ fn a_state_write_without_the_exclusive_lock_fails_the_test() {
     };
     let _ = host.state_write(&shared, &key, b"x");
 }
+
+/// TASK-30 review (Codex 6, mped): the write's allocation, not its encoded
+/// length, is guarded, and it comes before the run's final sample. With the
+/// state directory on the reclaimed filesystem (made by an earlier run) and
+/// the walk ending 1 KiB above `--min-free`, a snapshot of a few hundred
+/// bytes would still take a 4 KiB block: it is not written, and the run's
+/// exit 0 means the space is really there.
+#[test]
+fn a_snapshot_with_1_kib_of_headroom_is_not_written_and_exit_0_holds() {
+    let yaml = yaml("  /tmp/.state/diskgc: {.: {mode: \"0700\"}}\n")
+        .replace(
+            &format!("state_dir: {STATE}"),
+            "state_dir: /tmp/.state/diskgc",
+        )
+        .replace(
+            "  /tmp/a2: {f: {size: 10K}}\n  /tmp/a3: {f: {size: 10K}}\n",
+            "",
+        )
+        .replace(
+            "  /tmp/b1: {f: {size: 10K}}\n  /tmp/b2: {f: {size: 10K}}\n",
+            "",
+        )
+        .replace("/tmp/a1: {f: {size: 10K}}", "/tmp/a1: {f: {size: 4K}}");
+    let host = host(&yaml);
+    let before = host.space_at(Path::new("/tmp")).avail_bytes;
+    // /tmp/a1 frees one block for its directory and one for its file.
+    let min = before + 8192 - 1024;
+    assert_eq!(min % 1024, 0);
+    let library = library(PROFILES);
+    let tier = tier(&library, "profile:tmp-a", "a");
+    let mut lines = Vec::new();
+    let report = executor::ensure_with_index(
+        &host,
+        &Request {
+            min_free: parse_size(&format!("{}K", min / 1024)).expect("a size"),
+            ..request(tier, "1K")
+        },
+        &[1000],
+        &mut RunIndex::snapshot(),
+        &mut |l| lines.push(l.to_owned()),
+    );
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    let after = host.space_at(Path::new("/tmp")).avail_bytes;
+    assert_eq!(report.exit_code(), 0, "{report:#?}");
+    assert!(after >= min, "exit 0 with {after} available, below {min}");
+    assert_eq!(report.avail_after_bytes, Some(after));
+    assert!(
+        has(&lines, "the state directory is on the reclaimed filesystem"),
+        "{lines:#?}"
+    );
+    assert_eq!(calls(&host, Op::StateWrite), 0);
+}
+
+/// TASK-30 review: a SIGTERM that arrives while the snapshot is written is
+/// the run's status (exit 143), since the write is part of the run.
+#[test]
+fn a_signal_during_the_snapshot_write_is_the_runs_exit_code() {
+    let host = host(&yaml(
+        "events:\n  - {at: {op: state_write, when: after}, signal: term}\n",
+    ));
+    let (report, lines) = run(&host, &tiers(PROFILES), &mut RunIndex::snapshot());
+    assert!(host.unfired_events().is_empty());
+    assert!(has(&lines, "written: 5 unit(s)"), "{lines:#?}");
+    assert_eq!(report.exit_code(), 143, "{report:#?}");
+}
+
+/// A state directory diskgc may not use (others may write to it) is said
+/// once, and nothing is read or written there.
+#[test]
+fn an_unusable_state_directory_is_one_line_and_no_write() {
+    let host = host(&yaml(&format!("  {STATE}: {{.: {{mode: \"0777\"}}}}\n")));
+    let (_, lines) = run(&host, &tiers(PROFILES), &mut RunIndex::snapshot());
+    let index_lines: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("index: ") && !l.starts_with("index: synchronous"))
+        .collect();
+    assert_eq!(index_lines.len(), 1, "{lines:#?}");
+    assert!(
+        index_lines[0].contains("writable by no one else")
+            && index_lines[0].contains("nothing is written"),
+        "{lines:#?}"
+    );
+    assert_eq!(calls(&host, Op::StateWrite), 0);
+}

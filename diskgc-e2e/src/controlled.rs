@@ -75,6 +75,11 @@ pub const OPS: &[&str] = &[
     "unlinkat",
     "fchmod",
     "run_command",
+    "fs_uuid",
+    "boot_id",
+    "state_lock",
+    "state_read",
+    "state_write",
 ];
 
 /// A position on the port-call trace.
@@ -705,7 +710,9 @@ clock: 2026-10-15T03:00:00Z
 mounts:
   - {id: 1, at: /, fs: ext4, dev: "254:1", size: 100G}
   - {id: 30, at: /tmp, fs: tmpfs, dev: "0:42", size: 1G, parent: 1}
+state_dir: /home/u/.local/state/diskgc
 tree:
+  /home/u: {.: {mode: "0700"}}
   /tmp/a:
     f: {}
     link: {symlink: f}
@@ -798,6 +805,22 @@ processes:
             host.run_command(&a.fd, &run),
             CommandInvocation::Started(Ok(diskgc_core::host::CommandExit::Exited(0)))
         ));
+        let dev = diskgc_core::host::Dev {
+            major: 0,
+            minor: 42,
+        };
+        assert_eq!(host.fs_uuid(dev).expect("fs_uuid"), None);
+        host.boot_id().expect("boot_id");
+        let key = diskgc_core::host::FsKey::dev(dev);
+        let lock = host.state_lock(&key).expect("state_lock");
+        let TryLock::Acquired(locked) = host
+            .flock_try(lock.fd, LockMode::Exclusive)
+            .expect("flock_try")
+        else {
+            panic!("the state lock is free")
+        };
+        host.state_write(&locked, &key, b"x").expect("state_write");
+        assert!(host.state_read(&key, 8).expect("state_read").is_some());
     }
 
     #[test]

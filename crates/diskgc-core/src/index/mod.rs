@@ -636,7 +636,8 @@ impl Index {
             UnitRef::Single(_) => stats.singles += 1,
             UnitRef::Block(b) => {
                 stats.blocks += 1;
-                stats.members += b.members;
+                // Saturating: a count for reports, never worth a panic.
+                stats.members = stats.members.saturating_add(b.members);
             }
         });
         stats

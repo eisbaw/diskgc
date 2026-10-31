@@ -904,6 +904,11 @@ pub(crate) const GATED: &[Pattern] = &[
     Pattern::Path("OFlags", "from_bits_retain"),
     Pattern::Path("OFlags", "from_bits_truncate"),
     Pattern::Path("fs", "write"),
+    // Writing through an fd (the snapshot's write loop: TASK-30 review).
+    Pattern::Path("io", "write"),
+    Pattern::Word("pwrite"),
+    Pattern::Word("pwritev"),
+    Pattern::Word("writev"),
     Pattern::Path("fs", "copy"),
     Pattern::Word("set_len"),
     Pattern::Word("ftruncate"),
@@ -931,6 +936,27 @@ pub(crate) const GATED: &[Pattern] = &[
     Pattern::Word("DirBuilder"),
     Pattern::Word("linkat"),
     Pattern::Word("hard_link"),
+    Pattern::Word("symlink"),
+    Pattern::Word("symlinkat"),
+    Pattern::Word("mknod"),
+    Pattern::Word("mknodat"),
+    // Changing who owns a file, its times or its extended attributes: a
+    // changed mtime can make a tree look idle (TASK-30 review).
+    Pattern::Word("chown"),
+    Pattern::Word("fchown"),
+    Pattern::Word("lchown"),
+    Pattern::Word("chownat"),
+    Pattern::Word("utimensat"),
+    Pattern::Word("futimens"),
+    Pattern::Word("utimes"),
+    Pattern::Word("set_times"),
+    Pattern::Word("set_modified"),
+    Pattern::Word("setxattr"),
+    Pattern::Word("fsetxattr"),
+    Pattern::Word("lsetxattr"),
+    Pattern::Word("removexattr"),
+    Pattern::Word("fremovexattr"),
+    Pattern::Word("lremovexattr"),
     // Creating a name: binding an AF_UNIX socket to a path makes a socket
     // file (rustix's `net` feature, std's `UnixListener::bind`). The `net`
     // feature is there for one read-only query, the socket diagnostics of
@@ -1048,7 +1074,7 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
              index-<fs>.new and renamed onto index-<fs> under its single-writer lock; \
              diskgc's cache, never user data",
         ),
-        matches: 4, // TMPFILE, WRONLY, linkat, renameat
+        matches: 5, // TMPFILE, WRONLY, io::write, linkat, renameat
     },
     // The deletion engine's one caller of each deleting port method: with
     // these entries the scan also checks that nothing else in the core calls
@@ -1615,6 +1641,29 @@ mod tests {
             "std::fs::DirBuilder::new().create(p);",
             "rustix::fs::linkat(d, a, d, b, f);",
             "std::fs::hard_link(a, b);",
+            "rustix::io::write(fd, b);",
+            "rustix::io::pwrite(fd, b, 0);",
+            "rustix::io::pwritev(fd, &v, 0);",
+            "rustix::io::writev(fd, &v);",
+            "rustix::fs::symlink(a, b);",
+            "rustix::fs::symlinkat(a, d, b);",
+            "nix::sys::stat::mknod(p, k, m, 0);",
+            "rustix::fs::mknodat(d, n, k, m, 0);",
+            "rustix::fs::chown(p, u, g);",
+            "rustix::fs::fchown(fd, u, g);",
+            "std::os::unix::fs::lchown(p, u, g);",
+            "rustix::fs::chownat(d, p, u, g, f);",
+            "rustix::fs::utimensat(d, p, &t, f);",
+            "rustix::fs::futimens(fd, &t);",
+            "nix::sys::stat::utimes(p, &a, &m);",
+            "file.set_times(t);",
+            "file.set_modified(t);",
+            "rustix::fs::setxattr(p, n, v, f);",
+            "rustix::fs::fsetxattr(fd, n, v, f);",
+            "rustix::fs::lsetxattr(p, n, v, f);",
+            "rustix::fs::removexattr(p, n);",
+            "rustix::fs::fremovexattr(fd, n);",
+            "rustix::fs::lremovexattr(p, n);",
             "rustix::net::bind(fd, &addr);",
             "std::process::Command::new(\"docker\");",
             "let pid = unsafe { fork() };",

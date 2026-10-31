@@ -645,7 +645,15 @@ Model scenarios required by [safety.md](safety.md) and
   directory, no lock file);
   `the_write_never_takes_the_reclaimed_filesystem_below_min_free`;
   `a_state_write_without_the_exclusive_lock_fails_the_test` (the port's
-  shape). Still open: `source: snapshot` / `source: sync` in the report
+  shape); `a_snapshot_with_1_kib_of_headroom_is_not_written_and_exit_0_holds`
+  (the write's allocation is guarded, and it comes before the final
+  sample); `a_signal_during_the_snapshot_write_is_the_runs_exit_code`
+  (143); and the property
+  `no_snapshot_content_panics_the_seed_or_a_later_collapse`
+  (`tests/snapshot_props.rs`: counters near `u64::MAX` and paths up to
+  300 components through decode, validity, restore, statistics and a
+  collapse to one lump; `a_path_far_deeper_than_the_bound_is_refused_before_the_index`
+  for 60,000 components). Still open: `source: snapshot` / `source: sync` in the report
   (TASK-244), and comparing an ignored snapshot's run with a
   `--no-index` run's deletions (the scenarios delete nothing in either
   run);
@@ -1338,7 +1346,10 @@ removed (the TASK-121 discipline).
   that run's own discovery finds", both outside the generated models:
   re-matching a unit looks names up on the way down instead of listing,
   so a directory over the listing limit is not refused there
-  (`too_many_entries`; every per-candidate check still applies); and a
+  (`too_many_entries`; every per-candidate check still applies), for
+  units of this run's tally and for units seeded from an earlier run's
+  snapshot alike (a root that grew past the limit after that run's
+  listing; [architecture.md](architecture.md#the-reclaim-walk)); and a
   host failure that first appears after the synchronous tally can follow
   deletions of queued candidates (one the tally meets, listing or
   sizing, keeps the run off the index's queue:

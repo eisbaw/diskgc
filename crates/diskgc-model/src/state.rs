@@ -738,6 +738,7 @@ impl State {
                 .saturating_sub(fs.other_used)
                 .saturating_sub(allocated),
             size_bytes: fs.size,
+            block_bytes: BLOCK,
         }
     }
 

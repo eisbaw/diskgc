@@ -38,6 +38,9 @@ use restore::Clocks;
 /// (docs/architecture.md, Snapshot: Format). A larger one is refused unread.
 pub const MAX_SNAPSHOT_BYTES: u64 = 2 * BUDGET_BYTES as u64;
 
+/// The version a snapshot must have been written by: this build's.
+pub const DISKGC_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// How long a writer waits for the single-writer lock: a lock its last
 /// holder just released can look held for the length of another process's
 /// `/proc` read (docs/safety.md, Host lock; up to 0.5 ms measured), so one
@@ -57,13 +60,20 @@ pub fn state_dir(xdg_state_home: Option<&OsStr>, home: Option<&OsStr>) -> Option
 }
 
 /// The key of the filesystem `dev`: its UUID where the host knows one,
-/// otherwise its device number.
-pub fn fs_key<H: Host>(host: &H, dev: Dev) -> Result<FsKey, String> {
+/// otherwise its device number. A UUID that cannot be read or used (an
+/// `EACCES` on the udev links, an escaped name) falls back to the device
+/// number with the reason, for the log: only warmth is at stake.
+pub fn fs_key<H: Host>(host: &H, dev: Dev) -> (FsKey, Option<String>) {
     match host.fs_uuid(dev) {
-        Ok(Some(uuid)) => FsKey::uuid(&uuid)
-            .ok_or_else(|| format!("filesystem {dev} has an unusable UUID {uuid:?}")),
-        Ok(None) => Ok(FsKey::dev(dev)),
-        Err(e) => Err(format!("filesystem {dev}: its UUID: {e}")),
+        Ok(Some(uuid)) => match FsKey::uuid(&uuid) {
+            Some(key) => (key, None),
+            None => (
+                FsKey::dev(dev),
+                Some(format!("its UUID {uuid:?} is not hex digits and dashes")),
+            ),
+        },
+        Ok(None) => (FsKey::dev(dev), None),
+        Err(e) => (FsKey::dev(dev), Some(format!("its UUID: {e}"))),
     }
 }
 
@@ -78,15 +88,26 @@ enum Persist {
     Snapshot,
 }
 
+/// The filesystem a run reclaims, as the snapshot needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reclaimed {
+    /// `st_dev` of `PATH`: what the key ([`fs_key`]) is made from.
+    pub dev: Dev,
+    /// The device mountinfo names for `PATH`'s mount (the superblock's:
+    /// one for every btrfs subvolume of a filesystem, where `st_dev`
+    /// differs per subvolume): what the space guard compares with the
+    /// state directory's ([`crate::host::StateLock::dir_dev`]).
+    pub fs: Dev,
+    /// `--min-free` in bytes: the write never takes the filesystem below it.
+    pub min_free: u64,
+    pub deadline: Option<MonoTime>,
+}
+
 /// What [`RunIndex::seed`] keeps for [`RunIndex::finish`].
 #[derive(Debug, Clone)]
 struct Pending {
     key: FsKey,
-    /// The filesystem the run reclaims, and its `--min-free` in bytes:
-    /// the write never takes it below that.
-    dev: Dev,
-    min_free: u64,
-    deadline: Option<MonoTime>,
+    run: Reclaimed,
 }
 
 /// A run's index (docs/architecture.md, The tally: Sources of a run's
@@ -132,20 +153,20 @@ impl RunIndex {
         }
     }
 
-    /// Seeds the index from the snapshot of the filesystem `dev`, right
-    /// before the synchronous tally of a run that tallies (and so will
-    /// write it, [`Self::finish`]). `bound` holds the (profile, hash) of
-    /// every source this run tallies: a snapshot finder of one of these
+    /// Seeds the index from the snapshot of the reclaimed filesystem,
+    /// right before the synchronous tally of a run that tallies (and so
+    /// will write it, [`Self::finish`]). `bound` holds the (profile, hash)
+    /// of every source this run tallies: a snapshot finder of one of these
     /// profiles under another hash (the profile was edited) is dropped;
-    /// finders of other profiles stay for the runs that use them.
-    /// Anything wrong with the snapshot is one log line, and the run
-    /// starts from nothing. Under `--no-index`, nothing.
+    /// finders of other profiles stay for the runs that use them. Anything
+    /// wrong with the snapshot is one log line, and the run starts from
+    /// nothing; a state directory that cannot be used at all is said once
+    /// and nothing is written either. At or past the deadline, nothing.
+    /// Under `--no-index`, one line.
     pub fn seed<H: Host>(
         &mut self,
         host: &H,
-        dev: Dev,
-        min_free: u64,
-        deadline: Option<MonoTime>,
+        run: Reclaimed,
         bound: &BTreeMap<&str, u64>,
         log: &mut dyn FnMut(&str),
     ) {
@@ -159,22 +180,31 @@ impl RunIndex {
             }
             Persist::Snapshot => {}
         }
-        let key = match fs_key(host, dev) {
-            Ok(key) => key,
-            Err(why) => {
-                log(&format!(
-                    "index: no snapshot ({why}); the synchronous tally starts from nothing and \
+        if run.deadline.is_some_and(|d| host.now() >= d) {
+            return; // the tally is skipped too; nothing to seed or write
+        }
+        let (key, fallback) = fs_key(host, run.dev);
+        if let Some(why) = fallback {
+            log(&format!(
+                "index: filesystem {}: {why}; its snapshot is keyed by device number",
+                run.dev
+            ));
+        }
+        // The state directory and the lock file are made now, before the
+        // reclaim walk, if they are missing: what they take is then on the
+        // filesystem before the walk samples it, so a state directory on
+        // the reclaimed filesystem never costs the goal behind the space
+        // guard's back ([`Self::finish`] creates nothing but the file).
+        // A state directory diskgc may not use is said once, here.
+        match host.state_lock(&key) {
+            Ok(lock) => drop(lock),
+            Err(e) => {
+                return log(&format!(
+                    "index: no snapshot ({e}); the synchronous tally starts from nothing and \
                      nothing is written"
                 ));
-                return;
             }
-        };
-        self.pending = Some(Pending {
-            key: key.clone(),
-            dev,
-            min_free,
-            deadline,
-        });
+        }
         let name = key.snapshot_name();
         let ignored = |why: String| {
             format!(
@@ -187,10 +217,18 @@ impl RunIndex {
                 log(&format!(
                     "index: no snapshot {name} yet; the synchronous tally starts from nothing"
                 ));
+                self.pending = Some(Pending { key, run });
                 return;
             }
-            Err(e) => return log(&ignored(e.to_string())),
+            Err(e) => {
+                self.pending = Some(Pending { key, run });
+                return log(&ignored(e.to_string()));
+            }
         };
+        self.pending = Some(Pending {
+            key: key.clone(),
+            run,
+        });
         let uid = host.effective_uid();
         let bytes = match (file.file_type, file.bytes) {
             (FileType::Regular, _) if file.uid != uid => {
@@ -215,7 +253,9 @@ impl RunIndex {
             }
             (other, _) => return log(&ignored(format!("a {other}, not a regular file"))),
         };
-        let snapshot = match format::decode(&bytes).and_then(|s| fits(host, &key, s)) {
+        let decoded = format::decode(&bytes);
+        drop(bytes); // up to twice the budget: not held through the run
+        let snapshot = match decoded.and_then(|s| fits(host, &key, s)) {
             Ok(snapshot) => snapshot,
             Err(why) => return log(&ignored(why)),
         };
@@ -256,52 +296,59 @@ impl RunIndex {
         }
     }
 
-    /// Writes the snapshot after a run that seeded it ([`Self::seed`]):
-    /// not after a terminating signal, not at or past the run's deadline,
-    /// not while another writer holds the single-writer lock, and not when
-    /// the state directory is on the reclaimed filesystem and the write
-    /// would take it below `--min-free`. Each skip or failure is one log
-    /// line and changes nothing else (docs/architecture.md, Snapshot).
+    /// Writes the snapshot after the reclaim walk of a run that seeded it
+    /// ([`Self::seed`]), before the run's final space sample, so that the
+    /// sample, the exit code and the report's duration include the write
+    /// (TASK-30 review). Not after a terminating signal, not at or past
+    /// the run's deadline, not while another writer holds the single-writer
+    /// lock, not when the encoded index is larger than any snapshot may be
+    /// ([`MAX_SNAPSHOT_BYTES`]: every later run would refuse it), and not
+    /// when the state directory is on the reclaimed filesystem and the
+    /// space the file takes (its size rounded up to whole blocks, and one
+    /// more block for the new directory entry; the state directory and the
+    /// lock file were made by [`Self::seed`], before the walk) would take
+    /// that filesystem
+    /// below `--min-free`. Each skip or failure is one log line and changes
+    /// nothing else (docs/architecture.md, Snapshot).
     pub fn finish<H: Host>(&mut self, host: &H, log: &mut dyn FnMut(&str)) {
-        let Some(pending) = self.pending.take() else {
+        let Some(Pending { key, run }) = self.pending.take() else {
             return;
         };
-        let name = pending.key.snapshot_name();
+        let name = key.snapshot_name();
         let skipped = |why: &str| format!("index: snapshot {name} not written: {why}");
+        let past = |host: &H| run.deadline.is_some_and(|d| host.now() >= d);
         if host.interrupted().is_some() {
             return log(&skipped("the run was interrupted"));
         }
-        let past = |host: &H| pending.deadline.is_some_and(|d| host.now() >= d);
         if past(host) {
             return log(&skipped("the run's deadline has passed"));
         }
-        let header = Header {
-            diskgc_version: env!("CARGO_PKG_VERSION").to_owned(),
-            key: pending.key.clone(),
-            uid: host.effective_uid(),
-            boot_id: match host.boot_id() {
-                Ok(id) => id,
-                Err(e) => return log(&skipped(&format!("the boot id: {e}"))),
-            },
-            written: host.wall_clock(),
+        let boot_id = match host.boot_id() {
+            Ok(id) => id,
+            Err(e) => return log(&skipped(&format!("the boot id: {e}"))),
         };
         let clocks = Clocks::now(host);
-        let snapshot = restore::capture(
-            &self.state,
-            clocks,
-            Header {
-                written: clocks.wall,
-                ..header
-            },
-        );
-        let bytes = format::encode(&snapshot);
-        let lock = match host.state_lock(&pending.key) {
+        let header = Header {
+            diskgc_version: DISKGC_VERSION.to_owned(),
+            key: key.clone(),
+            uid: host.effective_uid(),
+            boot_id,
+            written: clocks.wall,
+        };
+        let bytes = format::encode(&restore::capture(&self.state, clocks, header));
+        let size = u64::try_from(bytes.len()).expect("fits u64");
+        if size > MAX_SNAPSHOT_BYTES {
+            return log(&skipped(&format!(
+                "{size} bytes, more than the {MAX_SNAPSHOT_BYTES} a snapshot may be"
+            )));
+        }
+        let lock = match host.state_lock(&key) {
             Ok(lock) => lock,
             Err(e) => return log(&skipped(&e.to_string())),
         };
-        let dir_dev = lock.dir_dev;
+        let dir_fs = lock.dir_dev;
         let wait_until = host.now().checked_add(LOCK_WAIT);
-        let until = match (pending.deadline, wait_until) {
+        let until = match (run.deadline, wait_until) {
             (Some(d), Some(w)) => Some(d.min(w)),
             (d, w) => d.or(w),
         };
@@ -310,38 +357,43 @@ impl RunIndex {
             Ok(WaitLock::DeadlinePassed(_)) => {
                 return log(&skipped(&format!(
                     "{} is held by another writer (a watch, or an ensure writing)",
-                    pending.key.lock_name()
+                    key.lock_name()
                 )));
             }
             Ok(WaitLock::Interrupted(_)) => return log(&skipped("the run was interrupted")),
             Err(e) => return log(&skipped(&e.to_string())),
         };
-        if dir_dev == pending.dev {
-            let size = u64::try_from(bytes.len()).expect("fits u64");
+        if dir_fs == run.fs {
             match host.statvfs(locked.fd()) {
-                Ok(space) if space.avail_bytes.saturating_sub(size) >= pending.min_free => {}
                 Ok(space) => {
-                    return log(&skipped(&format!(
-                        "the state directory is on the reclaimed filesystem, and {} would take \
-                         its {} available below --min-free {}",
-                        format_bytes(size),
-                        format_bytes(space.avail_bytes),
-                        format_bytes(pending.min_free)
-                    )));
+                    let block = space.block_bytes.max(1);
+                    let takes = size.div_ceil(block).saturating_add(1).saturating_mul(block);
+                    if space.avail_bytes.saturating_sub(takes) < run.min_free {
+                        return log(&skipped(&format!(
+                            "the state directory is on the reclaimed filesystem, and the {} it \
+                             takes would bring its {} available below --min-free {}",
+                            format_bytes(takes),
+                            format_bytes(space.avail_bytes),
+                            format_bytes(run.min_free)
+                        )));
+                    }
                 }
                 Err(e) => return log(&skipped(&e.to_string())),
             }
         }
+        if host.interrupted().is_some() {
+            return log(&skipped("the run was interrupted"));
+        }
         if past(host) {
             return log(&skipped("the run's deadline has passed"));
         }
-        match host.state_write(&locked, &pending.key, &bytes) {
+        match host.state_write(&locked, &key, &bytes) {
             Ok(()) => {
                 let stats = self.state.index.stats();
                 log(&format!(
                     "index: snapshot {name} written: {} unit(s), {}",
                     stats.singles + stats.blocks,
-                    format_bytes(u64::try_from(bytes.len()).expect("fits u64"))
+                    format_bytes(size)
                 ));
             }
             Err(e) => log(&skipped(&e.to_string())),
@@ -352,9 +404,9 @@ impl RunIndex {
 /// `snapshot` if this run may use it (docs/architecture.md, Snapshot:
 /// Validity): written by this build, for this filesystem, by this user,
 /// and for a filesystem without a UUID in this boot.
-fn fits<H: Host>(host: &H, key: &FsKey, snapshot: Snapshot) -> Result<Snapshot, String> {
+pub fn fits<H: Host>(host: &H, key: &FsKey, snapshot: Snapshot) -> Result<Snapshot, String> {
     let h = &snapshot.header;
-    let version = env!("CARGO_PKG_VERSION");
+    let version = DISKGC_VERSION;
     if h.diskgc_version != version {
         return Err(format!(
             "written by diskgc {}, this is {version}",

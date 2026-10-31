@@ -24,13 +24,15 @@
 //! | checksum u64 (FNV-1a over every byte before it)
 //! ```
 //!
-//! `str` and `path` are a u32 length and the bytes; `time` is i64 seconds
+//! `str` and `path` are a u32 length and the bytes (a path at most
+//! [`MAX_PATH_BYTES`] long and [`MAX_PATH_DEPTH`] components deep); `time` is i64 seconds
 //! and u32 nanoseconds of the wall clock (monotonic times are never
 //! written: they mean nothing in another process or boot); `opt` is a
 //! byte 0 or 1 and the value; `identity` is the device (two u32), the
 //! inode (u64) and the birth (0 and a time, or 1 and the parent's inode
 //! u64); `finders` is a u32 count and that many indices into the finder
-//! table, ascending. The checksum detects a torn or damaged file, not a
+//! table, ascending. Members, `est_bytes` and `files` summed over all
+//! units stay within [`MAX_TOTAL`]. The checksum detects a torn or damaged file, not a
 //! crafted one: the file is the user's own (mode 0600) and grants nothing
 //! (the index is never an authority).
 
@@ -47,6 +49,46 @@ pub const MAGIC: &[u8; 8] = b"DISKGCIX";
 
 /// The format this build writes and reads; any other is ignored whole.
 pub const FORMAT_VERSION: u32 = 1;
+
+/// The longest path a snapshot may hold, in bytes (Linux's `PATH_MAX`).
+pub const MAX_PATH_BYTES: usize = 4096;
+
+/// The most components a snapshot path may have. The index's trie is
+/// walked and dropped recursively, one level per component, so a loaded
+/// path bounds that depth (Codex review of TASK-30: a crafted deep path
+/// exhausted the stack). Real candidates sit far shallower.
+pub const MAX_PATH_DEPTH: usize = 256;
+
+/// The most the snapshot's sizes and counts may add up to, each of
+/// members, `est_bytes` and `files` summed over every unit (2^62, about
+/// 4.6 EiB or 4.6 × 10^18 entries): far beyond any filesystem, and low
+/// enough that the index's sums over any subset (collapse, recount,
+/// statistics), plus what this run adds, never overflow (Codex and
+/// mped review of TASK-30: two blocks near `u64::MAX` panicked).
+pub const MAX_TOTAL: u64 = 1 << 62;
+
+/// Running sums of a snapshot's sizes and counts ([`MAX_TOTAL`]).
+#[derive(Default)]
+struct Totals {
+    members: u64,
+    est_bytes: u64,
+    files: u64,
+}
+
+impl Totals {
+    fn add(&mut self, members: u64, est_bytes: u64, files: u64) -> Read<()> {
+        let sum = |total: u64, more: u64, what: &str| {
+            total
+                .checked_add(more)
+                .filter(|t| *t <= MAX_TOTAL)
+                .ok_or_else(|| format!("the {what} of its units add up to more than 2^62"))
+        };
+        self.members = sum(self.members, members, "members")?;
+        self.est_bytes = sum(self.est_bytes, est_bytes, "estimated bytes")?;
+        self.files = sum(self.files, files, "files")?;
+        Ok(())
+    }
+}
 
 /// Who wrote the snapshot, for what, and when.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -360,12 +402,24 @@ impl<'a> Reader<'a> {
 /// path is rebuilt from its components and compared byte for byte.)
 fn check_path(path: &Path, what: &str) -> Read<()> {
     let bytes = path.as_os_str().as_bytes();
+    if bytes.len() > MAX_PATH_BYTES {
+        return Err(format!(
+            "{what} of {} bytes is longer than {MAX_PATH_BYTES}",
+            bytes.len()
+        ));
+    }
     let mut canonical: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut components = path.components();
     if components.next() != Some(Component::RootDir) {
         return Err(format!("{what} {} is not absolute", path.display()));
     }
-    for c in components {
+    for (depth, c) in components.enumerate() {
+        if depth == MAX_PATH_DEPTH {
+            return Err(format!(
+                "{what} {} is deeper than {MAX_PATH_DEPTH} components",
+                path.display()
+            ));
+        }
         let Component::Normal(name) = c else {
             return Err(format!("{what} {} holds {c:?}", path.display()));
         };
@@ -456,6 +510,7 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, String> {
             .get(i)
             .ok_or_else(|| format!("{what}: mount {i} of {}", mounts.len()))
     };
+    let mut totals = Totals::default();
     let mut singles = Vec::new();
     for _ in 0..r.len("single count")? {
         let mount = r.len("single mount")?;
@@ -495,6 +550,9 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, String> {
                 tallied_at: r.time("tallied_at")?,
             })
         })?;
+        if let Some(t) = &tally {
+            totals.add(0, t.est_bytes, t.files)?;
+        }
         let checked_at = r.time("checked_at")?;
         let refusal = r.opt("refusal", |r| {
             let name = r.text("refusal reason")?;
@@ -540,6 +598,7 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, String> {
         }
         let est_bytes = r.u64("block est_bytes")?;
         let files = r.u64("block files")?;
+        totals.add(members, est_bytes, files)?;
         let oldest_change = r.time("block oldest_change")?;
         let newest_change = r.time("block newest_change")?;
         if oldest_change > newest_change {
@@ -688,6 +747,8 @@ mod tests {
             ("/tmp/./a1", "is not canonical"),
             ("/tmp//a1", "is not canonical"),
             ("/tmp/a1/", "is not canonical"),
+            (&format!("/tmp/{}", "d/".repeat(300)), "deeper than 256"),
+            (&format!("/tmp/{}", "x".repeat(5000)), "longer than 4096"),
             ("/tmp", "not strictly below its mount point"),
             ("/etc/a1", "not strictly below its mount point"),
         ] {
@@ -721,6 +782,25 @@ mod tests {
                 "another device",
             ),
             (Box::new(|s| s.blocks[0].members = 0), "without members"),
+            (
+                Box::new(|s| s.blocks[0].members = u64::MAX),
+                "members of its units add up",
+            ),
+            (
+                Box::new(|s| {
+                    s.blocks[0].est_bytes = MAX_TOTAL;
+                }),
+                "estimated bytes of its units add up",
+            ),
+            (
+                Box::new(|s| {
+                    let mut twin = s.blocks[0].clone();
+                    twin.files = MAX_TOTAL - 1;
+                    s.blocks[0].files = 2;
+                    s.blocks.push(twin);
+                }),
+                "files of its units add up",
+            ),
         ] {
             let got = refused(bend);
             assert!(got.contains(why), "{why}: {got}");
