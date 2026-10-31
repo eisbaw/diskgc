@@ -3,10 +3,10 @@ id: TASK-30
 title: >-
   Index snapshot: atomic write, filesystem naming, single-writer lock,
   validation, --no-index
-status: To Do
+status: Done
 assignee: []
 created_date: 2026-10-16 22:41
-updated_date: '2026-10-30T23:48:00Z'
+updated_date: '2026-10-31T00:07:00Z'
 labels:
   - wave-3
   - architecture
@@ -26,8 +26,8 @@ Why: ensure on a runner needs a warm index from watch. Implement the snapshot pe
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A second watch for the same filesystem and user exits 2
-- [ ] #2 A corrupted or other-user snapshot falls back to synchronous tally and the report says so
-- [ ] #3 A profile edited between runs drops only that profile's units; changing tiers or --roots invalidates nothing (per-unit finders: profile, profile hash, root)
+- [x] #2 A corrupted or other-user snapshot falls back to synchronous tally and the report says so
+- [x] #3 A profile edited between runs drops only that profile's units; changing tiers or --roots invalidates nothing (per-unit finders: profile, profile hash, root)
 <!-- AC:END -->
 
 ## Definition of Done
@@ -66,4 +66,6 @@ From TASK-31 review (2026-10-26, mped-architect on e2bb85d): (a) Refusal.at is a
 Codex review of TASK-31 at 82cb9af (2026-10-30, finding 3, single event: one index corruption): Reclaim::rematch treats a refusal with at >= run_started as 'refused by this run's tally' and handled.paths then suppresses the tier's real discovery result for that path, so a pressure tier can run while an earlier tier's eligible candidate remains. Fix with the snapshot: refusals produced by this invocation are tracked separately from cached/persisted hints; a cached hint never suppresses discovery. Model test red first.
 
 TASK-30 implementer (branch t30-snapshot, 2026-10-31): AC1's watch-level assertion (a second watch exits 2 after its 10 s wait) is left to TASK-32, which builds watch. Implemented here: the single-writer lock primitive watch will use (Host::state_lock creates/opens index-<fs>.lock; flock_wait Exclusive), and ensure's side of it: it waits at most 100 ms (snapshot::LOCK_WAIT) and, still held, skips its write with one log line (model test a_second_writer_does_not_write). AC2's 'the report says so' is stderr only (index: snapshot ... ignored: <why>); the JSON index block (source: sync/snapshot) is TASK-244.
+
+2026-10-30: merged (ff) at 97b178b after one review round (mped + Codex). AC1 lock primitive done (second writer skips after 100 ms); the watch-level exit 2 is TASK-32's. AC2: stderr says so; JSON index block is TASK-244. Not re-walked after the review fixes (disk < 15 GiB): container ensure_warms_the_snapshot must run in the next async QA.
 <!-- SECTION:NOTES:END -->
