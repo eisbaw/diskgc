@@ -256,6 +256,32 @@ fn the_tables_shrink_with_the_units() {
     assert_eq!(index.accounted_bytes(), 0);
 }
 
+/// TASK-231: a watch pinned at its budget makes and sweeps finder sets
+/// for as long as it runs. Ids past what 32 bits hold keep coming, and a
+/// swept id stays stale (never reused for another set).
+#[test]
+fn finder_set_ids_do_not_run_out_past_32_bits() {
+    let mut index = Index::new(BUDGET);
+    index.next_set_id = u64::from(u32::MAX) - 1;
+    let mut seen = Vec::new();
+    for (i, path) in ["/tmp/a", "/tmp/b", "/tmp/c", "/tmp/d"].iter().enumerate() {
+        let profile = format!("p{i}");
+        put(&mut index, path, &finder(&profile, "/tmp"), i as u64 + 1, 1);
+        let id = index.single(&tmp(), Path::new(path)).unwrap().finders();
+        assert_eq!(index.finder_set(id)[0].profile.as_ref(), profile);
+        assert!(index.evict_single(&tmp(), Path::new(path)));
+        index.sweep_tables();
+        assert!(index.live_set(id).is_none(), "swept");
+        seen.push(id);
+    }
+    assert!(
+        seen.windows(2).all(|w| w[0] < w[1]),
+        "never reused: {seen:?}"
+    );
+    assert!(seen[3].0 > u64::from(u32::MAX));
+    index.assert_consistent();
+}
+
 #[test]
 fn a_block_dissolves_only_when_its_members_fit_under_the_low_water_mark() {
     let mut index = Index::new(64 * 1024);

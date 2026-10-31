@@ -47,11 +47,20 @@ impl Identity {
 }
 
 /// A finder set in the index's table: the units of one set share it, so a
-/// unit stores four bytes, not its finders. Each new set gets the next
+/// unit stores eight bytes, not its finders. Each new set gets the next
 /// number, never reused, so an id kept past the set's sweep
-/// ([`super::Index::sweep_tables`]) is stale, never another set's.
+/// ([`super::Index::sweep_tables`]) is stale, never another set's: the
+/// tally's listing rounds ([`crate::tally::recount::BlockKey`]) and the
+/// reclaim walk's expanded blocks hold ids across index changes and rely
+/// on a stale one matching nothing.
+///
+/// 64 bits so that a `watch` pinned at its budget, which makes and sweeps
+/// sets for as long as it runs, never runs out (TASK-231: 32 bits did, in
+/// principle). Recycling ids was rejected: an id held across a sweep
+/// could then name another set, and every holder would need an epoch to
+/// tell. At a million new sets a second, 2^64 ids last 500,000 years.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FinderSetId(pub(super) u32);
+pub struct FinderSetId(pub(super) u64);
 
 /// Who found a unit: the profile, the hash of its definition (kind,
 /// `find`, `where`, `action`) and the root it was bound to

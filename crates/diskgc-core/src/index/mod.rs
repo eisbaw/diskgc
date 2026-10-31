@@ -212,8 +212,8 @@ pub struct Index {
     mounts: Vec<MountTrie>,
     /// Finder sets in the order of their ids.
     finder_sets: Vec<SetSlot>,
-    /// The id the next new set gets.
-    next_set_id: u32,
+    /// The id the next new set gets (never reused: [`FinderSetId`]).
+    next_set_id: u64,
 }
 
 #[derive(Debug)]
@@ -534,6 +534,17 @@ impl Index {
             });
         });
         self.finder_sets.retain(|slot| used.contains(&slot.id));
+        self.finder_sets.shrink_to_fit();
+        self.tables_bytes = self.tables_cost();
+    }
+
+    /// [`Self::sweep_sets`] for a caller that keeps every set's unit count
+    /// exact (a collapse pass's users, checked against [`Self::set_users`]
+    /// at the end of the pass): drops the sets counted at zero, or not at
+    /// all, without walking the index.
+    fn sweep_sets_counted(&mut self, users: &BTreeMap<FinderSetId, usize>) {
+        self.finder_sets
+            .retain(|slot| users.get(&slot.id).is_some_and(|n| *n > 0));
         self.finder_sets.shrink_to_fit();
         self.tables_bytes = self.tables_cost();
     }
@@ -1250,7 +1261,7 @@ impl Index {
         let names = rel_names(&mount.mount_point, site);
         let block = Block {
             site: parts.site,
-            finders: FinderSetId(u32::MAX),
+            finders: FinderSetId(u64::MAX),
             family: parts.family,
             members: parts.members,
             est_bytes: parts.est_bytes,

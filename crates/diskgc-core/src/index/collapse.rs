@@ -796,21 +796,23 @@ fn absorb_step(
     let mut removed = Delta::default();
     let taken = take(site, &step.takes, &mut removed);
     index.apply(removed);
-    // Room for a new union set: what was removed, and the sets only it
-    // used, free more than it costs (see `gain`).
-    let set = match (step.takes.set, union) {
-        (Some(set), _) => set,
-        (None, Some(union)) => {
-            index.sweep_sets();
-            index.intern_set(union)
-        }
-        (None, None) => unreachable!("a lump has a union"),
-    };
     for (taken_set, n) in &counts {
         for _ in 0..*n {
             unuse(users, *taken_set);
         }
     }
+    // Room for a new union set: what was removed, and the sets only it
+    // used, free more than it costs (see `gain`). `users` is exact here,
+    // so the sweep reads it instead of walking the index: a lump step
+    // costs its site and the table, not the whole index (TASK-231).
+    let set = match (step.takes.set, union) {
+        (Some(set), _) => set,
+        (None, Some(union)) => {
+            index.sweep_sets_counted(users);
+            index.intern_set(union)
+        }
+        (None, None) => unreachable!("a lump has a union"),
+    };
     *users.entry(set).or_default() += 1;
     let units = taken.len();
     let mut taken = taken.into_iter().map(|mut b| {
