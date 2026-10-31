@@ -336,8 +336,9 @@ stacked on `PATH` does not change what is watched):
   reclaim walk with `min = --min-free`, `goal = --target-free`, the
   cycle's deadline, the live index, the configuration's tiers (or
   `--select`). Each cycle repeats the run-time checks `ensure` makes before
-  its first deletion (roots, executables, backend binding;
-  [safety.md](safety.md#validation)), since the machine changes under a
+  its first deletion (roots, executables, backend binding, `owners:`
+  names; [safety.md](safety.md#validation)) and shuffles `ranking: random`
+  groups with a fresh seed, as each `ensure` would, since the machine changes under a
   long-running process; it also re-resolves `PATH` and requires the same
   device as at start (another one is a cycle error, `host`, and nothing
   is deleted). The background tally pauses while the host lock is held

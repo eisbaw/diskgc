@@ -71,7 +71,7 @@ pub const JOIN_WAIT: Duration = Duration::from_secs(2);
 pub trait LiveIndex {
     /// Runs `f` with exclusive use of the live index (the background tally
     /// runs no batch meanwhile), or with `None` when the tally did not let
-    /// go of it by `until` or a signal came first.
+    /// go of it by `until`.
     fn with_state<R>(&mut self, until: MonoTime, f: impl FnOnce(Option<&mut TallyState>) -> R)
     -> R;
 
@@ -205,8 +205,8 @@ impl Shared {
             .expect("the live index's other user panicked")
     }
 
-    /// The live index, waiting for it in [`POLL`] steps until `until` or a
-    /// signal (`None` then).
+    /// The live index, waiting for it in [`POLL`] steps until `until`
+    /// (`None` then).
     fn try_lock_until<H: Host>(
         &self,
         host: &H,
@@ -220,8 +220,10 @@ impl Shared {
                 }
                 Err(TryLockError::WouldBlock) => {}
             }
+            // Not cut short by a signal: the stop's snapshot needs the index
+            // too, and the wait is bounded (at most `LOCK_WAIT`).
             let now = host.now();
-            if now >= until || host.interrupted().is_some() {
+            if now >= until {
                 return None;
             }
             host.sleep(until.saturating_since(now).min(POLL));
