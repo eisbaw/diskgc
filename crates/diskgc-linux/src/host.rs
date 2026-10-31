@@ -1665,6 +1665,11 @@ impl Host for LinuxHost {
         })
     }
 
+    fn listable(&self, dir: &LinuxFd) -> Result<(), HostError> {
+        // `read_dir`'s own open, closed again unread.
+        reopen_readable(dir, &dir.to_string()).map(drop)
+    }
+
     fn read_head(&self, file: &LinuxFd, limit: usize) -> Result<Vec<u8>, HostError> {
         let subject = file.to_string();
         let reopened = self.open_regular(file, &subject, "only marker files are read")?;
@@ -4358,6 +4363,43 @@ mod tests {
         });
         assert_eq!(error, Err(rustix::io::Errno::NOENT));
         assert_eq!(calls, [base | OFlags::NOATIME]);
+    }
+
+    /// `listable` is `read_dir`'s open alone: a directory that can be
+    /// searched but not read (mode `0333`) is refused by both (`EACCES`)
+    /// while a name below it is still looked up; a readable directory
+    /// passes; a non-directory is `ENOTDIR`. A `getdents` error after a
+    /// good open (`EIO`) fails only the listing.
+    #[test]
+    fn listable_refuses_exactly_what_a_listing_refuses() {
+        use std::os::unix::fs::PermissionsExt;
+        let host = LinuxHost::new().expect("host setup");
+        if rustix::process::geteuid().is_root() {
+            eprintln!("skipped: root reads any directory");
+            return;
+        }
+        let dir = TempDir::new();
+        let locked = dir.0.join("searchable-only");
+        std::fs::create_dir(&locked).expect("create dir");
+        std::fs::write(locked.join("f"), b"").expect("create file");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o333)).expect("chmod");
+        let locked_fd = resolve(&host, &locked, Want::Directory)
+            .expect("resolve")
+            .fd;
+        let listing = host.read_dir(&locked_fd, 10).unwrap_err();
+        let probe = host.listable(&locked_fd).unwrap_err();
+        // Still searchable: the name below it is looked up.
+        let found = host.statx(Base::Dir(&locked_fd), Path::new("f"));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert!(listing.is(Errno::EACCES), "{listing}");
+        assert!(probe.is(Errno::EACCES), "{probe}");
+        assert!(found.is_ok(), "{found:?}");
+
+        let open = resolve(&host, &dir.0, Want::Directory).expect("resolve").fd;
+        host.listable(&open).expect("a readable directory");
+        let file = resolve(&host, &locked.join("f"), Want::Any).expect("resolve file");
+        let err = host.listable(&file.fd).unwrap_err();
+        assert!(err.is(Errno::ENOTDIR), "{err}");
     }
 
     /// `read_dir` lists every name of a directory, from an `O_PATH` fd (as

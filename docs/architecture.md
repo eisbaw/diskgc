@@ -258,7 +258,10 @@ split step waits for a measured need (backlog).
   mounts, the same listing bounds) and keeps the names in the block's
   family. Like per-tier discovery, it acts only on an expansion that
   completed: one stopped by the deadline or an error acts on nothing it
-  listed. Members are held as per-tier discovery holds its candidates
+  listed. A multiply linked member is not taken (the single's rule in
+  The reclaim walk: discovery judges it under the name it meets first);
+  it still counts as present, so its block is not evicted as empty.
+  Members are held as per-tier discovery holds its candidates
   (outside the index budget, which bounds what is kept between runs).
   They join the tier's queue in the tier's order, keyed for `oldest`
   by `max(mtime, ctime)` of the member's own root (a cheap stand-in for
@@ -289,7 +292,10 @@ split step waits for a measured need (backlog).
 - **Refusals.** A tally refusal (kept, another user's, too many entries,
   a checkout) is stored with its time as a hint. A refusal found by this
   run's own synchronous tally skips the candidate for the run, as
-  before the index existed: the walk knows these by the tally's own list,
+  before the index existed, once the unit is re-matched at its path (a
+  unit discovery would not reach, below a directory it cannot list, is
+  left to discovery, which reports what it meets instead; TASK-252):
+  the walk knows these by the tally's own list,
   never by a hint's time (a hint timed in the run by a clock step or a
   corrupt snapshot would otherwise suppress an eligible candidate and let
   a later tier run first; Codex review of TASK-31). One from an earlier
@@ -683,12 +689,27 @@ reclaim(min, goal, filesystem, deadline):
   walk of the same bound roots (each root judged as discovery judges it),
   the same patterns, `where`, mount and `systemd-private-*` rules, level
   by level, but looking up only the names on the way instead of listing
-  each directory. It must find a candidate at exactly that path, with the
+  each directory. Where discovery would list a directory on the way (a
+  pattern has a `*` at that level), the re-match opens it for reading as
+  the listing would and reads nothing (`Host::listable`), so a directory
+  diskgc can search but not read (mode `0333`) is refused there as
+  discovery refuses it (`unreadable`), never passed by name (TASK-252).
+  It must find a candidate at exactly that path, with the
   stored identity; otherwise the unit is `stale` (gone, replaced, no
   longer matching, or below another candidate, which discovery would find
   instead) and is never walked or locked. A refusal on the way (a root or
   directory refused) leaves the unit to the tier's discovery, which
-  reports it. A block's members are found by the same discovery
+  reports it. So does a multiply linked file (a link count other than 1,
+  or none reported): discovery finds an inode once, under the first of
+  its names it meets, and judges that name, which may lie outside the
+  re-match's way (TASK-252; [safety.md](safety.md#other-properties), Hard
+  links). **A tier whose roots lie on two mounts of one filesystem** (a
+  bind mount: one device in mountinfo, two mount ids) takes no queue at
+  all, and its discovery alone decides: one directory entry can be
+  spelled under each root, discovery records it under the first root
+  that reaches it (roots outermost first) and judges that spelling's way
+  down, and a link count does not show such an alias (TASK-252 review).
+  One line is logged. A root whose mount cannot be told counts the same. A block's members are found by the same discovery
   restricted to its site (Expanding a block). The identity re-discovery
   saw is then the identity "discovery found" for every later check of
   [safety.md](safety.md#deletion), and the candidate is judged exactly
@@ -697,7 +718,11 @@ reclaim(min, goal, filesystem, deadline):
   misorder it; it cannot name a path that the run's own sources would
   not find, nor skip a check. The one difference from a listing: a
   directory too large to list (`too_many_entries`) is not listed on the
-  way down to a unit, so not refused. This holds for units of this
+  way down to a unit, so not refused. (Also, the re-match opens such a
+  directory without reading it, so a listing that opens and then fails,
+  `getdents` with `EIO`, passes the re-match while discovery stops on it
+  as an error of the run: the limit of a host failure that first appears
+  after the tally, below.) This holds for units of this
   run's tally and equally for units seeded from an earlier run's
   snapshot whose root was listed less than 5 minutes ago (a root that
   grew past the listing limit since is not listed by this run's tally,

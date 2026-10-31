@@ -48,6 +48,9 @@ impl Host for Short {
     fn read_dir(&self, dir: &ModelFd, limit: usize) -> Result<DirListing, HostError> {
         self.0.read_dir(dir, limit)
     }
+    fn listable(&self, dir: &ModelFd) -> Result<(), HostError> {
+        self.0.listable(dir)
+    }
     fn read_head(&self, file: &ModelFd, limit: usize) -> Result<Vec<u8>, HostError> {
         self.0.read_head(file, limit)
     }

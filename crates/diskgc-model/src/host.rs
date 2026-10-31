@@ -198,6 +198,18 @@ fn errno_text(e: Errno) -> String {
     e.to_string()
 }
 
+/// Whether diskgc's user may not read (list) the directory at `loc`: the
+/// one permission the model checks (docs/testing.md, Model tests: Limits).
+/// Its owner's `r` bit for its owner, the others' `r` bit for anyone else
+/// (the group class is not modelled); diskgc as root (`own_uid: 0`) reads
+/// any directory, as `CAP_DAC_READ_SEARCH` lets it.
+fn read_denied(state: &State, loc: Loc) -> bool {
+    let inode = state.inode(loc);
+    let own = state.own_uid;
+    let bit = if inode.uid == own { 0o400 } else { 0o004 };
+    own != 0 && inode.entries().is_some() && inode.perm & bit == 0
+}
+
 /// A path with `.` components dropped (`..` is kept, so checks see it).
 fn tidy(path: &Path) -> PathBuf {
     path.components()
@@ -1193,6 +1205,14 @@ impl Host for ModelHost {
             }
             let loc = inner.loc_of(ofd);
             refuse_dead_mount(&inner.state, loc, "getdents", &shown);
+            if read_denied(&inner.state, loc) {
+                // `LinuxHost` opens `.` for reading first: that open fails.
+                return (
+                    Err(HostError::errno("open", &shown, Errno::EACCES)),
+                    None,
+                    errno_text(Errno::EACCES),
+                );
+            }
             let object = Some(inner.state.dev_ino(loc));
             match inner.state.inode(loc).entries() {
                 Some(entries) if entries.len() > limit => {
@@ -1211,6 +1231,40 @@ impl Host for ModelHost {
                     errno_text(Errno::ENOTDIR),
                 ),
             }
+        })
+    }
+
+    /// The open `read_dir` starts with, and nothing read: refused for a
+    /// directory diskgc may not read, as that listing is.
+    fn listable(&self, dir: &ModelFd) -> Result<(), HostError> {
+        let ofd = self.fd_ofd(dir);
+        let path = self.base_path(Base::Dir(dir), Path::new(""));
+        let shown = path.display().to_string();
+        self.call(Op::Listable, Some(path), None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("open", &shown, e)),
+                    None,
+                    errno_text(e),
+                );
+            }
+            let loc = inner.loc_of(ofd);
+            refuse_dead_mount(&inner.state, loc, "open", &shown);
+            if inner.state.inode(loc).entries().is_none() {
+                return (
+                    Err(HostError::errno("open", &shown, Errno::ENOTDIR)),
+                    None,
+                    errno_text(Errno::ENOTDIR),
+                );
+            }
+            if read_denied(&inner.state, loc) {
+                return (
+                    Err(HostError::errno("open", &shown, Errno::EACCES)),
+                    None,
+                    errno_text(Errno::EACCES),
+                );
+            }
+            (Ok(()), Some(inner.state.dev_ino(loc)), "ok".to_owned())
         })
     }
 

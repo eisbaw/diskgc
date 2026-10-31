@@ -37,12 +37,13 @@ use super::{Acted, CandidateQueue, Reclaim, SourceKind, Tier, overlaps_checked, 
 use crate::config::Order;
 use crate::engine::{Reason, Skip};
 use crate::fs_kind::{self, Beneath, Find, Found};
-use crate::host::{Delete, DevIno, Host, Timestamp};
+use crate::host::{Delete, DevIno, Host, MountEntry, Timestamp};
 use crate::index::queue::{self, AgeFilter, QueueEntry, Queued, Source, TierQuery};
 use crate::index::{Family, Finder, FinderSetId, MountKey, name_family};
 use crate::inuse::Checker;
 use crate::outcome::Stop;
 use crate::report::Report;
+use crate::resolve::mount_for;
 use crate::snapshot::{Reclaimed, RunIndex};
 use crate::tally::listing::{SourceFind, TallySource, index_identity};
 use crate::tally::sync::{self, SyncTier};
@@ -59,6 +60,41 @@ const FOUND_AHEAD_MAX: usize = 64;
 /// `fs` tier of one source without `!profile:` (see the module doc).
 pub(super) fn takes_index(tier: &Tier) -> bool {
     matches!(tier.source, SourceKind::Fs(_)) && tier.fs_union.is_empty() && tier.negated.is_empty()
+}
+
+/// Why `roots` may reach one object under two spellings that a restricted
+/// re-match cannot reconcile (TASK-252 review): two of them lie on
+/// different mounts of one filesystem (a bind mount, by device as
+/// mountinfo shows it). Discovery walks every root, outermost first, and
+/// records an object once, under the first root that reaches it, whose
+/// path then decides the rules by path (a keep marker on the way); a unit
+/// re-matched from the other root alone would be judged by its own way
+/// down, and unlinking it removes the same directory entry. `None`: no two
+/// roots share a filesystem across mounts. A root whose mount cannot be
+/// told counts as such a pair (fail closed).
+fn bind_view(mounts: &[MountEntry], roots: &[PathBuf]) -> Option<String> {
+    let mut placed: Vec<(&Path, &MountEntry)> = Vec::new();
+    for root in roots {
+        let Ok(mount) = mount_for(mounts, root) else {
+            return Some(format!(
+                "the mount of root {} cannot be told from mountinfo",
+                root.display()
+            ));
+        };
+        if let Some((other, _)) = placed
+            .iter()
+            .find(|(_, m)| m.dev == mount.dev && m.id != mount.id)
+        {
+            return Some(format!(
+                "roots {} and {} lie on two mounts of one filesystem (device {})",
+                other.display(),
+                root.display(),
+                mount.dev
+            ));
+        }
+        placed.push((root, mount));
+    }
+    None
 }
 
 /// The finder `tier`'s source carries for `root`.
@@ -427,6 +463,21 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let Some(state) = self.index.as_deref() else {
             return Walked::Discover;
         };
+        if self.tier.roots.len() > 1 {
+            // A bind view: one object, two spellings; only a full discovery
+            // picks the one it judges (`bind_view`).
+            let why = match self.host.mountinfo() {
+                Ok(mounts) => bind_view(&mounts, &self.tier.roots),
+                Err(e) => Some(format!("mountinfo: {e}")),
+            };
+            if let Some(why) = why {
+                (self.log)(&format!(
+                    "{}: no queue from the index: {why}; its discovery decides",
+                    self.tier.name
+                ));
+                return Walked::Discover;
+            }
+        }
         // The idle filters are not applied to the queue: a unit they would
         // leave out is found by the tier's discovery and judged anyway.
         let derived = queue::derive(
@@ -550,23 +601,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     /// A single of the queue, found again by the tier's discovery
-    /// restricted to its path and compared with its stored identity.
+    /// restricted to its path and compared with its stored identity. A
+    /// refusal of this run's own tally applies to the candidate found at
+    /// its path, never to a unit discovery would not reach (TASK-252: the
+    /// tally sizes units it did not find, and would report a refusal of
+    /// one below a directory discovery cannot list).
     fn rematch(&mut self, find: &Find, entry: &QueueEntry, handled: &mut Handled) -> Rematched {
         let Queued::Single(single) = &entry.unit else {
             unreachable!("rematch of a block")
         };
-        if let Some(&reason) = self.tally_refused.get(&entry.path) {
-            // This invocation's own tally refused it: skipped for the run,
-            // never walked or locked again (docs/architecture.md,
-            // Refusals). A hint already in the index is not this: it only
-            // ranked the unit last, and the unit is judged like any other.
-            handled.paths.insert(entry.path.clone());
-            self.skip(
-                &entry.path,
-                &Skip::new(reason, entry.path.clone(), "refused by this run's tally"),
-            );
-            return Rematched::Next;
-        }
         let started = self.host.now();
         let (found, stopped) = fs_kind::discover_beneath(
             self.host,
@@ -582,9 +625,25 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             self.stop(&stop);
             return Rematched::Stop;
         }
-        if !found.refused.is_empty() {
+        if let Some(refused) = found.refused.first() {
             // A root or a directory on the way refused: the tier's own
             // discovery reports it and decides.
+            (self.log)(&format!(
+                "{}: {} left to discovery: refused on the way: {refused}",
+                self.tier.name,
+                entry.path.display()
+            ));
+            return Rematched::Next;
+        }
+        if !found.aliased.is_empty() {
+            // A multiply linked file: discovery reports it under the name
+            // it meets first, which may not be this one (TASK-252). The
+            // tier's own discovery judges it.
+            (self.log)(&format!(
+                "{}: {} left to discovery: multiply linked",
+                self.tier.name,
+                entry.path.display()
+            ));
             return Rematched::Next;
         }
         let candidate = found
@@ -596,6 +655,20 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             // does not report): the tier's discovery reports it.
             Some((_, Err(_))) => return Rematched::Next,
             Some((_, Ok(found))) => {
+                if let Some(&reason) = self.tally_refused.get(&entry.path) {
+                    // This invocation's own tally refused the candidate at
+                    // this path: skipped for the run, never walked or locked
+                    // again, whatever object is there now (one verdict per
+                    // path and run; docs/architecture.md, Refusals). A hint
+                    // already in the index is not this: it only ranked the
+                    // unit last, and the unit is judged like any other.
+                    handled.paths.insert(entry.path.clone());
+                    self.skip(
+                        &entry.path,
+                        &Skip::new(reason, entry.path.clone(), "refused by this run's tally"),
+                    );
+                    return Rematched::Next;
+                }
                 if index_identity(found.identity, found.seen) == Some(single.identity) {
                     return Rematched::Candidate(Box::new(found));
                 }
@@ -652,6 +725,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             family: block.family.clone(),
         };
         let now = self.host.wall_clock();
+        // Multiply linked members are left to the tier's discovery (as in
+        // `rematch`): still there, so the block is not empty. Accepted
+        // cost: a block of only such members, which discovery keeps
+        // refusing, is expanded again on every run until a tally evicts it.
+        let aliased = found
+            .aliased
+            .iter()
+            .filter(|path| member_of(&entry.path, &block.family, path))
+            .count();
         let mut members = 0usize;
         for (path, candidate) in found.candidates {
             let Ok(found) = candidate else {
@@ -666,12 +748,18 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             queue.push_member(found, of.clone(), now);
         }
         (self.log)(&format!(
-            "{}: block at {} ({} recorded member(s)) expanded: {members} member(s) found",
+            "{}: block at {} ({} recorded member(s)) expanded: {members} member(s) found{}",
             self.tier.name,
             entry.path.display(),
-            block.members
+            block.members,
+            if aliased > 0 {
+                format!(", {aliased} multiply linked left to discovery")
+            } else {
+                String::new()
+            }
         ));
         if members == 0
+            && aliased == 0
             && let Some(state) = self.index.as_deref_mut()
         {
             state

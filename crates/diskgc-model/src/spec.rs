@@ -742,6 +742,8 @@ pub enum Op {
     ExecutableFile,
     ReadLink,
     ReadDir,
+    // `Host::listable`: the open a listing starts with.
+    Listable,
     ReadHead,
     ReopenRegular,
     Statvfs,
@@ -794,6 +796,7 @@ impl Op {
             Self::ExecutableFile => "executable_file",
             Self::ReadLink => "read_link",
             Self::ReadDir => "read_dir",
+            Self::Listable => "listable",
             Self::ReadHead => "read_head",
             Self::ReopenRegular => "reopen_regular",
             Self::Statvfs => "statvfs",

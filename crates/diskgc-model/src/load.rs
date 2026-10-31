@@ -969,6 +969,7 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             Op::Statx,
             Op::ReadLink,
             Op::ReadDir,
+            Op::Listable,
             Op::ReadHead,
             Op::Unlinkat,
             Op::Fchmod,

@@ -435,7 +435,7 @@ How the format reads (the schema documents every key):
   (a clock jump, e.g. a suspend), `fail` (the call fails with the named
   errno without acting, e.g. `fail: EIO` on a `read_dir`; only with an op
   trigger, `when: before`, on `openat2`, `statx`, `read_link`, `read_dir`,
-  `read_head`, `unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`,
+  `listable`, `read_head`, `unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`,
   `proc_identity`, `proc_identity_released`, the `/proc` readers
   `proc_fds`, `proc_links`, `proc_maps`, `proc_environ`, `proc_status`,
   `proc_uids`, `proc_cmdline`, `proc_root_lookup`, `docker_query` or
@@ -457,7 +457,11 @@ How the format reads (the schema documents every key):
   exactly as long as an fd refers to them.
 - **Limits:**
   - symlinks are never followed (every allowed call refuses them); `..` is
-    not modelled; permissions are not checked;
+    not modelled; permissions are not checked, except a directory's read
+    permission on a listing (`read_dir`, and `listable`, its open alone):
+    its owner's `r` bit for its owner, the others' for anyone else (the
+    group class is not modelled), none for `own_uid: 0`, so a directory
+    of mode `0333` is searchable but cannot be listed;
   - inode numbers are never reused, so a replacement that reuses the freed
     inode number cannot be modelled;
   - `/proc` link text is the path at open time (Linux follows renames);
@@ -1376,9 +1380,18 @@ removed (the TASK-121 discipline).
   identities, finders of another profile, definition or root, old
   refusal hints, shifted ages, a random small budget and sometimes a
   collapse to one lump per mount, under a plain, an idle-filtered and a
-  `keep_newest` selection (a retention guard ranking siblings); on a
+  `keep_newest` selection (a retention guard ranking siblings), over trees
+  that also hold hard links to their files under other names,
+  `.diskgc-keep` markers, and directories diskgc can search but not read
+  (TASK-252: discovery lists the latter and finds a multiply linked file
+  once, under the name it meets first); on a
   still model it also asserts that the set deleted, the non-`stale`
-  skips and the exit code are equal). Two stated exceptions to "what
+  skips and the exit code are equal: the same skipped candidates, each
+  skipped as often and for the same reason unless the run's synchronous
+  tally refused it, whose sizing walk checks no owners, keep markers or
+  sockets and so can name another of a candidate's refusals than the
+  eligibility walk's first, a reporting difference only (TASK-261: the
+  sizing walk's refusal reason differs from the eligibility walk's)). Two stated exceptions to "what
   that run's own discovery finds", both outside the generated models:
   re-matching a unit looks names up on the way down instead of listing,
   so a directory over the listing limit is not refused there

@@ -103,6 +103,12 @@ pub struct Discovery {
     /// Candidates found again (another root or pattern reached the same
     /// object): listed once.
     pub duplicates: Vec<PathBuf>,
+    /// Multiply linked files a restricted walk ([`discover_beneath`])
+    /// matched but cannot place: their other names lie outside it, and
+    /// [`discover`] reports the inode under whichever of its names it meets
+    /// first. Neither candidates nor refused: left to a full discovery.
+    /// Always empty for [`discover`].
+    pub aliased: Vec<PathBuf>,
     /// Container storage roots refused so far (each in `refused` once):
     /// listed, or above a root. One reached again through another root is
     /// not refused twice ([`Discovery::refuse_storage`]).
@@ -172,9 +178,19 @@ pub enum Beneath {
 /// `where`, the mount and `systemd-private-*` rules and the rule that a
 /// candidate is never descended into all apply level by level, so it can
 /// find a candidate above `at` (one that holds it) and never one that
-/// discovery would not. The one difference: a directory on the way that
-/// is too large to list (`too_many_entries` in [`discover`]) is not
-/// listed here, so not refused.
+/// discovery would not. Where discovery lists a directory on the way (a
+/// pattern has a `*` at that level), the walk opens it as the listing
+/// would ([`Host::listable`]) and refuses what discovery could not list
+/// (`unreadable`: searchable, not readable; TASK-252). A multiply linked
+/// file it matches goes to [`Discovery::aliased`], not to the candidates:
+/// discovery finds an inode once, under the name it meets first, which
+/// may lie outside this walk (TASK-252). Two differences are left: a
+/// directory on the way that is too large to list (`too_many_entries` in
+/// [`discover`]) is not listed here, so not refused; and a listing that
+/// opens but then fails (`getdents`: `EIO`, `EUCLEAN`) stops discovery as
+/// an error of the run, while the open alone passes here (a failing disk
+/// then shows in the tier's discovery after the queue: the documented
+/// limit of a host failure that first appears after the tally).
 pub fn discover_beneath<H: Host>(
     host: &H,
     roots: &[PathBuf],
@@ -299,6 +315,7 @@ fn discover_into<H: Host>(
             }
             cursor.way_down = names;
             cursor.exact = scope == Beneath::Exact;
+            cursor.restricted = true;
         }
         cursor.root_id = Some(identity);
         cursor.frames.push(Frame::root(find));
@@ -409,6 +426,9 @@ pub struct DiscoverCursor {
     way_down: Vec<OsString>,
     /// Restricted to the path itself: nothing below it is entered.
     exact: bool,
+    /// A restricted walk ([`discover_beneath`]), whatever its scope: it
+    /// does not see every name discovery sees.
+    restricted: bool,
 }
 
 impl DiscoverCursor {
@@ -423,6 +443,7 @@ impl DiscoverCursor {
             done: false,
             way_down: Vec::new(),
             exact: false,
+            restricted: false,
         }
     }
 
@@ -626,6 +647,7 @@ impl DiscoverCursor {
                     record_structural: self.record_structural,
                     way_down: &self.way_down,
                     exact: self.exact,
+                    restricted: self.restricted,
                     out: &mut *out,
                     seen: &mut seen,
                 };
@@ -727,6 +749,8 @@ struct Walk<'a, H: Host> {
     /// See [`DiscoverCursor::way_down`].
     way_down: &'a [OsString],
     exact: bool,
+    /// See [`DiscoverCursor::restricted`].
+    restricted: bool,
     out: &'a mut Discovery,
     seen: &'a mut HashSet<DevIno>,
 }
@@ -880,12 +904,6 @@ impl<H: Host> Walk<'_, H> {
         level: usize,
         active: &[usize],
     ) -> Result<Result<Vec<OsString>, Skip>, Stop> {
-        if let Some(name) = self.way_down.get(level) {
-            // On the way down to a restricted walk's path: that one name,
-            // looked up as a literal is (the caller keeps it only if an
-            // active pattern matches it).
-            return Ok(Ok(vec![name.clone()]));
-        }
         let mut literals = Vec::new();
         let mut glob = false;
         for &i in active {
@@ -894,6 +912,18 @@ impl<H: Host> Walk<'_, H> {
                 Some(None) => glob = true,
                 None => {}
             }
+        }
+        if let Some(name) = self.way_down.get(level) {
+            // On the way down to a restricted walk's path: that one name,
+            // looked up as a literal is (the caller keeps it only if an
+            // active pattern matches it). Where discovery would list this
+            // directory, what it could not list is refused here too
+            // (TASK-252: a lookup by name passes a directory that is
+            // searchable but not readable).
+            if glob && let Err(e) = self.host.listable(&dir.fd) {
+                return Ok(Err(skip_or_stop(path.to_owned(), "list", &e)?));
+            }
+            return Ok(Ok(vec![name.clone()]));
         }
         if !glob {
             literals.sort();
@@ -994,6 +1024,15 @@ impl<H: Host> Walk<'_, H> {
         } else {
             None
         };
+        // A restricted walk cannot tell which name of a multiply linked
+        // file discovery meets first (the dedupe below), nor whether that
+        // name is refused (a keep marker on its way, a retention guard among
+        // its siblings): left to a full discovery. An unreported link count
+        // counts as several.
+        if self.restricted && stat.file_type != Some(FileType::Directory) && stat.nlink != Some(1) {
+            self.out.aliased.push(at.to_owned());
+            return Ok(true);
+        }
         // Dedupe only actual source matches. An earlier route to this inode
         // may fail `where` or its anchor while another root supplies the
         // source evidence needed to select it.

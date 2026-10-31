@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-30T22:54:00Z'
+updated_date: '2026-10-31T01:40:00Z'
 labels:
   - irreversible
   - safety
@@ -25,3 +26,9 @@ Codex cross-model review of TASK-31 at 82cb9af (2026-10-30, tmp/reviews/codex-t3
 
 AC: each case a failing model test first (red on 82cb9af), green after; the index_authority property generator extended to produce unreadable glob dirs and hard-link aliases.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Alias rule: discovery's found-once dedup picks which name of a multiply linked file is reported and judged; it is not a safety rule (a keep marker keeps the names on its path; removing another name leaves the kept name and its data; with the unkept name sorted first discovery itself removes it). Parity fix anyway (index authority). Fix 1: discover_beneath opens each glob directory on its way as discovery's listing would (Host::listable) and refuses what discovery cannot list. Fix 2: a restricted walk sets multiply linked files (nlink != 1 or unreported) aside (Discovery::aliased); rematch and block expansion leave them to the tier's discovery; a block of only such members is not evicted. Found by the extended property: a refusal of this run's tally now applies only to a unit re-matched at its path (rematch order). Follow-ups for the orchestrator to file: (a) tally/size.rs sizing-walk refusal reason differs from the eligibility walk's first refusal (unreadable vs not_owner); index_authority.rs narrows the reason comparison for tally-refused skips until then. (b) cross-root aliases (a bind-mounted second root): a restricted walk skips roots beside its path, so a directory reached through two roots is re-matched under the root the unit names, not the outermost; not addressed here.
+<!-- SECTION:NOTES:END -->

@@ -1084,6 +1084,20 @@ pub trait Host {
     /// that creates entries faster than they are read.
     fn read_dir(&self, dir: &Self::Fd, limit: usize) -> Result<DirListing, HostError>;
 
+    /// Whether a listing of `dir` ([`Host::read_dir`]) would start: the
+    /// same fresh `O_RDONLY | O_DIRECTORY` open of `.` below `dir`, closed
+    /// again without reading a name. A directory diskgc may search but not
+    /// read (mode `0333`) fails here (`EACCES`) exactly as its listing
+    /// would. For a walk that looks a name up where discovery lists the
+    /// directory (`fs_kind::discover_beneath`): it refuses what discovery
+    /// could not list, at the cost of an open instead of a listing.
+    ///
+    /// The default makes the listing itself and stops at its first name;
+    /// a host overrides it with the bare open.
+    fn listable(&self, dir: &Self::Fd) -> Result<(), HostError> {
+        self.read_dir(dir, 0).map(drop)
+    }
+
     /// At most `limit` bytes from the start of the regular file open as
     /// `file` (fewer at its end); a read that fails part-way is that error.
     /// `file` may be an `O_PATH` fd: `LinuxHost` reopens the object it

@@ -48,6 +48,14 @@ const PROFILES: &str = r#"
   find: {roots: [/tmp/w/r], paths: ["a*"], type: dir}
   action: delete
   examples: {match: [/tmp/w/r/a0]}
+- name: two-level-any
+  find: {roots: [/tmp], paths: ["*/*"], type: any}
+  action: delete
+  examples: {match: [/tmp/p/f]}
+- name: bind-view
+  find: {roots: [/tmp/z/a, /tmp/b/z/a/sub], paths: ["f", "*/f"], type: file}
+  action: delete
+  examples: {match: [/tmp/z/a/sub/f]}
 "#;
 
 const OLD: &str = "2026-10-01T00:00:00Z";
@@ -905,4 +913,337 @@ fn a_host_error_in_the_tallys_sizing_keeps_the_tier_off_its_queue() {
     deleted.sort();
     assert_eq!(deleted, ["/tmp/a-bad", "/tmp/a-plain"], "{report:#?}");
     assert!(report.errors.is_empty(), "{report:#?}");
+}
+
+/// TASK-252 (Codex review of TASK-31, finding 1): a directory diskgc can
+/// search but not read (mode `0333`) at a level where the tier's pattern
+/// has a `*`. Discovery cannot list it and refuses it (`unreadable`); the
+/// queue's re-match looks the unit's names up instead of listing, and must
+/// refuse it as discovery does, leaving the unit to the tier's discovery
+/// rather than deleting what discovery never finds. With an index seeded
+/// as a recent snapshot would (the queue decides) and with an empty one
+/// (the run's own tally and discovery decide), alike.
+#[test]
+fn a_unit_below_a_glob_directory_discovery_cannot_list_is_never_deleted() {
+    let tree = format!(
+        "  /tmp/p: {{.: {{mtime: {OLD}, mode: \"0333\"}}, f: {{size: 10K, mtime: {OLD}}}}}\n  \
+         /tmp/q: {{.: {{mtime: {OLD}}}, f: {{size: 10K, mtime: {OLD}}}}}\n"
+    );
+    for seed in [false, true] {
+        let host = host(&yaml(&tree, ""));
+        let tier = tier("profile:two-level-any");
+        let mut state = if seed {
+            seeded(&host, &finder(&tier, "/tmp"), &["/tmp/p/f", "/tmp/q/f"])
+        } else {
+            TallyState::new(Index::new(BUDGET_BYTES))
+        };
+        let (report, _) = run(&host, &request(tier), &mut state);
+        assert_eq!(actions(&report), ["/tmp/q/f"], "seed {seed}: {report:#?}");
+        assert_eq!(
+            skip_of(&report, "/tmp/p"),
+            Some(Reason::Unreadable),
+            "seed {seed}: {report:#?}"
+        );
+        assert!(exists(&host, "/tmp/p/f"), "seed {seed}");
+        assert!(
+            !host
+                .trace()
+                .iter()
+                .any(|c| c.op == Op::Unlinkat && c.path.as_deref() == Some(Path::new("/tmp/p/f"))),
+            "seed {seed}"
+        );
+        // The queue opened `/tmp/p` as discovery's listing would (refused),
+        // and `/tmp` (a `*` level too); it listed neither.
+        let probes: Vec<(String, String)> = host
+            .trace()
+            .into_iter()
+            .filter(|c| c.op == Op::Listable)
+            .map(|c| (c.path.unwrap().display().to_string(), c.result))
+            .collect();
+        if seed {
+            assert!(
+                probes.contains(&("/tmp/p".to_owned(), "EACCES (13)".to_owned())),
+                "{probes:?}"
+            );
+            assert!(
+                probes.iter().any(|(p, r)| p == "/tmp" && r == "ok"),
+                "{probes:?}"
+            );
+        } else {
+            // The run's own tally could not list `/tmp/p`: `/tmp/p/f` was
+            // never queued.
+            assert!(probes.iter().all(|(p, _)| p != "/tmp/p"), "{probes:?}");
+        }
+    }
+
+    // A failure of the host on that open is an error of the run, as on
+    // discovery's listing: nothing deleted, exit 3.
+    let events =
+        "events:\n  - {at: {op: listable, path: /tmp/p, nth: 1, when: before}, fail: EIO}\n";
+    let host = host(&yaml(&tree, events));
+    let tier = tier("profile:two-level-any");
+    let mut state = seeded(&host, &finder(&tier, "/tmp"), &["/tmp/p/f"]);
+    let (report, _) = run(&host, &request(tier), &mut state);
+    assert!(host.unfired_events().is_empty());
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert_eq!(report.exit_code(), 3, "{report:#?}");
+    assert!(
+        report.errors.iter().any(|e| e.message.contains("/tmp/p")),
+        "{report:#?}"
+    );
+}
+
+/// TASK-252 (Codex review of TASK-31, finding 2): `/tmp/z/f` is indexed;
+/// later a hard link `/tmp/k/f` to it appears in `/tmp/k`, which holds a
+/// `.diskgc-keep`. Discovery meets `k/f` first (names sorted), finds the
+/// inode once, and refuses the kept candidate; `z/f` is a second name of
+/// it, not a candidate. The queue's re-match sees only `z/f`: a multiply
+/// linked file is left to the tier's discovery, so its verdict is
+/// discovery's. The converse order (`a/f` indexed and found first, its
+/// kept alias `k/f` after it) is deleted by discovery itself: the alias
+/// rule only picks which name discovery reports, and removing one name of
+/// a file that keeps another removes no data (docs/safety.md, Hard
+/// links).
+#[test]
+fn a_multiply_linked_unit_gets_discoverys_verdict_not_its_own_name() {
+    let tree = format!(
+        "  /tmp/k: {{.: {{mtime: {OLD}}}, .diskgc-keep: {{mtime: {OLD}}}, f: {{link: /tmp/z/f}}}}\n  \
+         /tmp/z: {{.: {{mtime: {OLD}}}, f: {{size: 10K, mtime: {OLD}}}}}\n"
+    );
+    for seed in [false, true] {
+        let host = host(&yaml(&tree, ""));
+        let tier = tier("profile:two-level-any");
+        let mut state = if seed {
+            seeded(&host, &finder(&tier, "/tmp"), &["/tmp/z/f"])
+        } else {
+            TallyState::new(Index::new(BUDGET_BYTES))
+        };
+        let (report, _) = run(&host, &request(tier), &mut state);
+        assert!(report.actions.is_empty(), "seed {seed}: {report:#?}");
+        assert_eq!(
+            skip_of(&report, "/tmp/k/f"),
+            Some(Reason::KeepMarker),
+            "seed {seed}: {report:#?}"
+        );
+        assert_eq!(
+            skip_of(&report, "/tmp/z/f"),
+            None,
+            "seed {seed}: {report:#?}"
+        );
+        assert!(exists(&host, "/tmp/z/f") && exists(&host, "/tmp/k/f"));
+        assert_eq!(host.trace_count(Op::Unlinkat), 0, "seed {seed}");
+    }
+
+    // The converse: discovery finds the eligible name first and deletes
+    // it; the queue, left to discovery, does the same.
+    let tree = format!(
+        "  /tmp/a: {{.: {{mtime: {OLD}}}, f: {{size: 10K, mtime: {OLD}}}}}\n  \
+         /tmp/k: {{.: {{mtime: {OLD}}}, .diskgc-keep: {{mtime: {OLD}}}, f: {{link: /tmp/a/f}}}}\n"
+    );
+    for seed in [false, true] {
+        let host = host(&yaml(&tree, ""));
+        let tier = tier("profile:two-level-any");
+        let mut state = if seed {
+            seeded(&host, &finder(&tier, "/tmp"), &["/tmp/a/f"])
+        } else {
+            TallyState::new(Index::new(BUDGET_BYTES))
+        };
+        let (report, _) = run(&host, &request(tier), &mut state);
+        assert_eq!(actions(&report), ["/tmp/a/f"], "seed {seed}: {report:#?}");
+        assert_eq!(skip_of(&report, "/tmp/k/f"), None, "seed {seed}");
+        assert!(exists(&host, "/tmp/k/f"), "the kept name stays");
+    }
+}
+
+/// TASK-252, finding 2 for a block: `/tmp/z/f-1` and `/tmp/z/f-2` are
+/// collapsed into a family block at `/tmp/z`; a kept hard link
+/// `/tmp/k/f-1` to the first appears. Expanding the block lists `/tmp/z`
+/// only; its multiply linked member is left to the tier's discovery, which
+/// refuses it under its kept name, while the other member is deleted.
+#[test]
+fn a_multiply_linked_block_member_gets_discoverys_verdict() {
+    let tree = format!(
+        "  /tmp/k: {{.: {{mtime: {OLD}}}, .diskgc-keep: {{mtime: {OLD}}}, f-1: {{link: /tmp/z/f-1}}}}\n  \
+         /tmp/z: {{.: {{mtime: {OLD}}}, f-1: {{size: 10K, mtime: {OLD}}}, f-2: {{size: 10K, mtime: {OLD}}}}}\n"
+    );
+    let host = host(&yaml(&tree, ""));
+    let tier = tier("profile:two-level-any");
+    let mut state = seeded(&host, &finder(&tier, "/tmp"), &["/tmp/z/f-1", "/tmp/z/f-2"]);
+    let before = state.index.accounted_bytes();
+    state
+        .index
+        .collapse_to(&host, before - 1)
+        .expect("collapsed");
+    assert_eq!(
+        blocks(&state),
+        [(PathBuf::from("/tmp/z"), 2, false)],
+        "one family block"
+    );
+    let (report, lines) = run(&host, &request(tier), &mut state);
+    assert!(
+        lines.iter().any(|l| l.contains(
+            "block at /tmp/z (2 recorded member(s)) expanded: 1 member(s) found, 1 multiply \
+                 linked left to discovery"
+        )),
+        "{lines:#?}"
+    );
+    assert_eq!(actions(&report), ["/tmp/z/f-2"], "{report:#?}");
+    assert_eq!(
+        skip_of(&report, "/tmp/k/f-1"),
+        Some(Reason::KeepMarker),
+        "{report:#?}"
+    );
+    assert!(exists(&host, "/tmp/z/f-1") && exists(&host, "/tmp/k/f-1"));
+}
+
+/// TASK-252: a block whose every member is multiply linked queues none of
+/// them, but it is not empty, so it stays in the index (an empty one is
+/// evicted); the tier's discovery judges them (kept).
+#[test]
+fn a_block_of_only_multiply_linked_members_stays_in_the_index() {
+    let tree = format!(
+        "  /tmp/k: {{.: {{mtime: {OLD}}}, .diskgc-keep: {{mtime: {OLD}}}, f-1: {{link: /tmp/z/f-1}}, \
+         f-2: {{link: /tmp/z/f-2}}}}\n  \
+         /tmp/z: {{.: {{mtime: {OLD}}}, f-1: {{size: 10K, mtime: {OLD}}}, f-2: {{size: 10K, mtime: {OLD}}}}}\n"
+    );
+    let host = host(&yaml(&tree, ""));
+    let tier = tier("profile:two-level-any");
+    let mut state = seeded(&host, &finder(&tier, "/tmp"), &["/tmp/z/f-1", "/tmp/z/f-2"]);
+    let before = state.index.accounted_bytes();
+    state
+        .index
+        .collapse_to(&host, before - 1)
+        .expect("collapsed");
+    let (report, lines) = run(&host, &request(tier), &mut state);
+    assert!(
+        lines.iter().any(|l| l.contains(
+            "block at /tmp/z (2 recorded member(s)) expanded: 0 member(s) found, 2 multiply \
+             linked left to discovery"
+        )),
+        "{lines:#?}"
+    );
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert_eq!(
+        blocks(&state),
+        [(PathBuf::from("/tmp/z"), 2, false)],
+        "kept in the index"
+    );
+}
+
+/// TASK-252 (found by the index-authority property once it generated
+/// unreadable directories): the run's synchronous tally sizes an unsized
+/// unit `/tmp/p/d` below the unreadable `/tmp/p` (reached by name, as a
+/// snapshot's unit is) and refuses it, `d` being unreadable too. A refusal
+/// of this run's tally skips the candidate re-matched at its path; this
+/// unit's re-match is refused on the way, so it is left to the tier's
+/// discovery, which reports `/tmp/p` only, as a run without the unit does.
+#[test]
+fn a_tally_refusal_of_a_unit_discovery_cannot_reach_is_not_reported() {
+    let tree = format!(
+        "  /tmp/p: {{.: {{mtime: {OLD}, mode: \"0333\"}}, d: {{.: {{mtime: {OLD}, mode: \"0333\"}}, \
+         x: {{size: 1K, mtime: {OLD}}}}}}}\n"
+    );
+    let host = host(&yaml(&tree, ""));
+    let tier = tier("profile:two-level-any");
+    let right = finder(&tier, "/tmp");
+    let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+    state
+        .index
+        .insert(
+            &host,
+            &tmp_mount(),
+            Path::new("/tmp/p/d"),
+            &right,
+            discovered(&host, "/tmp/p/d"),
+        )
+        .expect("inserted");
+    state.set_discovered_at(right, host.now());
+    let (report, lines) = run(&host, &request(tier), &mut state);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("1 unit(s) from the index (0 block(s), 1 with a refusal hint)")),
+        "the tally sized and refused the unit: {lines:#?}"
+    );
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert_eq!(skip_of(&report, "/tmp/p"), Some(Reason::Unreadable));
+    assert_eq!(skip_of(&report, "/tmp/p/d"), None, "{report:#?}");
+    assert!(exists(&host, "/tmp/p/d/x"));
+}
+
+/// TASK-252 review (Codex, ce91a5b): `/tmp/b` is a bind mount of `/tmp`'s
+/// filesystem, and a tier's two roots `/tmp/z/a` and `/tmp/b/z/a/sub`
+/// reach one file, `/tmp/z/a/sub/f` (link count 1), under two spellings.
+/// Discovery walks the outer root first, records `/tmp/z/a/sub/f`, finds
+/// the bind spelling again (the same inode) and refuses the recorded one:
+/// `/tmp/z/a` holds a `.diskgc-keep`. A unit at the bind spelling, re-matched
+/// from its own root alone, would start its checks below the marker, and
+/// unlinking that spelling removes the very same directory entry. A tier
+/// whose roots lie on two mounts of one filesystem takes no queue: full
+/// discovery decides, with or without an index.
+#[test]
+fn a_tier_with_roots_on_two_mounts_of_one_filesystem_takes_no_queue() {
+    let tree = format!(
+        "  /tmp/z/a: {{.: {{mtime: {OLD}}}, .diskgc-keep: {{mtime: {OLD}}}, sub: {{.: {{mtime: {OLD}}}, \
+         f: {{size: 10K, mtime: {OLD}}}}}}}\n  /tmp/b: {{.: {{}}}}\n"
+    );
+    let model = yaml(&tree, "").replace(
+        "  - {id: 30, at: /tmp, fs: tmpfs, dev: \"0:42\", size: 1G, other_used: 500M, parent: 1}\n",
+        "  - {id: 30, at: /tmp, fs: tmpfs, dev: \"0:42\", size: 1G, other_used: 500M, parent: 1}\n  \
+         - {id: 31, at: /tmp/b, fs: tmpfs, dev: \"0:42\", size: 1G, other_used: 500M, parent: 30, \
+         bind_of: 30}\n",
+    );
+    let mut logs = Vec::new();
+    for seed in [false, true] {
+        let host = host(&model);
+        assert_eq!(
+            host.stat_path(Path::new("/tmp/z/a/sub/f"))
+                .and_then(|s| s.dev_ino()),
+            host.stat_path(Path::new("/tmp/b/z/a/sub/f"))
+                .and_then(|s| s.dev_ino()),
+            "one file, two spellings"
+        );
+        let tier = tier("profile:bind-view");
+        let outer = finder(&tier, "/tmp/z/a");
+        let view = finder(&tier, "/tmp/b/z/a/sub");
+        let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+        if seed {
+            // A partial index: the bind spelling only, both roots listed
+            // recently, so the run's tally adds nothing.
+            let bind = MountKey {
+                mount_point: PathBuf::from("/tmp/b"),
+                ..tmp_mount()
+            };
+            state
+                .index
+                .insert(
+                    &host,
+                    &bind,
+                    Path::new("/tmp/b/z/a/sub/f"),
+                    &view,
+                    discovered(&host, "/tmp/b/z/a/sub/f"),
+                )
+                .expect("inserted");
+            state.set_discovered_at(outer, host.now());
+            state.set_discovered_at(view, host.now());
+        }
+        let (report, lines) = run(&host, &request(tier), &mut state);
+        assert!(report.actions.is_empty(), "seed {seed}: {report:#?}");
+        assert_eq!(
+            skip_of(&report, "/tmp/z/a/sub/f"),
+            Some(Reason::KeepMarker),
+            "seed {seed}: {report:#?}"
+        );
+        assert!(exists(&host, "/tmp/z/a/sub/f"), "seed {seed}");
+        assert_eq!(host.trace_count(Op::Unlinkat), 0, "seed {seed}");
+        logs.push(lines);
+    }
+    for lines in logs {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("two mounts of one filesystem")),
+            "the queue is not taken: {lines:#?}"
+        );
+    }
 }

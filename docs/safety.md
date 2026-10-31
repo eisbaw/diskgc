@@ -2090,7 +2090,25 @@ Each with the number of events outside diskgc it needs:
 ### Other properties
 
 - **Hard links:** removing a name that is hard-linked elsewhere frees
-  nothing; the signed `avail_delta` shows that.
+  nothing; the signed `avail_delta` shows that. Discovery finds a
+  multiply linked file once, under the first of its names it meets
+  (roots outermost first, each directory's names sorted), and judges that
+  name: the rules by path (a keep marker on the way, the checkout path
+  rule) and a retention guard's siblings are those of that name, not of
+  the file's other names. This picks a name to report; it is not a safety
+  rule (TASK-252): a keep marker keeps the names on its own path, and
+  removing another name of the file leaves the kept name and the data it
+  names. When the unkept name is met first, discovery itself removes it.
+  A reclaim from the index judges the same name as discovery,
+  since it leaves a multiply linked unit or block member to the tier's
+  discovery ([architecture.md](architecture.md#the-reclaim-walk)). A
+  filesystem union is stricter for the checkout guard: every admitted
+  refusing source's name counts (Overlap, above). A bind mount is not a
+  second name: two roots on two mounts of one filesystem can spell the
+  same directory entry, and unlinking either spelling removes it, so
+  there the root discovery records it under (the one of fewest path
+  components, walked first) decides every rule by path, and a reclaim from the index takes no queue for
+  such a tier (TASK-252 review).
 - **Deleted but open:** a file deleted while still open keeps its space
   until the process closes it. Every report lists such files on the
   requested filesystem (`held_by_deleted_files`): the open fds of visible

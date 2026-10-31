@@ -1039,6 +1039,7 @@
         "executable_file",
         "read_link",
         "read_dir",
+        "listable",
         "read_head",
         "reopen_regular",
         "statvfs",
