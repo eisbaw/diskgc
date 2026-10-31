@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-10-31T17:03:00Z'
-updated_date: '2026-10-31T19:16:00Z'
+updated_date: '2026-10-31T19:17:00Z'
 labels:
   - irreversible
   - safety
@@ -29,4 +29,6 @@ Implementer (branch t-userlock, commits cc6cf22 1a7533a ba0923f 168d296): per-us
 Review round 1 (Codex + mped on c0d0352) addressed in f02aa45 and 53f2338: environment-free per-user lock place (/run/user/<euid> if the user's 0700 dir, else account home's .local/state/diskgc; $HOME only without an account home), O_PATH inspection (foreign objects are provisioning, not EACCES), unlocked fallback with one warning for environmental failures (no place, ENOSPC/EDQUOT/EROFS/EACCES/EPERM/ENOTDIR), other host failures exit 3 host, probe and --tally-only make nothing, docs single-homed in safety.md#host-lock. Gates: just check exit 0 (1393), e2e-tests 109 passed; container (e2e-one, all PASS): the 4 earlier tests, ensure_as_a_user_refuses_another_users_per_user_lock, ensure_as_a_user_reclaims_unlocked_when_the_per_user_lock_cannot_be_made, ensure_dry_run_plans_real_targets_and_deletes_nothing@1.99.1, journey_ci_operator_frees_space_with_ensure@1.99.1.
 
 2026-10-31: merged (ff) after one review round (mped + Codex). Lock path: /run/user/<euid>/diskgc/lock when that runtime dir is owned and 0700, else <passwd home>/.local/state/diskgc/lock; env vars ignored. Unsafe object -> exit 2 provisioning; environmental failure -> reclaim unlocked with a warning; other failures -> exit 3 host (contract change from 2 usage). 0.1.0 still requires the provisioned host lock: backport is part of the 0.1.x / 0.2 decision (TASK-276).
+
+2026-10-31 dogfood on Mark's laptop (Mark's instruction: dogfood, dry run first): master release-01-candidate /nix/store/cgldrwb0vq1vpr90sssc106v1nmazxg1 (built at c95e055), as uid 1000, no /run/diskgc. Dry run: 14 cargo targets eligible, 35.11 GiB, note names /run/user/1000/diskgc/lock. Real: ensure --json --min-free 100% --select profile:cargo-target --roots tmp tmp -> per-user lock taken, 14 actions, 1 unreadable skip (test fixture), errors [], exit 1 exhausted (unreachable goal by design), avail 22.6 -> 57.7 GiB. Earlier the same run with the 0.1.0 release (dyqcq6wk...) exited 2 provisioning, nothing deleted.
 <!-- SECTION:NOTES:END -->
