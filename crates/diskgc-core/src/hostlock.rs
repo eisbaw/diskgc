@@ -126,13 +126,11 @@ impl fmt::Display for LockError {
                 "the host lock {} was still held by another reclaim at the deadline",
                 path.display()
             ),
-            Self::Interrupted(signal) => {
-                let name = match signal {
-                    Signal::Int => "SIGINT",
-                    Signal::Term => "SIGTERM",
-                };
-                write!(f, "interrupted by {name} while waiting for the host lock")
-            }
+            Self::Interrupted(signal) => write!(
+                f,
+                "interrupted by {} while waiting for the host lock",
+                signal.name()
+            ),
             Self::Failed(e) => write!(f, "the host lock {}: {e}", path.display()),
         }
     }

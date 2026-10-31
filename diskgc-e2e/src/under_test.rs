@@ -572,6 +572,19 @@ impl Spawned {
         }
     }
 
+    /// The next stdout line within `wait`, or `None` when none came (a
+    /// long-running command's silence: `watch` between its thresholds).
+    pub fn line_within(&mut self, wait: Duration) -> Result<Option<String>, String> {
+        match self.lines.recv_timeout(wait) {
+            Ok(line) => Ok(Some(line)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Err(format!(
+                "{:?} closed its stdout while it was expected to run",
+                self.argv
+            )),
+        }
+    }
+
     /// The next control line on stdout (result lines are skipped; they stay
     /// in the run's stdout), within [`CONTROL_TIMEOUT`].
     fn next_control(&self, waiting_for: &str) -> Result<ControlLine, String> {

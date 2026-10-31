@@ -122,6 +122,11 @@ pub enum Action {
     Fail(Errno),
     /// A new filesystem mounted on a directory.
     Mount(crate::spec::MountEventSpec),
+    /// A mount's filesystem's `other_used` (by mount id) changes.
+    OtherUsed {
+        mount: u64,
+        bytes: u64,
+    },
 }
 
 /// A validated event; `index` is its position in the model's `events`.
@@ -1003,11 +1008,22 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
         }
         actions.push(Action::Mount(m.clone()));
     }
+    if let Some(o) = &spec.other_used {
+        let mount = state
+            .mountinfo()
+            .into_iter()
+            .find(|m| m.mount_point == o.mount)
+            .ok_or_else(|| format!("other_used: no mount at {}", o.mount.display()))?;
+        actions.push(Action::OtherUsed {
+            mount: mount.id,
+            bytes: o.bytes.0,
+        });
+    }
     match actions.len() {
         1 => Ok(actions.pop().expect("one")),
         0 => Err(
             "no action (signal, create, mkdir, remove, rename, replace, replace_reusing_inode, chown, open, close, \
-                  exit, fork, dumpable, access, advance, fail, mount)"
+                  exit, fork, dumpable, access, advance, fail, mount, other_used)"
                 .to_owned(),
         ),
         _ => Err("more than one action; use one event per action".to_owned()),

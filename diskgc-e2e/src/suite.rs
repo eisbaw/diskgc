@@ -44,7 +44,7 @@ use crate::{
     fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey,
     lifecycle_suite, meson_suite, owner_pid_suite, packaging_suite, profile_vector_suite,
     project_cache_suite, pytest_contract_suite, release_suite, scale_suite, signal_suite,
-    stdout_suite, temp_safety_suite,
+    stdout_suite, temp_safety_suite, watch_suite,
 };
 
 /// Which gate runs a test.
@@ -397,6 +397,24 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Full,
         expect: Expect::Pass,
         run: signal_suite::sigterm_stubborn_command_child_gets_killed_after_grace,
+    },
+    Test {
+        name: "watch_process_reclaims_to_target_then_stays_quiet_and_stops_on_sigterm",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: watch_suite::watch_process_reclaims_to_target_then_stays_quiet_and_stops_on_sigterm,
+    },
+    Test {
+        name: "watch_tally_only_never_deletes_and_a_second_watch_exits_2",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: watch_suite::watch_tally_only_never_deletes_and_a_second_watch_exits_2,
+    },
+    Test {
+        name: "watch_tally_pauses_while_another_process_holds_the_host_lock",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: watch_suite::watch_tally_pauses_while_another_process_holds_the_host_lock,
     },
     Test {
         name: "agent_harness_uses_json_for_all_reclaim_decisions",

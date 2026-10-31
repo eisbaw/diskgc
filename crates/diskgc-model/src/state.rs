@@ -470,6 +470,11 @@ impl State {
         &self.fss[&self.mount(mnt).dev]
     }
 
+    /// Sets the space other writers use on mount `mnt`'s filesystem.
+    pub fn set_other_used(&mut self, mnt: u64, bytes: u64) {
+        self.fs_mut(mnt).other_used = bytes;
+    }
+
     fn fs_mut(&mut self, mnt: u64) -> &mut Fs {
         let dev = self.mount(mnt).dev;
         let fs = self.fss.get_mut(&dev).expect("model bug: mount without fs");

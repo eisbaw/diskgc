@@ -98,6 +98,7 @@ pub mod suite;
 pub mod tally_probe;
 pub mod temp_safety_suite;
 pub mod under_test;
+pub mod watch_suite;
 
 /// Exit codes of the in-container binaries, read by the runner and by tests
 /// that run probes as subprocesses.

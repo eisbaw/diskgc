@@ -309,6 +309,113 @@ fn run<H: Delete>(
     log: &mut dyn FnMut(&str),
     progress: &mut dyn FnMut(&str),
 ) -> Result<Report, (ErrorCause, String)> {
+    let prepared = prepare(host, options, config_file, platform, log)?;
+    prepared.refuse_missing_roots(host, options)?;
+    let mut index = if options.no_index {
+        RunIndex::no_index()
+    } else {
+        RunIndex::snapshot()
+    };
+    Ok(prepared.execute(host, options.dry_run, &mut index, progress))
+}
+
+/// Everything `ensure` and `watch` decide from the command line and the
+/// configuration before anything on the machine is measured: the
+/// configuration under the catalog, privileges, owners, protections and
+/// the tiers in policy order ([`prepare`]). Made once; a `watch` runs it
+/// at every reclaim cycle ([`Prepared::execute`]).
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    request: Request,
+    /// The configured tiers, their timeouts and the random seed; `None`
+    /// under `--select` (the request's tier alone).
+    configured: Option<(Vec<Tier>, Vec<Duration>, Option<u64>)>,
+    owners: Vec<u32>,
+    uid: u32,
+    config: Option<Config>,
+}
+
+impl Prepared {
+    /// The tiers a run takes, in policy order, with their own timeouts
+    /// (zero: none).
+    pub fn tiers(&self) -> (Vec<&Tier>, Vec<Duration>) {
+        match &self.configured {
+            Some((tiers, timeouts, _)) => (tiers.iter().collect(), timeouts.clone()),
+            None => (vec![&self.request.tier], vec![Duration::ZERO]),
+        }
+    }
+
+    /// The configuration file the decisions were read from, if any.
+    pub fn config_path(&self) -> Option<&Path> {
+        self.config.as_ref().map(|c| c.path.as_path())
+    }
+
+    /// The request a run makes (its `PATH`, goal and deadlines).
+    pub fn request(&self) -> &Request {
+        &self.request
+    }
+
+    /// The same, with `watch`'s goal and cycle deadline: `--min-free` and
+    /// `--target-free` in bytes (resolved at start) and `--timeout`; no
+    /// synchronous tally (the live index replaces it).
+    pub fn with_goal(mut self, min_free: u64, target_free: u64, timeout: Duration) -> Self {
+        self.request.min_free = Size::Bytes(min_free);
+        self.request.target_free = Some(Size::Bytes(target_free));
+        self.request.timeout = Some(timeout);
+        self.request.tally_budget = None;
+        self
+    }
+
+    /// A supplied root that does not exist refuses the run (exit 2,
+    /// [`refuse_missing_roots`]).
+    pub fn refuse_missing_roots<H: Host>(
+        &self,
+        host: &H,
+        options: &EnsureOptions,
+    ) -> Result<(), (ErrorCause, String)> {
+        refuse_missing_roots(host, self.config.as_ref(), options, self.uid)
+    }
+
+    /// Runs the executor: the dry run, or the reclaim on `index`
+    /// (docs/architecture.md, The reclaim walk). Every error is in the
+    /// report.
+    pub fn execute<H: Delete>(
+        &self,
+        host: &H,
+        dry_run: bool,
+        index: &mut RunIndex,
+        progress: &mut dyn FnMut(&str),
+    ) -> Report {
+        let request = &self.request;
+        let owners = &self.owners;
+        let mut report = if let Some((tiers, timeouts, _)) = &self.configured {
+            if dry_run {
+                executor::dry_run_grouped(host, request, tiers, timeouts, owners, progress)
+            } else {
+                executor::ensure_grouped_with_index(
+                    host, request, tiers, timeouts, owners, index, progress,
+                )
+            }
+        } else if dry_run {
+            // Through `Host` only: the dry run has no way to reach a deleting
+            // method (the generic bound is `Delete`; this call does not use it).
+            executor::dry_run(host, request, owners, progress)
+        } else {
+            executor::ensure_with_index(host, request, owners, index, progress)
+        };
+        report.seed = self.configured.as_ref().and_then(|(_, _, seed)| *seed);
+        report
+    }
+}
+
+/// The decisions of [`Prepared`], or the refusal before the executor.
+pub fn prepare<H: Delete>(
+    host: &H,
+    options: &EnsureOptions,
+    config_file: &ConfigFile,
+    platform: &Platform<'_>,
+    log: &mut dyn FnMut(&str),
+) -> Result<Prepared, (ErrorCause, String)> {
     let fail = |cause: ErrorCause, why: String| Err((cause, why));
     let loaded = match config_file {
         ConfigFile::Read { path, bytes } => Some(
@@ -414,7 +521,6 @@ fn run<H: Delete>(
     };
     tier.protections = protections;
     tier.max_entries = max_entries;
-    refuse_missing_roots(host, config, options, uid)?;
     let request = Request {
         path: options.path.clone(),
         min_free: options.min_free,
@@ -423,31 +529,13 @@ fn run<H: Delete>(
         tally_budget: options.tally_budget,
         tier,
     };
-    // A reclaim that tallies starts from the snapshot and writes it; a dry
-    // run neither reads nor writes it (read-only commands write no state,
-    // and its plan judges every candidate whatever an index would hold).
-    let mut index = if options.no_index {
-        RunIndex::no_index()
-    } else {
-        RunIndex::snapshot()
-    };
-    let mut report = if let Some((tiers, timeouts, _)) = &configured {
-        if options.dry_run {
-            executor::dry_run_grouped(host, &request, tiers, timeouts, &owners, progress)
-        } else {
-            executor::ensure_grouped_with_index(
-                host, &request, tiers, timeouts, &owners, &mut index, progress,
-            )
-        }
-    } else if options.dry_run {
-        // Through `Host` only: the dry run has no way to reach a deleting
-        // method (the generic bound is `Delete`; this call does not use it).
-        executor::dry_run(host, &request, &owners, progress)
-    } else {
-        executor::ensure_with_index(host, &request, &owners, &mut index, progress)
-    };
-    report.seed = configured.as_ref().and_then(|(_, _, seed)| *seed);
-    Ok(report)
+    Ok(Prepared {
+        request,
+        configured,
+        owners,
+        uid,
+        config: loaded,
+    })
 }
 
 /// A root the operator supplied (a tier's or a protect entry's `roots:`,

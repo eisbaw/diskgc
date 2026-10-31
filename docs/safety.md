@@ -3244,7 +3244,9 @@ candidate:
    directory `/`, the host lock directory.
    The one exception is `PATH`: the filesystem the operator asked about is
    measured whatever its type; nothing is searched or deleted through it,
-   and a `PATH` on a dead network mount can block there. Limit: the
+   and a `PATH` on a dead network mount can block there. `watch` reaches
+   its `PATH` the same way at start (the descriptor it samples) and again
+   before each cycle (the device check), and for nothing else. Limit: the
    command preflight's search for an executable (in diskgc's `PATH`, or
    an `env` wrapper's `PATH=`) stats each directory by path, outside
    this step (TASK-241).

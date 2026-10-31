@@ -95,6 +95,19 @@ fn sync_tiers<'t>(tiers: impl IntoIterator<Item = &'t Tier>) -> Vec<SyncTier> {
         .collect()
 }
 
+/// The background tally's sources for `tiers` (policy order): every
+/// indexed tier's source bound to each of its roots, each once (`watch`;
+/// docs/architecture.md, The tally: Background).
+pub fn tally_sources<'t>(tiers: impl IntoIterator<Item = &'t Tier>) -> Vec<TallySource> {
+    let mut sources: Vec<TallySource> = Vec::new();
+    for source in sync_tiers(tiers).into_iter().flat_map(|t| t.sources) {
+        if !sources.iter().any(|s| s.finder == source.finder) {
+            sources.push(source);
+        }
+    }
+    sources
+}
+
 /// What the run's synchronous tally came to, for the reclaim walk.
 #[derive(Debug, Default)]
 pub(super) struct SyncTallied {
@@ -136,7 +149,10 @@ pub(super) fn sync_tally<'t, H: Host>(
 ) -> SyncTallied {
     let (dev, deadline) = (run.dev, run.deadline);
     let tiers = sync_tiers(tiers);
-    if tiers.is_empty() {
+    // `watch`'s live index: the background tally keeps it, so a cycle
+    // takes its queues from it as it is (docs/reference.md, `watch`: the
+    // live index replaces the synchronous tally).
+    if tiers.is_empty() || index.is_live() {
         return SyncTallied {
             usable: true,
             ..SyncTallied::default()

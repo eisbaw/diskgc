@@ -44,6 +44,8 @@ use diskgc_core::units::{parse_duration, parse_size};
 use diskgc_linux::LinuxHost;
 use diskgc_linux::host::{read_config_file, read_root_config_file};
 
+mod watch;
+
 /// Exit code for usage, config and provisioning errors, including a kernel
 /// older than the minimum (docs/reference.md, Exit codes).
 const EXIT_USAGE: u8 = 2;
@@ -74,10 +76,12 @@ diskgc --version
 fn usage(command: Option<&str>) -> String {
     let synopses: &[&str] = match command {
         Some("ensure") => &[ENSURE_SYNOPSIS],
+        Some("watch") => &[watch::WATCH_SYNOPSIS],
         Some("profiles") => &[PROFILES_SYNOPSIS],
         Some("check") => &[CHECK_SYNOPSIS],
         _ => &[
             ENSURE_SYNOPSIS,
+            watch::WATCH_SYNOPSIS,
             PROFILES_SYNOPSIS,
             CHECK_SYNOPSIS,
             INFO_SYNOPSIS,
@@ -115,9 +119,15 @@ Configuration: --config FILE, else $DISKGC_CONFIG, else the first of
   package installs an example (share/doc/diskgc/examples/example.yaml), a
   README and the release notes with the known limits (share/doc/diskgc/).
 
+watch runs as a service: it reclaims as ensure does whenever available
+  space falls below --min-free, up to --target-free, and deletes nothing
+  in between; --tally-only only keeps the index snapshot warm. It stops on
+  SIGTERM, SIGINT or SIGHUP with exit 0 (no reload: restart it to apply an
+  edited configuration); 2 refused at start, 3 stdout or the host failed.
+
 This version runs `ensure --select` or configured groups with ordered or
-random tier ranking and oldest or best-fit candidate order; `watch` and
-`survey` are not in it yet. PATH and every DIR are absolute.
+random tier ranking and oldest or best-fit candidate order, and `watch`;
+`survey` is not in it yet. PATH and every DIR are absolute.
 SIZE: 50G, 80GiB, 500MB, 10%. DUR: 30s, 10m, 2h, 7d, 1w (m is minutes).
 ";
 
@@ -167,7 +177,7 @@ fn unknown_command(first: &str) -> String {
     };
     match diskgc_core::suggest::closest(first, &FIRST_WORDS) {
         Some(near) => format!("{what} `{first}`; did you mean `{near}`?"),
-        None => format!("{what} `{first}`; the commands are ensure, check and profiles"),
+        None => format!("{what} `{first}`; the commands are ensure, watch, check and profiles"),
     }
 }
 
@@ -178,6 +188,7 @@ enum Invocation {
     Version,
     Help,
     Ensure(EnsureArgs),
+    Watch(watch::WatchArgs),
     Profiles(ProfilesArgs),
     Check(Option<OsString>),
     /// A command of the contract that this version does not have yet.
@@ -209,7 +220,7 @@ enum ProfilesCommand {
 }
 
 /// The commands of docs/reference.md this version does not run yet.
-const NOT_YET: [&str; 2] = ["watch", "survey"];
+const NOT_YET: [&str; 1] = ["survey"];
 
 /// Whether the command line asks for JSON: any argument `--json`, or
 /// `--json=...` (then a usage error). Decided on the raw arguments, before
@@ -244,6 +255,10 @@ fn parse(args: &[OsString]) -> Invocation {
         [command, rest @ ..] if command == "ensure" => match parse_ensure(rest) {
             Ok(args) => Invocation::Ensure(args),
             Err(why) => Invocation::UsageError(format!("ensure: {why}")),
+        },
+        [command, rest @ ..] if command == "watch" => match watch::parse_watch(rest) {
+            Ok(args) => Invocation::Watch(args),
+            Err(why) => Invocation::UsageError(format!("watch: {why}")),
         },
         [command, rest @ ..] if command == "profiles" => parse_profiles(rest),
         [command, rest @ ..] if command == "check" => match parse_check(rest) {
@@ -948,6 +963,7 @@ fn main() -> ExitCode {
             }
         },
         Invocation::Ensure(args) => finish(&ensure(&args), json),
+        Invocation::Watch(args) => watch::watch(&args, json),
         Invocation::Check(config) => match check(config.as_deref()) {
             Ok(out) => output(&out, 0),
             Err(why) => {
@@ -986,7 +1002,8 @@ fn main() -> ExitCode {
         },
         Invocation::NotYet(command) => {
             let why = format!(
-                "`{command}` is not in diskgc {} yet; its commands are ensure, check and profiles",
+                "`{command}` is not in diskgc {} yet; its commands are ensure, watch, check and \
+                 profiles",
                 env!("CARGO_PKG_VERSION")
             );
             log(&format!("error: {why}"));
@@ -1428,7 +1445,7 @@ mod tests {
             ),
             (
                 &["prune"],
-                "unknown command `prune`; the commands are ensure, check and profiles",
+                "unknown command `prune`; the commands are ensure, watch, check and profiles",
             ),
             (&["--version", "ensure"], "--version takes no arguments"),
         ] {
@@ -1460,6 +1477,11 @@ mod tests {
             if let Err(error) = profiles_args(&["list", flag, "/c.yaml"]) {
                 assert!(!error.contains("unknown flag"), "{flag}: {error}");
             }
+        }
+        for flag in watch::WATCH_FLAGS {
+            assert!(watch::WATCH_SYNOPSIS.contains(flag), "{flag}");
+            let error = watch::parse_watch(&args(&[flag, "1G", "/p"])).err();
+            assert!(!error.is_some_and(|e| e.contains("unknown flag")), "{flag}");
         }
         for flag in CHECK_FLAGS {
             assert!(CHECK_SYNOPSIS.contains(flag), "{flag}");

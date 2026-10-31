@@ -15,8 +15,10 @@
 //!   [`RunIndex::finish`] after the run, both through the [`Host`] port's
 //!   state operations only.
 //!
-//! Not here: `watch`'s live index and its writes every 5 minutes
-//! (TASK-32), the report's `index` block (TASK-244).
+//! `watch` (TASK-32, [`crate::watch`]) seeds its live index with
+//! [`RunIndex::seed`] once at start and writes it through [`encode`] and
+//! [`write_held`] every 5 minutes under the single-writer lock it holds
+//! for its lifetime. Not here: the report's `index` block (TASK-244).
 
 pub mod format;
 pub mod restore;
@@ -26,7 +28,7 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::host::{Dev, FileType, FsKey, Host, LockMode, MonoTime, WaitLock};
+use crate::host::{Dev, FileType, FsKey, Host, LockMode, Locked, MonoTime, WaitLock};
 use crate::index::{BUDGET_BYTES, Finder, Index};
 use crate::tally::TallyState;
 use crate::units::format_bytes;
@@ -86,6 +88,10 @@ enum Persist {
     NoIndex,
     /// Seeded from a valid snapshot; written after the run.
     Snapshot,
+    /// `watch`'s live index for one reclaim cycle: the background tally
+    /// keeps it and the watcher writes it, so the cycle neither seeds,
+    /// tallies nor writes ([`RunIndex::live`]).
+    Live,
 }
 
 /// The filesystem a run reclaims, as the snapshot needs it.
@@ -118,6 +124,9 @@ pub struct RunIndex {
     persist: Persist,
     /// Set by [`Self::seed`] when the snapshot is to be written.
     pending: Option<Pending>,
+    /// Which tally builds the index when the seed is missing, for the log:
+    /// `synchronous` (`ensure`) or `background` (`watch`).
+    tally: &'static str,
 }
 
 impl RunIndex {
@@ -142,6 +151,7 @@ impl RunIndex {
             state,
             persist: Persist::No,
             pending: None,
+            tally: "synchronous",
         }
     }
 
@@ -151,6 +161,35 @@ impl RunIndex {
             persist: Persist::Snapshot,
             ..Self::ephemeral()
         }
+    }
+
+    /// `watch`'s live index `state` for one reclaim cycle: the reclaim
+    /// walk takes its queues from it and updates it, without a seed, a
+    /// synchronous tally or a write (the background tally and the
+    /// watcher's own writes do those: [`crate::watch`]).
+    pub fn live(state: TallyState) -> Self {
+        Self {
+            state,
+            persist: Persist::Live,
+            pending: None,
+            tally: "background",
+        }
+    }
+
+    /// `watch`'s seed at start: [`Self::snapshot`], whose log lines name
+    /// the background tally. `watch` takes [`Self::state`] after
+    /// [`Self::seed`] and writes the snapshot itself; it never calls
+    /// [`Self::finish`].
+    pub fn watch_seed() -> Self {
+        Self {
+            tally: "background",
+            ..Self::snapshot()
+        }
+    }
+
+    /// Whether this is `watch`'s live index ([`Self::live`]).
+    pub fn is_live(&self) -> bool {
+        self.persist == Persist::Live
     }
 
     /// Seeds the index from the snapshot of the reclaimed filesystem,
@@ -171,7 +210,7 @@ impl RunIndex {
         log: &mut dyn FnMut(&str),
     ) {
         match self.persist {
-            Persist::No => return,
+            Persist::No | Persist::Live => return,
             Persist::NoIndex => {
                 return log(
                     "index: --no-index: the snapshot is neither read nor written; the \
@@ -183,6 +222,7 @@ impl RunIndex {
         if run.deadline.is_some_and(|d| host.now() >= d) {
             return; // the tally is skipped too; nothing to seed or write
         }
+        let tally = self.tally;
         let (key, fallback) = fs_key(host, run.dev);
         if let Some(why) = fallback {
             log(&format!(
@@ -200,22 +240,20 @@ impl RunIndex {
             Ok(lock) => drop(lock),
             Err(e) => {
                 return log(&format!(
-                    "index: no snapshot ({e}); the synchronous tally starts from nothing and \
+                    "index: no snapshot ({e}); the {tally} tally starts from nothing and \
                      nothing is written"
                 ));
             }
         }
         let name = key.snapshot_name();
         let ignored = |why: String| {
-            format!(
-                "index: snapshot {name} ignored: {why}; the synchronous tally starts from nothing"
-            )
+            format!("index: snapshot {name} ignored: {why}; the {tally} tally starts from nothing")
         };
         let file = match host.state_read(&key, MAX_SNAPSHOT_BYTES) {
             Ok(Some(file)) => file,
             Ok(None) => {
                 log(&format!(
-                    "index: no snapshot {name} yet; the synchronous tally starts from nothing"
+                    "index: no snapshot {name} yet; the {tally} tally starts from nothing"
                 ));
                 self.pending = Some(Pending { key, run });
                 return;
@@ -323,25 +361,10 @@ impl RunIndex {
         if past(host) {
             return log(&skipped("the run's deadline has passed"));
         }
-        let boot_id = match host.boot_id() {
-            Ok(id) => id,
-            Err(e) => return log(&skipped(&format!("the boot id: {e}"))),
+        let bytes = match encode(host, &self.state, &key) {
+            Ok(bytes) => bytes,
+            Err(why) => return log(&skipped(&why)),
         };
-        let clocks = Clocks::now(host);
-        let header = Header {
-            diskgc_version: DISKGC_VERSION.to_owned(),
-            key: key.clone(),
-            uid: host.effective_uid(),
-            boot_id,
-            written: clocks.wall,
-        };
-        let bytes = format::encode(&restore::capture(&self.state, clocks, header));
-        let size = u64::try_from(bytes.len()).expect("fits u64");
-        if size > MAX_SNAPSHOT_BYTES {
-            return log(&skipped(&format!(
-                "{size} bytes, more than the {MAX_SNAPSHOT_BYTES} a snapshot may be"
-            )));
-        }
         let lock = match host.state_lock(&key) {
             Ok(lock) => lock,
             Err(e) => return log(&skipped(&e.to_string())),
@@ -363,41 +386,120 @@ impl RunIndex {
             Ok(WaitLock::Interrupted(_)) => return log(&skipped("the run was interrupted")),
             Err(e) => return log(&skipped(&e.to_string())),
         };
-        if dir_fs == run.fs {
-            match host.statvfs(locked.fd()) {
-                Ok(space) => {
-                    let block = space.block_bytes.max(1);
-                    let takes = size.div_ceil(block).saturating_add(1).saturating_mul(block);
-                    if space.avail_bytes.saturating_sub(takes) < run.min_free {
-                        return log(&skipped(&format!(
-                            "the state directory is on the reclaimed filesystem, and the {} it \
-                             takes would bring its {} available below --min-free {}",
-                            format_bytes(takes),
-                            format_bytes(space.avail_bytes),
-                            format_bytes(run.min_free)
-                        )));
-                    }
+        let held = Held {
+            key: &key,
+            locked: &locked,
+            dir_fs,
+        };
+        let guard = Guard {
+            fs: run.fs,
+            min_free: Some(run.min_free),
+        };
+        let last_check = |host: &H| {
+            if host.interrupted().is_some() {
+                Some("the run was interrupted")
+            } else if past(host) {
+                Some("the run's deadline has passed")
+            } else {
+                None
+            }
+        };
+        write_held(host, &self.state, held, guard, &bytes, &last_check, log);
+    }
+}
+
+/// The single-writer lock of `key`, held exclusively, and the device of
+/// the state directory it is in.
+#[derive(Debug, Clone, Copy)]
+pub struct Held<'a, F> {
+    pub key: &'a FsKey,
+    pub locked: &'a Locked<F>,
+    pub dir_fs: Dev,
+}
+
+/// What a snapshot write must not take: when the state directory is on
+/// `fs` (the filesystem a run reclaims, or `watch` watches), available
+/// space must stay at or above `min_free` after the write (`None`: no
+/// guard, only a write that fails is skipped; `watch --tally-only`
+/// without `--min-free`).
+#[derive(Debug, Clone, Copy)]
+pub struct Guard {
+    pub fs: Dev,
+    pub min_free: Option<u64>,
+}
+
+/// The snapshot of `state` for `key`, encoded, or why it is not written
+/// (the boot id cannot be read, or it is larger than any snapshot may be,
+/// [`MAX_SNAPSHOT_BYTES`]: every later run would refuse it).
+pub fn encode<H: Host>(host: &H, state: &TallyState, key: &FsKey) -> Result<Vec<u8>, String> {
+    let boot_id = host.boot_id().map_err(|e| format!("the boot id: {e}"))?;
+    let clocks = Clocks::now(host);
+    let header = Header {
+        diskgc_version: DISKGC_VERSION.to_owned(),
+        key: key.clone(),
+        uid: host.effective_uid(),
+        boot_id,
+        written: clocks.wall,
+    };
+    let bytes = format::encode(&restore::capture(state, clocks, header));
+    let size = u64::try_from(bytes.len()).expect("fits u64");
+    if size > MAX_SNAPSHOT_BYTES {
+        return Err(format!(
+            "{size} bytes, more than the {MAX_SNAPSHOT_BYTES} a snapshot may be"
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Writes `bytes` (`state` [`encode`]d) as the snapshot under the held
+/// single-writer lock, unless the space [`Guard`] says no or `last_check`
+/// names a reason right before the write. Every skip or failure is one log
+/// line; nothing else changes (docs/architecture.md, Snapshot). What the
+/// file takes is its size rounded up to whole blocks, and one more block
+/// for the new directory entry.
+pub fn write_held<H: Host>(
+    host: &H,
+    state: &TallyState,
+    held: Held<'_, H::Fd>,
+    guard: Guard,
+    bytes: &[u8],
+    last_check: &dyn Fn(&H) -> Option<&'static str>,
+    log: &mut dyn FnMut(&str),
+) {
+    let name = held.key.snapshot_name();
+    let skipped = |why: &str| format!("index: snapshot {name} not written: {why}");
+    let size = u64::try_from(bytes.len()).expect("fits u64");
+    if let (true, Some(min_free)) = (held.dir_fs == guard.fs, guard.min_free) {
+        match host.statvfs(held.locked.fd()) {
+            Ok(space) => {
+                let block = space.block_bytes.max(1);
+                let takes = size.div_ceil(block).saturating_add(1).saturating_mul(block);
+                if space.avail_bytes.saturating_sub(takes) < min_free {
+                    return log(&skipped(&format!(
+                        "the state directory is on the reclaimed filesystem, and the {} it \
+                         takes would bring its {} available below --min-free {}",
+                        format_bytes(takes),
+                        format_bytes(space.avail_bytes),
+                        format_bytes(min_free)
+                    )));
                 }
-                Err(e) => return log(&skipped(&e.to_string())),
             }
+            Err(e) => return log(&skipped(&e.to_string())),
         }
-        if host.interrupted().is_some() {
-            return log(&skipped("the run was interrupted"));
+    }
+    if let Some(why) = last_check(host) {
+        return log(&skipped(why));
+    }
+    match host.state_write(held.locked, held.key, bytes) {
+        Ok(()) => {
+            let stats = state.index.stats();
+            log(&format!(
+                "index: snapshot {name} written: {} unit(s), {}",
+                stats.singles + stats.blocks,
+                format_bytes(size)
+            ));
         }
-        if past(host) {
-            return log(&skipped("the run's deadline has passed"));
-        }
-        match host.state_write(&locked, &key, &bytes) {
-            Ok(()) => {
-                let stats = self.state.index.stats();
-                log(&format!(
-                    "index: snapshot {name} written: {} unit(s), {}",
-                    stats.singles + stats.blocks,
-                    format_bytes(size)
-                ));
-            }
-            Err(e) => log(&skipped(&e.to_string())),
-        }
+        Err(e) => log(&skipped(&e.to_string())),
     }
 }
 

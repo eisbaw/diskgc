@@ -11,6 +11,10 @@ and the reclaim walk in [architecture.md](architecture.md).
 diskgc ensure --min-free SIZE [--target-free SIZE] [--timeout DUR]
               [--tally-budget DUR] [--no-index] [--select EXPR] [--roots DIR]...
               [--dry-run] [--json] [--config FILE] [--allow-root] PATH
+diskgc watch  --min-free SIZE --target-free SIZE [--interval DUR] [--timeout DUR]
+              [--select EXPR] [--roots DIR]... [--json] [--config FILE] [--allow-root] PATH
+diskgc watch  --tally-only [--min-free SIZE]
+              [--select EXPR] [--roots DIR]... [--json] [--config FILE] [--allow-root] PATH
 diskgc check  [--config FILE]
 diskgc profiles list [--json] [--config FILE]
 diskgc profiles show NAME [--json] [--config FILE]
@@ -18,10 +22,9 @@ diskgc profiles test [--json] [--config FILE]
 diskgc --help | --version
 ```
 
-`watch` and `survey` are planned commands. This version returns exit 2
-for either, naming the commands it has; their interfaces are described
-below for implementation (`watch`'s is settled, `survey`'s is intended),
-not as available CLI behavior.
+`survey` is a planned command. This version returns exit 2 for it,
+naming the commands it has; its interface is described below for
+implementation (intended), not as available CLI behavior.
 
 A usage error (an unknown command or flag, a missing or malformed
 argument) exits 2 and prints, on stderr, `diskgc: error: MESSAGE`, then
@@ -205,8 +208,13 @@ process runs, even if that Cargo works in an unrelated directory; see
 
 ### `watch`
 
-Planned; this build returns exit 2. The contract below is settled
-(TASK-117) for implementation (TASK-32); nothing of it runs yet.
+The contract below was settled by TASK-117 and is implemented (TASK-32),
+with these limits in this build: the record's `index` block is `null`
+as in `ensure`'s report (TASK-244 defines it for both); a second signal
+during the stop does not skip the snapshot write; a mount stacked on
+`PATH` is detected by a check right before each cycle, so one made
+between that check and the cycle's own resolution of `PATH` is not seen
+by it.
 
 ```
 diskgc watch --min-free SIZE --target-free SIZE [--interval DUR] [--timeout DUR]

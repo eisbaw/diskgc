@@ -597,6 +597,19 @@ pub struct EventSpec {
     /// FUSE mount appearing in a candidate while diskgc works).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount: Option<MountEventSpec>,
+    /// The space other writers use on a mount's filesystem changes (its
+    /// `other_used`): available space falls or rises without a file of the
+    /// model changing (`watch`'s scripted curve).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_used: Option<OtherUsedSpec>,
+}
+
+/// A mount, by its mount point, and its filesystem's new `other_used`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OtherUsedSpec {
+    pub mount: PathBuf,
+    pub bytes: Bytes,
 }
 
 /// Signals the model can deliver to diskgc.

@@ -716,6 +716,10 @@ impl Inner {
                 Ok(())
             }
             Action::Mount(spec) => state.mount_on(spec),
+            Action::OtherUsed { mount, bytes } => {
+                state.set_other_used(*mount, *bytes);
+                Ok(())
+            }
         };
         if let Err(fault) = outcome {
             model_error(format!(

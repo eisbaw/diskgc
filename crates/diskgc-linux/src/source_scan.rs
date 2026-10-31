@@ -991,6 +991,14 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
     },
     Allowed {
         file: "crates/diskgc-linux/src/host.rs",
+        function: "install_hangup_handler_ungated",
+        gate: Gate::Ungated(
+            "sigaction reads and sets only this process's SIGHUP disposition (watch's flag-setting handler, or left ignored); no file or child operation",
+        ),
+        matches: 8, // two sigaction types and calls, sigemptyset, two SIGHUP, SIG_IGN
+    },
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
         function: "lookup_account",
         gate: Gate::Ungated(
             "getpwnam_r reads NSS user records; no filesystem mutation or child process",

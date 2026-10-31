@@ -43,6 +43,7 @@ mod preflight;
 mod tier;
 mod tier_policy;
 
+pub use indexed::tally_sources;
 pub use plan::{dry_run, dry_run_grouped};
 pub use preflight::privileges;
 pub use tier::{
@@ -108,8 +109,9 @@ fn signal_report<H: Host>(host: &H, mut report: Report) -> Report {
 
 /// Measure an entire public run, including early returns and final signal
 /// precedence. The wall clock is used only to label its start; elapsed time
-/// comes from the host's monotonic clock.
-fn timed_report<H: Host>(host: &H, run: impl FnOnce() -> Report) -> Report {
+/// comes from the host's monotonic clock. Public for `watch`'s cycles that
+/// end before the executor runs (a failed sample).
+pub fn timed_report<H: Host>(host: &H, run: impl FnOnce() -> Report) -> Report {
     let wall = host.wall_clock();
     let started = host.now();
     let mut report = run();

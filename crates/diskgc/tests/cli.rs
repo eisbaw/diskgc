@@ -253,7 +253,12 @@ fn a_usage_error_shows_the_error_then_only_the_command_usage() {
             "diskgc: error: check: unknown argument extra",
             1,
         ),
-        (&[], "diskgc: error: no command given", 9),
+        (
+            &["watch", "--tally-only", "--interval", "1m", "/nonexistent"],
+            "diskgc: error: watch: --interval is not valid with --tally-only",
+            4,
+        ),
+        (&[], "diskgc: error: no command given", 13),
     ] {
         let out = diskgc(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
@@ -841,7 +846,8 @@ fn json_anywhere_gives_one_object() {
             &["profiles", "--json"],
             "list, show NAME or test is required",
         ),
-        (&["watch", "--json"], "`watch` is not in diskgc 0.1.0 yet"),
+        (&["watch", "--json"], "watch: --min-free SIZE is required"),
+        (&["survey", "--json"], "`survey` is not in diskgc 0.1.0 yet"),
     ] {
         let out = diskgc(args);
         let error = error_of(&out);

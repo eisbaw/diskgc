@@ -81,10 +81,23 @@ impl Scratch {
     /// the image) with the given octal `mode` and `owner` for its root
     /// directory.
     pub fn mount(root: &str, mode: &str, owner: Owner) -> Result<Self, String> {
+        Self::mount_options(root, mode, owner, "")
+    }
+
+    /// [`Self::mount`] with a size limit (`size=` of tmpfs, e.g. `64m`): a
+    /// filesystem a test can fill (`watch`'s thresholds).
+    pub fn mount_sized(root: &str, mode: &str, owner: Owner, size: &str) -> Result<Self, String> {
+        Self::mount_options(root, mode, owner, &format!(",size={size}"))
+    }
+
+    fn mount_options(root: &str, mode: &str, owner: Owner, extra: &str) -> Result<Self, String> {
         let root = PathBuf::from(root);
         let covered = mount_id(&root, false)?;
-        let data = CString::new(format!("mode={mode},uid={},gid={}", owner.uid, owner.gid))
-            .expect("mount options have no NUL");
+        let data = CString::new(format!(
+            "mode={mode},uid={},gid={}{extra}",
+            owner.uid, owner.gid
+        ))
+        .expect("mount options have no NUL");
         rustix::mount::mount(
             "diskgc-e2e-scratch",
             &root,

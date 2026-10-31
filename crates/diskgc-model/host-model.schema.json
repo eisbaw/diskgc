@@ -564,6 +564,17 @@
             }
           ]
         },
+        "other_used": {
+          "description": "The space other writers use on a mount's filesystem changes (its\n`other_used`): available space falls or rises without a file of the\nmodel changing (`watch`'s scripted curve).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OtherUsedSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "remove": {
           "description": "Remove a name and, for a directory, every entry below it (`rm -r`).\nAn object still open or mapped keeps existing, but only itself: an\nopen directory stays, empty.",
           "type": [
@@ -1037,6 +1048,23 @@
         "state_lock",
         "state_read",
         "state_write"
+      ]
+    },
+    "OtherUsedSpec": {
+      "description": "A mount, by its mount point, and its filesystem's new `other_used`.",
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "$ref": "#/$defs/Bytes"
+        },
+        "mount": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mount",
+        "bytes"
       ]
     },
     "PidNamespaceSpec": {

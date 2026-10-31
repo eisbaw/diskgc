@@ -56,6 +56,19 @@ pub enum Status {
 pub enum Signal {
     Int,
     Term,
+    /// Handled by `watch` only (docs/reference.md, Watch signals), which
+    /// exits 0 on it; `ensure` installs no handler for it.
+    Hup,
+}
+
+impl Signal {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Int => "SIGINT",
+            Self::Term => "SIGTERM",
+            Self::Hup => "SIGHUP",
+        }
+    }
 }
 
 impl Status {
@@ -96,6 +109,9 @@ impl Status {
             Self::UsageError => 2,
             Self::Interrupted(Signal::Int) => 130,
             Self::Interrupted(Signal::Term) => 143,
+            // Never an exit code: only `watch` handles SIGHUP, and it
+            // exits 0. 128 + 1 for completeness.
+            Self::Interrupted(Signal::Hup) => 129,
             Self::LockTimeout => 75,
             Self::Met | Self::DryRun => 0,
             Self::Deadline => 124,
@@ -573,6 +589,26 @@ impl Report {
 
     /// The JSON object (docs/reference.md, Output), one line, no newline.
     pub fn to_json(&self) -> String {
+        self.json().to_text()
+    }
+
+    /// `watch`'s record of a reclaim cycle (docs/reference.md, Watch JSON
+    /// lines): the object of [`Self::to_json`] with `exit_code` `null`
+    /// (the process does not exit) and one more field, `watch`, last.
+    pub fn to_watch_json(&self, watch: Json) -> String {
+        let Json::Obj(mut fields) = self.json() else {
+            unreachable!("a report is an object")
+        };
+        for (key, value) in &mut fields {
+            if *key == "exit_code" {
+                *value = Json::Null;
+            }
+        }
+        fields.push(("watch", watch));
+        Json::Obj(fields).to_text()
+    }
+
+    fn json(&self) -> Json {
         let path = |p: &Path| Json::str(p.to_string_lossy());
         let opt_u64 = |v: Option<u64>| Json::opt(v, Json::U64);
         let (actions, overflow) = self.output_actions();
@@ -737,7 +773,6 @@ impl Report {
                 Json::Arr(self.errors.iter().map(ErrorEntry::to_json).collect()),
             ),
         ])
-        .to_text()
     }
 
     /// The human-mode result for stdout (docs/reference.md, Output):

@@ -661,7 +661,12 @@ Model scenarios required by [safety.md](safety.md) and
   scripted `other_used` curve for available space, scripted PSI, signal
   events; each scenario asserts the deletion oracle, the JSON lines
   parsed line by line, and the `Delete` and host-lock calls on the
-  trace):
+  trace). In diskgc-model `tests/watch.rs` (TASK-32), with the
+  background tally inline on the model's one thread; the retry doubling
+  is driven by a mount stacked on `PATH` (no backend reports
+  `backend_unavailable` yet). Still open: `watch_cycle_deadline`,
+  `watch_root_vanished_after_start_still_reclaims_other_tiers`, and of
+  `watch_signals` SIGINT, SIGHUP and a second signal during the stop:
   - `watch_steady_between_thresholds_deletes_nothing_and_keeps_its_duty_cycle`
     (the PRD's acceptance test): available space held between
     `--min-free` and `--target-free` for 24 virtual hours, with
@@ -1794,6 +1799,11 @@ filesystem, processes and mounts from the developer's system.
 - **Signals, deadlines, the CI-hook use of `ensure`, `watch` as a plain
   process.** For `watch`, the static binary in the Nix image, a scratch
   tmpfs as the watched filesystem and the deletion oracle on every run:
+  - (diskgc-e2e `watch_suite.rs`, TASK-32 and TASK-236:
+    `watch_process_reclaims_to_target_then_stays_quiet_and_stops_on_sigterm`,
+    `watch_tally_only_never_deletes_and_a_second_watch_exits_2`,
+    `watch_tally_pauses_while_another_process_holds_the_host_lock`; the
+    names below are still open where these do not cover them.)
   - `watch_process_reclaims_and_streams_json`: `watch --json` started,
     the tmpfs filled below `--min-free` with idle candidates by the
     harness: one stdout line per cycle, each a complete JSON object, the

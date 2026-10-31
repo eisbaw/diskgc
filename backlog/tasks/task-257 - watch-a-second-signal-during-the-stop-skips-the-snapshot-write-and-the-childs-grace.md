@@ -1,0 +1,26 @@
+---
+id: TASK-257
+title: >-
+  watch: a second signal during the stop skips the snapshot write and the
+  child's grace
+status: To Do
+assignee: []
+created_date: '2026-10-31T00:59:00Z'
+labels:
+  - watch
+  - contract
+dependencies: []
+priority: medium
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+From TASK-32: docs/reference.md (Watch signals) says a second SIGTERM, SIGINT or SIGHUP during the stop skips the snapshot write (its O_TMPFILE never linked in) and the rest of a running child's 10 s SIGTERM grace, and exits 0 at once. This build records only the first signal (LinuxHost's INTERRUPTED flag), so the stop always writes the snapshot. Needs a signal count on the Host port (ModelHost events too) and the watch loop/Writer checking it right before the write.
+<!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 A second signal during the stop's snapshot write leaves the old snapshot unchanged and exits 0 (model test, ModelHost signal events)
+- [ ] #2 A second signal during a cycle's child grace exits 0 without waiting out the grace, the child keeps the host lock it inherited
+<!-- AC:END -->

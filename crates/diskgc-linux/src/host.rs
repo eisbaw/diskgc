@@ -114,6 +114,36 @@ fn install_interrupt_handlers_ungated() -> Result<(), HostError> {
     Ok(())
 }
 
+/// `watch`'s SIGHUP handler (docs/reference.md, Watch signals): the same
+/// flag-setting handler as SIGINT and SIGTERM, unless SIGHUP was ignored
+/// when the process started (`nohup`), when it stays ignored. Returns
+/// whether it was installed. Ungated like the handlers above.
+fn install_hangup_handler_ungated() -> Result<bool, HostError> {
+    let failed = |op: &'static str| {
+        HostError::invalid(op, "SIGHUP", std::io::Error::last_os_error().to_string())
+    };
+    // SAFETY: sigaction reads and writes only our process's disposition
+    // of SIGHUP; the handler performs one lock-free atomic operation.
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut old) != 0 {
+            return Err(failed("sigaction"));
+        }
+        if old.sa_sigaction == libc::SIG_IGN {
+            return Ok(false);
+        }
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = note_interrupt as *const () as usize;
+        if libc::sigemptyset(&mut action.sa_mask) != 0 {
+            return Err(failed("sigemptyset"));
+        }
+        if libc::sigaction(libc::SIGHUP, &action, std::ptr::null_mut()) != 0 {
+            return Err(failed("sigaction"));
+        }
+    }
+    Ok(true)
+}
+
 /// An open file descriptor (close-on-exec). Dropping it closes it.
 ///
 /// `shown` is the path it was opened by (its base's path joined with the
@@ -163,6 +193,14 @@ impl LinuxHost {
     /// binary runs one command then exits, so the first signal is retained.
     pub fn install_interrupt_handlers() -> Result<(), HostError> {
         install_interrupt_handlers_ungated()
+    }
+
+    /// `watch`'s handlers: SIGINT and SIGTERM as for `ensure`, and SIGHUP,
+    /// which stops `watch` the same way, unless it was ignored at start
+    /// (`nohup`: then it stays ignored, and this returns `false`).
+    pub fn install_watch_handlers() -> Result<bool, HostError> {
+        install_interrupt_handlers_ungated()?;
+        install_hangup_handler_ungated()
     }
 
     /// Checks, failing closed, that the `/proc` readers can work here:
@@ -1717,6 +1755,7 @@ impl Host for LinuxHost {
         match INTERRUPTED.load(Ordering::Relaxed) {
             signal if signal == rustix::process::Signal::INT.as_raw() => Some(Signal::Int),
             signal if signal == rustix::process::Signal::TERM.as_raw() => Some(Signal::Term),
+            signal if signal == rustix::process::Signal::HUP.as_raw() => Some(Signal::Hup),
             _ => None,
         }
     }
