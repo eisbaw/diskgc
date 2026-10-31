@@ -42,14 +42,27 @@ fn json(out: &std::process::Output) -> Value {
     serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout:?}"))
 }
 
+/// What `--version` prints for this build (docs/reference.md, Help and
+/// version): a development version is followed by the commit the build
+/// says it comes from, `unknown` when it does not say; a release version
+/// prints alone.
+fn expected_version_line() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    if version.contains('-') {
+        let rev = option_env!("DISKGC_GIT_REV")
+            .filter(|r| !r.is_empty())
+            .unwrap_or("unknown");
+        format!("diskgc {version} ({rev})\n")
+    } else {
+        format!("diskgc {version}\n")
+    }
+}
+
 #[test]
 fn version_prints_name_and_package_version() {
     let out = diskgc(&["--version"]);
     assert!(out.status.success(), "status: {:?}", out.status);
-    assert_eq!(
-        text(&out.stdout),
-        format!("diskgc {}\n", env!("CARGO_PKG_VERSION"))
-    );
+    assert_eq!(text(&out.stdout), expected_version_line());
 }
 
 #[test]
@@ -67,10 +80,7 @@ fn version_with_json_in_either_order_is_plain_text() {
             "{args:?}: {}",
             text(&out.stderr)
         );
-        assert_eq!(
-            text(&out.stdout),
-            format!("diskgc {}\n", env!("CARGO_PKG_VERSION"))
-        );
+        assert_eq!(text(&out.stdout), expected_version_line());
     }
 }
 
@@ -847,7 +857,14 @@ fn json_anywhere_gives_one_object() {
             "list, show NAME or test is required",
         ),
         (&["watch", "--json"], "watch: --min-free SIZE is required"),
-        (&["survey", "--json"], "`survey` is not in diskgc 0.1.0 yet"),
+        (
+            &["survey", "--json"],
+            concat!(
+                "`survey` is not in diskgc ",
+                env!("CARGO_PKG_VERSION"),
+                " yet"
+            ),
+        ),
     ] {
         let out = diskgc(args);
         let error = error_of(&out);

@@ -1,5 +1,5 @@
 # vm-release-tmp-reclaim (TASK-156) test script, appended to the prelude in
-# vm-release-tmp-reclaim.nix that defines RELEASE, VERSION, COHORT, PYTEST,
+# vm-release-tmp-reclaim.nix that defines RELEASE, VERSION, VERSION_LINE, COHORT, PYTEST,
 # NIX and BASH. Runs in the NixOS test driver; every diskgc run is inside
 # the guest, as an ordinary user.
 #
@@ -117,7 +117,8 @@ machine.wait_for_unit("multi-user.target")
 assert "diskgc.e2e.release_tmp_reclaim=1" in machine.succeed("cat /proc/cmdline").split()
 installed = su("alice", "readlink -f $(command -v diskgc)")[1].strip()
 assert installed == f"{RELEASE}/bin/diskgc", installed
-assert su("alice", "diskgc --version")[1].strip() == f"diskgc {VERSION}"
+version_line = su("alice", "diskgc --version")[1].strip()
+assert version_line == VERSION_LINE, version_line
 # The drop-in, applied at boot by systemd-tmpfiles as on any NixOS host.
 lock = machine.succeed("stat -c '%U %G %a %F' /run/diskgc /run/diskgc/lock").splitlines()
 assert lock == ["root root 755 directory", "root root 644 regular empty file"], lock

@@ -70,12 +70,12 @@ e2e: _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
-    nix build -L --no-link .#checks.x86_64-linux.release-01-package
+    nix build -L --no-link .#checks.x86_64-linux.release-package
     nix build -L --no-link .#checks.x86_64-linux.release-gate-needs-catalog
     just _runner e2e-runner run --suite fast --budget-secs 300
     python3 tools/e2e_one_retention.py .gcroots/e2e-runner/bin/diskgc-e2e-runner
-    just _runner e2e-runner-release-01 --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
-    just _runner e2e-runner-release-01-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
+    just _runner e2e-runner-release --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
+    just _runner e2e-runner-release-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
     just _e2e-docker fast 300
     nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
     nix build -L --no-link .#checks.x86_64-linux.vm-release-tmp-reclaim
@@ -111,12 +111,12 @@ e2e-full: _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
     nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
-    nix build -L --no-link .#checks.x86_64-linux.release-01-package
+    nix build -L --no-link .#checks.x86_64-linux.release-package
     nix build -L --no-link .#checks.x86_64-linux.release-gate-needs-catalog
     just _runner e2e-runner run --suite full --budget-secs 3600
     python3 tools/e2e_one_retention.py .gcroots/e2e-runner/bin/diskgc-e2e-runner
-    just _runner e2e-runner-release-01 --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
-    just _runner e2e-runner-release-01-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
+    just _runner e2e-runner-release --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
+    just _runner e2e-runner-release-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
     just _e2e-debian
     just _e2e-docker full 900
     nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
@@ -135,7 +135,7 @@ e2e-full: _gcroot-dev
 e2e-debian: _gcroot-dev
     python3 tools/deadline.py 3600 just check
     nix build -L --no-link .#checks.x86_64-linux.e2e-tests
-    just _runner e2e-runner-release-01-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
+    just _runner e2e-runner-release-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
     just _e2e-debian
 
 # Native Docker Engine tests in a digest-pinned dind image under Podman.
@@ -231,7 +231,7 @@ scan-timing SCANS="20" *ARGS="":
     "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/examples/scan_timing" {{SCANS}} {{ARGS}}
 
 # Walkthrough driver (tools/walk, phase3.1 skill): a disposable rootless
-# Podman container from the e2e base image with the 0.1 release package on
+# Podman container from the e2e base image with the release-candidate package on
 # PATH, seeded data on size-limited tmpfs and a host-shaped process load,
 # driven through tmux session walk-diskgc-NAME. Reclaiming runs belong there.
 # Each NAME gets its own container and uid slot (docs/testing.md).

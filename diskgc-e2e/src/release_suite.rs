@@ -82,7 +82,7 @@ fn run_binary_with(
     env: &[(String, String)],
 ) -> Result<crate::under_test::Run, String> {
     let binary =
-        if binary == "diskgc-release-01" && ctx.bin_dir.join("diskgc-release-default").exists() {
+        if binary == "diskgc-release" && ctx.bin_dir.join("diskgc-release-default").exists() {
             ctx.diskgc()
         } else {
             ctx.bin_dir.join(binary)
@@ -102,7 +102,7 @@ fn run_binary_with(
 }
 
 fn run(ctx: &Ctx, args: &[&str], expected: i32) -> Result<crate::under_test::Run, String> {
-    run_binary(ctx, "diskgc-release-01", args, expected)
+    run_binary(ctx, "diskgc-release", args, expected)
 }
 
 fn profile_names(output: &str) -> Result<BTreeSet<String>, String> {
@@ -263,8 +263,7 @@ pub fn candidate_rejects_docker_command_and_arbitrary_delete_policy(ctx: &Ctx) -
                 "/tmp",
             ],
         ] {
-            let refused =
-                run_binary_with(ctx, "diskgc-release-01", &args, 2, Fixture::new(), &env)?;
+            let refused = run_binary_with(ctx, "diskgc-release", &args, 2, Fixture::new(), &env)?;
             ensure!(
                 refused.stdout.contains(rejected) || refused.stderr.contains(rejected),
                 "{label}: refusal did not name {rejected}: {refused:?}"
@@ -483,14 +482,7 @@ pub fn candidate_cargo_busy_then_reclaims_real_target(ctx: &Ctx) -> TestResult {
         .map_err(|e| format!("{lock_str} stayed locked after its holder exited: {e}"))?
         .finish()?;
 
-    let reclaimed = run_binary_with(
-        ctx,
-        "diskgc-release-01",
-        &args,
-        1,
-        reclaimable(&target)?,
-        &[],
-    )?;
+    let reclaimed = run_binary_with(ctx, "diskgc-release", &args, 1, reclaimable(&target)?, &[])?;
     let report: Value = serde_json::from_str(&reclaimed.stdout)
         .map_err(|e| format!("parse reclaim candidate report: {e}: {}", reclaimed.stdout))?;
     ensure!(

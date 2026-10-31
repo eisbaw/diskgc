@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "diskgc"
-version = "0.1.0"
+version = "0.2.0-dev"
 dependencies = [
  "diskgc-core",
  "diskgc-linux",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "diskgc-core"
-version = "0.1.0"
+version = "0.2.0-dev"
 dependencies = [
  "jiff",
  "proptest",
@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "diskgc-linux"
-version = "0.1.0"
+version = "0.2.0-dev"
 dependencies = [
  "diskgc-core",
  "libc",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "diskgc-model"
-version = "0.1.0"
+version = "0.2.0-dev"
 dependencies = [
  "diskgc-core",
  "jiff",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "diskgc-modelgen"
-version = "0.1.0"
+version = "0.2.0-dev"
 dependencies = [
  "diskgc-core",
  "diskgc-model",

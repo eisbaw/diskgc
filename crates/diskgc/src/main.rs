@@ -57,6 +57,26 @@ const EXIT_OUTPUT_ERROR: u8 = 3;
 /// `--timeout`'s default (docs/reference.md, `ensure`).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// The commit this build comes from, set at compile time by the flake's
+/// packages from `self.shortRev` or `self.dirtyShortRev` (flake.nix,
+/// `gitRev`). A plain `cargo build` leaves it unset unless the caller
+/// exports it.
+const GIT_REV: Option<&str> = option_env!("DISKGC_GIT_REV");
+
+/// The `--version` line (docs/reference.md, `diskgc --version`). A release
+/// version (no pre-release suffix such as `-dev`) is a tagged release and
+/// prints alone; any other version names the commit, or `unknown` when the
+/// build did not say, so that evidence from development builds can be told
+/// apart from a release and from each other.
+fn version_line(version: &str, rev: Option<&str>) -> String {
+    if version.contains('-') {
+        let rev = rev.filter(|r| !r.is_empty()).unwrap_or("unknown");
+        format!("diskgc {version} ({rev})\n")
+    } else {
+        format!("diskgc {version}\n")
+    }
+}
+
 /// Each command's synopsis as the `usage:` lines print it: continuation
 /// lines are indented for the 7 columns of `usage: `.
 const ENSURE_SYNOPSIS: &str = "\
@@ -971,7 +991,7 @@ fn main() -> ExitCode {
     let json = json_requested(&args);
     let report = args.first().is_some_and(|c| c == "ensure");
     match parse(&args) {
-        Invocation::Version => output(&format!("diskgc {}\n", env!("CARGO_PKG_VERSION")), 0),
+        Invocation::Version => output(&version_line(env!("CARGO_PKG_VERSION"), GIT_REV), 0),
         Invocation::Help => match builtin_library() {
             Ok(library) => output(
                 &format!("{}{HELP}{}", usage(None), describe::help_section(&library)),
@@ -1290,6 +1310,28 @@ mod tests {
         let error = Tier::select("profile:docker-build-cache", &library, None, 1000)
             .expect_err("excluded source");
         assert!(error.contains("docker-build-cache"), "{error}");
+    }
+
+    #[test]
+    fn a_development_version_names_its_commit_and_a_release_does_not() {
+        assert_eq!(
+            version_line("0.2.0-dev", Some("9c1e331")),
+            "diskgc 0.2.0-dev (9c1e331)\n"
+        );
+        assert_eq!(
+            version_line("0.2.0-dev", Some("9c1e331-dirty")),
+            "diskgc 0.2.0-dev (9c1e331-dirty)\n"
+        );
+        assert_eq!(
+            version_line("0.2.0-dev", None),
+            "diskgc 0.2.0-dev (unknown)\n"
+        );
+        assert_eq!(
+            version_line("0.2.0-dev", Some("")),
+            "diskgc 0.2.0-dev (unknown)\n"
+        );
+        assert_eq!(version_line("0.2.0", Some("9c1e331")), "diskgc 0.2.0\n");
+        assert_eq!(version_line("0.1.0", None), "diskgc 0.1.0\n");
     }
 
     #[test]

@@ -440,7 +440,7 @@ mod tests {
             );
             let flake = std::fs::read_to_string(repo.join("flake.nix")).expect("flake");
             let release = flake
-                .split_once("diskgcRelease01Build = craneLib.buildPackage")
+                .split_once("diskgcReleaseBuild = craneLib.buildPackage")
                 .expect("the candidate release package")
                 .1
                 .split_once("      );")

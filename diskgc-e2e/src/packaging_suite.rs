@@ -38,7 +38,7 @@ pub fn release_candidate_files_work_in_container(ctx: &Ctx) -> TestResult {
     verify_shipped_files(
         ctx,
         RuleSelection::Discover,
-        "diskgc-release-01",
+        "diskgc-release",
         "diskgc-release-tmpfiles.conf",
         "diskgc-release-example.yaml",
     )

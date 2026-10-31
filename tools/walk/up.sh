@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Host side of `just walk-up`: one disposable rootless Podman container from
-# the e2e base image with the 0.1 release package installed, seeded data on
+# the e2e base image with the release-candidate package installed, seeded data on
 # two size-limited tmpfs mounts (so --min-free bites) and a host-shaped
 # process load; then a long-lived tmux session with the tester's shell in it.
 # Nothing here touches host data: every write is inside the container.
@@ -24,7 +24,7 @@ if tmux has-session -t "=$name" 2>/dev/null || podman container exists "$name"; 
   exit 2
 fi
 
-pkg=$(nix build --no-link --print-out-paths "$repo#release-01-candidate")
+pkg=$(nix build --no-link --print-out-paths "$repo#release-candidate")
 stream=$(nix build --no-link --print-out-paths "$repo#e2e-base-image")
 image=localhost/diskgc-e2e-base:$(nix eval --raw "$repo#e2e-base-image.imageTag")
 # Same load-once rule as the e2e runner: the tag is the image's Nix hash.

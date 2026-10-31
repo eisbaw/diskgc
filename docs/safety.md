@@ -3615,15 +3615,17 @@ not drop the offset (the gate likewise checks once, at the first deleting
 operation), so the offset is only as trustworthy as the container that
 passed that check. The
 `release-without-sandbox-gate` feature compiles out the offset; the
-`release-excludes-clock-offset` check tests the separate 0.1 candidate
+`release-excludes-clock-offset` check tests the separate `release-candidate`
 package against a development positive control, for each of four traces:
 the offset path, the reader's error context and parse diagnostic, and the
 wall-clock overflow message. It is a byte-string check: it would not see an
 equivalent offset written without those strings. The default Nix package
-remains gated. The `release-01-candidate` output is test-only and unapproved
-for deployment until TASK-67 closes. Its /tmp catalog is `nix-shell-rc` and
-`pytest-tmp` (TASK-65); operator policy and deployment evidence remain
-unresolved.
+remains gated. The `release-candidate` output is test-only and unapproved
+for deployment: built from master it is a development version whose
+`--version` names its commit, not the v0.1.0 release (tagged on
+`release-0.1`), and it includes a reclaiming `watch` that no release
+decision covers (TASK-276). Its /tmp catalog is `nix-shell-rc` and
+`pytest-tmp` (TASK-65).
 
 In development builds, diskgc's deleting primitives (unlink, rmdir, the
 delete walk, and starting prune, GC or command children) refuse to act

@@ -273,7 +273,7 @@ The invocation keys: `profile` (shorthand for `select: profile:NAME`) or
 `select` (`--select`; neither: the configured groups run), `config` (the
 configuration file's text; absent: none was found), `catalog` (the
 build's built-in catalog: `development`, the default, or
-`proposed-release-01`, what the release-01 build's
+`proposed-release-01`, what the `release-candidate` build's
 `proposed-release-01-catalog` feature selects), `user_profiles`
 (without a `config`: added to the built-ins), `roots` (`--roots`), `path`
 (PATH), `min_free`, `target_free`, `timeout` (default 600s, `0` none),
@@ -2003,7 +2003,7 @@ filesystem, processes and mounts from the developer's system.
   --create` in disposable Nix and Debian containers, checks the resulting
   lock file, and validates the packaged example config.
   `release_candidate_files_work_in_container` repeats that proof with the
-  separately packaged 0.1 candidate binary and its installed files. The Docker dind
+  separately packaged `release-candidate` binary and its installed files. The Docker dind
   image runs the same proof as
   `docker_shipped_tmpfiles_and_example_work_in_container` with Alpine
   `sd-tmpfiles`. That proof names the staged rule file explicitly: Alpine
@@ -2011,10 +2011,9 @@ filesystem, processes and mounts from the developer's system.
   directories without a file argument, so this test does not establish
   automatic rule discovery there. Every container test provisions its
   per-test host lock from the packaged rule. The separately built
-  `release-01-candidate` package installs both files and passes the Nix
+  `release-candidate` package installs both files and passes the Nix
   package comparison check and the Nix/Debian container application checks.
-  This packaging proof does not approve the candidate for distribution;
-  the 0.1 release gate and its profile scope remain open in TASK67.
+  This packaging proof does not approve the candidate for distribution.
 
 **Not covered end-to-end (for now):** deletion on real block filesystems
 (ext4 or xfs as separate mounts, btrfs), network filesystems, and live
@@ -2524,11 +2523,11 @@ The VM check is part of `just e2e` and `just e2e-full`.
   - `/usr` is bind-mounted read-only by the harness, unlike a CI runner's;
   - the ordinary fast suite uses the development build with the pre-release
     sandbox gate. The separate release runner mounts the ungated
-    `release-01-candidate` package and runs catalog, action and package
+    `release-candidate` package and runs catalog, action and package
     negatives plus real Cargo CLI reclaim, busy-lock and dry-run journeys
     on both Nix and Debian images. The race tests use the test driver and
     do not establish race coverage for the packaged binary. The candidate
-    remains unapproved while TASK-67 release policy is unresolved;
+    is not approved for deployment;
   - one Cargo only, so the tests that need two (`NIX_ONLY_TESTS`) run on
     the Nix image only, and the cross-version parts of the others are not
     reached: race test 2's H2 rounds (a target the oldest stable built,
@@ -2625,13 +2624,12 @@ returned by `LinuxHost::wall_clock()`. `CLOCK_BOOTTIME` deadlines and actual
 kernel ctime remain unchanged. The feature
 `diskgc-linux/release-without-sandbox-gate` compiles
 out the offset path and reader. The `release-excludes-clock-offset` flake
-check compares the 0.1 candidate binary with a positive development
+check compares the `release-candidate` binary with a positive development
 control. The default package remains gated. The separate
-`release-01-candidate` output combines the proposed 0.1 catalog (Cargo,
+`release-candidate` output combines the proposed 0.1 catalog (Cargo,
 `nix-shell-rc`, `pytest-tmp`, the idle filters) and
 lifted gate solely for testing in disposable containers. It is unapproved
-for deployment until TASK-67 closes; operator policy decisions remain
-unresolved. The `just e2e` gate runs candidate negatives
+for deployment (docs/reference.md, Built-in profile library). The `just e2e` gate runs candidate negatives
 and the real Cargo reclaim, busy-lock, rebuild and dry-run CLI cases on Nix
 and Debian images through their candidate under-test runners.
 

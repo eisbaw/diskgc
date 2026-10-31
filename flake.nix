@@ -74,7 +74,23 @@
       '';
 
       # Single source of the version: [workspace.package] in Cargo.toml.
+      # Master carries the next release's version with a pre-release suffix
+      # (0.2.0-dev); only the commit a release tag points at has a plain one.
       version = (lib.importTOML ./Cargo.toml).workspace.package.version;
+      # The commit the packages are built from, compiled into `diskgc
+      # --version` as DISKGC_GIT_REV (crates/diskgc/src/main.rs,
+      # version_line; docs/reference.md, `diskgc --version`): a dirty tree
+      # has only dirtyShortRev ("<rev>-dirty"), a source without Git (a
+      # tarball, a path: input) neither.
+      gitRev = self.shortRev or self.dirtyShortRev or "unknown";
+      # The line `--version` must print, for the package checks below.
+      versionLine =
+        if lib.hasInfix "-" version then "diskgc ${version} (${gitRev})" else "diskgc ${version}";
+      # Only the shipped packages carry the commit. It changes with every
+      # commit, so it is kept out of workspaceArgs: the dependency build,
+      # clippy and the tests stay cached across commits that change no
+      # source (their binaries print "unknown").
+      stampArgs = { DISKGC_GIT_REV = gitRev; };
 
       # The test-sandbox marker constant (docs/testing.md, Safety interlock):
       # compiled into the binaries by include_bytes! and copied byte for byte
@@ -244,6 +260,7 @@
 
       diskgc = craneLib.buildPackage (
         workspaceArgs
+        // stampArgs
         // {
           pname = "diskgc";
           cargoArtifacts = workspaceDeps;
@@ -255,14 +272,19 @@
         }
       );
 
-      # Candidate 0.1 artifact. Keep the default development package gated;
-      # this is the sole build that removes the gate, and it also narrows the
-      # embedded catalog. Publishing it remains blocked on TASK-67's scope
-      # and real-kernel evidence.
-      diskgcRelease01Build = craneLib.buildPackage (
+      # The release candidate built from this source: the 0.1 catalog with
+      # the gate lifted. Keep the default development package gated; this is
+      # the sole build that removes the gate, and it also narrows the
+      # embedded catalog. Built from master it is a development version
+      # (`diskgc 0.2.0-dev (COMMIT)`), not 0.1: v0.1.0 is the tag on
+      # release-0.1. It also has master's reclaiming `watch`, which no
+      # release decision covers yet (TASK-276; docs/reference.md, Built-in
+      # profile library). Test-only: not approved for deployment.
+      diskgcReleaseBuild = craneLib.buildPackage (
         workspaceArgs
+        // stampArgs
         // {
-          pname = "diskgc-release-01-candidate";
+          pname = "diskgc-release-candidate";
           cargoArtifacts = workspaceDeps;
           cargoExtraArgs = "--locked --package diskgc --features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate";
           doCheck = false;
@@ -277,10 +299,10 @@
       # are cut from docs/reference.md (their one home) at build time, and
       # reference.md and safety.md ship beside them so that their links
       # resolve; links into architecture.md and testing.md do not.
-      diskgcRelease01 = pkgs.runCommand "diskgc-release-01-candidate-${version}"
+      diskgcRelease = pkgs.runCommand "diskgc-release-candidate-${version}"
         { inherit version; meta.mainProgram = "diskgc"; }
         ''
-          cp -R ${diskgcRelease01Build}/. $out
+          cp -R ${diskgcReleaseBuild}/. $out
           chmod -R u+w $out
           doc=$out/share/doc/diskgc
           install -Dm0644 ${./packaging/README.md} $doc/README.md
@@ -386,15 +408,15 @@
         cp ${lib.getExe diskgc} $out/bin/diskgc
         cp ${lib.getExe diskgc} $out/bin/diskgc-development
         cp ${diskgcProposed01}/bin/diskgc $out/bin/diskgc-proposed-01
-        cp ${lib.getExe diskgcRelease01} $out/bin/diskgc-release-01
+        cp ${lib.getExe diskgcRelease} $out/bin/diskgc-release
         cp ${e2eBins}/bin/diskgc-e2e ${e2eBins}/bin/diskgc-e2e-canary \
           ${e2eBins}/bin/diskgc-e2e-driver $out/bin/
         # These copies fail the build if the Nix package omits either
         # shipped file. The test applies the actual drop-in in its container.
         cp ${diskgc}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-tmpfiles.conf
         cp ${diskgc}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-example.yaml
-        cp ${diskgcRelease01}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-release-tmpfiles.conf
-        cp ${diskgcRelease01}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-release-example.yaml
+        cp ${diskgcRelease}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-release-tmpfiles.conf
+        cp ${diskgcRelease}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-release-example.yaml
         ln -s ${pkgs.systemd}/bin/systemd-tmpfiles $out/bin/systemd-tmpfiles
         # TASK-97's real Buildah operation runs only in its disposable
         # container. Keep these pinned tools outside the large base image;
@@ -440,9 +462,9 @@
       e2eReleaseUnderTest = pkgs.runCommand "diskgc-e2e-release-under-test" { } ''
         cp -a ${e2eUnderTest} $out
         chmod -R u+w $out
-        cp ${lib.getExe diskgcRelease01} $out/bin/diskgc
-        cp ${diskgcRelease01}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-tmpfiles.conf
-        cp ${diskgcRelease01}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-example.yaml
+        cp ${lib.getExe diskgcRelease} $out/bin/diskgc
+        cp ${diskgcRelease}/lib/tmpfiles.d/diskgc.conf $out/bin/diskgc-tmpfiles.conf
+        cp ${diskgcRelease}/share/doc/diskgc/examples/example.yaml $out/bin/diskgc-example.yaml
         touch $out/bin/diskgc-release-default
       '';
 
@@ -883,8 +905,8 @@
       # The same runner on the Debian image: `nix run .#e2e-runner-debian`.
       e2eRunnerDebian = mkE2eRunner "diskgc-e2e-runner-debian" e2eDebianImage "standard" e2eUnderTest;
       e2eRunnerDocker = mkE2eRunner "diskgc-e2e-runner-docker" e2eDockerImage "dind" e2eUnderTest;
-      e2eRunnerRelease = mkE2eRunner "diskgc-e2e-runner-release-01" e2eBaseImage "standard" e2eReleaseUnderTest;
-      e2eRunnerReleaseDebian = mkE2eRunner "diskgc-e2e-runner-release-01-debian" e2eDebianImage "standard" e2eReleaseUnderTest;
+      e2eRunnerRelease = mkE2eRunner "diskgc-e2e-runner-release" e2eBaseImage "standard" e2eReleaseUnderTest;
+      e2eRunnerReleaseDebian = mkE2eRunner "diskgc-e2e-runner-release-debian" e2eDebianImage "standard" e2eReleaseUnderTest;
       vmHistoricalCtime = import ./diskgc-e2e/vm-historical-ctime.nix {
         inherit pkgs;
         image = e2eVmImage;
@@ -893,7 +915,8 @@
       # TASK-156: the release package reclaims genuinely old /tmp sessions.
       vmReleaseTmpReclaim = import ./diskgc-e2e/vm-release-tmp-reclaim.nix {
         inherit pkgs;
-        release = diskgcRelease01;
+        release = diskgcRelease;
+        inherit versionLine;
       };
       vmColdScale = import ./diskgc-e2e/vm-cold-scale.nix {
         inherit pkgs;
@@ -985,12 +1008,12 @@
 
       packages.${system} = {
         default = diskgc;
-        release-01-candidate = diskgcRelease01;
+        release-candidate = diskgcRelease;
         e2e-runner = e2eRunner;
         e2e-runner-debian = e2eRunnerDebian;
         e2e-runner-docker = e2eRunnerDocker;
-        e2e-runner-release-01 = e2eRunnerRelease;
-        e2e-runner-release-01-debian = e2eRunnerReleaseDebian;
+        e2e-runner-release = e2eRunnerRelease;
+        e2e-runner-release-debian = e2eRunnerReleaseDebian;
         e2e-base-image = e2eBaseImage;
         e2e-vm-image = e2eVmImage;
         e2e-debian-image = e2eDebianImage;
@@ -1111,7 +1134,7 @@
                 exit 1
               fi
               got=$("$bin" --version)
-              want="diskgc ${version}"
+              want=${lib.escapeShellArg versionLine}
               if [ "$got" != "$want" ]; then
                 echo "error: --version printed '$got', expected '$want'" >&2
                 exit 1
@@ -1126,7 +1149,7 @@
         # needles (diskgc-e2e/src/release_check.rs).
         release-excludes-e2e = pkgs.runCommand "diskgc-release-excludes-e2e" { } ''
           ${e2eBins}/bin/diskgc-e2e-release-check \
-            --shipped ${lib.getExe diskgcRelease01} \
+            --shipped ${lib.getExe diskgcRelease} \
             --dep-tree ${releaseDepTree} \
             --control ${e2eBins}/bin/diskgc-e2e-driver
           touch $out
@@ -1134,18 +1157,18 @@
 
         release-excludes-clock-offset = pkgs.runCommand "diskgc-release-excludes-clock-offset" { } ''
           ${e2eBins}/bin/diskgc-e2e-release-check \
-            --clock-offset-excluded ${lib.getExe diskgcRelease01} \
+            --clock-offset-excluded ${lib.getExe diskgcRelease} \
             --clock-offset-control ${lib.getExe diskgc}
           touch $out
         '';
 
         release-gate-needs-catalog = releaseGateNeedsCatalog;
 
-        release-01-package = pkgs.runCommand "diskgc-release-01-package-check"
+        release-package = pkgs.runCommand "diskgc-release-package-check"
           { nativeBuildInputs = [ pkgs.binutils ]; }
           ''
             ${checkStaticElf}
-            bin=${lib.getExe diskgcRelease01}
+            bin=${lib.getExe diskgcRelease}
             check_static_elf "$bin"
             if grep -aFq '/.diskgc-test-sandbox' "$bin"; then
               echo "candidate release binary still contains the sandbox marker" >&2
@@ -1155,14 +1178,18 @@
               echo "development control binary lacks the sandbox marker" >&2
               exit 1
             fi
-            cmp ${diskgcRelease01}/lib/tmpfiles.d/diskgc.conf ${./packaging/diskgc.conf}
-            cmp ${diskgcRelease01}/share/doc/diskgc/examples/example.yaml ${./docs/example.yaml}
-            cmp ${diskgcRelease01}/share/doc/diskgc/README.md ${./packaging/README.md}
-            cmp ${diskgcRelease01}/share/doc/diskgc/reference.md ${./docs/reference.md}
-            head -n 1 ${diskgcRelease01}/share/doc/diskgc/RELEASE-NOTES.md \
+            cmp ${diskgcRelease}/lib/tmpfiles.d/diskgc.conf ${./packaging/diskgc.conf}
+            cmp ${diskgcRelease}/share/doc/diskgc/examples/example.yaml ${./docs/example.yaml}
+            cmp ${diskgcRelease}/share/doc/diskgc/README.md ${./packaging/README.md}
+            cmp ${diskgcRelease}/share/doc/diskgc/reference.md ${./docs/reference.md}
+            head -n 1 ${diskgcRelease}/share/doc/diskgc/RELEASE-NOTES.md \
               | grep -qxF '# diskgc 0.1 release notes'
-            cmp ${lib.getExe diskgcRelease01} ${lib.getExe diskgcRelease01Build}
-            test "$("$bin" --version)" = "diskgc ${version}"
+            cmp ${lib.getExe diskgcRelease} ${lib.getExe diskgcReleaseBuild}
+            got=$("$bin" --version)
+            if [ "$got" != ${lib.escapeShellArg versionLine} ]; then
+              echo "error: --version printed '$got', expected '${versionLine}'" >&2
+              exit 1
+            fi
             touch $out
           '';
 
@@ -1208,8 +1235,8 @@
         e2e-runner = e2eRunner;
         e2e-runner-debian = e2eRunnerDebian;
         e2e-runner-docker = e2eRunnerDocker;
-        e2e-runner-release-01 = e2eRunnerRelease;
-        e2e-runner-release-01-debian = e2eRunnerReleaseDebian;
+        e2e-runner-release = e2eRunnerRelease;
+        e2e-runner-release-debian = e2eRunnerReleaseDebian;
       }
       // nixosModuleChecks
       // vmChecks;

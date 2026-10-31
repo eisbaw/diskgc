@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "diskgc-core"
-version = "0.1.0"
+version = "0.2.0-dev"
 dependencies = [
  "jiff",
  "serde",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "diskgc-linux"
-version = "0.1.0"
+version = "0.2.0-dev"
 dependencies = [
  "diskgc-core",
  "libc",

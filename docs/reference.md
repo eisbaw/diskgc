@@ -596,8 +596,8 @@ snapshot instead of a cold synchronous tally.
 
 #### Watch as a systemd service
 
-The development package (not the 0.1 release candidate, whose scope is
-`ensure`) ships the two templates of
+The development package (not the `release-candidate` package, which ships
+0.1's contents) ships the two templates of
 [architecture.md](architecture.md#the-watch-units):
 `lib/systemd/user/diskgc-watch@.service` and
 `lib/systemd/system/diskgc-watch@.service`, whose `ExecStart` runs
@@ -859,6 +859,15 @@ is looked up (Configuration file, Lookup) and where the package installs
 the example configuration. It reads no configuration. `--help` and
 `--version` exit 0, and print text also when `--json` is given: help wins
 over `--json`.
+
+`diskgc --version` prints `diskgc VERSION` for a release (a version
+without a pre-release suffix, built from its tag), and `diskgc VERSION
+(COMMIT)` for every other build, such as `diskgc 0.2.0-dev (9c1e331)`
+from master: the flake's packages compile in the commit they were built
+from (`-dirty` after it for a tree with uncommitted changes), and a build
+that was not told prints `unknown` (a plain `cargo build`, unless
+`DISKGC_GIT_REV` is set). The JSON `version` field is the package version
+alone.
 
 ### `check`
 
@@ -2065,9 +2074,13 @@ listed as planned, not shipped.
 
 The optional `proposed-release-01-catalog` build feature narrows the catalog.
 On its own it retains the development sandbox gate. The separate
-`release-01-candidate` package combines that feature with
+`release-candidate` package combines that feature with
 `diskgc-linux/release-without-sandbox-gate` for disposable-container testing;
-it is not approved for deployment. The candidate keeps `cargo-target`, the
+it is not approved for deployment. Built from master it is a development
+version (`diskgc 0.2.0-dev (COMMIT)`), not 0.1.0, and it includes master's
+reclaiming `watch` with the gate lifted: no released version has a
+reclaiming `watch` yet (0.1.0's exits 2), and whether the next release
+includes it is undecided (TASK-276). The candidate keeps `cargo-target`, the
 two `/tmp` built-ins with a liveness contract (`nix-shell-rc`, `pytest-tmp`;
 TASK-65, Mark 2026-10-24) and the seven idle filters, and rejects every
 operator-authored profile, including
@@ -2326,10 +2339,33 @@ its task notes.
 
 ### 0.1 release notes
 
-**Status: draft.** 0.1 is not released until TASK-67 closes; until then
-this describes the `release-01-candidate` package built from the current
-source, and its gate lift is tested only in disposable containers. The
-default development package stays sandbox gated.
+**Status: released** as v0.1.0, the annotated tag on `release-0.1` at
+af3d503 (2026-10-30), whose package is that branch's
+`release-01-candidate` output. These notes are kept in step with master;
+where master changed behaviour after 0.1.0 (below), 0.1.0 behaves as the
+list says. Master's `release-candidate` package ships these notes but is
+a development build with more than 0.1 ([Built-in profile
+library](#built-in-profile-library)). The default development package
+stays sandbox gated.
+
+**Known issues in 0.1.0, fixed on master** (in no release yet):
+
+- TASK-242: `cargo-target` discovery descends into rootless Podman or
+  Docker image layers; only their permission bits keep a Cargo target
+  inside a layer from being planned for deletion.
+- TASK-260: `protect` and `!profile` miss a candidate reached through a
+  bind mount of a subdirectory of the protected or negated tree.
+- TASK-44: `--allow-root` is accepted from a non-root user, and with
+  `CAP_SYS_PTRACE` a process the kernel refused to show (an LSM) is
+  excused instead of keeping its candidate.
+- TASK-277: a non-root reclaim needs the provisioned host lock
+  `/run/diskgc/lock` and exits 2 (`cause: provisioning`) without it;
+  master takes a per-user lock instead (Install, item 2).
+
+**Open in 0.1.0 and on master** (static readings, not reproduced):
+TASK-267, container storage behind a subdirectory bind is not recognised
+(the check probes lexical ancestors only); TASK-268, an overlay mounted
+inside a protected or negated match escapes the overlay refusal.
 
 **What 0.1 does.** One command frees space, two read-only ones explain
 it:
@@ -2500,7 +2536,7 @@ built-in in the [library](#built-in-profile-library), including the other
 else). The `docs/ci-pre-job.sh` example stays in the source tree; the
 package does not install it.
 
-Evidence for the candidate package, and what it does not cover:
+Evidence for the 0.1.0 package at its release, and what it does not cover:
 
 | Candidate deployment question | Evidence and current limit |
 |---|---|
@@ -2509,7 +2545,7 @@ Evidence for the candidate package, and what it does not cover:
 | Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp` and the seven idle filters. Excluded built-ins and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
 | Host and filesystem deployment | The candidate has no approval for an operator host or its filesystem, mount, permissions and running-work mix. Container results establish behavior only in those disposable fixtures. |
 | Race and temporary paths | Cargo race protocol tests use a separate development test driver, so they do not establish packaged-binary race behavior. The `/tmp` contracts' container tests run the development binary; the packaged binary's `/tmp` evidence is the release vectors (ModelHost) and a recorded walk in a disposable container (TASK-65), not a container suite, because `min_idle_for: 1h` meets the kernel's ctime and the gate-lifted binary has no test clock offset. |
-| Operator policy and rollout | Operator-authored `fs`/delete and command actions are excluded; the final policy contract, installation environment and rollout evidence are unresolved. Do not deploy this candidate as a 0.1 release. |
+| Operator policy and rollout | Operator-authored `fs`/delete and command actions are excluded; the final policy contract, installation environment and rollout evidence were unresolved at release. |
 
 ### User profiles
 

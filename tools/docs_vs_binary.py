@@ -511,8 +511,14 @@ def probe_errors(reference, run, report):
 
 def probe_help_and_version(run, report):
     version = run.diskgc("--version")
-    report.expect(version.code == 0 and re.fullmatch(r"diskgc \S+\n", version.out) is not None,
-                  "version", "`--version`", "`diskgc VERSION`, exit 0", f"{version.out!r} exit {version.code}")
+    # reference.md, `diskgc --version`: a development version (one with a
+    # pre-release suffix) names its commit; a release version prints alone.
+    line = re.fullmatch(r"diskgc (\S+)(?: \((\S+)\))?\n", version.out)
+    shaped = line is not None and ("-" in line.group(1)) == (line.group(2) is not None)
+    report.expect(version.code == 0 and shaped,
+                  "version", "`--version`",
+                  "`diskgc VERSION` (release) or `diskgc VERSION-PRE (COMMIT)`, exit 0",
+                  f"{version.out!r} exit {version.code}")
     for argv in (["-h"], ["--json", "--help"], ["profiles", "list", "--help"],
                  ["ensure", "--dry-run", "-h", "--json"]):
         r = run.diskgc(*argv)
