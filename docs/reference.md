@@ -593,11 +593,15 @@ systemd does it. Without it the watcher exits 2 (`provisioning`) and
 stays failed. A user may instead keep the user template in
 `~/.config/systemd/user/`.
 
-**Laptop owner**, as themselves. The instance name is the watched
-`PATH` escaped by `systemd-escape --path` (`/home` is `home`), and the
-thresholds go in that instance's environment file:
+**Laptop owner**, as themselves, from the package. `watch` needs a
+configuration (the example's Cargo root replaced with directories you
+own: a supplied root that does not exist is exit 2). The instance name
+is the watched `PATH` escaped by `systemd-escape --path` (`/home` is
+`home`), and the thresholds, which must fit the filesystem (`--min-free`
+below its size), go in that instance's environment file:
 
 ```sh
+install -Dm0644 share/doc/diskgc/examples/example.yaml ~/.config/diskgc/config.yaml
 mkdir -p ~/.config/diskgc/watch
 echo 'DISKGC_WATCH_ARGS=--min-free 30G --target-free 60G' > ~/.config/diskgc/watch/home.env
 diskgc check
