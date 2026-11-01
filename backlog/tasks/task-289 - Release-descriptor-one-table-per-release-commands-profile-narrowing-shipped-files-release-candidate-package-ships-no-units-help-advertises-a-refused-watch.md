@@ -4,10 +4,10 @@ title: >-
   Release descriptor: one table per release (commands, profile narrowing,
   shipped files); release-candidate package ships no units, help advertises a
   refused watch
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-01T05:37:00Z'
-updated_date: '2026-11-01T14:57:00Z'
+updated_date: '2026-11-01T16:29:00Z'
 labels:
   - release
   - refactor
@@ -29,4 +29,8 @@ Periodic full review #2 on master 794e0e1 (2026-11-01; Codex tmp/reviews/codex-f
 2026-11-01 t289: release descriptor crates/diskgc-core/src/releases.json (core release.rs): per build commands, catalog label, shipped files; feature release-catalog replaces proposed-release-01-catalog; main.rs help/refusals, flake installs + passthru.diskgcBuild, NixOS module assertions (templates, commands), release-notes header all read it. Release notes: index wording, missing changes, 0.1.0 exposure per fix. Gates in progress.
 
 806a763 (WIP, t289-release-descriptor): just check exit 0 (1510 Rust tests, 111 tool tests); nix flake check --no-build ok; built release-candidate-package, release-gate-needs-catalog, release-excludes-e2e/-clock-offset, deployment-units, nixos-module-eval (41 cases), nixos-module-bad-config, version-stamp, e2e-clippy, e2e-tests, workspace-tests: exit 0; release suite nix 10/10, debian 10/10; e2e-one named_checkout_policy_cannot_expand_the_release_catalog pass; docs-vs-binary dev 243/0, release-candidate 175/0 (on the tree before the last fail-closed edit). Not run: full just e2e, VMs. Awaiting mped + Codex review.
+
+Review round fixes in 3264e8c (rebased on master 4d38045 incl. TASK-286; one commit, not merged). Gates on 3264e8c: nix develop -c just e2e exit 0 (just check 1528 Rust + 112 tool tests; nix fast 246/246, release nix 11/11, release debian 11/11, docker 7/7, release checks, deployment-units, nixos-module-eval 43 cases, all fast VMs); nix flake check --no-build ok; vm-nixos-module exit 0; docs-vs-binary dev 243/0, release-candidate 175/0. First e2e on 67d847b failed release_candidate_runs_watch_tally_only in the standard runner (comm diskgc-release, not diskgc); fixed, passes in all three runners.
+
+2026-11-01: merged (ff) after one review round; full just e2e exit 0 on the final commit. The 0.2 row is provisional (TASK-276).
 <!-- SECTION:NOTES:END -->
