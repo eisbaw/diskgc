@@ -39,6 +39,16 @@ use crate::resolve::{
 /// directories down (the root itself is depth 0).
 pub const DISCOVERY_DEPTH: usize = 6;
 
+/// How many times a directory with a valid tag is inspected while entries
+/// vanish under the inspection (`changed`: Cargo removes entries of a
+/// profile directory as it builds, `cargo clean` all of them) before it is
+/// refused as unsettled (TASK-268 review, Codex 1). A vanished entry is
+/// not a vanished target: dropping the target then would empty a
+/// `protect` or negated match set while its tag and lock still stand. A
+/// target that is gone shows on the next look (its tag cannot be read, or
+/// no profile directory is left).
+pub const INSPECT_ATTEMPTS: usize = 3;
+
 /// What [`discover`] found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Discovery {
@@ -977,23 +987,47 @@ impl<H: Host> Walk<'_, H> {
 
     /// Records the directory open as `fd` as a target if it is one (a valid
     /// tag and a profile directory); `Ok(Ok(true))` then, so it is not
-    /// descended into.
+    /// descended into. So too for one refused as unsettled
+    /// ([`INSPECT_ATTEMPTS`]), which is recorded among the refusals.
     fn target_at(&mut self, fd: &H::Fd, path: &Path, parent_ino: Option<u64>) -> Judged<bool> {
         let tag = path.join(CACHEDIR_TAG);
         if is_mount_point(self.mounts, &tag) {
             return Ok(Err(mounted(&tag)));
         }
-        if !judged!(has_valid_tag(self.host, fd, self.mount_id, path)) {
-            return Ok(Ok(false));
-        }
-        let inspected = judged!(inspect_in(
-            self.host,
-            fd,
-            self.mounts,
-            self.mount_id,
-            path,
-            self.deadline
-        ));
+        let mut attempt = 0;
+        let inspected = loop {
+            attempt += 1;
+            if !judged!(has_valid_tag(self.host, fd, self.mount_id, path)) {
+                return Ok(Ok(false));
+            }
+            match inspect_in(
+                self.host,
+                fd,
+                self.mounts,
+                self.mount_id,
+                path,
+                self.deadline,
+            )? {
+                Ok(inspected) => break inspected,
+                Err(skip) if skip.reason == Reason::Changed && attempt < INSPECT_ATTEMPTS => {}
+                Err(skip) if skip.reason == Reason::Changed => {
+                    // Its tag still stands: the inspection is incomplete,
+                    // which is a refusal (a `protect` or negated
+                    // enumeration cannot prove its matches), never "no
+                    // target here". Not descended into.
+                    self.found.refused.push(Skip::new(
+                        Reason::Changed,
+                        path.to_owned(),
+                        format!(
+                            "a tagged directory whose entries kept changing while it was \
+                             inspected ({INSPECT_ATTEMPTS} times; the last: {skip})"
+                        ),
+                    ));
+                    return Ok(Ok(true));
+                }
+                Err(skip) => return Ok(Err(skip)),
+            }
+        };
         if inspected.profiles.is_empty() {
             return Ok(Ok(false));
         }

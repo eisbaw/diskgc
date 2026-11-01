@@ -1,0 +1,50 @@
+# TASK-268 review (Codex 1): as
+# protect-cargo-target-child-vanishes-during-enumeration, but an entry of
+# `debug/` vanishes under each of the three inspections (z1, z2, z3). The
+# target is refused as unsettled, so `protect` cannot prove its matches:
+# the run stops (exit 3) and nothing is deleted, never "no target here".
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: deps-cruft
+      find: {roots: [/proj/target/debug/deps], paths: [cruft], type: dir}
+      action: delete
+      examples: {match: [/proj/target/debug/deps/cruft]}
+  protect:
+    - {profile: cargo-target, roots: [/proj]}
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:deps-cruft}
+path: /proj
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /proj, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /proj/Cargo.toml: {}
+    /proj/target/CACHEDIR.TAG: {cachedir_tag: true}
+    /proj/target/debug/.cargo-lock: {mtime: 2026-10-01T00:00:00Z}
+    /proj/target/debug/z1: {size: 1K, mtime: 2026-10-01T00:00:00Z}
+    /proj/target/debug/z2: {size: 1K, mtime: 2026-10-01T00:00:00Z}
+    /proj/target/debug/z3: {size: 1K, mtime: 2026-10-01T00:00:00Z}
+    /proj/target/debug/deps/cruft: {.: {mtime: 2026-10-01T00:00:00Z}, blob: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+  events:
+    - {at: {op: statx, path: /proj/target/debug/z1, nth: 1, when: before}, remove: /proj/target/debug/z1}
+    - {at: {op: statx, path: /proj/target/debug/z2, nth: 1, when: before}, remove: /proj/target/debug/z2}
+    - {at: {op: statx, path: /proj/target/debug/z3, nth: 1, when: before}, remove: /proj/target/debug/z3}
+expect:
+  plan: []
+  dry_run_exit: 3
+  dry_run_errors: [{cause: operation, contains: "protect `cargo-target` cannot prove matches at /proj/target: changed"}]
+  reclaim_exit: 3
+  errors: [{cause: operation, contains: "protect `cargo-target` cannot prove matches at /proj/target: changed"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/proj/target/debug/deps/cruft/blob]

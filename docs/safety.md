@@ -439,7 +439,16 @@ Immediately before acting, diskgc walks the candidate's whole tree
   `protect` matches are enumerated
   before the first deletion of the run and again before each later tier;
   a tier's negated profiles at its start. An incomplete enumeration stops
-  the run (`protect`) or excludes the tier (negated). Each candidate is
+  the run (`protect`) or excludes the tier (negated). A Cargo target
+  whose inspection meets an entry that vanished between a listing and
+  its `statx` (Cargo removes files of a profile directory as it builds)
+  is inspected again, up to `INSPECT_ATTEMPTS` (3) times in all; one
+  whose tag cannot be read any more, or that has no profile directory
+  left, is gone and no match; one that never settles is refused
+  (`changed`), which makes the enumeration incomplete, never a target
+  less (TASK-268 review: the target used to be dropped as if it had
+  vanished, emptying the match set). A candidate tier reports such a
+  target skipped `changed`. Each candidate is
   judged before its lock, under it before the walk, and after the walk
   immediately before the deletion (a Cargo target: before each part).
   At each of these checks, from the first screen of a candidate onwards,

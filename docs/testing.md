@@ -570,6 +570,11 @@ Model scenarios required by [safety.md](safety.md) and
   union walk and for a Cargo target
   (`a_negated_match_removed_before_the_first_screen_does_not_stop_the_{run,dry_run}`,
   `a_negated_match_removed_before_a_cargo_targets_first_screen_does_not_stop_the_{run,dry_run}`);
+  a protected or negated Cargo target one of whose entries vanishes
+  during its inspection is inspected again and still matches, and one that
+  never settles stops the run
+  (`vectors/config/{protect,negated}-cargo-target-child-vanishes-during-enumeration`,
+  `vectors/config/protect-cargo-target-inspection-never-settles`);
   and one removal costs one enumeration again, not one per later
   candidate (`tests/index_reclaim.rs`
   `one_removed_protect_match_costs_one_enumeration_not_one_per_candidate`);

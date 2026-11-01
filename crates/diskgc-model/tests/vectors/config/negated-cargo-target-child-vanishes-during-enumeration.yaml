@@ -1,0 +1,40 @@
+# TASK-268 review (Codex 1), `!profile:` instead of `protect`: the tier's
+# negated Cargo source loses /proj/target the same way (a child of
+# `debug/` unlinked between its listing and its statx). The target is
+# inspected again, the match stands, and the candidate is `excluded`.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: deps-cruft
+      find: {roots: required, paths: [cruft], type: dir}
+      action: delete
+      examples: {root: /proj/target/debug/deps, match: [/proj/target/debug/deps/cruft]}
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: "profile:deps-cruft && !profile:cargo-target", roots: [/proj/target/debug/deps, /proj]}
+path: /proj
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /proj, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /proj/Cargo.toml: {}
+    /proj/target/CACHEDIR.TAG: {cachedir_tag: true}
+    /proj/target/debug/.cargo-lock: {mtime: 2026-10-01T00:00:00Z}
+    /proj/target/debug/zold: {size: 1K, mtime: 2026-10-01T00:00:00Z}
+    /proj/target/debug/deps/cruft: {.: {mtime: 2026-10-01T00:00:00Z}, blob: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+  events:
+    - {at: {op: statx, path: /proj/target/debug/zold, nth: 1, when: before}, remove: /proj/target/debug/zold}
+expect:
+  plan: [{candidate: /proj/target/debug/deps/cruft, reason: excluded}]
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: [{candidate: /proj/target/debug/deps/cruft, reason: excluded}]
+  preserved: [/proj/target/debug/deps/cruft/blob]
