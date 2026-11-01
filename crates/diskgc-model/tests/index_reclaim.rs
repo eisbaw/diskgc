@@ -1435,9 +1435,77 @@ fn deferred_sizing_takes_the_units_in_the_order_of_their_sized_keys() {
     assert!(!report.tally_cut_short);
 }
 
+/// Runs `tier` over 300 old candidates named by `name` (each holding one
+/// 10 KiB file) with a goal the 65th candidate meets, and returns how many
+/// units the walk sized as its queue reached them: the found-ahead batches
+/// it took (docs/architecture.md, Found ahead).
+fn sized_for_the_65th(tier: impl Fn() -> Tier, name: impl Fn(usize) -> String) -> usize {
+    let mut tree = String::from("  /usr/bin/bash: {}\n");
+    for n in 0..300 {
+        tree.push_str(&format!("  {}: {}\n", name(n), old_dir()));
+    }
+    let measured = host(&yaml(&tree, ""));
+    let uid = executor::privileges(&measured, false).unwrap_or_else(|e| panic!("{e}"));
+    let avail = executor::dry_run(&measured, &request(tier()), &[uid], &mut |_| {})
+        .avail_before_bytes
+        .expect("measured");
+    // What one candidate frees, measured by deleting one.
+    let one = {
+        let host = host(&yaml(&tree, ""));
+        let mut request = request(tier());
+        request.min_free = Size::Bytes(avail + 1);
+        let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+        let (report, _) = run(&host, &request, &mut state);
+        assert_eq!(actions(&report), [name(0)], "{report:#?}");
+        u64::try_from(report.actions[0].avail_delta_bytes.expect("sampled")).expect("freed")
+    };
+    let host = host(&yaml(&tree, ""));
+    let mut request = request(tier());
+    request.min_free = Size::Bytes(avail + 64 * one + 1);
+    let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+    let (report, lines) = run(&host, &request, &mut state);
+    assert_eq!(report.actions.len(), 65, "{report:#?}");
+    let line = lines
+        .iter()
+        .find(|l| l.contains("unit(s) sized as the queue reached them"))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+    line.split(": ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("{line}"))
+}
+
+/// TASK-292: the found-ahead batches of a liveness tier grow, those of a
+/// plain tier do not. A liveness tier's scan must start after its batch was
+/// found, so each batch costs a scan, and its batches double from 64: a
+/// goal the 65th candidate meets has the walk find (and size) 64 + 128 and
+/// no more (a batch is at most what was judged before it plus 64). A plain
+/// tier keeps its scan across batches and finds 64 + 64.
+#[test]
+fn found_ahead_batches_grow_only_on_a_liveness_tier() {
+    let rc = || {
+        Tier::select(
+            "profile:nix-shell-rc",
+            &Library::builtin().expect("built-ins"),
+            None,
+            1000,
+        )
+        .expect("tier")
+    };
+    assert_eq!(
+        sized_for_the_65th(rc, |n| format!("/tmp/nix-shell-4242-{n:03}")),
+        192
+    );
+    assert_eq!(
+        sized_for_the_65th(|| tier("profile:tmp-a"), |n| format!("/tmp/a-{n:03}")),
+        128
+    );
+}
+
 /// TASK-251: a hundred old candidates and a goal one candidate meets. The
 /// walk sizes the units its queue reaches, the 64 it finds ahead of
-/// judging the first (`FOUND_AHEAD_MAX`), and deletes one; the other 36
+/// judging the first (`FOUND_AHEAD_FIRST`), and deletes one; the other 36
 /// are never sized in this run (the synchronous tally sized none).
 #[test]
 fn deferred_sizing_sizes_only_what_the_queue_reaches() {

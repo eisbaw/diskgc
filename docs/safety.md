@@ -1290,8 +1290,8 @@ complete; every precondition below fails closed (`producer_unknown`).
    (discovery's `statx` of it): an owner alive then is in every later
    listing. A scan kept from an earlier candidate does not serve a
    candidate found after it started (`FreshAttempts::scan_not_before`; a
-   new scan is made); the reclaim walk on the index finds up to 64
-   candidates ahead of judging them so one scan still serves several
+   new scan is made); the reclaim walk on the index finds candidates
+   ahead in batches so one scan still serves several
    ([architecture.md](architecture.md#the-reclaim-walk), Found ahead).
    The index may order by an earlier verdict; it never decides.
 9. *Scope.* It shows that the recorded process ended, not that every

@@ -57,13 +57,41 @@ mod tier_queue;
 
 use tier_queue::{Item, Settle, TierQueue};
 
-/// Candidates the queue finds again ahead of judging them
-/// ([`Reclaim::find_ahead`]). An in-use scan serves consecutive candidates
-/// for up to a second (TASK-203: one scan per candidate made 6,400 pytest
-/// sessions take one to two hours); 64 restricted re-discoveries, each a
-/// few `statx` calls, are far cheaper than one scan, and bound what is
-/// held ahead of the order (and how stale `best-fit`'s `need` gets).
-const FOUND_AHEAD_MAX: usize = 64;
+/// The first found-ahead batch (docs/architecture.md, Found ahead): what
+/// the first deletion waits for.
+const FOUND_AHEAD_FIRST: usize = 64;
+
+/// The largest found-ahead batch, of a liveness tier ordered `oldest`
+/// (docs/architecture.md, Found ahead).
+const FOUND_AHEAD_MAX: usize = 512;
+
+/// The sizes of a tier's successive found-ahead batches
+/// (docs/architecture.md, Found ahead): one at a time under `best-fit`;
+/// under `oldest`, [`FOUND_AHEAD_FIRST`] each time, except that a tier
+/// whose source has a liveness contract doubles them up to
+/// [`FOUND_AHEAD_MAX`] (no scan started before its candidates were found
+/// may serve them, [`crate::inuse::FreshAttempts::scan_not_before`], so
+/// each of its batches costs a scan).
+fn found_ahead_batches(order: Order, has_contract: bool) -> impl Iterator<Item = usize> {
+    let (first, grows) = match order {
+        Order::BestFit => (1, false),
+        Order::Oldest => (FOUND_AHEAD_FIRST, has_contract),
+    };
+    std::iter::successors(Some(first), move |&batch| {
+        Some(if grows {
+            (batch * 2).min(FOUND_AHEAD_MAX)
+        } else {
+            batch
+        })
+    })
+}
+
+/// A tier's found-ahead batch: the candidates found again and not yet
+/// judged, and the sizes of the batches to come ([`found_ahead_batches`]).
+struct FoundAhead<I> {
+    ready: VecDeque<(Found, Origin)>,
+    sizes: I,
+}
 
 /// Whether the reclaim walk takes `tier`'s candidates from the index: an
 /// `fs` tier of one source without `!profile:` (see the module doc).
@@ -613,18 +641,21 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 return Walked::TierDone;
             }
         };
-        let mut ready: VecDeque<(Found, Origin)> = VecDeque::new();
+        let mut ahead = FoundAhead {
+            ready: VecDeque::new(),
+            sizes: found_ahead_batches(self.tier.order, find.liveness_contract.is_some()),
+        };
         loop {
             if self.stop_if_interrupted() || self.goal_reached(avail) {
                 return Walked::TierDone;
             }
-            if ready.is_empty() {
+            if ahead.ready.is_empty() {
                 let need = self.measured.target.saturating_sub(avail);
-                if !self.find_ahead(find, &mut queue, &mut ready, handled, need, deferred) {
+                if !self.find_ahead(find, &mut queue, &mut ahead, handled, need, deferred) {
                     return Walked::TierDone;
                 }
             }
-            let Some((found, origin)) = ready.pop_front() else {
+            let Some((found, origin)) = ahead.ready.pop_front() else {
                 return Walked::Discover;
             };
             if !handled.ids.insert(found.identity.id) {
@@ -640,32 +671,27 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         }
     }
 
-    /// Takes the next candidates from `queue` into `ready`, each found
-    /// again (a single re-matched, a block expanded into the queue), up to
-    /// [`FOUND_AHEAD_MAX`] of them, before any of them is judged: then one
-    /// in-use scan started after all of them can serve them all (a
-    /// liveness contract takes no scan older than its candidate's finding,
-    /// [`crate::inuse::FreshAttempts::scan_not_before`]; TASK-203 shares a
-    /// scan among consecutive candidates). Under `best-fit` one at a time:
-    /// each pick needs `need`, the space still missing after the last
-    /// action. `false`: the run stops.
+    /// Takes the next found-ahead batch from `queue` into `ahead.ready`,
+    /// its size the next of `ahead.sizes`, each candidate found again (a
+    /// single re-matched, a block expanded into the queue) before any of
+    /// them is judged: then one in-use scan started after all of them can
+    /// serve them all (a liveness contract takes no scan older than its
+    /// candidate's finding, [`crate::inuse::FreshAttempts::scan_not_before`];
+    /// TASK-203 shares a scan among consecutive candidates). `need` is the
+    /// space still missing after the last action, which a `best-fit` pick
+    /// needs. `false`: the run stops.
     fn find_ahead(
         &mut self,
         find: &Find,
         queue: &mut TierQueue<Member>,
-        ready: &mut VecDeque<(Found, Origin)>,
+        ahead: &mut FoundAhead<impl Iterator<Item = usize>>,
         handled: &mut Handled,
         need: u64,
         deferred: &mut Option<DeferredSizing>,
     ) -> bool {
-        // `best-fit` picks each candidate with the space missing after the
-        // last action (docs/architecture.md, Order within a tier): one at
-        // a time.
-        let ahead = match self.tier.order {
-            Order::Oldest => FOUND_AHEAD_MAX,
-            Order::BestFit => 1,
-        };
-        while ready.len() < ahead {
+        let size = ahead.sizes.next().expect("an endless iterator");
+        let ready = &mut ahead.ready;
+        while ready.len() < size {
             if self.stop_if_interrupted() {
                 return false;
             }
@@ -1176,4 +1202,27 @@ enum Rematched {
     /// Skipped, or left to the tier's discovery: the next item.
     Next,
     Stop,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn first(order: Order, has_contract: bool, n: usize) -> Vec<usize> {
+        found_ahead_batches(order, has_contract).take(n).collect()
+    }
+
+    /// A liveness tier ordered `oldest` doubles its found-ahead batches from
+    /// the first up to the cap and stays there; a plain one keeps the first
+    /// size; `best-fit` takes one at a time either way.
+    #[test]
+    fn found_ahead_batches_grow_only_for_a_liveness_tier_and_stop_at_the_cap() {
+        assert_eq!(
+            first(Order::Oldest, true, 7),
+            [64, 128, 256, 512, 512, 512, 512]
+        );
+        assert_eq!(first(Order::Oldest, false, 4), [64; 4]);
+        assert_eq!(first(Order::BestFit, true, 4), [1; 4]);
+        assert_eq!(first(Order::BestFit, false, 4), [1; 4]);
+    }
 }

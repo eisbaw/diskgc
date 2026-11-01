@@ -1316,7 +1316,15 @@
           checks = removeAttrs self.checks.${system} (
             builtins.attrNames vmChecks ++ builtins.attrNames nixosModuleChecks
           );
-          packages = [ pkgs.just pkgs.python3 pkgs.coreutils pkgs.cargo-mutants ];
+          # perf and inferno: profiling the reclaim walk (TASK-292).
+          packages = [
+            pkgs.just
+            pkgs.python3
+            pkgs.coreutils
+            pkgs.cargo-mutants
+            pkgs.perf
+            pkgs.inferno
+          ];
           shellHook = devShellHook;
         };
 

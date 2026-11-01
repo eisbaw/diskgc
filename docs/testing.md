@@ -523,7 +523,9 @@ Model scenarios required by [safety.md](safety.md) and
   the reuse window is the accepted limit 5 and is pinned as such
   (`a_block_member_opened_after_an_earlier_member_was_deleted_is_in_use`;
   candidates of a liveness tier found ahead share one scan,
-  `a_liveness_tier_from_the_index_shares_one_scan`);
+  `a_liveness_tier_from_the_index_shares_one_scan`; a liveness tier's
+  found-ahead batches grow from 64 and a plain tier's do not,
+  `found_ahead_batches_grow_only_on_a_liveness_tier`);
 - one scan serving consecutive `fs` candidates of a `delete` (TASK-203;
   property test `no_fs_delete_starts_on_a_scan_past_the_bound`, with
   random scan, unlink and final-check durations): no deletion starts on a
@@ -3014,3 +3016,22 @@ the host's and other walk containers' processes (which is when slots
 matter), and container root, being the invoking user, could signal the
 user's host processes: `reset.sh` signals a holder only while its pid
 still has the start time recorded when it was started.
+
+### Profiling a walk
+
+The dev shell has `perf` and `inferno` (TASK-292). Neither is in the walk
+image: copy perf's closure in (`nix-store -qR` of the dev shell's `perf`,
+streamed with `tar` into `podman exec -i walk-diskgc-NAME tar -x -C /`),
+then, as `tester` in the container, `perf record -F 499 --call-graph fp -o
+FILE -- diskgc-TAG ensure ...` on a build with frame pointers
+(`RUSTFLAGS="-C force-frame-pointers=yes"`,
+`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`, its own
+`CARGO_TARGET_DIR`). On the host, `perf script --symfs DIR` (a directory
+holding the binary at its container path and a `nix` link to `/nix`) piped
+into `inferno-collapse-perf` gives folded stacks for `inferno-flamegraph`.
+Limits: with the usual `kernel.perf_event_paranoid` of 2, only user-space
+time is sampled, so syscall cost is invisible (count syscalls with
+`strace -c` on a short run instead; under `strace` the in-use scans miss
+their one-second bound, so it distorts timing); and on hybrid CPUs one run's
+rate swings with the cores the scheduler gives it (`cpu_core` against
+`cpu_atom` samples), so compare builds interleaved, never one run each.

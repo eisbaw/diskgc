@@ -520,13 +520,73 @@ pub fn name_present<H: Host>(
     name: &std::ffi::OsStr,
     mounts: &[MountEntry],
 ) -> Result<bool, HostError> {
-    if is_mount_point(mounts, &path.join(name)) {
+    name_present_in(host, dir, &MountedNames::in_dir(mounts, path), name)
+}
+
+/// [`name_present`] for several names of one directory: the mount points
+/// directly in it are looked up in the table once ([`MountedNames`]), not
+/// once per name (TASK-292: the dozen container-storage marker names of
+/// every directory on a candidate's way each compared every mount point).
+pub fn name_present_in<H: Host>(
+    host: &H,
+    dir: &H::Fd,
+    mounted: &MountedNames<'_>,
+    name: &std::ffi::OsStr,
+) -> Result<bool, HostError> {
+    if mounted.has(name)? {
         return Ok(true);
     }
     match host.statx(Base::Dir(dir), Path::new(name)) {
         Ok(_) => Ok(true),
         Err(e) if e.is(Errno::ENOENT) => Ok(false),
         Err(e) => Err(e),
+    }
+}
+
+/// The names of the mount points directly in one directory, by a mount
+/// table (nothing is looked up): for a name that is one normal path
+/// component, [`MountedNames::has`] answers what [`is_mount_point`] of the
+/// directory joined with the name answers. The table's mount points are
+/// compared with the directory once, here, instead of once per name.
+#[derive(Debug)]
+pub struct MountedNames<'m> {
+    dir: PathBuf,
+    names: Vec<&'m std::ffi::OsStr>,
+}
+
+impl<'m> MountedNames<'m> {
+    /// The mount points of `mounts` whose parent is `dir`, component-wise
+    /// as [`Path`] compares: `dir.join(name) == mount_point` exactly when
+    /// the mount point's last component is the normal component `name` and
+    /// the rest of it is `dir`.
+    pub fn in_dir(mounts: &'m [MountEntry], dir: &Path) -> Self {
+        let names = mounts
+            .iter()
+            .filter(|m| m.mount_point.parent() == Some(dir))
+            .filter_map(|m| m.mount_point.file_name())
+            .collect();
+        Self {
+            dir: dir.to_owned(),
+            names,
+        }
+    }
+
+    /// Whether `name` in the directory is a mount point. A name that is not
+    /// exactly one normal path component (empty, `.`, `..`, holding a `/`)
+    /// is an error, never answered: the lookup above is only equivalent to
+    /// [`is_mount_point`] for one normal component (fail closed).
+    pub fn has(&self, name: &std::ffi::OsStr) -> Result<bool, HostError> {
+        let mut components = Path::new(name).components();
+        match (components.next(), components.next()) {
+            (Some(std::path::Component::Normal(one)), None) if one == name => {
+                Ok(self.names.contains(&name))
+            }
+            _ => Err(HostError::invalid(
+                "mount point lookup",
+                self.dir.join(name).display(),
+                "the name is not one normal path component",
+            )),
+        }
     }
 }
 
@@ -1343,5 +1403,39 @@ pub(crate) mod tests {
             let path = Path::new(&path);
             prop_assert_eq!(screen_mount_chain(&mounts, path), per_ancestor(&mounts, path));
         });
+    }
+    /// The per-directory lookup answers exactly what a lookup of the joined
+    /// path in the whole table answers, for every spelling the two may meet
+    /// (trailing and doubled slashes, `.` and `..` segments, `/` itself), and
+    /// refuses a name that is not one normal component (TASK-292).
+    #[test]
+    fn mounted_names_match_a_lookup_of_the_joined_path() {
+        use proptest::prelude::*;
+        let segment = prop::sample::select(vec!["a", "b", "ab", ".", "..", ""]);
+        let spelled = prop::collection::vec(segment, 0..4)
+            .prop_map(|segments| format!("/{}", segments.join("/")));
+        let table = prop::collection::vec(spelled.clone(), 0..8).prop_map(|points| {
+            points
+                .iter()
+                .enumerate()
+                .map(|(i, at)| mount(i as u64 + 1, 0, at))
+                .collect::<Vec<_>>()
+        });
+        let name = prop::sample::select(vec!["a", "b", "ab", "c"]);
+        proptest!(ProptestConfig::with_cases(4096), |(mounts in table, dir in spelled, name in name)| {
+            let dir = Path::new(&dir);
+            let name = std::ffi::OsStr::new(name);
+            prop_assert_eq!(
+                MountedNames::in_dir(&mounts, dir).has(name).expect("one normal component"),
+                is_mount_point(&mounts, &dir.join(name))
+            );
+        });
+        let mounted = MountedNames::in_dir(&[], Path::new("/tmp"));
+        for bad in ["", ".", "..", "a/b", "a/", "/a"] {
+            assert!(
+                mounted.has(std::ffi::OsStr::new(bad)).is_err(),
+                "{bad:?} is not one normal component"
+            );
+        }
     }
 }

@@ -49,7 +49,8 @@ use std::path::{Path, PathBuf};
 use super::{Reason, Skip};
 use crate::host::{Access, Host, HostError, MountEntry};
 use crate::resolve::{
-    ResolveError, Resolved, Want, mount_for, name_present, open_beneath, resolve_in,
+    MountedNames, ResolveError, Resolved, Want, mount_for, name_present_in, open_beneath,
+    resolve_in,
 };
 
 /// One kind of storage root and the names that make one: for every group,
@@ -230,17 +231,20 @@ pub fn check_listing(path: &Path, names: &[OsString]) -> Result<(), Skip> {
 }
 
 /// Whether the open directory `dir` (at `path`) is a storage root, asked
-/// by [`name_present`] (a `statx` per name, not followed; a mount point of
-/// that name counts without being touched). A name that cannot be told is
-/// the error, with the path it was asked at: fail closed is the caller's.
+/// by [`name_present_in`] (a `statx` per name, not followed; a mount point
+/// of that name counts without being touched; the table is searched for the
+/// directory's mount points once, [`MountedNames`]). A name that cannot be
+/// told is the error, with the path it was asked at: fail closed is the
+/// caller's.
 pub fn storage_in<H: Host>(
     host: &H,
     dir: &H::Fd,
     path: &Path,
     mounts: &[MountEntry],
 ) -> Result<Option<ContainerStorage>, (PathBuf, HostError)> {
+    let mounted = MountedNames::in_dir(mounts, path);
     recognise(|name| {
-        name_present(host, dir, path, OsStr::new(name), mounts).map_err(|e| (path.join(name), e))
+        name_present_in(host, dir, &mounted, OsStr::new(name)).map_err(|e| (path.join(name), e))
     })
 }
 

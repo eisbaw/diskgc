@@ -784,14 +784,38 @@ reclaim(min, goal, filesystem, deadline):
   and its units are found again by name): `too_many_entries` is a
   resource bound, not a safety check, and every per-candidate check
   still applies to each (TASK-30 review: accepted).
-- **Found ahead.** The queue finds up to 64 candidates again before it
-  judges the first of them, so that one in-use scan, started after all
-  of them were found, can serve them (a liveness contract takes no scan
-  started before its candidate was found, [safety.md](safety.md#in-use);
-  one scan per candidate made 6,400 pytest sessions take one to two
-  hours, TASK-203). Under `best-fit` it finds one at a time, since each
-  pick depends on the space freed by the last action; a liveness tier
-  ordered `best-fit` therefore scans once per candidate.
+- **Found ahead.** The queue finds a *found-ahead batch* of candidates
+  again before it judges the first of them, so that one in-use scan,
+  started after all of them were found, can serve them: a liveness
+  contract takes no scan started before its candidate was found
+  ([safety.md](safety.md#producer-liveness), Owner PID, *When*), and one
+  scan per candidate made 6,400 pytest sessions take one to two hours
+  (TASK-203). The batches (`found_ahead_batches` in the executor):
+  - `oldest`, a tier whose source has a liveness contract: 64 first
+    (what the first deletion waits for), then each twice the one before,
+    up to 512 (`FOUND_AHEAD_MAX`). Each of its batches costs a scan
+    however few of the scan's second its candidates use, so the batches
+    grow until one fills about a scan's second with the cheapest
+    candidates. A batch is at most what was judged before it plus 64,
+    which bounds what is found ahead and never judged (the goal met
+    first). Its candidates wait longer between being found again and
+    being judged: up to their batch's judging, under a second for the
+    smallest, longer for large ones. That identity is only what the
+    judgement's own reach must find again
+    ([safety.md](safety.md#deletion), steps 2 to 4), so a change in
+    between is `changed` or `missing`, as with any batch.
+  - `oldest`, a plain tier: 64 each time. Its candidates have no such
+    floor, so one scan already serves them across batches for as long
+    as it is fresh (Freshness); a larger batch would only make them wait
+    longer between being found and being judged, and find more ahead of
+    a goal that may be met first.
+  - `best-fit`: one at a time, since each pick depends on the space
+    freed by the last action; a liveness tier ordered `best-fit`
+    therefore scans once per candidate.
+
+  A batch whose judging outlasts its scan gets a new one, as any
+  candidate does (Freshness): the batches change how many scans a run
+  makes, never which scan may serve a candidate.
 
 - **Discovery is per tier.** A tier is not left until its own sources have
   been discovered afresh, so a stale index can never make a pressure tier
@@ -881,10 +905,11 @@ reclaim(min, goal, filesystem, deadline):
   first tier (its root reads or a unit's sizing, under the host lock as
   the queue reaches it) is an **error of the run**, as any failure of the
   walk's own checks: the run stops there (exit 3). It can come after
-  earlier candidates of the queue were deleted (the queue sizes 64 ahead
-  of judging them), each of which passed every live check; it is the
-  same kind of limit as the next one, and the queue rule above does not
-  apply: no queue is taken back once the walk has begun.
+  earlier candidates of the queue were deleted (the queue sizes each
+  found-ahead batch before judging it, Found ahead above), each of which
+  passed every live check; it is the same kind of limit as the next one,
+  and the queue rule above does not apply: no queue is taken back once
+  the walk has begun.
 - **Remaining limit: a failure that first appears after the tally.** A
   host failure on a branch the tally listed cleanly that first shows when
   the tier's discovery lists it after the queue (a disk going bad during
