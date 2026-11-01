@@ -1353,6 +1353,15 @@ pub trait Host {
     /// not its block device, or no udev links). Read-only.
     fn fs_uuid(&self, dev: Dev) -> Result<Option<String>, HostError>;
 
+    /// The file behind the loop block device `dev` (major 7):
+    /// `/sys/dev/block/MAJ:MIN/loop/backing_file`, as the kernel prints it
+    /// for this process (`d_path`; ` (deleted)` appended once it was
+    /// unlinked), without the trailing newline. `None`: the device has no
+    /// such file (not a configured loop device). What the `protect` and
+    /// `!profile:` verdict needs to relate a loop-mounted image to the file
+    /// holding it (docs/safety.md, Not protected, not excluded). Read-only.
+    fn loop_backing_file(&self, dev: Dev) -> Result<Option<PathBuf>, HostError>;
+
     /// The kernel's boot id (`/proc/sys/kernel/random/boot_id`): a
     /// snapshot of a filesystem without a UUID is valid only in the boot
     /// that wrote it. Read-only.

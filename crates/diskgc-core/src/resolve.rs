@@ -829,6 +829,13 @@ pub(crate) mod tests {
             unreachable!()
         }
 
+        fn loop_backing_file(
+            &self,
+            _: crate::host::Dev,
+        ) -> Result<Option<std::path::PathBuf>, HostError> {
+            unreachable!()
+        }
+
         fn boot_id(&self) -> Result<String, HostError> {
             unreachable!()
         }

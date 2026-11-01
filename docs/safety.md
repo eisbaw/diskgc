@@ -429,11 +429,25 @@ Immediately before acting, diskgc walks the candidate's whole tree
   its "no overlap"
   rests on live mounts (a covered mount, still listed, fails there). A
   negated profile's roots are searched on every filesystem, not only
-  `PATH`'s: its matches only exclude (TASK-260). Limits: the translation
-  knows only the mount table read for the check (a bind made after it is
-  the enumeration limit below) and compares places on one device only,
-  so a protected file used as a loop-mounted image does not overlap what
-  the image holds. Btrfs subvolumes are reasoned (mountinfo names the
+  `PATH`'s: its matches only exclude (TASK-260). A filesystem on a loop
+  device (block major 7) is stored in its backing file, which the kernel
+  names (`/sys/dev/block/7:N/loop/backing_file`, read-only): a candidate
+  on its mount is judged again as that file (a protected
+  `/safe/image.ext4` loop-mounted at `/mnt/image` keeps
+  `/mnt/image/cruft`), and a match on one, or one mounted at or below a
+  match, also protects or excludes that file and whatever holds it; an
+  image inside an image is followed up to 4 deep. While there is any
+  match, such a backing file that cannot be read, is not reported, was
+  deleted (` (deleted)`) or is not an absolute path is an error (TASK-268
+  review); loop devices inside no match and holding no candidate are
+  never asked about. Limits: the translation knows only the mount table
+  read for the check (a bind made after it is the enumeration limit
+  below) and compares places on one device only, and a loop device is
+  recognised by its major only: a partition of one (`loop0p1`, the
+  extended major 259), a device-mapper device stacked on one (a LUKS
+  container file), or btrfs on one (whose mountinfo device is
+  anonymous) is not related to its file. The backing path is the one the
+  kernel prints for diskgc's own root and mount namespace. Btrfs subvolumes are reasoned (mountinfo names the
   subvolume in the root field), not tested on one.
 
   `protect` matches are enumerated

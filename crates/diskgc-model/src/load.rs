@@ -221,6 +221,15 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
         if let Some(uuid) = &spec.uuid {
             state.fs_uuids.insert(spec.dev.0, uuid.clone());
         }
+        if let Some(backing) = &spec.loop_backing {
+            if spec.dev.0.major != LOOP_MAJOR {
+                return Err(LoadError::new(
+                    format!("mounts[id {}]", spec.id),
+                    "loop_backing needs a loop device (dev major 7)",
+                ));
+            }
+            state.loop_backings.insert(spec.dev.0, backing.clone());
+        }
     }
     let deferred = load_tree(&mut state, model)?;
     load_processes(&mut state, model)?;
@@ -233,6 +242,9 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
     let events = load_events(&state, model)?;
     Ok((state, events))
 }
+
+/// The block major of loop devices (`Documentation/admin-guide/devices.txt`).
+const LOOP_MAJOR: u32 = 7;
 
 fn require_normal(at: &str, path: &Path) -> Result<(), LoadError> {
     normal_names(path)

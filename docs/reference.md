@@ -2375,6 +2375,10 @@ development package stays sandbox gated.
   ([safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)).
   In 0.1.0 such an overlay escaped the overlay refusal (reproduced in the
   model and in a container).
+- TASK-268 review: a candidate on a loop-mounted image is kept when the
+  image file is protected or negated (and the reverse), read from the
+  loop device's `backing_file`; while any match exists, an unreadable one
+  is an error.
 - TASK-269: a `protect` or `!profile` match removed after the tier
   enumerated it (a `cargo clean` of a protected target) no longer stops
   the run or the dry run (exit 3) at a candidate's first check: the

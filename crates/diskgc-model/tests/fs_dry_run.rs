@@ -1505,6 +1505,83 @@ tree:
     assert_eq!(verdict("/proj/third/f", "/proj/third"), Ok(true));
 }
 
+/// TASK-268 review (Codex 3): a filesystem on a loop device is stored in
+/// its backing file. `/mnt/image` (loop0) is backed by `/safe/image.ext4`,
+/// `/proj/target/img` (loop1, mounted inside a match) by
+/// `/cache/img.ext4`; `/mnt/unread` (loop2) cannot be read, `/mnt/gone`
+/// (loop3) was backed by a file since deleted, and `/snap/x` (loop4,
+/// unreadable too) lies inside no match and is never asked about.
+#[test]
+fn a_loop_image_overlaps_the_file_behind_it() {
+    let host = host(
+        r#"host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  - {id: 2, at: /mnt/image, fs: ext4, dev: "7:0", size: 1G, parent: 1, loop_backing: /safe/image.ext4}
+  - {id: 3, at: /proj/target/img, fs: ext4, dev: "7:1", size: 1G, parent: 1, loop_backing: /cache/img.ext4}
+  - {id: 4, at: /mnt/unread, fs: ext4, dev: "7:2", size: 1G, parent: 1}
+  - {id: 5, at: /mnt/gone, fs: ext4, dev: "7:3", size: 1G, parent: 1, loop_backing: "/old/img.ext4 (deleted)"}
+  - {id: 6, at: /snap/x, fs: squashfs, dev: "7:4", size: 1G, parent: 1}
+tree:
+  /safe/image.ext4: {}
+  /safe/other: {}
+  /mnt/image/keep/f: {}
+  /mnt/image/cruft/f: {}
+  /cache/img.ext4: {}
+  /cache/other: {}
+  /proj/target/f: {}
+  /mnt/unread/cruft: {}
+  /mnt/gone/cruft: {}
+"#,
+    );
+    let verdict = |candidate: &str, matched: &str| {
+        executor::overlaps_checked(&host, Path::new(candidate), &[PathBuf::from(matched)])
+    };
+    for (candidate, matched, overlaps) in [
+        // On the image, against a match holding its file.
+        ("/mnt/image/cruft", "/safe/image.ext4", true),
+        ("/mnt/image/cruft", "/safe", true),
+        ("/mnt/image/cruft", "/safe/other", false),
+        // The image file (or a directory holding it), against a match on
+        // the image.
+        ("/safe/image.ext4", "/mnt/image/keep", true),
+        ("/safe", "/mnt/image/keep", true),
+        ("/safe/other", "/mnt/image/keep", false),
+        // A loop mount inside a match: its file is part of what the match
+        // shows.
+        ("/cache/img.ext4", "/proj/target", true),
+        ("/cache/other", "/proj/target", false),
+    ] {
+        assert_eq!(
+            verdict(candidate, matched),
+            Ok(overlaps),
+            "{candidate} against {matched}"
+        );
+    }
+    for (candidate, wanted) in [
+        (
+            "/mnt/unread/cruft",
+            "loop device 7:2 (mounted at /mnt/unread) cannot be read",
+        ),
+        ("/mnt/gone/cruft", "is /old/img.ext4 (deleted)"),
+    ] {
+        let error = verdict(candidate, "/safe").expect_err(wanted);
+        assert!(error.contains(wanted), "{error}");
+    }
+    assert_eq!(
+        host.trace()
+            .iter()
+            .filter(|call| call.op == Op::LoopBackingFile)
+            .filter(|call| call
+                .path
+                .as_deref()
+                .is_some_and(|p| p.starts_with("/sys/dev/block/7:4")))
+            .count(),
+        0
+    );
+}
+
 /// A negated profile's root on another filesystem than PATH's was dropped
 /// with the tier's foreign source roots ("cannot free space"), so its
 /// matches excluded nothing: here the candidate lies inside the negated

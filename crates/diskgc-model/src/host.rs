@@ -2196,6 +2196,27 @@ impl Host for ModelHost {
         })
     }
 
+    fn loop_backing_file(&self, dev: diskgc_core::host::Dev) -> Result<Option<PathBuf>, HostError> {
+        let path = PathBuf::from(format!("/sys/dev/block/{dev}/loop/backing_file"));
+        self.call(Op::LoopBackingFile, Some(path.clone()), None, |inner| {
+            let result = match inner.state.loop_backings.get(&dev) {
+                Some(backing) => Ok(Some(backing.clone())),
+                None if dev.major == 7 => Err(HostError::errno(
+                    "read",
+                    path.display(),
+                    diskgc_core::host::Errno::EACCES,
+                )),
+                None => Ok(None),
+            };
+            let text = match &result {
+                Ok(Some(backing)) => backing.display().to_string(),
+                Ok(None) => "none".to_owned(),
+                Err(e) => e.to_string(),
+            };
+            (result, None, text)
+        })
+    }
+
     fn boot_id(&self) -> Result<String, HostError> {
         self.call(Op::BootId, None, None, |inner| {
             let id = inner.state.boot_id.clone();

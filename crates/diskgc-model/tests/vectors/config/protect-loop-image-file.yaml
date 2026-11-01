@@ -1,0 +1,46 @@
+# TASK-268 review (Codex 3, static): `protect` matches the image file
+# /safe/image.ext4, which is loop-mounted (loop0, 7:0) at /mnt/image; the
+# tier selects /mnt/image/cruft. Devices, names and identities differ, so
+# the overlap was not seen, yet deleting there writes into the protected
+# image. A candidate on a loop device's mount lies inside the device's
+# backing file (read from /sys/dev/block/7:0/loop/backing_file), which
+# lies inside the match: `protected`. (The model does not tie the image's
+# bytes to the mount's contents, so the vector shows the verdict, not a
+# changed image.)
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: image
+      find: {roots: [/safe], paths: [image.ext4], type: file}
+      action: delete
+      examples: {match: [/safe/image.ext4]}
+    - name: image-cruft
+      find: {roots: [/mnt/image], paths: [cruft], type: dir}
+      action: delete
+      examples: {match: [/mnt/image/cruft]}
+  protect: [image]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:image-cruft}
+path: /mnt/image
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /safe, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /mnt/image, fs: ext4, dev: "7:0", size: 1G, parent: 1, loop_backing: /safe/image.ext4}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /safe/image.ext4: {size: 1M}
+    /mnt/image/cruft: {.: {mtime: 2026-10-01T00:00:00Z}, blob: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+expect:
+  plan: [{candidate: /mnt/image/cruft, reason: protected}]
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: [{candidate: /mnt/image/cruft, reason: protected}]
+  preserved: [/mnt/image/cruft/blob, /safe/image.ext4]

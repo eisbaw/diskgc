@@ -91,6 +91,30 @@ pub(super) fn overlaps_checked_until<H: Host>(
     matches: &[PathBuf],
     deadline: Option<MonoTime>,
 ) -> Result<bool, String> {
+    overlaps_through_images(host, candidate, matches, deadline, LOOP_IMAGE_DEPTH)
+}
+
+/// How many loop images deep (an image inside an image) the verdict
+/// follows a backing file before it cannot prove anything any more.
+const LOOP_IMAGE_DEPTH: usize = 4;
+
+/// The block major of loop devices (`Documentation/admin-guide/devices.txt`).
+const LOOP_MAJOR: u32 = 7;
+
+/// [`overlaps_checked_until`]: by name, place and identity, then through
+/// loop images (TASK-268 review, Codex 3): a filesystem on a loop device is
+/// stored in its backing file, so what is on its mount lies inside that
+/// file. A candidate on such a mount is judged again as its backing file;
+/// a match on one, or one holding one mounted at or below it, also
+/// protects that mount's backing file, against which the candidate is
+/// judged again. `depth` bounds images within images.
+fn overlaps_through_images<H: Host>(
+    host: &H,
+    candidate: &Path,
+    matches: &[PathBuf],
+    deadline: Option<MonoTime>,
+    depth: usize,
+) -> Result<bool, String> {
     if matches.is_empty() {
         return Ok(false);
     }
@@ -122,7 +146,7 @@ pub(super) fn overlaps_checked_until<H: Host>(
     // whose live mount is not the table's (a covered mount, still listed),
     // so their places rest on mounts confirmed live. A mount made after the
     // table was read is not seen (docs/safety.md, limits).
-    overlaps_with(candidate, matches, |path| {
+    let by_identity = overlaps_with(candidate, matches, |path| {
         check_time()?;
         let at = resolve_in(host, &mounts, path, Want::Any)
             .map_err(|error| format!("cannot prove overlap at {}: {error}", path.display()))?;
@@ -132,7 +156,90 @@ pub(super) fn overlaps_checked_until<H: Host>(
                 path.display()
             )
         })
-    })
+    })?;
+    if by_identity {
+        return Ok(true);
+    }
+    let (inside, images) = loop_images(host, &mounts, candidate, matches)?;
+    if inside.is_none() && images.is_empty() {
+        return Ok(false);
+    }
+    let Some(depth) = depth.checked_sub(1) else {
+        return Err(format!(
+            "cannot prove overlap at {}: loop images nested more than {LOOP_IMAGE_DEPTH} deep",
+            candidate.display()
+        ));
+    };
+    if let Some(image) = inside
+        && overlaps_through_images(host, &image, matches, deadline, depth)?
+    {
+        return Ok(true);
+    }
+    overlaps_through_images(host, candidate, &images, deadline, depth)
+}
+
+/// The backing file of the loop device `candidate`'s mount is on, if it is
+/// one (`inside`), and those of the loop filesystems the matches show: a
+/// match on one, or one mounted at or below a match ([`nested_in`]). Read
+/// through [`Host::loop_backing_file`]; one that cannot be read, is not an
+/// absolute path or was deleted (` (deleted)`) relates to nothing a place
+/// can prove: an error.
+fn loop_images<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    candidate: &Path,
+    matches: &[PathBuf],
+) -> Result<(Option<PathBuf>, Vec<PathBuf>), String> {
+    let image_of = |mount: &MountEntry| -> Result<Option<PathBuf>, String> {
+        if mount.dev.major != LOOP_MAJOR {
+            return Ok(None);
+        }
+        let cannot = |why: String| {
+            format!(
+                "cannot prove overlap at {}: the image behind loop device {} (mounted at {}) {why}",
+                candidate.display(),
+                mount.dev,
+                mount.mount_point.display()
+            )
+        };
+        let backing = host
+            .loop_backing_file(mount.dev)
+            .map_err(|error| cannot(format!("cannot be read: {error}")))?
+            .ok_or_else(|| cannot("is not reported (no loop/backing_file)".to_owned()))?;
+        if backing.to_string_lossy().ends_with(" (deleted)") || !backing.is_absolute() {
+            return Err(cannot(format!("is {}", backing.display())));
+        }
+        Ok(Some(backing))
+    };
+    let on = |path: &Path| {
+        mount_for(mounts, path)
+            .map_err(|why| format!("cannot prove overlap at {}: {why}", path.display()))
+    };
+    let inside = image_of(on(candidate)?)?;
+    let mut images = Vec::new();
+    for matched in matches {
+        images.extend(image_of(on(matched)?)?);
+    }
+    let loops: Vec<&MountEntry> = mounts
+        .iter()
+        .filter(|mount| mount.dev.major == LOOP_MAJOR)
+        .collect();
+    if !loops.is_empty() {
+        let by_id: HashMap<u64, &MountEntry> =
+            mounts.iter().map(|mount| (mount.id, mount)).collect();
+        let places = matches
+            .iter()
+            .map(|matched| place_of(mounts, matched))
+            .collect::<Result<Vec<_>, _>>()?;
+        for mount in loops {
+            if nested_in(&by_id, mount, matches, &places, candidate)?.is_some() {
+                images.extend(image_of(mount)?);
+            }
+        }
+    }
+    images.sort();
+    images.dedup();
+    Ok((inside, images))
 }
 
 /// Screens the candidate and every match before any of them is resolved,

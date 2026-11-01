@@ -2458,6 +2458,25 @@ impl Host for LinuxHost {
         crate::state::fs_uuid(dev)
     }
 
+    fn loop_backing_file(&self, dev: Dev) -> Result<Option<PathBuf>, HostError> {
+        use std::os::unix::ffi::OsStringExt;
+        let path = format!("/sys/dev/block/{dev}/loop/backing_file");
+        match std::fs::read(&path) {
+            Ok(mut text) => {
+                if text.last() == Some(&b'\n') {
+                    text.pop();
+                }
+                Ok(Some(PathBuf::from(std::ffi::OsString::from_vec(text))))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(HostError::errno(
+                "read",
+                &path,
+                Errno(e.raw_os_error().unwrap_or(5)),
+            )),
+        }
+    }
+
     fn boot_id(&self) -> Result<String, HostError> {
         const BOOT_ID: &str = "sys/kernel/random/boot_id";
         let text = ProcRoot(self.proc.as_fd()).read(BOOT_ID)?;

@@ -395,7 +395,9 @@ How the format reads (the schema documents every key):
   /path` (a directory on an earlier mount) shows that directory's tree
   under the overlay's own `dev` and root field `/`, so an unlink on either
   side removes the entry from both; lower layers, whiteouts and copy-up
-  are not modelled.
+  are not modelled. On a device of major 7, `loop_backing: /path` is what
+  `/sys/dev/block/7:N/loop/backing_file` reads (absent: `EACCES`); the
+  image's bytes are not tied to that file's.
 - **Processes:** `exe`, `cwd`, `root`, `environ`, `fds` (`deleted: true`
   for a deleted-but-open file), `maps`, and `proc: denied|failed` for the
   `/proc` read errors; a pid that exits is `Gone`. What `status` shows,
@@ -579,6 +581,15 @@ Model scenarios required by [safety.md](safety.md) and
   ancestor that already held a profile directory makes it a protected or
   negated Cargo target, and the candidate inside is kept
   (`vectors/config/{protect,negated}-cargo-tag-made-after-enumeration`);
+  a candidate on a loop-mounted image whose file a match holds is
+  `protected` or `excluded`, and the reverse, and a loop mount inside a
+  match protects its file; an unreadable or deleted backing file is an
+  error, and a loop device in no match is never read (model:
+  `loop_backing` on a mount of major 7; `tests/fs_dry_run.rs`
+  `a_loop_image_overlaps_the_file_behind_it`,
+  `vectors/config/{protect,negated}-loop-image-file`,
+  `vectors/config/protect-loop-image-unreadable`; no container test: a
+  rootless container cannot attach a loop device);
   and one removal costs one enumeration again, not one per later
   candidate (`tests/index_reclaim.rs`
   `one_removed_protect_match_costs_one_enumeration_not_one_per_candidate`);

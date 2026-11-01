@@ -643,6 +643,14 @@ impl<H: Host> Host for Controlled<H> {
         self.host.fs_uuid(dev)
     }
 
+    fn loop_backing_file(
+        &self,
+        dev: diskgc_core::host::Dev,
+    ) -> Result<Option<std::path::PathBuf>, HostError> {
+        self.before("loop_backing_file");
+        self.host.loop_backing_file(dev)
+    }
+
     fn boot_id(&self) -> Result<String, HostError> {
         self.before("boot_id");
         self.host.boot_id()

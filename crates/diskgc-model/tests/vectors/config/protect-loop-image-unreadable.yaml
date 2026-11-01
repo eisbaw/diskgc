@@ -1,0 +1,43 @@
+# TASK-268 review (Codex 3): as protect-loop-image-file, but the loop
+# device's backing_file cannot be read: with a match, the candidate on the
+# image cannot be proved apart from it (exit 3, nothing deleted).
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: image
+      find: {roots: [/safe], paths: [image.ext4], type: file}
+      action: delete
+      examples: {match: [/safe/image.ext4]}
+    - name: image-cruft
+      find: {roots: [/mnt/image], paths: [cruft], type: dir}
+      action: delete
+      examples: {match: [/mnt/image/cruft]}
+  protect: [image]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:image-cruft}
+path: /mnt/image
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /safe, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /mnt/image, fs: ext4, dev: "7:0", size: 1G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /safe/image.ext4: {size: 1M}
+    /mnt/image/cruft: {.: {mtime: 2026-10-01T00:00:00Z}, blob: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+expect:
+  plan: []
+  dry_run_exit: 3
+  dry_run_errors: [{cause: operation, contains: "cannot prove overlap at /mnt/image/cruft: the image behind loop device 7:0 (mounted at /mnt/image) cannot be read"}]
+  reclaim_exit: 3
+  errors: [{cause: operation, contains: "the image behind loop device 7:0 (mounted at /mnt/image) cannot be read"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/mnt/image/cruft/blob]

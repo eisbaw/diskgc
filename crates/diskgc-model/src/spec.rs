@@ -243,6 +243,14 @@ pub struct MountSpec {
     /// the object itself, whichever name opened it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay_upper: Option<PathBuf>,
+    /// For a filesystem on a loop device (`dev` of major 7): the file the
+    /// device reads and writes (`/sys/dev/block/7:N/loop/backing_file`, as
+    /// printed, ` (deleted)` included), a path of the model's tree or not.
+    /// Absent on such a device: reading it fails (`EACCES`). The image's
+    /// contents are not tied to that file's: deleting on the mount changes
+    /// no byte of it in the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_backing: Option<PathBuf>,
     /// The filesystem's UUID as `fs_uuid` reports it (the udev link
     /// `/dev/disk/by-uuid`); absent: none (tmpfs, no udev).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -815,6 +823,7 @@ pub enum Op {
     Pressure,
     LowerPriority,
     FsUuid,
+    LoopBackingFile,
     BootId,
     StateLock,
     StateRead,
@@ -870,6 +879,7 @@ impl Op {
             Self::Pressure => "pressure",
             Self::LowerPriority => "lower_priority",
             Self::FsUuid => "fs_uuid",
+            Self::LoopBackingFile => "loop_backing_file",
             Self::BootId => "boot_id",
             Self::StateLock => "state_lock",
             Self::StateRead => "state_read",

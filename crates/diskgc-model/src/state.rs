@@ -425,6 +425,8 @@ pub struct State {
     pub elapsed: Duration,
     /// Filesystem UUIDs (`fs_uuid`), by device.
     pub fs_uuids: BTreeMap<Dev, String>,
+    /// [`crate::spec::MountSpec::loop_backing`], by device.
+    pub loop_backings: BTreeMap<Dev, PathBuf>,
     /// diskgc's state directory (`state_*` operations), if any.
     pub state_dir: Option<PathBuf>,
     /// diskgc's user's home for the per-user lock (`user_lock_path`).
@@ -466,6 +468,7 @@ impl State {
             wall_start,
             elapsed: Duration::ZERO,
             fs_uuids: BTreeMap::new(),
+            loop_backings: BTreeMap::new(),
             state_dir: None,
             home: None,
             boot_id: DEFAULT_BOOT_ID.to_owned(),

@@ -968,7 +968,9 @@ is accepted until measured otherwise.
   lock's parent share (`make_dirs_ungated`), these are the only
   writes, creations or renames the scan allows outside
   `Delete`. Read-only beside them: `state_read` (the snapshot, never
-  through a symlink, with its owner and mode), `fs_uuid` and `boot_id`.
+  through a symlink, with its owner and mode), `fs_uuid`, `boot_id` and
+  `loop_backing_file` (`/sys/dev/block/7:N/loop/backing_file`, for the
+  `protect` verdict on loop images).
 - **Time is part of the port.** The clock, every blocking operation (host
   lock wait, child wait, the SIGTERM → 10 s → SIGKILL sequence, re-sampling)
   and the tally's batch timing and sleeps are port operations; `ModelHost`

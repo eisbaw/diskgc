@@ -179,6 +179,13 @@ impl Host for Short {
         self.0.fs_uuid(dev)
     }
 
+    fn loop_backing_file(
+        &self,
+        dev: diskgc_core::host::Dev,
+    ) -> Result<Option<std::path::PathBuf>, HostError> {
+        self.0.loop_backing_file(dev)
+    }
+
     fn boot_id(&self) -> Result<String, HostError> {
         self.0.boot_id()
     }
