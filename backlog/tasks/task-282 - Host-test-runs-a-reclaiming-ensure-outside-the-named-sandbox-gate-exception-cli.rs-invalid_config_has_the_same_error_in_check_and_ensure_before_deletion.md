@@ -3,10 +3,10 @@ id: TASK-282
 title: >-
   Host test runs a reclaiming ensure outside the named sandbox-gate exception
   (cli.rs invalid_config_has_the_same_error_in_check_and_ensure_before_deletion)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-01T04:11:00Z'
-updated_date: '2026-11-01T08:41:00Z'
+updated_date: '2026-11-01T09:01:00Z'
 labels:
   - test
   - safety
