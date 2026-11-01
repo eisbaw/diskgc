@@ -466,7 +466,11 @@ pub fn watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock(ctx: &C
     unsafe { libc::kill(-child, libc::SIGKILL) };
     let run = spawned.wait()?;
     let verdict = oracle.judge(&run)?;
-    ensure!(left_running, "the child was not left running");
+    ensure!(
+        left_running,
+        "the child was not left running; stderr: {}",
+        run.stderr
+    );
     ensure!(
         lock_held?,
         "the host lock was free while the child that inherited it ran"
@@ -489,10 +493,14 @@ pub fn watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock(ctx: &C
     ensure!(
         errors.iter().any(|e| {
             e["message"].as_str().is_some_and(|m| {
-                m.contains("still running: a second signal during its SIGTERM grace")
+                // Once: the cleanup after the grace must not wrap it again
+                // (nor signal the group a second time).
+                m.matches("still running: a second signal during its SIGTERM grace")
+                    .count()
+                    == 1
             })
         }),
-        "no error says the child was left running: {record}"
+        "no error says, once, that the child was left running: {record}"
     );
     ensure!(kept.exists(), "the cleaner's second file is gone");
     verdict.assert_clean()

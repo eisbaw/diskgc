@@ -3405,9 +3405,12 @@ fn run_command_permitted(
             "spawned child returned an invalid pid",
         )));
     };
-    let mut leader_reaped = false;
-    let result = drive_command_output(host, run, &subject, pid, &mut child, &mut leader_reaped);
-    if !leader_reaped && let Err(failure) = &result {
+    // Settled: the leader was reaped, or the group was left running after
+    // a second signal ([`leaves_running`]); either way the cleanup below
+    // has nothing to do (it must not signal a group it left running).
+    let mut leader_settled = false;
+    let result = drive_command_output(host, run, &subject, pid, &mut child, &mut leader_settled);
+    if !leader_settled && let Err(failure) = &result {
         // An output or wait failure must not leave a trusted cleaner
         // running after the caller has been told the action failed. A signal
         // or deadline uses the same TERM grace even if output setup failed.
@@ -3473,7 +3476,7 @@ fn drive_command_output(
     subject: &str,
     pid: rustix::process::Pid,
     child: &mut process::Child,
-    leader_reaped: &mut bool,
+    leader_settled: &mut bool,
 ) -> Result<CommandExit, HostError> {
     let mut stdout = child.stdout.take().ok_or_else(|| {
         HostError::invalid("run command", subject, "spawned child has no stdout pipe")
@@ -3505,7 +3508,7 @@ fn drive_command_output(
                 subject,
                 pid,
                 child,
-                leader_reaped,
+                leader_settled,
                 &mut stdout,
                 &mut stderr,
                 &mut out_line,
@@ -3575,7 +3578,7 @@ fn drive_command_output(
             let status = child
                 .wait()
                 .map_err(|e| io_error("wait command", subject, &e))?;
-            *leader_reaped = true;
+            *leader_settled = true;
             return command_exit(status, subject);
         }
         if host.now() >= run.deadline {
@@ -3596,7 +3599,7 @@ fn terminate_command_group(
     subject: &str,
     pid: rustix::process::Pid,
     child: &mut process::Child,
-    leader_reaped: &mut bool,
+    leader_settled: &mut bool,
     stdout: &mut process::ChildStdout,
     stderr: &mut process::ChildStderr,
     out_line: &mut OutputLine,
@@ -3619,6 +3622,7 @@ fn terminate_command_group(
             // Its output is not drained further: the pipes close with
             // diskgc (documented: a child that writes after it may end on
             // SIGPIPE).
+            *leader_settled = true;
             return Err(left_running(subject, "after SIGTERM to its group"));
         }
         // The leader remains waitable so its PID pins the group until KILL.
@@ -3635,7 +3639,7 @@ fn terminate_command_group(
     child
         .wait()
         .map_err(|e| io_error("wait command", subject, &e))?;
-    *leader_reaped = true;
+    *leader_settled = true;
     // Already-readable bytes and unterminated lines get one further bounded
     // chance to reach stderr. Failure is expected when its consumer stalled.
     let tail_deadline = host
