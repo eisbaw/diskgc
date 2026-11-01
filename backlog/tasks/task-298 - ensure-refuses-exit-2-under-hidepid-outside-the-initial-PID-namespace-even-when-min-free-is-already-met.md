@@ -3,10 +3,10 @@ id: TASK-298
 title: >-
   ensure refuses (exit 2) under hidepid / outside the initial PID namespace even
   when --min-free is already met
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-01T16:39:00Z'
-updated_date: '2026-11-01T16:40:00Z'
+updated_date: '2026-11-01T19:49:00Z'
 labels:
   - contract
   - safety
@@ -24,4 +24,6 @@ Periodic full review #3 on master fc33d98 (2026-11-01; Codex tmp/reviews/codex-f
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-01: in progress in tmp/worktrees/t298 (branch t298-goal-met-first).
+
+2026-11-01: merged (ff) after one review round; full just e2e exit 0.
 <!-- SECTION:NOTES:END -->
