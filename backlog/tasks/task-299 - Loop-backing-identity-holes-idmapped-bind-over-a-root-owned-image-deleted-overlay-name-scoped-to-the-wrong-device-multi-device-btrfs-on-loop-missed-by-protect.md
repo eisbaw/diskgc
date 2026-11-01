@@ -4,10 +4,10 @@ title: >-
   Loop backing identity holes: idmapped bind over a root-owned image, deleted
   overlay name scoped to the wrong device, multi-device btrfs on loop missed by
   protect
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-01T16:39:00Z'
-updated_date: '2026-11-01T16:40:00Z'
+updated_date: '2026-11-01T19:05:00Z'
 labels:
   - safety
   - irreversible
@@ -25,4 +25,6 @@ Periodic full review #3 on master fc33d98 (2026-11-01; Codex tmp/reviews/codex-f
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-01: in progress in tmp/worktrees/t299 (branch t299-loop-identity).
+
+2026-11-01: merged (ff) after one review round; full just e2e exit 0 on the final commit. Limits documented by the orchestrator's convergence decision (Mark may veto); real-kernel coverage: TASK-304.
 <!-- SECTION:NOTES:END -->
