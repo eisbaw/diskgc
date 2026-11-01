@@ -885,6 +885,96 @@ fn watch_tally_only_guards_a_state_directory_on_an_overlay_of_the_watched_filesy
     );
 }
 
+/// [`yaml`] with the state directory on the watched `/tmp`, the first
+/// sample of `/tmp` (at start) failing with `EIO`, and a SIGTERM at 11
+/// minutes: two guarded writes, at the 5- and 10-minute ticks, and the
+/// stop's.
+fn state_on_tmp_first_sample_fails(other_used: &str) -> ModelHost {
+    let events = "events:\n  \
+                  - {at: {op: statvfs, path: /tmp, nth: 1, when: before}, fail: EIO}\n  \
+                  - {at: {elapsed: 11m}, signal: term}\n";
+    host(
+        &yaml(other_used, "", events)
+            .replace(
+                "state_dir: /home/u/.local/state/diskgc",
+                "state_dir: /tmp/u/state",
+            )
+            .replace(
+                "  /home/u: {.: {mode: \"0700\"}}\n",
+                "  /tmp/u: {.: {mode: \"0700\"}}\n",
+            ),
+    )
+}
+
+/// TASK-287: the snapshot guard is not frozen at start. The first sample
+/// fails (the goal is not resolved at start) and the state directory is
+/// on the watched filesystem, below `--min-free`: every snapshot write is
+/// still skipped, for a goal in bytes and for a percentage alike. (The
+/// guard was `None` for the life of the watch, so the writes took the
+/// filesystem's last space.)
+#[test]
+fn a_failed_first_sample_still_guards_the_snapshot_writes() {
+    for (min, target) in [("1G", "2G"), ("20%", "30%")] {
+        let host = state_on_tmp_first_sample_fails("10200M");
+        assert!(avail(&host) < 100 * MIB);
+        let run = watch(&host, &reclaim(min, target, "10s"));
+        assert_eq!(run.ended, Ok(Ended::Stopped(Signal::Term)), "{min}");
+        assert!(
+            run.has("warning: the first sample of PATH /tmp failed"),
+            "{min}: {:?}",
+            run.lines
+        );
+        assert_eq!(
+            host.trace_count(Op::StateWrite),
+            0,
+            "{min}: {:?}",
+            run.lines
+        );
+        assert_eq!(
+            run.count("not written: the state directory is on the reclaimed filesystem"),
+            3,
+            "{min}: both ticks and the stop: {:?}",
+            run.lines
+        );
+    }
+}
+
+/// TASK-287, `--tally-only`: a percentage `--min-free` whose first sample
+/// failed guards the writes too (it was dropped, with a warning that only a
+/// failed write would skip one), resolved against the size the write's own
+/// sample of `PATH` reports.
+#[test]
+fn a_tally_only_percentage_guards_the_writes_after_a_failed_first_sample() {
+    let host = state_on_tmp_first_sample_fails("10200M");
+    let run = watch(
+        &host,
+        &Mode::TallyOnly {
+            min_free: Some(parse_size("20%").unwrap()),
+        },
+    );
+    assert_eq!(run.ended, Ok(Ended::Stopped(Signal::Term)));
+    assert_eq!(host.trace_count(Op::StateWrite), 0, "{:?}", run.lines);
+    assert_eq!(
+        run.count("not written: the state directory is on the reclaimed filesystem"),
+        3,
+        "{:?}",
+        run.lines
+    );
+}
+
+/// TASK-287, the other side: with space above the percentage, the guard
+/// resolved at write time lets every write through, the goal unresolved
+/// or not (the writes do not wait for the loop's sample).
+#[test]
+fn a_percentage_guard_with_space_above_it_writes_after_a_failed_first_sample() {
+    let host = state_on_tmp_first_sample_fails("1G");
+    let run = watch(&host, &reclaim("20%", "30%", "10s"));
+    assert_eq!(run.ended, Ok(Ended::Stopped(Signal::Term)));
+    assert!(run.has("warning: the first sample of PATH /tmp failed"));
+    assert_eq!(host.trace_count(Op::StateWrite), 3, "{:?}", run.lines);
+    assert_eq!(deletions(&host), 0);
+}
+
 /// `watch --tally-only --min-free 1G` of `path` on `host` with the state
 /// directory `state`, run until its SIGTERM event; its log lines.
 fn tally_only_lines(host: &ModelHost, path: &str, state: &str) -> Vec<String> {

@@ -292,24 +292,17 @@ pub fn start<H: Delete>(
             }
         }
     }
-    let guard_min = match (mode, &goal) {
-        (_, Some(goal)) => goal.resolved.map(|g| g.min_free),
-        (Mode::TallyOnly { min_free: None }, _) => None,
-        (Mode::TallyOnly { min_free: Some(m) }, _) => match (&first, m) {
-            (_, Size::Bytes(b)) => Some(*b),
-            (Ok(space), m) => Some(m.bytes(space.size_bytes).map_err(|e| {
-                Refused::usage(ErrorCause::Usage, path, format!("--min-free {m}: {e}"))
-            })?),
-            (Err(e), m) => {
-                log(&format!(
-                    "warning: --min-free {m} cannot be resolved (sampling PATH failed: {e}); \
-                     snapshot writes skip only on a failed write"
-                ));
-                None
-            }
-        },
-        (Mode::Reclaim { .. }, None) => unreachable!("a reclaiming watch has a goal"),
+    // The snapshot guard's --min-free, as given: each guarded write
+    // resolves a percentage with its own sample of PATH (snapshot::Guard),
+    // so a first sample that failed costs no guard (TASK-287).
+    let guard_min = match mode {
+        Mode::Reclaim { min_free, .. } => Some(*min_free),
+        Mode::TallyOnly { min_free } => *min_free,
     };
+    if let (Mode::TallyOnly { min_free: Some(m) }, Ok(space)) = (mode, &first) {
+        m.bytes(space.size_bytes)
+            .map_err(|e| Refused::usage(ErrorCause::Usage, path, format!("--min-free {m}: {e}")))?;
+    }
     // 5. The lock reclaims take (docs/safety.md, Host lock): the host lock,
     // or for a non-root watch without it the per-user lock, made now in
     // reclaim mode; --tally-only makes nothing, it only names what it polls.
@@ -409,9 +402,11 @@ pub fn start<H: Delete>(
             .map(|s| (&*s.finder.profile, s.finder.profile_hash))
             .collect();
         let mut seed = RunIndex::watch_seed();
+        // The seed only reads: its `min_free` bounds no write
+        // (RunIndex::watch_seed is never finished).
         let run = Reclaimed {
             mount: at.mount.clone(),
-            min_free: guard_min.unwrap_or(0),
+            min_free: 0,
             deadline: None,
         };
         seed.seed(host, run, &at.fd, &bound, log);

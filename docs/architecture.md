@@ -606,7 +606,11 @@ the order of work.
     held descriptors' samples, minus what the write takes stays at or
     above `--min-free` (in `watch`, its
     `--min-free`; in `watch --tally-only`, its optional `--min-free`,
-    and without one only a failed write skips it). What it takes is
+    and without one only a failed write skips it). A percentage is
+    resolved at each such write against the size `PATH`'s sample
+    reports, so the guard holds from a `watch`'s first write even when
+    its first sample failed and its goal is not resolved yet (TASK-287);
+    a write whose samples fail is skipped. What it takes is
     its size rounded up to whole blocks (`f_frsize`) plus one block for
     the new directory entry: a file of a few hundred bytes still takes
     a block (TASK-30 review). The state directory and the lock file

@@ -36,7 +36,7 @@ use crate::host::{
 use crate::index::{BUDGET_BYTES, Finder, Index};
 use crate::places;
 use crate::tally::TallyState;
-use crate::units::format_bytes;
+use crate::units::{Size, format_bytes};
 
 use format::{Header, Snapshot};
 use restore::Clocks;
@@ -403,7 +403,7 @@ impl RunIndex {
         };
         let guard = Guard {
             watched: run.mount.clone(),
-            min_free: Some(run.min_free),
+            min_free: Some(Size::Bytes(run.min_free)),
         };
         let last_check = |host: &H| {
             if host.interrupted().is_some() {
@@ -462,11 +462,16 @@ pub struct Held<'a, F> {
 /// filesystem a run reclaims, or `watch` watches; [`places::shared_space`]),
 /// available space must stay at or above `min_free` after the write
 /// (`None`: no guard, only a write that fails is skipped; `watch
-/// --tally-only` without `--min-free`).
+/// --tally-only` without `--min-free`). `min_free` is `--min-free` as
+/// given: a percentage is resolved at each guarded write against the size
+/// of `PATH`'s filesystem in the sample the guard takes anyway, so the
+/// guard needs no sample of its own and holds from the first write
+/// whatever the start's sample did (TASK-287: a guard resolved once at
+/// start was lost for the life of a `watch` whose first sample failed).
 #[derive(Debug, Clone)]
 pub struct Guard {
     pub watched: MountEntry,
-    pub min_free: Option<u64>,
+    pub min_free: Option<Size>,
 }
 
 /// The snapshot of `state` for `key`, encoded, or why it is not written:
@@ -545,6 +550,10 @@ pub fn write_held<H: Host>(
             let (dir, watched) = match sampled {
                 Ok(both) => both,
                 Err(e) => return log(&skipped(&e.to_string())),
+            };
+            let min_free = match min_free.bytes(watched.size_bytes) {
+                Ok(bytes) => bytes,
+                Err(e) => return log(&skipped(&format!("--min-free {min_free}: {e}"))),
             };
             let block = dir.block_bytes.max(watched.block_bytes).max(1);
             let takes = size.div_ceil(block).saturating_add(1).saturating_mul(block);

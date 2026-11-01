@@ -283,7 +283,9 @@ runner's service manager); systemd is not required.
   index replaces the synchronous tally).
 - Sizes and durations as under [Sizes and durations](#sizes-and-durations);
   a percentage is resolved against the filesystem's size at start (at the
-  first sample that works, when the start's failed).
+  first sample that works, when the start's failed); the snapshot write's
+  guard resolves `--min-free` at each write instead
+  ([architecture.md](architecture.md#the-tally), Snapshot).
 
 **One process per filesystem and state directory.** The snapshot's
 single-writer lock `index-<fs>.lock` ([architecture.md](architecture.md#the-tally),
