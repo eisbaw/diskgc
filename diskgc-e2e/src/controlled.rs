@@ -78,6 +78,7 @@ pub const OPS: &[&str] = &[
     "fs_uuid",
     "loop_backing_file",
     "loop_backing_files",
+    "loop_backing_identity",
     "boot_id",
     "state_lock",
     "state_read",
@@ -664,6 +665,14 @@ impl<H: Host> Host for Controlled<H> {
         self.host.loop_backing_files()
     }
 
+    fn loop_backing_identity(
+        &self,
+        dev: diskgc_core::host::Dev,
+    ) -> Result<diskgc_core::host::LoopIdentity, HostError> {
+        self.before("loop_backing_identity");
+        self.host.loop_backing_identity(dev)
+    }
+
     fn test_container_pid_namespace(&self) -> bool {
         self.host.test_container_pid_namespace()
     }
@@ -858,6 +867,11 @@ processes:
             host.loop_backing_files()
                 .expect("loop_backing_files")
                 .is_empty()
+        );
+        assert_eq!(
+            host.loop_backing_identity(dev)
+                .expect("loop_backing_identity"),
+            diskgc_core::host::LoopIdentity::Detached
         );
         host.boot_id().expect("boot_id");
         let key = diskgc_core::host::FsKey::dev(dev);

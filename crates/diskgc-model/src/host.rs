@@ -2286,6 +2286,50 @@ impl Host for ModelHost {
         )
     }
 
+    /// [`crate::state::State::loop_identity`]: the held file's identity
+    /// when diskgc can open the device, else `Unavailable` (`EACCES`).
+    fn loop_backing_identity(
+        &self,
+        dev: diskgc_core::host::Dev,
+    ) -> Result<diskgc_core::host::LoopIdentity, HostError> {
+        let node = PathBuf::from(format!("/dev/block/{dev}"));
+        self.call(Op::LoopBackingIdentity, Some(node.clone()), None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(HostError::errno(
+                        "ioctl LOOP_GET_STATUS64",
+                        node.display(),
+                        e,
+                    )),
+                    None,
+                    errno_text(e),
+                );
+            }
+            if !inner.state.loop_backings.contains_key(&dev) {
+                return (
+                    Ok(diskgc_core::host::LoopIdentity::Detached),
+                    None,
+                    "detached".to_owned(),
+                );
+            }
+            match inner.state.loop_identity(dev) {
+                Some(id) => (
+                    Ok(diskgc_core::host::LoopIdentity::Known(id)),
+                    None,
+                    id.to_string(),
+                ),
+                None => (
+                    Ok(diskgc_core::host::LoopIdentity::Unavailable(format!(
+                        "open {}: EACCES",
+                        node.display()
+                    ))),
+                    None,
+                    "unavailable".to_owned(),
+                ),
+            }
+        })
+    }
+
     fn boot_id(&self) -> Result<String, HostError> {
         self.call(Op::BootId, None, None, |inner| {
             let id = inner.state.boot_id.clone();

@@ -12,7 +12,7 @@ use super::{
     HeldEntry, OTHER_FS_ROOT_DETAIL, PlanEntry, Report, SkipEntry, Status, human_space_values,
     signed_bytes,
 };
-use crate::engine::{ProcessBlocker, Reason};
+use crate::engine::{ProcessBlocker, Reason, UnknownCause};
 use crate::liveness::{HIDEPID, NOT_INITIAL_PID_NAMESPACE};
 use crate::units::{format_age, format_bytes};
 
@@ -161,10 +161,7 @@ fn live_text(report: &Report, held: Option<String>) -> String {
     lines.extend(busy_line(
         live.kept
             .iter()
-            .filter(|skip| {
-                skip.reason == Reason::InUseUnknown
-                    && standing_cause(skip.detail.as_deref()).is_none()
-            })
+            .filter(|skip| skip.reason == Reason::InUseUnknown && busy(skip.unknown_cause))
             .map(|skip| skip.count)
             .fold(0, u64::saturating_add),
     ));
@@ -256,6 +253,7 @@ impl<'a> KeptRow<'a> {
             count: 1,
             diagnostic: plain_diagnostic(
                 reason,
+                entry.unknown_cause,
                 entry.detail.as_deref(),
                 entry.process_blockers.as_deref(),
             )
@@ -379,6 +377,7 @@ fn skip_why(skip: &SkipEntry) -> String {
 fn skip_diagnostic(skip: &SkipEntry) -> Option<String> {
     plain_diagnostic(
         skip.reason,
+        skip.unknown_cause,
         skip.detail.as_deref(),
         skip.process_blockers.as_deref(),
     )
@@ -395,6 +394,7 @@ fn skip_diagnostic(skip: &SkipEntry) -> Option<String> {
 /// (TASK-221); [`hidden_processes_line`] says what to do.
 fn plain_diagnostic(
     reason: Reason,
+    cause: Option<UnknownCause>,
     detail: Option<&str>,
     blockers: Option<&[ProcessBlocker]>,
 ) -> Option<String> {
@@ -413,20 +413,19 @@ fn plain_diagnostic(
                 .as_deref()
                 .map_or_else(String::new, |command| format!(" ({})", one_line(command)))
         ),
-        None => match standing_cause(detail) {
-            Some(cause) => brief(cause),
-            None => "the host was too busy to check whether it is in use".to_owned(),
+        // A cause that stays (TASK-263, TASK-169) says itself; only a
+        // busy host (or no cause recorded) reads as one.
+        None => match (cause, detail) {
+            (Some(cause), Some(detail)) if cause.stays() => brief(detail),
+            _ => "the host was too busy to check whether it is in use".to_owned(),
         },
     })
 }
 
-/// The detail of an `in_use_unknown` whose cause is not the host's load
-/// and stays until someone changes it (TASK-263, TASK-169): a process list
-/// the in-use check cannot see whole, or a loop device whose backing file
-/// could be in any candidate. Recognised by the texts [`crate::inuse`]
-/// gives those causes; [`busy_line`] does not count them.
-fn standing_cause(detail: Option<&str>) -> Option<&str> {
-    detail.filter(|d| crate::inuse::standing_cause(d))
+/// Whether an `in_use_unknown` counts toward [`busy_line`]: its cause does
+/// not stay ([`UnknownCause::stays`]; a skip without one counts).
+fn busy(cause: Option<UnknownCause>) -> bool {
+    !cause.is_some_and(UnknownCause::stays)
 }
 
 /// Why diskgc cannot see every process, when that kept a candidate
@@ -631,8 +630,7 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
             .rows
             .iter()
             .filter(|row| {
-                row.entry.reason == Some(Reason::InUseUnknown)
-                    && standing_cause(row.entry.detail.as_deref()).is_none()
+                row.entry.reason == Some(Reason::InUseUnknown) && busy(row.entry.unknown_cause)
             })
             .count() as u64,
     ));

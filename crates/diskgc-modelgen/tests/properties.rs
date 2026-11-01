@@ -21,7 +21,10 @@ use diskgc_core::resolve::{Want, resolve};
 use diskgc_core::units::parse_size;
 use diskgc_model::spec::{DirSpec, FileSpec, HostModel, NodeSpec, Op, PidNamespaceSpec, Special};
 use diskgc_model::{Call, ModelHost};
-use diskgc_modelgen::{ROOT, host_model, host_model_with_kernel_holders};
+use diskgc_modelgen::{OWNERS, ROOT, host_model, host_model_with_kernel_holders};
+
+/// The other user of generated models: a file of theirs is in no candidate.
+const OWNERS_OTHER: u32 = OWNERS[1];
 use proptest::prelude::*;
 use proptest::test_runner::{TestError, TestRunner};
 
@@ -320,10 +323,12 @@ proptest! {
     /// TASK-263, TASK-169: what no process shows still keeps a candidate.
     /// Judged from the model's specification, not from the scan: a process
     /// list that cannot be complete (`hidepid`, or a PID namespace other
-    /// than the initial one outside a test container) or a loop device
-    /// whose backing file was deleted makes the candidate `in_use_unknown`;
-    /// otherwise a loop device backed by a file of the candidate keeps it
-    /// (`in_use`). The candidate is never cleared in either case.
+    /// than the initial one outside a test container) makes the candidate
+    /// `in_use_unknown`, and so does a loop device diskgc cannot open whose
+    /// name proves nothing: deleted (the candidate shares its directory's
+    /// filesystem), naming nothing, or naming a file of the run's owner.
+    /// Otherwise a device diskgc can open, backed by a file of the
+    /// candidate, keeps it. The candidate is never cleared in either case.
     #[test]
     fn the_in_use_check_never_clears_what_it_cannot_see_or_a_loop_device_holds(
         model in host_model_with_kernel_holders(3, 3, 2),
@@ -339,16 +344,27 @@ proptest! {
             return Ok(());
         };
         let hidden = model.proc_hidepid || model.pid_namespace == PidNamespaceSpec::Nested;
-        let deleted = model
-            .loops
-            .iter()
-            .any(|spec| spec.backing.to_string_lossy().ends_with(" (deleted)"));
         let objects: BTreeSet<DevIno> = record.objects().collect();
-        let held = model.loops.iter().any(|spec| {
-            host.stat_path(&spec.backing)
-                .and_then(|stat| stat.ino.map(|ino| DevIno { dev: stat.dev, ino }))
-                .is_some_and(|id| objects.contains(&id))
-        });
+        let identity = |path: &Path| {
+            host.stat_path(path)
+                .and_then(|stat| stat.ino.map(|ino| (DevIno { dev: stat.dev, ino }, stat.uid)))
+        };
+        let mut unknown = false;
+        let mut held = false;
+        for spec in &model.loops {
+            let text = spec.backing.to_string_lossy();
+            if spec.readable {
+                held |= identity(&spec.backing).is_some_and(|(id, _)| objects.contains(&id));
+            } else if text.ends_with(" (deleted)") {
+                // Its directory, /tmp/gen, is on the candidate's filesystem.
+                unknown = true;
+            } else {
+                match identity(&spec.backing) {
+                    None => unknown = true,
+                    Some((_, uid)) => unknown |= uid != Some(OWNERS_OTHER),
+                }
+            }
+        }
         let scan = diskgc_core::inuse::scan(
             &host,
             &diskgc_core::inuse::Options::from_rules(&rules),
@@ -357,10 +373,10 @@ proptest! {
         .map_err(|error| failure(&model, format!("scan: {error}")))?;
         let verdict = scan.check(&candidate, &record);
         let reason = verdict.as_ref().err().map(|skip| skip.reason);
-        if hidden || deleted {
+        if hidden || unknown {
             if reason != Some(diskgc_core::engine::Reason::InUseUnknown) {
                 return Err(failure(&model, format!(
-                    "hidden {hidden}, deleted loop backing {deleted}: {verdict:?}"
+                    "hidden {hidden}, loop device unknown {unknown}: {verdict:?}"
                 )));
             }
         } else if held && verdict.is_ok() {

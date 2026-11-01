@@ -859,6 +859,11 @@ pub(crate) const PRODUCTION_DEPENDENCIES: &[(&str, &[&str])] = &[
         &[
             "[features]",
             "release-without-sandbox-gate = []",
+            // TASK-263 review (Codex 1): the e2e harness's builds only
+            // (sandbox::sandbox_flags_are_enabled_only_where_expected);
+            // it makes the in-use scan trust a marked test container's own
+            // PID namespace and deletes nothing itself.
+            "e2e-test-container-pid-namespace = []",
             "[dependencies]",
             "diskgc-core.workspace = true",
             "workspace: diskgc-core = { path = \"crates/diskgc-core\" }",

@@ -12,6 +12,13 @@ publish.workspace = true
 # (sandbox_gate_flag_is_enabled_nowhere) fails if any manifest, the flake or
 # the justfile names it, or if it becomes a default feature.
 release-without-sandbox-gate = []
+# For the e2e harness's builds only (TASK-263): inside a marked test
+# container, the in-use scan assumes its own PID namespace complete
+# (docs/safety.md, In use: Visibility). The flake's e2e builds of diskgc and
+# diskgc-e2e's manifest enable it; a test
+# (sandbox_flags_are_enabled_only_where_expected) fails if anything else
+# names it, if it becomes a default feature, or with the release feature.
+e2e-test-container-pid-namespace = []
 
 [dependencies]
 diskgc-core.workspace = true

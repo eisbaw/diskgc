@@ -197,6 +197,16 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
     state.pid_namespace_initial = model.pid_namespace == crate::spec::PidNamespaceSpec::Initial;
     state.test_container_pid_namespace =
         model.pid_namespace == crate::spec::PidNamespaceSpec::TestContainer;
+    // The exception exists only where the gate lets an e2e build delete
+    // (sandbox::test_container_pid_namespace): with the gate closed it is
+    // not a state LinuxHost can be in.
+    if state.test_container_pid_namespace && model.sandbox_gate == crate::spec::GateSpec::Closed {
+        return Err(LoadError::new(
+            "pid_namespace",
+            "test_container needs the sandbox gate open (an e2e build inside a marked test \
+             container); sandbox_gate: closed is outside one",
+        ));
+    }
     state.proc_hidepid = model.proc_hidepid;
     state.sandbox_gate = model.sandbox_gate;
     state.command_exit = model.command_exit;
@@ -233,10 +243,24 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
             state.loop_backings.insert(spec.dev.0, backing.clone());
         }
     }
+    // The file each device holds, by the name it opened: `file`, or the
+    // text itself.
+    let mut held: BTreeMap<diskgc_core::host::Dev, PathBuf> = state
+        .loop_backings
+        .iter()
+        .map(|(dev, text)| (*dev, text.clone()))
+        .collect();
     for (i, spec) in model.loops.iter().enumerate() {
         let at = format!("loops[{i}]");
         if spec.dev.0.major != LOOP_MAJOR {
             return Err(LoadError::new(at, "a loop device has dev major 7"));
+        }
+        held.insert(
+            spec.dev.0,
+            spec.file.clone().unwrap_or_else(|| spec.backing.clone()),
+        );
+        if spec.readable {
+            state.loop_readable.insert(spec.dev.0);
         }
         if state
             .loop_backings
@@ -251,14 +275,38 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
         }
     }
     let deferred = load_tree(&mut state, model)?;
-    // What each loop device's text names in the tree, so a later read
-    // follows renames and deletions (`State::loop_text`).
-    let objects: Vec<(diskgc_core::host::Dev, Loc)> = state
-        .loop_backings
-        .iter()
-        .filter_map(|(dev, text)| state.lookup_link(text).ok().map(|loc| (*dev, loc)))
-        .collect();
-    state.loop_objects.extend(objects);
+    // The file each device holds, when in the tree, and the entry it opened
+    // (`State::loop_text`, `State::loop_identity`).
+    for (dev, file) in held {
+        let Ok(loc) = state.lookup_link(&file) else {
+            continue;
+        };
+        let at = format!("loop device {dev}");
+        let (Some(parent), Some(name)) = (file.parent(), file.file_name()) else {
+            return Err(LoadError::new(at, "the file it holds is a mount root"));
+        };
+        let dir = state
+            .lookup_link(parent)
+            .map_err(|_| LoadError::new(at.clone(), "the held file's directory"))?;
+        if state.fs(dir.mnt).dev != state.fs(loc.mnt).dev {
+            return Err(LoadError::new(
+                at,
+                "the held file is a mount point: name it below its mount",
+            ));
+        }
+        let stat = state.stat(loc);
+        let object = crate::state::LoopObject {
+            loc,
+            opened: (dir.ino, name.to_owned()),
+            names_at_load: state.fs(loc.mnt).names_of(loc.ino),
+            identity: diskgc_core::host::DevIno {
+                dev: stat.dev,
+                ino: stat.ino.unwrap_or(loc.ino),
+            },
+            text_is_path: state.loop_backings.get(&dev) == Some(&file),
+        };
+        state.loop_objects.insert(dev, object);
+    }
     load_processes(&mut state, model)?;
     load_locks(&mut state, model)?;
     remove_deleted(&mut state, model)?;
@@ -1140,6 +1188,7 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             Op::ProcRootLookup,
             Op::PidNamespace,
             Op::LoopBackingFiles,
+            Op::LoopBackingIdentity,
             Op::ProcNspid,
             Op::PidAlive,
             Op::Pressure,

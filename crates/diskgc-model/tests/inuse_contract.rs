@@ -195,6 +195,13 @@ impl Host for Short {
         self.0.loop_backing_files()
     }
 
+    fn loop_backing_identity(
+        &self,
+        dev: diskgc_core::host::Dev,
+    ) -> Result<diskgc_core::host::LoopIdentity, HostError> {
+        self.0.loop_backing_identity(dev)
+    }
+
     fn test_container_pid_namespace(&self) -> bool {
         self.0.test_container_pid_namespace()
     }

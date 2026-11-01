@@ -311,6 +311,18 @@
       diskgcTested = diskgcBuilds.tested;
       diskgc = diskgcBuilds.shipped;
 
+      # The development build the e2e containers run as `diskgc`
+      # (TASK-263): its in-use scan assumes, inside a marked test container,
+      # that the container's own PID namespace is complete (docs/safety.md,
+      # In use: Visibility). Never the default package, the dev shell's
+      # build or the release candidate; a diskgc-linux test pins where the
+      # feature is named.
+      diskgcE2eBuilds = mkDiskgc {
+        pname = "diskgc-e2e-build";
+        cargoExtraArgs = "--locked --package diskgc --features diskgc-linux/e2e-test-container-pid-namespace";
+        postInstall = "";
+      };
+
       # The release candidate built from this source: the 0.1 catalog with
       # the gate lifted. Keep the default development package gated; this is
       # the sole build that removes the gate, and it also narrows the
@@ -365,13 +377,15 @@
       diskgcRelease = mkReleasePackage diskgcReleaseBuilds.shipped;
 
       # A separate feature-built binary for catalog-policy container tests.
-      # This is not the default package and retains the pre-release gate.
+      # This is not the default package and retains the pre-release gate;
+      # like the e2e `diskgc` it plans in a test container's own PID
+      # namespace (TASK-263).
       diskgcProposed01 = craneLib.buildPackage (
         workspaceArgs
         // {
           pname = "diskgc-proposed-01";
           cargoArtifacts = workspaceDeps;
-          cargoExtraArgs = "--locked --package diskgc --features proposed-release-01-catalog";
+          cargoExtraArgs = "--locked --package diskgc --features proposed-release-01-catalog,diskgc-linux/e2e-test-container-pid-namespace";
           doCheck = false;
         }
       );
@@ -446,7 +460,9 @@
       );
       e2eUnderTest = pkgs.runCommand "diskgc-e2e-under-test" { } ''
         mkdir -p $out/bin
-        cp ${lib.getExe diskgcTested} $out/bin/diskgc
+        cp ${lib.getExe diskgcE2eBuilds.tested} $out/bin/diskgc
+        # The development package itself, without the e2e build's PID
+        # namespace assumption: it refuses to plan or reclaim in a container.
         cp ${lib.getExe diskgcTested} $out/bin/diskgc-development
         cp ${diskgcProposed01}/bin/diskgc $out/bin/diskgc-proposed-01
         cp ${lib.getExe diskgcReleaseTested} $out/bin/diskgc-release

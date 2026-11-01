@@ -234,6 +234,7 @@ mod tests {
             build_evidence: None,
             detail: None,
             process_blockers: None,
+            unknown_cause: None,
         }
     }
 
@@ -330,6 +331,7 @@ mod tests {
                         reason: REASONS[reason],
                         detail: None,
                         process_blockers: None,
+                        unknown_cause: None,
                         estimated_bytes: None,
                     }),
                 }

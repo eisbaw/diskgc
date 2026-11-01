@@ -229,7 +229,10 @@ fn namespace_facts_must_hold_over_the_whole_scan() {
         (Ok(clear), Ok(clear), true),
     ] {
         let mut table = PidTable::new(before.clone(), true);
-        table.confirm_namespace(after.clone());
+        table.confirm_namespace(crate::liveness::confirmed_namespace(
+            before.clone(),
+            after.clone(),
+        ));
         let answer = owner_pid(&table, Ok(TMPFS), 4242, |_| Ok(false)).expect("decided");
         assert_eq!(answer == OwnerPid::Ended, trusted, "{before:?} {after:?}");
     }

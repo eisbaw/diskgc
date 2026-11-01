@@ -833,6 +833,20 @@ impl BoundSocket {
     }
 }
 
+/// What a loop device says of the file it holds
+/// ([`Host::loop_backing_identity`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopIdentity {
+    /// The held file's (device, inode).
+    Known(DevIno),
+    /// The device holds no file now (`ENXIO`: detached since it was listed).
+    Detached,
+    /// diskgc cannot ask the device, and why: its node cannot be opened by
+    /// diskgc's user (`EACCES`, `EPERM`), is missing from this `/dev`
+    /// (`ENOENT`, a container), or is not that block device.
+    Unavailable(String),
+}
+
 /// What the held `/proc` says about the PID namespace diskgc runs in,
 /// for Owner PID's preconditions (docs/safety.md, Producer liveness) and
 /// the in-use scan's (docs/safety.md, In use: Visibility).
@@ -1304,15 +1318,14 @@ pub trait Host {
     /// and 4) and the in-use scan's (docs/safety.md, In use: Visibility).
     fn pid_namespace(&self) -> Result<PidNamespace, HostError>;
 
-    /// Whether this is a development build running inside a marked
-    /// disposable test container (both sandbox markers, docs/safety.md,
-    /// Pre-release sandbox gate): the one place where the in-use scan
-    /// takes diskgc's own PID namespace as holding every process that can
-    /// use a candidate (docs/safety.md, In use: Visibility), since the
-    /// container's files are its own. Always `false` in the
-    /// release-candidate build. Decided once, at startup; read-only. It
-    /// never touches Owner PID, which still permits nothing outside the
-    /// initial namespace.
+    /// Whether this is the e2e harness's build (a cargo feature no shipped
+    /// or development package has) running inside a marked disposable test
+    /// container (both sandbox markers, docs/safety.md, Pre-release sandbox
+    /// gate): the one place where the in-use scan assumes, for tests, that
+    /// diskgc's own PID namespace holds every process that can use a
+    /// candidate (docs/safety.md, In use: Visibility). `false` in every
+    /// other build. Decided once; read-only. It never touches Owner PID,
+    /// which still permits nothing outside the initial namespace.
     fn test_container_pid_namespace(&self) -> bool;
 
     /// The `NSpid:` line of `/proc/<pid>/status`: the process's pid in
@@ -1402,6 +1415,15 @@ pub trait Host {
     /// where no process shows it (docs/safety.md, In use: Loop devices).
     /// Read-only.
     fn loop_backing_files(&self) -> Result<Vec<(Dev, PathBuf)>, HostError>;
+
+    /// The identity of the file the loop device `dev` holds, by the
+    /// device's own word: `LOOP_GET_STATUS64`'s `lo_device` and `lo_inode`,
+    /// which the kernel takes from the held file itself (`vfs_getattr`), so
+    /// they are exact whatever its name, a deleted one included. Needs the
+    /// block device opened read-only (`/dev/loop<N>`, checked to be that
+    /// device): root, or the `disk` group. Read-only (docs/safety.md, In
+    /// use: Loop devices).
+    fn loop_backing_identity(&self, dev: Dev) -> Result<LoopIdentity, HostError>;
 
     /// The kernel's boot id (`/proc/sys/kernel/random/boot_id`): a
     /// snapshot of a filesystem without a UUID is valid only in the boot

@@ -586,6 +586,7 @@ pub(super) fn plan_tier_row(tier: &Tier, reason: Option<Reason>) -> PlanEntry {
         build_evidence: None,
         detail: None,
         process_blockers: None,
+        unknown_cause: None,
     }
 }
 
@@ -595,6 +596,7 @@ pub(super) fn plan_skip(tier: &Tier, candidate: &Path, skip: &Skip) -> PlanEntry
     PlanEntry {
         detail: Some(skip.detail.clone()),
         process_blockers: skip.process_blockers.clone(),
+        unknown_cause: skip.unknown_cause,
         ..plan_entry(tier, candidate, Some(skip.reason), None)
     }
 }

@@ -244,11 +244,10 @@ pub fn start<H: Delete>(
         }),
         Mode::TallyOnly { .. } => None,
     };
-    // 3. The in-use check's visibility (TASK-263) and the pre-release
-    //    sandbox gate, unless nothing can be deleted.
-    if goal.is_some() {
-        crate::executor::process_visibility(host).map_err(|e| refuse((e.cause, e.message)))?;
-    }
+    // 3. The pre-release sandbox gate, then the in-use check's visibility
+    //    (TASK-263), unless nothing can be deleted. The gate first: outside
+    //    a test container a development build names the gate wherever it
+    //    runs, its own PID namespace included.
     if goal.is_some()
         && let Err(gate) = host.may_delete()
     {
@@ -260,6 +259,9 @@ pub fn start<H: Delete>(
                  nothing; ensure --dry-run previews a cycle)"
             ),
         ));
+    }
+    if goal.is_some() && prepared.uses_in_use_scan() {
+        crate::executor::process_visibility(host).map_err(|e| refuse((e.cause, e.message)))?;
     }
     // 4. PATH, reached safely and held. The first sample is not a start
     //    check: a goal whose percentage needs it waits for one that works.

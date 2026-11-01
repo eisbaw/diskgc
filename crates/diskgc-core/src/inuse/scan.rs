@@ -670,7 +670,7 @@ pub(crate) fn gather<H: Host>(
 /// step 5) of a scan whose listings ran after `before` was read: the
 /// `NSpid` of every process of its last listing. The caller confirms the
 /// namespace facts with a read made afterwards
-/// ([`PidTable::confirm_namespace`]): facts that changed between the two
+/// ([`crate::liveness::confirmed_namespace`]): facts that changed between the two
 /// reads (a `/proc` remounted mid-scan) or failed either read are unknown,
 /// so the listings they guard are never taken as complete.
 ///

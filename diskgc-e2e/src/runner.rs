@@ -620,6 +620,36 @@ fn fuse_device(name: &str) -> Vec<String> {
 /// The real Buildah fixture uses pinned executables reached through the
 /// under-test mount. Expose their Nix closure read-only for this one test,
 /// without changing or reloading the multi-gigabyte base image.
+/// The host-wide lock of host-PID-namespace containers: an exclusive
+/// `flock` on `$XDG_RUNTIME_DIR/diskgc-e2e-host-pid.lock` (the user's
+/// runtime directory, shared by every checkout and worktree; created if
+/// missing, never written or removed), held while the container runs.
+fn host_pid_lock() -> Result<File, String> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|d| !d.is_empty())
+        .ok_or(
+            "XDG_RUNTIME_DIR is not set: the host-PID-namespace containers need the user's \
+                runtime directory for their host-wide lock",
+        )?;
+    let path = Path::new(&dir).join("diskgc-e2e-host-pid.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    if rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
+        info!(
+            "waiting for {} (another runner's host-PID-namespace container)",
+            path.display()
+        );
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+            .map_err(|e| format!("flock {}: {e}", path.display()))?;
+    }
+    Ok(file)
+}
+
 /// Whether the container of test `name` shares the host's PID namespace
 /// ([`HOST_PID_NAMESPACE_ARGS`]): a test listed in
 /// [`crate::suite::HOST_PID_NAMESPACE_TESTS`], or every test when the
@@ -866,6 +896,20 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
     if Instant::now() >= deadline {
         return finish(Outcome::NotRun);
     }
+    // Host-PID-namespace containers see every host process, other
+    // runners' containers included: one at a time on the whole host, not
+    // only in this runner (TASK-263 review, mped S1).
+    let _host_pid_lock = if shares_host_pid_namespace(release_under_test(config), &test.name) {
+        match host_pid_lock() {
+            Ok(lock) => Some(lock),
+            Err(e) => {
+                eprintln!("runner: {}: {e}", test.name);
+                return finish(Outcome::Fail(None));
+            }
+        }
+    } else {
+        None
+    };
     let container = container_name(std::process::id(), &test.name);
     #[expect(
         clippy::disallowed_methods,

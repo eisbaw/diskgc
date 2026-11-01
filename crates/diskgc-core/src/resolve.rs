@@ -870,6 +870,13 @@ pub(crate) mod tests {
             unreachable!()
         }
 
+        fn loop_backing_identity(
+            &self,
+            _: crate::host::Dev,
+        ) -> Result<crate::host::LoopIdentity, HostError> {
+            unreachable!()
+        }
+
         fn test_container_pid_namespace(&self) -> bool {
             unreachable!()
         }

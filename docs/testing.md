@@ -437,12 +437,18 @@ How the format reads (the schema documents every key):
   answers to Owner PID's preconditions and the in-use check's visibility
   rule (default: the initial namespace, no `hidepid`);
   `pid_namespace: test_container` is a nested namespace inside a marked
-  test container of a development build, which the visibility rule
-  excepts and Owner PID does not. The top-level `loops:` (`{dev: "7:N",
-  backing: TEXT}`) are configured loop devices no mount shows, listed with
-  the mounts' `loop_backing` by `loop_backing_files`; a backing text that
-  names an object of the tree follows it as the kernel's `d_path` does
-  (renamed: its new path; deleted: the text with ` (deleted)`). A mount's `fs:` name gives `fstatfs` its magic (unknown
+  test container of the e2e harness's build, which the visibility rule
+  excepts and Owner PID does not (refused with `sandbox_gate: closed`).
+  The top-level `loops:` (`{dev: "7:N", backing: TEXT, file: PATH,
+  readable: true}`) are configured loop devices no mount shows, listed
+  with the mounts' `loop_backing` by `loop_backing_files`. `file` is the
+  file the device holds by the name it opened (default: the text; given
+  apart for another namespace's rendering or a decoy mounted over the
+  name); the text follows that opened entry as `d_path` follows its
+  dentry (a rename of it: the new path; unlinking it: the text with
+  ` (deleted)`, other links or not). `readable` (or `own_uid: 0`) lets
+  diskgc open the device, so `loop_backing_identity` reports the held
+  file's identity; otherwise it is unavailable. A mount's `fs:` name gives `fstatfs` its magic (unknown
   names: 0, never on the local list). The top-level `own_uid_map` is diskgc's
   own (same default, `none` too), `own_uid` its user id (default 1000; 0
   models running as root), `own_cap_effective` its effective capability
@@ -2616,8 +2622,14 @@ or reclaims only there (TASK-263; safety.md, In use: Visibility, a process list 
 cannot be complete), so its tests that do are listed too, and the release
 runner (whose under-test directory holds `bin/diskgc-release-default`)
 gives every container the host's PID namespace and runs them one at a
-time. The development build in an ordinary container (its own PID
-namespace) reclaims through the test-container exception of that rule;
+time, on the whole host: each such container holds an exclusive `flock`
+on `$XDG_RUNTIME_DIR/diskgc-e2e-host-pid.lock` while it runs, so other
+runners and worktrees wait too. The development build in an ordinary container (its own PID
+namespace) reclaims through the test-container exception of that rule,
+which only the e2e build has (the bundle's `diskgc` and
+`diskgc-proposed-01`; `diskgc-development` is the development package
+itself, and `development_package_refuses_in_its_own_pid_namespace` shows
+that it refuses there);
 `release_candidate_refuses_in_its_own_pid_namespace` shows that the
 release build has none (a nested namespace, with and without `hidepid`:
 refused at start; from the container's: plans). What that exposes, and how it is

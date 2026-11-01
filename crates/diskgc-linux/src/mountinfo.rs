@@ -73,12 +73,25 @@ fn parse_line(line: &[u8]) -> Result<MountEntry, String> {
     })
 }
 
-/// Whether the procfs mount with id `mount_id` hides processes: its
-/// superblock options name a `hidepid` other than `0` / `off`
-/// (`noaccess`, `invisible`, `ptraceable` and their numbers 1, 2, 4).
-/// A table without that mount, or a line for it that is not procfs, is an
-/// error: Owner PID's precondition is then undecided, never assumed.
-pub fn hidepid_of(text: &[u8], mount_id: u64) -> Result<bool, String> {
+/// What the `hidepid` and `gid` superblock options of a procfs mount say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hidepid {
+    /// `hidepid` absent, `0` or `off`.
+    Off,
+    /// `noaccess` (`1`) or `invisible` (`2`): processes diskgc may not
+    /// ptrace-read are hidden, except from members of `gid`.
+    Hides { gid: Option<u32> },
+    /// `ptraceable` (`4`): hidden from every reader that may not
+    /// ptrace-read them; `gid` is not consulted.
+    Ptraceable,
+}
+
+/// The `hidepid` of the procfs mount with id `mount_id` (its superblock
+/// options). An unknown `hidepid` value counts as hiding. A table without
+/// that mount, or a line for it that is not procfs, is an error: the
+/// in-use check's and Owner PID's precondition is then undecided, never
+/// assumed.
+pub fn hidepid_of(text: &[u8], mount_id: u64) -> Result<Hidepid, String> {
     let mounts = text.split(|b| *b == b'\n').filter(|line| !line.is_empty());
     for line in mounts {
         let entry = parse_line(line)?;
@@ -95,11 +108,35 @@ pub fn hidepid_of(text: &[u8], mount_id: u64) -> Result<bool, String> {
             .position(|f| *f == b"-")
             .map(|p| p + 6)
             .expect("parse_line found the separator");
-        let hidden = fields[sep + 3]
-            .split(|b| *b == b',')
-            .filter_map(|option| option.strip_prefix(b"hidepid="))
-            .any(|value| value != b"0" && value != b"off");
-        return Ok(hidden);
+        let options: Vec<&[u8]> = fields[sep + 3].split(|b| *b == b',').collect();
+        let value = |key: &[u8]| {
+            options
+                .iter()
+                .rev()
+                .find_map(|option| option.strip_prefix(key))
+        };
+        return Ok(match value(b"hidepid=") {
+            None | Some(b"0" | b"off") => Hidepid::Off,
+            Some(b"4" | b"ptraceable") => Hidepid::Ptraceable,
+            Some(b"1" | b"2" | b"noaccess" | b"invisible") => {
+                let gid = match value(b"gid=") {
+                    None => None,
+                    Some(text) => Some(
+                        std::str::from_utf8(text)
+                            .ok()
+                            .and_then(|t| t.parse::<u32>().ok())
+                            .ok_or_else(|| {
+                                format!(
+                                    "mount {mount_id}: gid={} is not a number",
+                                    String::from_utf8_lossy(text)
+                                )
+                            })?,
+                    ),
+                };
+                Hidepid::Hides { gid }
+            }
+            Some(_) => Hidepid::Hides { gid: None },
+        });
     }
     Err(format!("no mount {mount_id} in mountinfo"))
 }
@@ -159,18 +196,26 @@ mod tests {
 26 1 0:25 / /proc5 rw - proc proc rw,hidepid=0
 27 1 0:26 / /proc6 rw - proc proc rw,hidepid=ptraceable
 28 1 254:1 / / rw - ext4 /dev/root rw
+29 1 0:27 / /proc7 rw - proc proc rw,hidepid=4,gid=10
+30 1 0:28 / /proc8 rw - proc proc rw,hidepid=1
+31 1 0:29 / /proc9 rw - proc proc rw,hidepid=7
+32 1 0:30 / /proc10 rw - proc proc rw,hidepid=2,gid=x
 ";
         for (id, hidden) in [
-            (22, false),
-            (23, true),
-            (24, true),
-            (25, false),
-            (26, false),
-            (27, true),
+            (22, Hidepid::Off),
+            (23, Hidepid::Hides { gid: None }),
+            (24, Hidepid::Hides { gid: Some(10) }),
+            (25, Hidepid::Off),
+            (26, Hidepid::Off),
+            (27, Hidepid::Ptraceable),
+            (29, Hidepid::Ptraceable),
+            (30, Hidepid::Hides { gid: None }),
+            (31, Hidepid::Hides { gid: None }),
         ] {
             assert_eq!(hidepid_of(table, id), Ok(hidden), "mount {id}");
         }
         assert!(hidepid_of(table, 28).is_err(), "not proc");
+        assert!(hidepid_of(table, 32).is_err(), "gid not a number");
         assert!(hidepid_of(table, 99).is_err(), "absent");
     }
 

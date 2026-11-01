@@ -1197,99 +1197,135 @@ note can see them:
   with `CAP_SYS_PTRACE` the hidden ones are those an LSM keeps from it,
   which block while listed. `noaccess` (`1`) lists every process but
   refuses its `status`, which blocks every candidate; it is refused
-  alike, for one rule. A `gid=` group whose members see everything is
-  not honoured: diskgc does not read its own groups, and refuses
-  whatever the group.
+  alike, for one rule. Under `noaccess` and `invisible` the kernel shows
+  every process to a member of the mount's `gid=` group (`in_group_p`:
+  the filesystem gid or a supplementary group), so a diskgc in that group
+  (its effective gid or `getgroups`) is not under `hidepid` here; under
+  `ptraceable` the group is not consulted.
 - A PID namespace other than the initial one (a container; systemd's
   `PrivatePIDs=`) shows only its own processes: every process outside
   it, the host's, another container's, the user's own, can use a
   candidate unseen, root or not.
 
-The rule: the in-use check runs only where its process list can be
-complete, the held `/proc` without `hidepid` and diskgc in the initial PID
-namespace. These are the facts of Owner PID's preconditions 3 and 4,
+The rule (pending Mark's confirmation): the in-use check runs only where
+its process list can be complete, the held `/proc` without `hidepid` and
+diskgc in the initial PID namespace. These are the facts of Owner PID's preconditions 3 and 4,
 read the same way through the held `/proc`: `self/ns/pid` is the initial
 namespace's nsfs inode, and the held mount's own `mountinfo` line names no
-`hidepid` other than `off`. Where the rule fails, `ensure` (its dry run
-too: a plan shows what a reclaim would do, and a reclaim would not start)
-and a reclaiming `watch` refuse at start, before anything is measured:
-exit 2, `cause: safety`, naming the rule and where to run instead; facts
-that cannot be read are exit 3 (`host`). `watch --tally-only`, `check`,
-`survey` and `profiles` judge no candidate and are not refused. Every
-scan reads the facts again, before its first listing and after its last
-read: a failed read, a change between the two (a `/proc` remounted with
-`hidepid` under a running `watch`) or a failed rule makes every candidate
-`in_use_unknown`. Decided 2026-11-01 for TASK-263 (implementer's choice,
+`hidepid` other than `off` (or diskgc is in its `gid=` group). Where the
+rule fails and a selected tier relies on the in-use check (the `fs` kind,
+its command actions included, which are rechecked against a scan before
+they start, and `cargo-target`; not the Docker kinds, whose daemon decides
+what is in use), `ensure` (its dry run too: a plan shows what a reclaim
+would do, and a reclaim would not start) and a reclaiming `watch` refuse
+at start, before anything is measured: exit 2, `cause: safety`, naming
+the rule and where to run instead; facts that cannot be read are exit 3
+(`host`). A reclaim asks the [Pre-release sandbox
+gate](#pre-release-sandbox-gate) first, so outside a test container a
+development build names the gate, in its own PID namespace too.
+`watch --tally-only`, `check`, `survey` and `profiles` judge no candidate
+and are not refused. Every scan reads the facts again, before its first
+listing and after its last read, and confirms them once for both this
+rule and Owner PID: a failed read, a change between the two (a `/proc`
+remounted with `hidepid` under a running `watch`) or a failed rule makes
+every candidate `in_use_unknown` (`unknown_cause:
+incomplete_process_list`). Decided 2026-11-01 for TASK-263 (implementer's choice,
 for Mark to confirm): refusing is the simplest sound rule and the loud
 one; the alternative, every candidate `in_use_unknown` without a
 refusal, keeps dry runs informative but makes a run that can never
 reclaim end like one on a busy host (exit 1).
 
-One exception, for tests only: a development build inside a marked test
-container (both markers, the gate's own cached decision, [Pre-release
-sandbox gate](#pre-release-sandbox-gate)) takes its own PID namespace as
-complete for this rule, since the container's files are its own; this is
-how the rootless e2e containers, each in its own PID namespace, reclaim.
+One exception, for tests only: the e2e harness's own build, inside a
+marked test container, assumes its own PID namespace complete for this
+rule; this is how the rootless e2e containers, each in its own PID
+namespace, reclaim. Both conditions hold together: the cargo feature
+`e2e-test-container-pid-namespace` of `diskgc-linux`, which only the
+flake's e2e builds of `diskgc` and the harness's own crate enable (a test,
+`sandbox_flags_are_enabled_only_where_expected`, pins every place that
+names it), and the gate's own cached decision that this is a marked test
+container. The markers alone are not enough: any Podman container has
+`/run/.containerenv` and the image marker's bytes are public, so an
+ordinary development build (the default package, the dev shell's) never
+takes the exception (TASK-263 review, Codex 1), and refuses in a
+container like the release candidate (diskgc-e2e
+`development_package_refuses_in_its_own_pid_namespace`,
+`release_candidate_refuses_in_its_own_pid_namespace`). The feature
+cannot be built with `release-without-sandbox-gate` (a compile error).
 `hidepid` is never excepted, and Owner PID still permits nothing outside
-the initial namespace. The `release-without-sandbox-gate` feature compiles
-the exception out, so the release-candidate build refuses in every
-container (diskgc-e2e `candidate_refuses_in_its_own_pid_namespace`).
+the initial namespace.
 Limits: a container that shares the host's PID namespace (`--pid=host`)
 passes, and sees the host's processes only as far as its user namespace
 lets it (a rootless one sees the user's processes as another user's:
 Visibility above, more capable); a `hidepid` mount made after the last
 scan is the check-to-delete race (limit 5).
 
-**Loop devices** (TASK-169). A configured loop device holds its backing
-file open in the kernel, where no process's fds, maps or directories show
-it: an image set up with `udisksctl loop-setup` or `losetup` (mounted or
-not) and deleted under the device keeps working until the device
-detaches, and then its data is gone. So every scan also lists the
-configured loop devices (`/sys/block/loop<N>`: its `dev` and, while it is
-bound, `loop/backing_file`; read-only) and looks each backing file up by
-the safe lookup every root takes ([Path traversal](#path-traversal): no
-symlink followed, network, FUSE and automount mounts never touched). The
-kernel prints the file's path for diskgc's root and mount namespace
-(`d_path`, which follows renames):
+**Loop devices** (TASK-169; TASK-263 review). A configured loop device
+holds its backing file open in the kernel, where no process's fds, maps or
+directories show it: an image set up with `udisksctl loop-setup` or
+`losetup` (mounted or not) and deleted under the device keeps working
+until the device detaches, and then its data is gone. So every scan also
+lists the configured loop devices (`/sys/block/loop<N>`: its `dev` and,
+while it is bound, `loop/backing_file`; read-only) and judges each:
 
-- the text names an object here: its (device, inode) is a use, matched
-  like a process's open file, so a candidate holding it by any name (a
-  hard link) is `in_use`, its detail naming the device;
-- the text ends in ` (deleted)`: the name the device opened is gone and
-  the file's identity cannot be learned, while another name of it (a
-  hard link) could be in any candidate: every candidate is
-  `in_use_unknown`, naming the device and how to end it (`losetup -d`,
-  `udisksctl loop-delete`), until it is detached. Not narrowed to one
-  filesystem: the device's (device, inode) is in its `LOOP_GET_STATUS64`,
-  which needs the block device opened, root's or the `disk` group's
-  (a follow-up for `--allow-root`). A live file whose name really ends
-  in ` (deleted)` is taken as deleted, the conservative side;
-- the text names nothing the eligibility walk could reach (missing,
-  unsearchable by diskgc's user, a symlink or a network or FUSE mount on
-  the way, not an absolute path: an anonymous file): the walk reaches
-  candidates by the same safe lookups as the same user, so no candidate
-  holds the file by that name. The text is read once more first: a file
-  renamed between the listing and the lookup shows its new name, which is
-  looked up instead (up to three times; a name still changing then
-  blocks every candidate). What stays unreachable is noted in the log,
-  not blocking;
-- anything else (an I/O error, no inode number): every candidate is
-  `in_use_unknown`.
+1. **The device's own word.** diskgc opens `/dev/loop<N>` read-only
+   (checked to be that block device) and asks `LOOP_GET_STATUS64`, whose
+   `lo_device` and `lo_inode` the kernel fills from the held file itself:
+   exact whatever the file's name, a deleted one included. That
+   (device, inode) is a use, matched like an open fd, so a candidate
+   holding the file by any name (a hard link) is `in_use`, its detail
+   naming the device. Only a reader that can open the block device gets
+   it: root (`--allow-root`), or a user in the `disk` group. udisks does
+   not give a user its loop devices: `/dev/loop<N>` stays `root:disk`
+   `0660` (no `chown` of a loop device in udisks 2.11.2; its only
+   ownership change is a filesystem's `TakeOwnership`).
+2. Otherwise only the path the kernel prints (`d_path`) is left, and it
+   proves nothing about identity: a mount made over the file's directory
+   after the device opened it makes a fresh lookup reach another file (a
+   decoy, Codex 3), and a name diskgc cannot look up may have another
+   link inside a candidate (Codex 2). Looked up by the safe lookup every
+   root takes ([Path traversal](#path-traversal): no symlink followed,
+   network, FUSE and automount mounts never touched):
+   - it reaches a file none of the run's owners owns (root's snap images,
+     for a user's run): no candidate can hold that file, since the
+     eligibility walk admits only the owners' entries. Noted, not
+     blocking. Limit: a decoy of another user's mounted over a real file
+     of an owner's hides it; such a mount in diskgc's own mount namespace
+     takes root;
+   - it is not an absolute path (`d_dname`, an object no directory names):
+     noted, not blocking;
+   - it ends in ` (deleted)`: the name the device opened is gone, and
+     another link of the file can only be on the same filesystem, so the
+     candidates on the filesystem of the name's surviving parent directory
+     are `in_use_unknown` (`unknown_cause: loop_device`) and the others
+     are judged; with no surviving parent, every candidate. A live file
+     whose name really ends in ` (deleted)` is taken as deleted. Limit: a
+     mount made over that parent since;
+   - anything else, every candidate is `in_use_unknown`
+     (`unknown_cause: loop_device`), naming the device and how to end it
+     (`losetup -d`, `udisksctl loop-delete`, or run diskgc as a reader
+     that can open it): the name reaches a file of an owner's, which may
+     be a decoy, or it reaches nothing. A name that reaches nothing is
+     read again first, up to three times (`d_path` follows renames, so a
+     rename racing the lookup shows the new name).
 
-A listing that fails, a `dev` that does not parse, or a backing file
-that cannot be read is an error of the run (exit 3 if the goal is not
-met), never a shorter list; a device detached during the listing is left
-out. No configured device costs one directory listing per scan. Limits:
-a device set up in another mount namespace (a privileged container's)
-prints that namespace's path, which can name nothing here, or another
-file, while the real file is in a candidate (not seen); a sysfs masked by
-a container runtime lists no device (diskgc then refuses anyway, being in
-a container); a device set up after the scan is the check-to-delete race
-(limit 5). No rootless container can attach a loop device, so these rules
-are tested in the model only (`inuse_visibility`, the vectors
-`inuse/loop-backing-file-*`, the generated property
+So a user outside the `disk` group whose own image is attached as a loop
+device (the common udisks case) reclaims no `fs` or Cargo candidate until
+the device is detached: loud and fail closed, the cost of a decoy that
+nothing else rules out. A listing that fails, a `dev` that does not parse,
+a backing file or device that cannot be read for another reason (not an
+`EACCES`, `EPERM` or a missing node) is an error of the run (exit 3 if
+the goal is not met), never a shorter list; a device detached during the
+listing is left out. No configured device costs one directory listing per
+scan. Limits: a sysfs masked by a container runtime lists no device
+(diskgc then refuses anyway, being in a container); a device set up after
+the scan is the check-to-delete race (limit 5). No rootless container can
+attach a loop device or open one, so these rules are tested in the model
+(`inuse_visibility`, the vectors `inuse/loop-backing-file-*`, the
+generated property
 `the_in_use_check_never_clears_what_it_cannot_see_or_a_loop_device_holds`)
-and the listing by a read-only test of `LinuxHost` on the development host.
+and the listing and the device query by read-only tests of `LinuxHost` on
+the development host, which can open no loop device (not in `disk`), so
+`LOOP_GET_STATUS64` itself has not run against a bound device.
 
 ### Producer liveness
 
@@ -4026,10 +4062,8 @@ How it holds:
 
 ## Privileges
 
-- `ensure` (its dry run too) and a reclaiming `watch` refuse to start
-  under `hidepid` or outside the initial PID namespace, as root or not
-  (exit 2, `safety`): the in-use check would miss processes there
-  ([In use](#in-use), Visibility: a process list that cannot be complete).
+- Visibility of the process list, checked at start too, root or not:
+  [In use](#in-use), Visibility: a process list that cannot be complete.
 - diskgc refuses to run as root (uid 0) unless `--allow-root` is given;
   the laptop service runs as the owner, CI as the runner user. `profiles
   list` and `show` are exempt: they only read the configuration and

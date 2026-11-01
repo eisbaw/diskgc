@@ -84,7 +84,7 @@ use crate::cargo_target::{self, Discovery, ReclaimEnd, Stop, Tally, Target};
 use crate::command_action::Ready;
 use crate::config::Order;
 use crate::docker_backend::{self, Binding, Bound};
-use crate::engine::{Checkouts, Reason, Rules, Skip};
+use crate::engine::{Checkouts, Reason, Rules, Skip, UnknownCause};
 use crate::fs_kind::{self, Find};
 use crate::host::{
     Cause, CommandExit, CommandInvocation, CommandRun, Delete, Dev, Host, HostError, MonoTime,
@@ -486,6 +486,7 @@ fn skip_entry(
         reason,
         detail,
         process_blockers: None,
+        unknown_cause: None,
         estimated_bytes: None,
     }
 }
@@ -811,11 +812,10 @@ struct Reclaim<'a, 'l, H: Delete> {
     /// Candidates in a row, in the order taken, whose reclaim ended
     /// `in_use_unknown` ([`IN_USE_UNKNOWN_IN_A_ROW_MAX`]).
     in_use_unknown_in_a_row: usize,
-    /// The detail of the latest of them when its cause is not the host's
-    /// load but one that stays ([`crate::inuse::standing_cause`]: a loop
-    /// device, a process list that cannot be complete): the candidates
-    /// skipped unchecked then name it instead of a busy host.
-    in_use_unknown_cause: Option<String>,
+    /// The cause and detail of the latest of them when that cause stays
+    /// ([`UnknownCause::stays`]): the candidates skipped unchecked then
+    /// take it instead of a busy host.
+    in_use_unknown_cause: Option<(UnknownCause, String)>,
     /// The run's index, which the reclaim walk takes its queue from
     /// ([`indexed`]); `None` for a tier that discovers only.
     index: Option<&'a mut TallyState>,
@@ -1124,19 +1124,26 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         if self.in_use_unknown_in_a_row < IN_USE_UNKNOWN_IN_A_ROW_MAX {
             return false;
         }
-        let detail = match &self.in_use_unknown_cause {
-            Some(cause) => format!(
-                "not checked: the {} candidates before it in this tier could not be checked: \
-                 {cause}",
-                self.in_use_unknown_in_a_row
+        let skip = match &self.in_use_unknown_cause {
+            Some((cause, detail)) => Skip::in_use_unknown(
+                candidate.to_owned(),
+                *cause,
+                format!(
+                    "not checked: the {} candidates before it in this tier could not be \
+                     checked: {detail}",
+                    self.in_use_unknown_in_a_row
+                ),
             ),
-            None => format!(
-                "not checked: the host was too busy to check the {} candidates before it in \
-                 this tier; kept, run again when the host is less busy",
-                self.in_use_unknown_in_a_row
+            None => Skip::in_use_unknown(
+                candidate.to_owned(),
+                UnknownCause::Busy,
+                format!(
+                    "not checked: the host was too busy to check the {} candidates before it \
+                     in this tier; kept, run again when the host is less busy",
+                    self.in_use_unknown_in_a_row
+                ),
             ),
         };
-        let skip = Skip::new(Reason::InUseUnknown, candidate.to_owned(), detail);
         self.skip_as(candidate, profile, &skip);
         true
     }
@@ -1181,6 +1188,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             reason: skip.reason,
             detail: Some(skip.detail.clone()),
             process_blockers: skip.process_blockers.clone(),
+            unknown_cause: skip.unknown_cause,
             estimated_bytes,
         });
     }
@@ -1317,6 +1325,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 reason: skip.reason,
                 detail: Some(skip.detail.clone()),
                 process_blockers: skip.process_blockers.clone(),
+                unknown_cause: skip.unknown_cause,
                 estimated_bytes: None,
             });
         }
@@ -2427,9 +2436,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             });
         }
         let in_use_unknown = match &outcome.end {
-            ReclaimEnd::Skipped(skip) if skip.reason == Reason::InUseUnknown => {
-                Some(skip.detail.clone())
-            }
+            ReclaimEnd::Skipped(skip) if skip.reason == Reason::InUseUnknown => Some((
+                skip.unknown_cause.unwrap_or(UnknownCause::Busy),
+                skip.detail.clone(),
+            )),
             _ => None,
         };
         match outcome.end {
@@ -2459,9 +2469,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
         }
         // After the skip's own log line, so the give-up line follows it.
-        if let Some(detail) = in_use_unknown {
+        if let Some((cause, detail)) = in_use_unknown {
             self.in_use_unknown_in_a_row += 1;
-            self.in_use_unknown_cause = crate::inuse::standing_cause(&detail).then_some(detail);
+            self.in_use_unknown_cause = cause.stays().then_some((cause, detail));
             if self.in_use_unknown_in_a_row == IN_USE_UNKNOWN_IN_A_ROW_MAX {
                 let why = match &self.in_use_unknown_cause {
                     Some(_) => "a cause that stays, named in each skip",

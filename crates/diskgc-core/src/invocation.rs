@@ -361,7 +361,14 @@ fn run<H: Delete>(
     progress: &mut dyn FnMut(&str),
 ) -> Result<Report, (ErrorCause, String)> {
     let prepared = prepare(host, loaded, platform)?;
-    executor::process_visibility(host).map_err(|e| (e.cause, e.message))?;
+    // The in-use check's visibility (TASK-263), where a tier relies on that
+    // check. A reclaim asks the pre-release sandbox gate first: where it is
+    // closed the executor names the gate (exit 2), wherever diskgc runs,
+    // its own PID namespace included. A dry run is refused where its
+    // reclaim would be.
+    if prepared.uses_in_use_scan() && (options.dry_run || host.may_delete().is_ok()) {
+        executor::process_visibility(host).map_err(|e| (e.cause, e.message))?;
+    }
     prepared.refuse_missing_roots(host)?;
     let mut index = if options.no_index {
         RunIndex::no_index()
@@ -400,6 +407,20 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    /// Whether a tier relies on diskgc's own in-use check: the `fs` kind
+    /// (its `delete` and its command actions, rechecked against a scan
+    /// before they start) and `cargo-target`. The Docker kinds leave
+    /// liveness to their daemon, and are not refused where the scan
+    /// cannot see every process (docs/safety.md, In use: Visibility).
+    pub fn uses_in_use_scan(&self) -> bool {
+        self.tiers().0.iter().any(|tier| {
+            matches!(
+                tier.source,
+                executor::SourceKind::Fs(_) | executor::SourceKind::CargoTarget
+            )
+        })
+    }
+
     /// The tiers a run takes, in policy order, with their own timeouts
     /// (zero: none).
     pub fn tiers(&self) -> (Vec<&Tier>, Vec<Duration>) {

@@ -41,17 +41,17 @@ use std::time::{Duration, Instant};
 use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, Dev, DevIno,
     DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, Host, HostError,
-    LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MakeUserLock, MapEntry,
-    MonoTime, MountEntry, OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace, Pressure, ProcError,
-    ProcFd, ProcLink, ProcStatus, ProcView, SecondSignal, Space, Stat, StateFile, StateLock,
-    StateWritten, Timestamp, TryLock, UidMap, Unlink, UserLock, UserLockError, WaitLock,
+    LinkTarget, LockMode, Locked, LoopIdentity, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MakeUserLock,
+    MapEntry, MonoTime, MountEntry, OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace, Pressure,
+    ProcError, ProcFd, ProcLink, ProcStatus, ProcView, SecondSignal, Space, Stat, StateFile,
+    StateLock, StateWritten, Timestamp, TryLock, UidMap, Unlink, UserLock, UserLockError, WaitLock,
     is_single_name, read_proc_view,
 };
 use diskgc_core::report::Signal;
 use rustix::event::PollFlags;
 use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, PROC_SUPER_MAGIC, ResolveFlags};
 
-use crate::mountinfo::{hidepid_of, parse_mountinfo};
+use crate::mountinfo::{Hidepid, hidepid_of, parse_mountinfo};
 use crate::procfs::{
     StatusFields, list_in_one_call, parse_maps, parse_nspid, parse_nspid_levels, parse_status,
     parse_status_ids, read_confirmed, read_in_one_call, read_two_passes,
@@ -845,6 +845,53 @@ fn check_pidfd_open(opened: Result<(), Errno>) -> Result<(), HostError> {
             ),
         )
     })
+}
+
+/// `LOOP_GET_STATUS64` (include/uapi/linux/loop.h): a plain number, not
+/// an `_IOR` code, taking a `struct loop_info64 *`.
+const LOOP_GET_STATUS64: rustix::ioctl::Opcode = 0x4C05;
+
+/// `struct loop_info64` (include/uapi/linux/loop.h), 232 bytes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LoopInfo64 {
+    lo_device: u64,
+    lo_inode: u64,
+    lo_rdevice: u64,
+    lo_offset: u64,
+    lo_sizelimit: u64,
+    lo_number: u32,
+    lo_encrypt_type: u32,
+    lo_encrypt_key_size: u32,
+    lo_flags: u32,
+    lo_file_name: [u8; 64],
+    lo_crypt_name: [u8; 64],
+    lo_encrypt_key: [u8; 32],
+    lo_init: [u64; 2],
+}
+
+const _: () = assert!(std::mem::size_of::<LoopInfo64>() == 232);
+
+/// A device number as `huge_encode_dev` (`new_encode_dev`) gives it to
+/// userspace: minor bits 0-7, major bits 8-19, minor bits 8-19 at 20-31.
+fn decode_huge_dev(encoded: u64) -> Dev {
+    let low = encoded & 0xffff_ffff;
+    Dev {
+        major: u32::try_from((low >> 8) & 0xfff).expect("12 bits"),
+        minor: u32::try_from((low & 0xff) | ((low >> 12) & 0xfff00)).expect("20 bits"),
+    }
+}
+
+/// Whether diskgc is a member of group `gid` as the kernel's `in_group_p`
+/// asks it: its filesystem gid (its effective gid: diskgc never changes
+/// its filesystem ids) or one of its supplementary groups.
+fn in_group(gid: u32) -> Result<bool, HostError> {
+    if rustix::process::getegid().as_raw() == gid {
+        return Ok(true);
+    }
+    let groups = rustix::process::getgroups()
+        .map_err(|e| HostError::errno("getgroups", "diskgc", errno_of(e)))?;
+    Ok(groups.iter().any(|g| g.as_raw() == gid))
 }
 
 /// A sysfs `dev` file: `MAJOR:MINOR` and a newline.
@@ -2324,8 +2371,18 @@ impl Host for LinuxHost {
             ));
         }
         let table = proc.read("self/mountinfo")?;
-        let hidepid = hidepid_of(&table, held.stx_mnt_id)
+        let hidden = hidepid_of(&table, held.stx_mnt_id)
             .map_err(|why| HostError::invalid("parse", ProcRoot::shown("self/mountinfo"), why))?;
+        // The kernel shows every process to a member of the mount's `gid=`
+        // group under `noaccess` and `invisible` (`in_group_p`: the
+        // filesystem gid or a supplementary group), never under
+        // `ptraceable` (fs/proc/base.c, `has_pid_permissions`).
+        let hidepid = match hidden {
+            Hidepid::Off => false,
+            Hidepid::Ptraceable => true,
+            Hidepid::Hides { gid: Some(gid) } => !in_group(gid)?,
+            Hidepid::Hides { gid: None } => true,
+        };
         Ok(PidNamespace { initial, hidepid })
     }
 
@@ -2618,6 +2675,94 @@ impl Host for LinuxHost {
         }
         found.sort();
         Ok(found)
+    }
+
+    /// `/sys/dev/block/MAJ:MIN` names the device's node (`loop<N>`);
+    /// `/dev/loop<N>` is opened read-only (no write, no `O_EXCL`, no
+    /// controlling terminal, not following a symlink), `fstat`ed to be
+    /// that block device, and asked `LOOP_GET_STATUS64`, whose `lo_device`
+    /// and `lo_inode` the kernel fills from the held file's own attributes
+    /// (drivers/block/loop.c, `loop_get_status`; no capability is checked
+    /// beyond the open). The ioctl writes only into diskgc's buffer.
+    fn loop_backing_identity(&self, dev: Dev) -> Result<LoopIdentity, HostError> {
+        let link = format!("/sys/dev/block/{dev}");
+        let target = match std::fs::read_link(&link) {
+            Ok(target) => target,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoopIdentity::Detached);
+            }
+            Err(e) => return Err(io_error("readlink", &link, &e)),
+        };
+        let name = target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| {
+                n.strip_prefix("loop")
+                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+            })
+            .ok_or_else(|| {
+                HostError::invalid(
+                    "readlink",
+                    &link,
+                    format!("not a loop device: {}", target.display()),
+                )
+            })?;
+        let node = format!("/dev/{name}");
+        let fd = match rustix::fs::open(
+            &node,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::NOCTTY,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(
+                e @ (rustix::io::Errno::ACCESS
+                | rustix::io::Errno::PERM
+                | rustix::io::Errno::NOENT
+                | rustix::io::Errno::LOOP
+                | rustix::io::Errno::NODEV
+                | rustix::io::Errno::NXIO),
+            ) => {
+                return Ok(LoopIdentity::Unavailable(format!(
+                    "open {node}: {}",
+                    errno_of(e)
+                )));
+            }
+            Err(e) => return Err(HostError::errno("open", &node, errno_of(e))),
+        };
+        let st =
+            rustix::fs::fstat(&fd).map_err(|e| HostError::errno("fstat", &node, errno_of(e)))?;
+        let rdev = Dev {
+            major: rustix::fs::major(st.st_rdev),
+            minor: rustix::fs::minor(st.st_rdev),
+        };
+        if rustix::fs::FileType::from_raw_mode(st.st_mode) != rustix::fs::FileType::BlockDevice
+            || rdev != dev
+        {
+            return Ok(LoopIdentity::Unavailable(format!(
+                "{node} is not block device {dev}"
+            )));
+        }
+        // SAFETY: LOOP_GET_STATUS64 (0x4C05) fills exactly one
+        // `struct loop_info64` through its pointer argument; `LoopInfo64`
+        // is that struct's layout (include/uapi/linux/loop.h).
+        let info = unsafe {
+            rustix::ioctl::ioctl(
+                &fd,
+                rustix::ioctl::Getter::<LOOP_GET_STATUS64, LoopInfo64>::new(),
+            )
+        };
+        match info {
+            Ok(info) => Ok(LoopIdentity::Known(DevIno {
+                dev: decode_huge_dev(info.lo_device),
+                ino: info.lo_inode,
+            })),
+            Err(rustix::io::Errno::NXIO) => Ok(LoopIdentity::Detached),
+            Err(e) => Err(HostError::errno(
+                "ioctl LOOP_GET_STATUS64",
+                &node,
+                errno_of(e),
+            )),
+        }
     }
 
     fn boot_id(&self) -> Result<String, HostError> {

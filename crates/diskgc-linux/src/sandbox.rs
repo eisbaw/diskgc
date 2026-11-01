@@ -193,22 +193,46 @@ pub fn status() -> Result<(), &'static str> {
     }
 }
 
-/// Whether the in-use scan takes this process's own PID namespace as
-/// holding every process that can use a candidate (docs/safety.md, In use:
-/// Visibility): exactly where the gate lets a development build delete,
-/// inside a marked test container ([`status`], the same cached decision).
-/// The container's files are its own, and a process outside it that uses
-/// them is not part of any test. A release build answers `false`.
-#[cfg(not(feature = "release-without-sandbox-gate"))]
+/// Whether the in-use scan assumes, for tests, that this process's own PID
+/// namespace holds every process that can use a candidate (docs/safety.md,
+/// In use: Visibility). Only a build with the cargo feature
+/// [`E2E_PID_NAMESPACE_FEATURE`] can answer `true`, and only where the
+/// gate lets it delete, inside a marked test container ([`status`], the
+/// same cached decision). That feature is enabled for the e2e harness's
+/// builds alone (`sandbox_flags_are_enabled_only_where_expected`): the
+/// markers alone are forgeable (any Podman container has
+/// `/run/.containerenv`, and the image marker's bytes are public), so an
+/// ordinary development build must never trust them for this (TASK-263
+/// review, Codex 1). Every other build answers `false`.
+#[cfg(all(
+    feature = "e2e-test-container-pid-namespace",
+    not(feature = "release-without-sandbox-gate")
+))]
 pub fn test_container_pid_namespace() -> bool {
     status().is_ok()
 }
 
-/// A release build: no PID namespace but the initial one is complete.
-#[cfg(feature = "release-without-sandbox-gate")]
+/// Every build but the e2e harness's: no PID namespace but the initial one
+/// is complete.
+#[cfg(not(all(
+    feature = "e2e-test-container-pid-namespace",
+    not(feature = "release-without-sandbox-gate")
+)))]
 pub fn test_container_pid_namespace() -> bool {
     false
 }
+
+/// The cargo feature of [`test_container_pid_namespace`].
+pub const E2E_PID_NAMESPACE_FEATURE: &str = "e2e-test-container-pid-namespace";
+
+#[cfg(all(
+    feature = "e2e-test-container-pid-namespace",
+    feature = "release-without-sandbox-gate"
+))]
+compile_error!(
+    "diskgc-linux/e2e-test-container-pid-namespace is for the e2e harness's gated builds; \
+     a release build (release-without-sandbox-gate) must not have it"
+);
 
 /// A release build (0.1 onwards): the gate is compiled out and every call is
 /// permitted. Only the release package enables this feature.
@@ -352,6 +376,135 @@ mod tests {
             }
         }
         found
+    }
+
+    /// TASK-263 review (Codex 1): the e2e harness's PID-namespace
+    /// assumption ([`test_container_pid_namespace`]) is a cargo feature
+    /// defined once in diskgc-linux's manifest, not a default feature, and
+    /// named only by the flake's two e2e builds of diskgc and by
+    /// diskgc-e2e's manifest (its test driver); never beside the release
+    /// feature (a compile error too). The development package, the dev
+    /// shell's build, the workspace tests and the release candidate are
+    /// built without it. As for the release flag, flake.nix, the justfile
+    /// and diskgc-e2e's manifest are scanned in a git checkout only.
+    #[test]
+    // The constant is the point: it is what the build configuration decided.
+    #[allow(clippy::assertions_on_constants)]
+    fn sandbox_flags_are_enabled_only_where_expected() {
+        let flag = E2E_PID_NAMESPACE_FEATURE;
+        let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = crate_dir.join("../..");
+        let checkout = repo.join(".git").exists();
+        let manifest = std::fs::read_to_string(crate_dir.join("Cargo.toml")).expect("manifest");
+        let naming: Vec<&str> = manifest
+            .lines()
+            .filter(|l| l.contains(flag) && !l.trim_start().starts_with('#'))
+            .collect();
+        assert_eq!(
+            naming,
+            [format!("{flag} = []").as_str()],
+            "diskgc-linux/Cargo.toml must define the e2e flag once and enable it nowhere"
+        );
+        assert!(
+            !cfg!(feature = "e2e-test-container-pid-namespace"),
+            "the workspace tests must be built without the e2e flag"
+        );
+        let mut scanned = vec![PathBuf::from("Cargo.toml")];
+        for entry in std::fs::read_dir(repo.join("crates")).expect("list crates") {
+            let manifest = entry.expect("crate entry").path().join("Cargo.toml");
+            let rel = manifest.strip_prefix(&repo).expect("below repo").to_owned();
+            if manifest.exists() && rel != Path::new("crates/diskgc-linux/Cargo.toml") {
+                scanned.push(rel);
+            }
+        }
+        for rel in ["diskgc-e2e/Cargo.toml", "flake.nix", "justfile"] {
+            if repo.join(rel).exists() {
+                scanned.push(rel.into());
+            } else {
+                assert!(!checkout, "{rel} missing from the git checkout");
+            }
+        }
+        scanned.extend(cargo_configs_under(&repo));
+        let mut found = Vec::new();
+        for rel in &scanned {
+            let text = std::fs::read_to_string(repo.join(rel))
+                .unwrap_or_else(|e| panic!("read {}: {e}", rel.display()));
+            for (n, line) in text.lines().enumerate() {
+                if line.contains(flag) && !line.trim_start().starts_with('#') {
+                    found.push((rel.clone(), n + 1, line.trim().to_owned()));
+                }
+            }
+        }
+        let allowed = [
+            (
+                "flake.nix",
+                "cargoExtraArgs = \"--locked --package diskgc --features diskgc-linux/e2e-test-container-pid-namespace\";",
+            ),
+            (
+                "flake.nix",
+                "cargoExtraArgs = \"--locked --package diskgc --features proposed-release-01-catalog,diskgc-linux/e2e-test-container-pid-namespace\";",
+            ),
+            (
+                "diskgc-e2e/Cargo.toml",
+                "diskgc-linux = { path = \"../crates/diskgc-linux\", features = [\"e2e-test-container-pid-namespace\"] }",
+            ),
+        ];
+        let unexpected: Vec<_> = found
+            .iter()
+            .filter(|(rel, _, line)| {
+                !allowed
+                    .iter()
+                    .any(|(file, text)| rel == Path::new(file) && line == text)
+                    || line.contains(RELEASE_FLAG)
+            })
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "the e2e PID-namespace flag has an unexpected enabler: {unexpected:?}"
+        );
+        if checkout {
+            assert_eq!(
+                found.len(),
+                allowed.len(),
+                "an expected e2e enabler vanished: {found:?}"
+            );
+            let flake = std::fs::read_to_string(repo.join("flake.nix")).expect("flake");
+            let e2e_build = flake
+                .split_once("diskgcE2eBuilds = mkDiskgc {")
+                .expect("the e2e build")
+                .1
+                .split_once("      };")
+                .expect("its end")
+                .0;
+            assert!(
+                e2e_build.contains(allowed[0].1),
+                "the e2e build lost its flag"
+            );
+            let proposed = flake
+                .split_once("diskgcProposed01 = craneLib.buildPackage (")
+                .expect("the proposed-catalog e2e build")
+                .1
+                .split_once("      );")
+                .expect("its end")
+                .0;
+            assert!(
+                proposed.contains(allowed[1].1),
+                "the proposed build lost its flag"
+            );
+            let under_test = flake
+                .split_once("e2eUnderTest = pkgs.runCommand")
+                .expect("the e2e under-test bundle")
+                .1
+                .split_once("      '';")
+                .expect("its end")
+                .0;
+            assert!(
+                under_test.contains("cp ${lib.getExe diskgcE2eBuilds.tested} $out/bin/diskgc\n")
+                    && under_test
+                        .contains("cp ${lib.getExe diskgcTested} $out/bin/diskgc-development"),
+                "the e2e bundle must run the e2e build as diskgc and keep the development package"
+            );
+        }
     }
 
     /// AC #3 of task-50, the compiled half: this test build (`just check`,

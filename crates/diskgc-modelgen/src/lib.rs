@@ -319,7 +319,8 @@ pub fn visibility() -> impl Strategy<Value = (PidNamespaceSpec, bool)> {
 /// (docs/safety.md, In use: Loop devices), each backed by one of `files`
 /// (a generated tree's), by [`EXE`] (outside the tree), by a path that
 /// names nothing here (another mount namespace's), or by a file since
-/// deleted (` (deleted)`).
+/// deleted (` (deleted)`); each one diskgc can or cannot open for
+/// `LOOP_GET_STATUS64`.
 pub fn loop_devices(files: Vec<PathBuf>) -> impl Strategy<Value = Vec<LoopSpec>> {
     let mut texts: Vec<BoxedStrategy<PathBuf>> = vec![
         Just(PathBuf::from(EXE)).boxed(),
@@ -330,16 +331,18 @@ pub fn loop_devices(files: Vec<PathBuf>) -> impl Strategy<Value = Vec<LoopSpec>>
         texts.push(select(files).boxed());
     }
     let backing = proptest::strategy::Union::new(texts);
-    proptest::collection::vec(backing, 0..=2).prop_map(|backings| {
+    proptest::collection::vec((backing, any::<bool>()), 0..=2).prop_map(|backings| {
         backings
             .into_iter()
             .enumerate()
-            .map(|(minor, backing)| LoopSpec {
+            .map(|(minor, (backing, readable))| LoopSpec {
                 dev: DevSpec(Dev {
                     major: 7,
                     minor: minor as u32,
                 }),
                 backing,
+                file: None,
+                readable,
             })
             .collect()
     })

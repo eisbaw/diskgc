@@ -13,7 +13,7 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::{dir, host};
-use diskgc_core::engine::{Candidate, Reason, Rules, Skip, walk};
+use diskgc_core::engine::{Candidate, Reason, Rules, Skip, UnknownCause, walk};
 use diskgc_core::host::Host;
 use diskgc_core::inuse::{self, Options, Scan, ScanError};
 use diskgc_model::ModelHost;
@@ -130,7 +130,7 @@ fn facts_unread_before_or_after_the_listings_clear_nothing() {
         assert_eq!(skip.reason, Reason::InUseUnknown, "read {nth}: {skip}");
         assert!(
             skip.detail.starts_with(
-                "PID namespace unreadable, so the in-use check cannot see every process"
+                "the PID namespace facts are unknown, so the in-use check cannot see every process"
             ),
             "read {nth}: {skip}"
         );
@@ -154,33 +154,63 @@ fn out_of_descriptors_reading_the_facts_is_a_run_error() {
 
 // ---- Loop devices (TASK-169) ----
 
-/// A loop device backed by a file of the candidate keeps it (`in_use`),
-/// whichever name the candidate holds it by: the device holds the file
-/// open in the kernel, where no process shows it. One backed by a file
-/// elsewhere leaves the candidate clear.
+/// Walks and checks the candidate `path` below `parent` against a fresh
+/// scan.
+fn check_at(host: &ModelHost, parent: &str, path: &str) -> Result<(), Skip> {
+    let parent = dir(host, parent);
+    let path = PathBuf::from(path);
+    let candidate = Candidate::new(&parent, &path).expect("a name");
+    let record = walk(host, &candidate, &Rules::new(&[ME]), None).expect("walk");
+    let scan = inuse::scan(host, &options(), None).expect("scan");
+    scan.check(&candidate, &record)
+}
+
+fn loop_unknown(result: Result<(), Skip>, what: &str) -> Skip {
+    let skip = result.expect_err(what);
+    assert_eq!(skip.reason, Reason::InUseUnknown, "{what}: {skip}");
+    assert_eq!(
+        skip.unknown_cause,
+        Some(UnknownCause::LoopDevice),
+        "{what}: {skip}"
+    );
+    skip
+}
+
+/// The device's own word decides when diskgc can open it
+/// (`LOOP_GET_STATUS64`: `readable`, or root): a file of the candidate
+/// keeps it (`in_use`), by whichever name the candidate holds it (a hard
+/// link); one elsewhere leaves it clear. When diskgc cannot open the
+/// device, the name proves nothing and an owner's file it reaches could be
+/// a decoy: every candidate is `in_use_unknown` (cause `loop_device`).
 #[test]
 fn a_loop_device_backed_by_a_file_of_the_candidate_keeps_it() {
-    for (top, tree, at) in [
+    for (top, tree, verdict) in [
         (
-            "loops:\n  - {dev: \"7:0\", backing: /tmp/c/disk.img}",
+            "loops:\n  - {dev: \"7:0\", backing: /tmp/c/disk.img, readable: true}",
             "",
             Some("/tmp/c/disk.img"),
         ),
         // A hard link: the device names the file by the other name.
         (
-            "loops:\n  - {dev: \"7:0\", backing: /tmp/disk-link.img}",
+            "loops:\n  - {dev: \"7:0\", backing: /tmp/disk-link.img, readable: true}",
             "  /tmp/disk-link.img: {link: /tmp/c/disk.img}",
             Some("/tmp/c/disk.img"),
         ),
         (
-            "loops:\n  - {dev: \"7:0\", backing: /srv/other.img}",
+            "loops:\n  - {dev: \"7:0\", backing: /srv/other.img, readable: true}",
             "",
             None,
+        ),
+        // As root diskgc opens every device.
+        (
+            "own_uid: 0\nloops:\n  - {dev: \"7:0\", backing: /tmp/c/disk.img}",
+            "",
+            Some("/tmp/c/disk.img"),
         ),
     ] {
         let host = model(top, tree);
         let (result, _) = check_c(&host);
-        match at {
+        match verdict {
             Some(at) => {
                 let skip = result.expect_err(top);
                 assert_eq!(skip.reason, Reason::InUse, "{top:?}: {skip}");
@@ -189,100 +219,201 @@ fn a_loop_device_backed_by_a_file_of_the_candidate_keeps_it() {
                     skip.detail.starts_with("loop device 7:0 is backed by it"),
                     "{top:?}: {skip}"
                 );
-                assert!(
-                    skip.process_blockers.as_ref().is_none_or(Vec::is_empty),
-                    "{top:?}: {skip}"
-                );
             }
             None => assert_eq!(result, Ok(()), "{top:?}"),
         }
     }
+    for backing in ["/tmp/c/disk.img", "/srv/other.img"] {
+        let host = model(
+            &format!("loops:\n  - {{dev: \"7:0\", backing: {backing}}}"),
+            "",
+        );
+        let skip = loop_unknown(check_c(&host).0, backing);
+        assert!(
+            skip.detail
+                .starts_with(&format!("loop device 7:0 is backed by {backing}"))
+                && skip.detail.contains("losetup -d"),
+            "{skip}"
+        );
+    }
 }
 
-/// A mount on a loop device whose image is in the candidate keeps it too:
-/// the listing covers mounted and unmounted devices alike.
+/// Codex 2 (TASK-263 review): the device opened `/tmp/private/image`, a
+/// name diskgc cannot look up (`EACCES`), while a hard link of the same
+/// file lies in the candidate. Logging and clearing would delete the
+/// device's file. Unopenable: `in_use_unknown`; openable: `in_use`.
 #[test]
-fn a_mounted_loop_image_in_the_candidate_keeps_it() {
+fn an_unreachable_backing_name_with_a_link_in_the_candidate_keeps_it() {
+    let tree = "  /tmp/private/image: {size: 1M}\n  /tmp/c/image-link: {link: /tmp/private/image}";
+    let unreachable =
+        "events:\n  - {at: {op: openat2, path: /tmp/private/image, when: before}, fail: EACCES}";
+    let host = model(
+        &format!("loops:\n  - {{dev: \"7:0\", backing: /tmp/private/image}}\n{unreachable}"),
+        tree,
+    );
+    let skip = loop_unknown(check_c(&host).0, "unreachable");
+    assert!(skip.detail.contains("reaches nothing here"), "{skip}");
+    let host = model(
+        "loops:\n  - {dev: \"7:0\", backing: /tmp/private/image, readable: true}",
+        tree,
+    );
+    let skip = check_c(&host).0.expect_err("in use");
+    assert_eq!(skip.reason, Reason::InUse, "{skip}");
+    assert_eq!(skip.path, Path::new("/tmp/c/image-link"), "{skip}");
+}
+
+/// Codex 3 (TASK-263 review): `/tmp/src` is bound at `/alias`, the device
+/// opened `/tmp/src/c/image`, and a decoy directory was mounted over
+/// `/tmp/src` since, holding another `c/image`. The name now reaches the
+/// decoy while the real file lies in the candidate `/alias/c`. Unopenable:
+/// both candidates `in_use_unknown`; openable: the real one `in_use`, the
+/// decoy's clear.
+#[test]
+fn a_decoy_mounted_over_the_backing_name_does_not_clear_the_real_file() {
+    let decoy = |readable: bool| {
+        yaml(
+            &format!(
+                "loops:\n  - {{dev: \"7:0\", backing: /tmp/src/c/image, file: /alias/c/image, readable: {readable}}}"
+            ),
+            "  /alias/c/image: {size: 1M}\n  /tmp/src/c/image: {size: 1M}",
+        )
+        .replacen(
+            "  - {id: 30, at: /tmp, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1}\n",
+            "  - {id: 30, at: /tmp, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1}\n  - {id: 31, at: /alias, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1, bind_of: 30, bind_root: /src}\n  - {id: 32, at: /tmp/src, fs: tmpfs, dev: \"0:43\", size: 1G, parent: 30}\n",
+            1,
+        )
+    };
+    let text = decoy(false);
+    let host = host(&text);
+    let skip = loop_unknown(check_at(&host, "/alias", "/alias/c"), "real, unopenable");
+    assert!(
+        skip.detail
+            .contains("its name reaches a file the run's owners hold"),
+        "the decoy, not a failed lookup: {skip}"
+    );
+    let host = common::host(&text);
+    loop_unknown(
+        check_at(&host, "/tmp/src", "/tmp/src/c"),
+        "decoy, unopenable",
+    );
+    let host = common::host(&decoy(true));
+    let skip = check_at(&host, "/alias", "/alias/c").expect_err("real file");
+    assert_eq!(skip.reason, Reason::InUse, "{skip}");
+    assert_eq!(skip.path, Path::new("/alias/c/image"), "{skip}");
+    let host = common::host(&decoy(true));
+    assert_eq!(check_at(&host, "/tmp/src", "/tmp/src/c"), Ok(()));
+}
+
+/// A device diskgc cannot open (root's snap images) whose name reaches a
+/// file no owner of the run holds keeps nothing: the walk admits only the
+/// owners' entries, so no candidate can hold that file. Noted.
+#[test]
+fn a_loop_on_another_users_file_does_not_block_the_run() {
+    let host = model(
+        "loops:\n  - {dev: \"7:0\", backing: /var/lib/snapd/snaps/core_1.snap}",
+        "  /var/lib/snapd/snaps/core_1.snap: {size: 1M, uid: 0}",
+    );
+    let (result, scan) = check_c(&host);
+    assert_eq!(result, Ok(()));
+    assert!(
+        scan.notes()
+            .iter()
+            .any(|note| note.starts_with("loop device 7:0")
+                && note.contains("uid 0, which no candidate of this run may hold")),
+        "{:?}",
+        scan.notes()
+    );
+}
+
+/// A device diskgc cannot open whose name was deleted: another link of the
+/// file can only be on the filesystem of the name's surviving directory,
+/// so candidates there are `in_use_unknown` and others are clear (mped
+/// option b). With no surviving directory, every candidate.
+#[test]
+fn a_deleted_backing_name_blocks_only_its_filesystem() {
+    let tree = "  /srv/c/f: {size: 1K}\n  /tmp/old: {.: {}}";
+    let host = model(
+        "loops:\n  - {dev: \"7:1\", backing: \"/tmp/old/x.img (deleted)\"}",
+        tree,
+    );
+    let skip = loop_unknown(check_c(&host).0, "same filesystem");
+    assert!(
+        skip.detail
+            .contains("loop device 7:1 is backed by /tmp/old/x.img (deleted)")
+            && skip.detail.contains("the filesystem of /tmp/old"),
+        "{skip}"
+    );
+    let host = model(
+        "loops:\n  - {dev: \"7:1\", backing: \"/tmp/old/x.img (deleted)\"}",
+        tree,
+    );
+    assert_eq!(
+        check_at(&host, "/srv", "/srv/c"),
+        Ok(()),
+        "another filesystem"
+    );
+    for top in [
+        "loops:\n  - {dev: \"7:1\", backing: \"/tmp/gone/x.img (deleted)\"}",
+        "loops:\n  - {dev: \"7:1\", backing: \"x.img (deleted)\"}",
+    ] {
+        let host = model(top, tree);
+        loop_unknown(check_at(&host, "/srv", "/srv/c"), top);
+    }
+}
+
+/// A mount on a loop device is listed too; diskgc cannot open it, and its
+/// image is an owner's file: every candidate `in_use_unknown`.
+#[test]
+fn a_mounted_loop_image_is_listed() {
     let text = yaml("", "").replacen(
         "  - {id: 30,",
         "  - {id: 31, at: /mnt/img, fs: ext4, dev: \"7:3\", size: 1G, parent: 1, loop_backing: /tmp/c/disk.img}\n  - {id: 30,",
         1,
     );
     let host = host(&text);
-    let skip = check_c(&host).0.expect_err("in use");
-    assert_eq!(skip.reason, Reason::InUse, "{skip}");
+    let skip = loop_unknown(check_c(&host).0, "mounted");
     assert!(skip.detail.starts_with("loop device 7:3"), "{skip}");
 }
 
-/// A backing file whose name was deleted cannot be identified, and another
-/// name of it (a hard link) could be in any candidate: every candidate is
-/// `in_use_unknown`, naming the device and how to end it.
+/// mped S4: the model's text follows the entry the device opened, as
+/// `d_path` follows its dentry: a rename of it shows the new path;
+/// unlinking it shows ` (deleted)` even while another link remains.
 #[test]
-fn a_deleted_backing_file_blocks_every_candidate() {
-    let host = model(
-        "loops:\n  - {dev: \"7:1\", backing: \"/var/tmp/old.img (deleted)\"}",
-        "",
-    );
-    let (result, scan) = check_c(&host);
-    let skip = result.expect_err("unknown");
-    assert_eq!(skip.reason, Reason::InUseUnknown, "{skip}");
-    assert!(
-        skip.detail.starts_with(inuse::loops::LOOP_UNKNOWN)
-            && skip.detail.contains("loop device 7:1")
-            && skip.detail.contains("losetup -d"),
-        "{skip}"
-    );
-    assert!(scan.blocked().is_some());
-}
-
-/// The kernel's text follows the file: deleted under a live device it
-/// reads ` (deleted)` (here diskgc's own earlier deletion is modelled by an
-/// event), renamed it reads the new name, which the scan looks up again.
-#[test]
-fn the_backing_text_follows_renames_and_deletions() {
-    // Renamed between the listing and the lookup: the listed name names
-    // nothing, and the re-read finds the new one.
+fn the_backing_text_follows_the_opened_name() {
+    let dev = diskgc_core::host::Dev { major: 7, minor: 0 };
+    let read = |host: &ModelHost| host.loop_backing_file(dev).expect("read").expect("bound");
     let host = model(
         "loops:\n  - {dev: \"7:0\", backing: /tmp/c/disk.img}\nevents:\n  - {at: {op: loop_backing_files, when: after}, rename: {from: /tmp/c/disk.img, to: /tmp/c/sub/disk.img}}",
-        "",
+        "  /tmp/c/other-link.img: {link: /tmp/c/disk.img}",
     );
-    let skip = check_c(&host).0.expect_err("in use");
-    assert_eq!(skip.reason, Reason::InUse, "{skip}");
-    // The walk, made before the rename, names the object.
-    assert_eq!(skip.path, Path::new("/tmp/c/disk.img"), "{skip}");
-    assert_eq!(host.trace_count(Op::LoopBackingFile), 1, "one re-read");
-    // Deleted (its only name): ` (deleted)`.
+    host.loop_backing_files().expect("listing");
+    assert_eq!(read(&host), Path::new("/tmp/c/sub/disk.img"));
     let host = model(
-        "loops:\n  - {dev: \"7:0\", backing: /srv/other.img}\nevents:\n  - {at: {op: loop_backing_files, when: before}, remove: /srv/other.img}",
-        "",
+        "loops:\n  - {dev: \"7:0\", backing: /tmp/c/disk.img}\nevents:\n  - {at: {op: loop_backing_files, when: after}, remove: /tmp/c/disk.img}",
+        "  /tmp/c/other-link.img: {link: /tmp/c/disk.img}",
     );
-    let skip = check_c(&host).0.expect_err("unknown");
-    assert_eq!(skip.reason, Reason::InUseUnknown, "{skip}");
-    assert!(skip.detail.contains("/srv/other.img (deleted)"), "{skip}");
+    host.loop_backing_files().expect("listing");
+    assert_eq!(read(&host), Path::new("/tmp/c/disk.img (deleted)"));
 }
 
-/// A text that names nothing the walk could reach (another mount
-/// namespace's path, an anonymous file) and stays the same on a second
-/// read is noted, not blocking: no candidate holds the file by that name.
+/// A name that reaches nothing is read again: a root-owned image renamed
+/// between the listing and the lookup is found under its new name and,
+/// no owner's file, blocks nothing. Without the re-read it would block
+/// every candidate.
 #[test]
-fn a_backing_file_named_nowhere_here_is_noted() {
-    for backing in ["/var/lib/containers/disk.img", "anon_inode:[loop]"] {
-        let host = model(
-            &format!("loops:\n  - {{dev: \"7:2\", backing: \"{backing}\"}}"),
-            "",
-        );
-        let (result, scan) = check_c(&host);
-        assert_eq!(result, Ok(()), "{backing}");
-        assert!(
-            scan.notes()
-                .iter()
-                .any(|note| note.starts_with("loop device 7:2")
-                    && note.contains(backing)
-                    && note.contains("another mount namespace")),
-            "{backing}: {:?}",
-            scan.notes()
-        );
-    }
+fn a_backing_name_is_read_again_before_it_blocks() {
+    let host = model(
+        "loops:\n  - {dev: \"7:0\", backing: /var/img/a.img}\nevents:\n  - {at: {op: loop_backing_files, when: after}, rename: {from: /var/img/a.img, to: /var/img/b.img}}",
+        "  /var/img/a.img: {size: 1M, uid: 0}",
+    );
+    assert_eq!(check_c(&host).0, Ok(()));
+    assert_eq!(host.trace_count(Op::LoopBackingFile), 1, "one re-read");
+    // Anonymous objects (no directory names them) block nothing.
+    let host = model(
+        "loops:\n  - {dev: \"7:2\", backing: \"anon_inode:[loop]\"}",
+        "",
+    );
+    assert_eq!(check_c(&host).0, Ok(()));
 }
 
 /// A listing that fails, or a backing file that cannot be read, is an

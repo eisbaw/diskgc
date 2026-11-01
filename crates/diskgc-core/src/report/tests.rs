@@ -56,6 +56,7 @@ fn full() -> Report {
         }),
         detail: None,
         process_blockers: None,
+        unknown_cause: None,
     };
     r.plan = vec![plan(None, Some(7)), plan(Some(Reason::NotIdle), None)];
     r.actions = vec![ActionEntry {
@@ -80,6 +81,7 @@ fn full() -> Report {
             command: None,
             evidence: crate::engine::ProcessEvidence::Fd,
         }]),
+        unknown_cause: None,
         estimated_bytes: Some(4096),
     }];
     r.held_by_deleted_files = Some(vec![HeldEntry {
@@ -242,6 +244,7 @@ fn skip(candidate: impl Into<PathBuf>, tier: &str, profile: &str, reason: Reason
         reason,
         detail: None,
         process_blockers: None,
+        unknown_cause: None,
         estimated_bytes: None,
     }
 }
@@ -566,6 +569,7 @@ fn human_failure_names_kept_targets_and_held_deleted_files() {
         reason: Reason::Locked,
         detail: None,
         process_blockers: None,
+        unknown_cause: None,
         estimated_bytes: None,
     });
     report.skipped.push(SkipEntry {
@@ -577,6 +581,7 @@ fn human_failure_names_kept_targets_and_held_deleted_files() {
         reason: Reason::Empty,
         detail: None,
         process_blockers: None,
+        unknown_cause: None,
         estimated_bytes: None,
     });
     let text = report.summary().expect("summary");
@@ -604,6 +609,7 @@ fn human_kept_reasons_are_bounded_and_paths_cannot_inject_lines() {
             reason: Reason::InUse,
             detail: None,
             process_blockers: None,
+            unknown_cause: None,
             estimated_bytes: None,
         });
     }
@@ -632,6 +638,7 @@ fn human_groups_other_users_entries_from_two() {
         reason,
         detail: Some(detail.into()),
         process_blockers: None,
+        unknown_cause: None,
         estimated_bytes: None,
     };
     let denied = "cannot list it (fail closed): open /tmp/x: EACCES (13)";
@@ -678,6 +685,7 @@ fn human_preflight_refusal_does_not_invent_a_kept_candidate() {
         reason: Reason::Missing,
         detail: None,
         process_blockers: None,
+        unknown_cause: None,
         estimated_bytes: None,
     });
     let text = report.summary().expect("preflight refusal must be visible");
@@ -791,46 +799,69 @@ fn human_summary_says_a_busy_host_kept_candidates_and_to_run_again() {
     );
 }
 
-/// TASK-263, TASK-169: an `in_use_unknown` whose cause stays (a loop
-/// device's deleted backing file, a process list that cannot be complete)
-/// names that cause, and is not counted as the host's load: waiting does
-/// not help.
+/// TASK-263, TASK-169 (mped S2): an `in_use_unknown` whose cause stays
+/// (`incomplete_process_list`, `loop_device`) says its detail and is not
+/// counted as the host's load, whatever the detail's words; a `busy` one,
+/// or one without a cause, is. The JSON carries the cause.
 #[test]
 fn human_summary_names_a_standing_cause_instead_of_a_busy_host() {
-    let loop_cause = format!(
-        "{}: loop device 7:4 is backed by /tmp/old.img (deleted) (...)",
-        crate::inuse::loops::LOOP_UNKNOWN
-    );
-    let hidden = format!(
-        "the held /proc is mounted with hidepid, so {}",
-        crate::inuse::HIDDEN_PROCESSES
-    );
+    use crate::engine::UnknownCause;
+    let with = |candidate: &str, cause: UnknownCause, detail: &str| SkipEntry {
+        unknown_cause: Some(cause),
+        ..tier_skip("t", candidate, Reason::InUseUnknown, detail)
+    };
     let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);
     report.mount = Some("/tmp".into());
-    report
-        .skipped
-        .push(tier_skip("t", "/tmp/a", Reason::InUseUnknown, &loop_cause));
-    report
-        .skipped
-        .push(tier_skip("t", "/tmp/b", Reason::InUseUnknown, &hidden));
+    report.skipped.push(with(
+        "/tmp/a",
+        UnknownCause::LoopDevice,
+        "loop device 7:4 is backed by /tmp/old.img (deleted)",
+    ));
+    report.skipped.push(with(
+        "/tmp/b",
+        UnknownCause::IncompleteProcessList,
+        "the held /proc is mounted with hidepid",
+    ));
     let text = report.summary().expect("summary");
     assert!(!text.contains("too busy"), "{text}");
     assert!(
-        text.contains("kept /tmp/a: in_use_unknown, a loop device's backing file"),
+        text.contains("kept /tmp/a: in_use_unknown, loop device 7:4 is backed by"),
         "{text}"
     );
     assert!(
         text.contains("kept /tmp/b: in_use_unknown, the held /proc is mounted with hidepid"),
         "{text}"
     );
+    let json: serde_json::Value = serde_json::from_str(&report.to_json()).expect("JSON");
+    assert_eq!(json["skipped"][0]["unknown_cause"], "loop_device");
+    assert_eq!(
+        json["skipped"][1]["unknown_cause"],
+        "incomplete_process_list"
+    );
+    report.skipped.push(with(
+        "/tmp/c",
+        UnknownCause::Busy,
+        "loop device 7:9 in words only: the cause decides",
+    ));
     report
         .skipped
-        .push(skip("/tmp/c", "t", "p", Reason::InUseUnknown));
+        .push(skip("/tmp/d", "t", "p", Reason::InUseUnknown));
     let text = report.summary().expect("summary");
     assert!(
-        text.contains("the host was too busy to check 1 candidate(s)"),
+        text.contains("the host was too busy to check 2 candidate(s)"),
         "{text}"
     );
+    let json: serde_json::Value = serde_json::from_str(&report.to_json()).expect("JSON");
+    assert_eq!(json["skipped"][3]["unknown_cause"], serde_json::Value::Null);
+    // Every cause's name is documented (docs/reference.md, Output).
+    let docs = section(&reference_md(), "## Output");
+    for cause in UnknownCause::ALL {
+        assert!(
+            docs.contains(&format!("`{}`", cause.as_str())),
+            "{} undocumented",
+            cause.as_str()
+        );
+    }
 }
 
 fn tier_skip(tier: &str, candidate: &str, reason: Reason, detail: &str) -> SkipEntry {
@@ -975,6 +1006,7 @@ fn plan_row(tier: &str, candidate: &str, reason: Option<Reason>, bytes: Option<u
         build_evidence: None,
         detail: reason.map(|_| "last build 1 h ago; idle_for 7d required".into()),
         process_blockers: None,
+        unknown_cause: None,
     }
 }
 

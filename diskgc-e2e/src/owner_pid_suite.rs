@@ -234,6 +234,42 @@ pub fn owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace(
     Ok(())
 }
 
+/// TASK-263 review (Codex 1): the development package, built without the
+/// e2e harness's feature, does not trust the test container's markers: in
+/// this ordinary container (its own PID namespace) `ensure --dry-run` is
+/// refused at start, exit 2, `cause: safety`, naming the namespace rule.
+/// Control: the e2e build (`diskgc`) plans in the same container, which
+/// is what every other container test relies on.
+pub fn development_package_refuses_in_its_own_pid_namespace(ctx: &Ctx) -> TestResult {
+    ctx.scratch.mkdirs("devpkg-pidns/project", 0o755, TESTER)?;
+    let roots = ctx.scratch.path("devpkg-pidns");
+    let roots = roots
+        .to_str()
+        .ok_or_else(|| format!("non-UTF-8 path {}", roots.display()))?
+        .to_owned();
+    let args = [
+        "ensure",
+        "--dry-run",
+        "--json",
+        "--no-index",
+        "--min-free",
+        "100%",
+        "--select",
+        "profile:cargo-target",
+        "--roots",
+        &roots,
+        &roots,
+    ];
+    let development = ctx.bin_dir.join("diskgc-development");
+    let oracle = Oracle::arm(Fixture::new())?;
+    let refused = ctx.run_as_tester(&development, &args)?;
+    let planned = ctx.run_as_tester(&ctx.diskgc(), &args)?;
+    oracle.judge_runs(&[&refused, &planned])?.assert_clean()?;
+    expect_refused(&refused, NOT_INITIAL)?;
+    planned.expect_code(0)?;
+    Ok(())
+}
+
 /// A `/proc` mounted with `hidepid=invisible` hides a process from every
 /// reader that may not ptrace it, the user's own included: a shell whose
 /// group differs (as after `newgrp`) is unlisted for tester. The in-use

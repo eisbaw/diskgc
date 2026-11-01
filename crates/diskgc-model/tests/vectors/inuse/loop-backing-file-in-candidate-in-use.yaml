@@ -1,8 +1,10 @@
-# TASK-169: an image set up as a loop device (udisksctl loop-setup, no
-# mount) is held open by the kernel, where no process shows it. Deleting it
-# would lose its data when the device detaches: the candidate holding it is
-# in_use; the other one is reclaimed. A loop device backed by a file
-# elsewhere changes nothing.
+# TASK-169: an image set up as a loop device (losetup, no mount) is held
+# open by the kernel, where no process shows it. Deleting it would lose its
+# data when the device detaches. diskgc can open both devices here (the
+# disk group: readable), so LOOP_GET_STATUS64 names each held file: the
+# candidate holding one is in_use, the other one is reclaimed, and a device
+# backed by a file elsewhere changes nothing. A device diskgc cannot open:
+# loop-backing-file-unopenable-unknown.yaml.
 profile_vector: 1
 user_profiles:
   - {"name": "scratch-probe", "find": {"roots": ["/tmp"], "paths": ["scratch-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/scratch-a"]}}
@@ -13,8 +15,8 @@ host:
   host_model: 1
   clock: 2026-10-15T03:00:00Z
   loops:
-    - {dev: "7:0", backing: /tmp/scratch-a/vm/disk.img}
-    - {dev: "7:1", backing: /srv/other.img}
+    - {dev: "7:0", backing: /tmp/scratch-a/vm/disk.img, readable: true}
+    - {dev: "7:1", backing: /srv/other.img, readable: true}
   mounts:
     - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
     - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}

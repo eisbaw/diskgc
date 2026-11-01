@@ -212,6 +212,21 @@ impl Fs {
     }
 
     /// A directory entry naming `ino`: its directory and the name.
+    /// Every entry naming inode `ino` in a directory reachable from the
+    /// root: (directory inode, name).
+    pub fn names_of(&self, ino: u64) -> BTreeSet<(u64, OsString)> {
+        self.reachable()
+            .into_iter()
+            .filter_map(|dir| Some((dir, self.inodes[&dir].entries()?)))
+            .flat_map(|(dir, entries)| {
+                entries
+                    .iter()
+                    .filter(move |(_, child)| **child == ino)
+                    .map(move |(name, _)| (dir, name.clone()))
+            })
+            .collect()
+    }
+
     fn parent_entry(&self, ino: u64) -> Option<(u64, OsString)> {
         self.inodes.iter().find_map(|(dir, inode)| {
             let (name, _) = inode.entries()?.iter().find(|(_, child)| **child == ino)?;
@@ -238,6 +253,24 @@ impl Fs {
         }
         seen
     }
+}
+
+/// The file a loop device holds, as the kernel tracks it: the object, the
+/// directory entry the device opened it by (its dentry: `d_path` follows
+/// it through renames, and prints ` (deleted)` once it is unlinked, other
+/// links or not), and the identity `LOOP_GET_STATUS64` reports.
+#[derive(Debug, Clone)]
+pub struct LoopObject {
+    pub loc: Loc,
+    /// The directory (an inode of `loc`'s filesystem) and name it was
+    /// opened by.
+    pub opened: (u64, OsString),
+    /// Every entry naming the file at load.
+    pub names_at_load: BTreeSet<(u64, OsString)>,
+    pub identity: DevIno,
+    /// The text names the opened entry (`file` was not given apart from
+    /// `backing`): renames show in it.
+    pub text_is_path: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -434,10 +467,13 @@ pub struct State {
     /// [`crate::spec::HostModel::loops`], by device: the text as written.
     /// What a read shows is [`State::loop_text`].
     pub loop_backings: BTreeMap<Dev, PathBuf>,
-    /// The object each backing text named in the loaded tree, by device
-    /// (none: the text names nothing in the model, as another mount
+    /// The file each device holds, by device, when it is in the loaded
+    /// tree (none: the text names nothing in the model, as another mount
     /// namespace's path or a deleted file's).
-    pub loop_objects: BTreeMap<Dev, Loc>,
+    pub loop_objects: BTreeMap<Dev, LoopObject>,
+    /// Devices diskgc can open for `LOOP_GET_STATUS64` besides root's
+    /// ([`crate::spec::LoopSpec::readable`]).
+    pub loop_readable: BTreeSet<Dev>,
     /// diskgc's state directory (`state_*` operations), if any.
     pub state_dir: Option<PathBuf>,
     /// diskgc's user's home for the per-user lock (`user_lock_path`).
@@ -483,6 +519,7 @@ impl State {
             fs_uuids: BTreeMap::new(),
             loop_backings: BTreeMap::new(),
             loop_objects: BTreeMap::new(),
+            loop_readable: BTreeSet::new(),
             state_dir: None,
             home: None,
             boot_id: DEFAULT_BOOT_ID.to_owned(),
@@ -924,30 +961,70 @@ impl State {
     }
 
     /// The backing file of loop device `dev` as the kernel prints it now
-    /// (`d_path`, which follows the file's own name): the text as written
-    /// while it still names the object it named at load; the object's
-    /// current path after a rename (a file with one link that is still
-    /// linked); otherwise the text with ` (deleted)`. A renamed file with
-    /// several links reads as deleted here (the model cannot tell which
-    /// name the device opened), the conservative side. `None`: no such
+    /// (`d_path` of the entry the device opened, [`LoopObject`]): while
+    /// that entry still names the file, its current path (moved with a
+    /// rename of it or of a directory above it, found as the one new entry
+    /// when exactly the opened one is gone); once it is unlinked, the text
+    /// with ` (deleted)`, whatever other links remain. A text given apart
+    /// from the file (another namespace's rendering) is printed as given,
+    /// with ` (deleted)` once the opened entry is gone. `None`: no such
     /// configured loop device.
     pub fn loop_text(&self, dev: Dev) -> Option<PathBuf> {
         let text = self.loop_backings.get(&dev)?;
-        let Some(&loc) = self.loop_objects.get(&dev) else {
+        let Some(object) = self.loop_objects.get(&dev) else {
             return Some(text.clone());
         };
-        if self.lookup_link(text).is_ok_and(|now| now == loc) {
-            return Some(text.clone());
+        let fs = self.fs(object.loc.mnt);
+        let names = fs.names_of(object.loc.ino);
+        let entry_path = |(dir, name): &(u64, OsString)| {
+            self.path_of(Loc {
+                mnt: object.loc.mnt,
+                ino: *dir,
+            })
+            .map(|p| p.join(name))
+        };
+        let current = if names.contains(&object.opened) {
+            Some(object.opened.clone())
+        } else {
+            let gone: Vec<_> = object.names_at_load.difference(&names).collect();
+            let new: Vec<_> = names.difference(&object.names_at_load).collect();
+            match (gone.as_slice(), new.as_slice()) {
+                ([gone], [new]) if **gone == object.opened => Some((*new).clone()),
+                _ => None,
+            }
+        };
+        match current {
+            Some(entry) if object.text_is_path => entry_path(&entry).or_else(|| Some(text.clone())),
+            Some(_) => Some(text.clone()),
+            None => {
+                let mut deleted = text.clone().into_os_string();
+                deleted.push(" (deleted)");
+                Some(PathBuf::from(deleted))
+            }
         }
-        if self.is_linked(loc)
-            && self.stat(loc).nlink == Some(1)
-            && let Some(path) = self.path_of(loc)
-        {
-            return Some(path);
+    }
+
+    /// What `LOOP_GET_STATUS64` on device `dev` reports to diskgc: the held
+    /// file's identity when diskgc can open the device (as root, or
+    /// [`crate::spec::LoopSpec::readable`]); for a file outside the
+    /// model's tree, a (device, inode) no file of the model has
+    /// (`0:4095`, the device's minor plus one). `None`: diskgc cannot open
+    /// it. Panics for a device that is not configured.
+    pub fn loop_identity(&self, dev: Dev) -> Option<DevIno> {
+        assert!(self.loop_backings.contains_key(&dev), "loop device {dev}");
+        if self.own_uid != 0 && !self.loop_readable.contains(&dev) {
+            return None;
         }
-        let mut deleted = text.clone().into_os_string();
-        deleted.push(" (deleted)");
-        Some(PathBuf::from(deleted))
+        Some(self.loop_objects.get(&dev).map_or(
+            DevIno {
+                dev: Dev {
+                    major: 0,
+                    minor: 4095,
+                },
+                ino: u64::from(dev.minor) + 1,
+            },
+            |object| object.identity,
+        ))
     }
 
     pub fn is_linked(&self, loc: Loc) -> bool {

@@ -319,10 +319,9 @@ In this order; the first failure exits with its code and deletes nothing:
 3. Running as root without `--allow-root`, or `--allow-root` not as root
    or without `CAP_SYS_PTRACE` ([safety.md](safety.md#privileges)): exit 2
    (`safety`); a capability set that cannot be read: exit 3 (`host`).
-   Without `--tally-only`: the held `/proc` mounted with `hidepid`, or
-   diskgc outside the initial PID namespace (a container, `PrivatePIDs=`),
-   exit 2 (`safety`; [safety.md](safety.md#in-use)), facts that cannot be
-   read exit 3 (`host`). The
+   After the sandbox gate below, without `--tally-only`: the in-use
+   check's visibility ([safety.md](safety.md#in-use), Visibility), exit 2
+   (`safety`) or 3 (`host`). The
    configuration's checks that depend on the user diskgc runs as
    (`owners:` names, `protect` and tier roots with `{uid}`): exit 2. In a
    development build, the pre-release sandbox gate: exit 2 outside a test
@@ -956,7 +955,7 @@ The first matching row wins:
 
 | Code | Meaning |
 |---|---|
-| 2 | Usage, config, safety or provisioning error, the dry run's too (`safety` at start: privileges, or the in-use check's visibility, `hidepid` or a PID namespace other than the initial one, [safety.md](safety.md#in-use)). Nothing was deleted. |
+| 2 | Usage, config, safety or provisioning error, the dry run's too ([safety.md](safety.md#privileges), [safety.md](safety.md#in-use): Visibility). Nothing was deleted. |
 | 130 / 143 | Interrupted by SIGINT / SIGTERM. |
 | 75 | Deadline reached while waiting for another reclaim, and a fresh sample is still below `--min-free` (EX_TEMPFAIL). Nothing was deleted; retry later. If the other holder freed enough meanwhile, the result is 0. |
 | 0 | Final sample of available space ≥ `--min-free`. |
@@ -1066,7 +1065,7 @@ JSON result (field names are part of the contract):
   "avail_before_bytes": 0, "avail_after_bytes": 0,
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow", "build_evidence": {"marker": "", "source": "", "idle_age_seconds": null}}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "idle_age_seconds": null, "count": 1}],
-    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | in_use_unknown | not_idle | too_idle | changed | empty | keep_marker | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_backend | backend_unavailable | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension | producer_unknown", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir | owner_pid | command_line | temp_root | unresolved_path"}], "estimated_bytes": null}],
+    "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | in_use_unknown | not_idle | too_idle | changed | empty | keep_marker | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_backend | backend_unavailable | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension | producer_unknown", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir | owner_pid | command_line | temp_root | unresolved_path"}], "unknown_cause": null, "estimated_bytes": null}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "cause": "parse | config | safety | host | operation | usage | provisioning", "message": ""}]
@@ -1206,6 +1205,18 @@ is `host`.
 - `skipped[].detail` is an advisory human diagnostic from the refusal, or
   `null` when no diagnostic was captured. Grouped rows always use `null`;
   programs should branch on `reason`, not parse this text.
+- `skipped[].unknown_cause` (added with TASK-263; a consumer of the
+  0.1 contract that ignores unknown fields is unaffected) says why an
+  `in_use_unknown` could not be judged, and is `null` for every other
+  reason and for an aggregated row: `busy` (no in-use scan stayed fresh
+  or settled, or the tier stopped checking after such candidates in a
+  row: a later run may judge it), `unreadable_process` (a process of the
+  user could not be inspected; `process_blockers` names it),
+  `incomplete_process_list` (`hidepid`, a PID namespace other than the
+  initial one, or its facts unread or changed during the run) and
+  `loop_device` (a loop device's backing file cannot be told apart from
+  the candidate; until the device is detached; [safety.md](safety.md#in-use)).
+  The dry run's plan does not carry it.
 - `skipped[].process_blockers` is `null` when the refusal cannot be
   attributed to an observed process, including flock contention, an
   unsettled process scan and grouped rows. Otherwise it is a nonempty array
@@ -2424,19 +2435,24 @@ development package stays sandbox gated.
   image file is protected or negated (and the reverse), read from the
   loop device's `backing_file`; while any match exists, an unreadable one
   is an error.
-- TASK-263: `ensure` (its dry run too) and a reclaiming `watch` refuse to
-  start (exit 2, `cause: safety`) under `hidepid` or in a PID namespace
-  other than the initial one, so in a container: the in-use check cannot
-  see every process there. 0.1.0 ran there and judged candidates by the
+- TASK-263 (pending Mark's confirmation): `ensure` (its dry run too) and
+  a reclaiming `watch` whose tiers rely on the in-use check (`fs`,
+  `cargo-target`) refuse to start (exit 2, `cause: safety`) under
+  `hidepid` or in a PID namespace other than the initial one, so in a
+  container: the in-use check cannot see every process there. 0.1.0 ran there and judged candidates by the
   processes it could see, so a Cargo target whose program ran outside
   the container (Cargo holds no lock while it runs) could be deleted
   (static reading). A CI hook that ran 0.1.0 inside its job
   container must run diskgc on the runner host instead.
 - TASK-169: a candidate holding the backing file of a configured loop
-  device (`udisksctl loop-setup`, `losetup`, mounted or not) is `in_use`;
-  a device whose backing file was deleted keeps every candidate
-  `in_use_unknown` until it is detached. 0.1.0 deleted such an image; its
-  data was gone once the device detached.
+  device (`udisksctl loop-setup`, `losetup`, mounted or not) is `in_use`
+  where diskgc can ask the device (root, the `disk` group); where it
+  cannot, a device whose file may be the user's keeps every candidate
+  `in_use_unknown` (a deleted one: those on its filesystem) until it is
+  detached ([safety.md](safety.md#in-use), Loop devices). 0.1.0 deleted
+  such an image; its data was gone once the device detached.
+- TASK-263 review: `skipped[].unknown_cause` says why an
+  `in_use_unknown` could not be judged (Output).
 - TASK-269: a `protect` or `!profile` match removed after the tier
   enumerated it (a `cargo clean` of a protected target) no longer stops
   the run or the dry run (exit 3) at a candidate's first check: the
@@ -2586,7 +2602,8 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   are less exposed (their contracts keep a session or rc directory on
   their own evidence).
 - **diskgc in its own PID namespace** (most containers, `PrivatePIDs=`)
-  refuses to run `ensure`, its dry run and a reclaiming `watch` (exit 2,
+  refuses to run `ensure`, its dry run and a reclaiming `watch` with an
+  `fs` or `cargo-target` tier (exit 2,
   `safety`): the in-use check cannot see the processes outside it
   ([safety.md](safety.md#in-use), Visibility: a process list that cannot be
   complete). Run it on the host. (In 0.1.0 it ran, and kept every

@@ -87,7 +87,9 @@ kinds), and where those guarantees end. The protocols are in
   an explicit `owners:` list under `--allow-root`).
 - Not if a visible process has any of the candidate's files open, mapped,
   as its working directory, or (heuristically) named in its initial
-  environment, nor if one of its files backs a configured loop device;
+  environment, nor if one of its files backs a configured loop device
+  (or, where diskgc cannot ask the device, could; pending Mark's
+  confirmation, TASK-169);
   not if the candidate directory is `flock`ed by someone
   else (a locked *file* inside is only caught as an open file of a visible
   process), nor if it contains a mount, a `.diskgc-keep` file, a Cargo
@@ -101,7 +103,9 @@ kinds), and where those guarantees end. The protocols are in
   namespace), so stale test fixtures do not block forever.
 - Nothing at all where diskgc cannot see every process (`hidepid` on
   `/proc`, a PID namespace other than the initial one, as in a
-  container): `ensure` and a reclaiming `watch` refuse to start there.
+  container): `ensure` and a reclaiming `watch` refuse to start there
+  when a tier relies on diskgc's own in-use check (pending Mark's
+  confirmation, TASK-263).
 - Nor, for a source with a liveness contract, unless that contract
   permits it ([safety.md](docs/safety.md#producer-liveness)); a `/tmp` or
   cache built-in ships only with a contract whose class admits it, and
@@ -352,8 +356,9 @@ where they apply ([safety.md](docs/safety.md) for Cargo, Docker and Nix).
   the fingerprints (`.fingerprint/`, or `build/<pkg>/<hash>/fingerprint` on the
   per-unit layout) being deleted first; resolved by race test 6.
 - **`hidepid` and private PID namespaces** hide processes from the in-use
-  check, so diskgc refuses to reclaim there (TASK-263): hardened hosts
-  (`ProtectProc=`) and containers must run it on the host.
+  check, so diskgc refuses to reclaim there (TASK-263, pending Mark's
+  confirmation): hardened hosts (`ProtectProc=`) and containers must run
+  it on the host.
 - **Docker containerd root discovery** for filesystem matching must be
   settled during implementation; unknown layouts are skipped as
   `unsupported_backend`.

@@ -1019,10 +1019,13 @@ is accepted until measured otherwise.
   bound in diskgc's network namespace (`bound_unix_sockets`, a read-only
   `NETLINK_SOCK_DIAG` query: ungated, like the query runs); the PID
   namespace facts (`pid_namespace`: the initial namespace, `hidepid`) and
-  whether this is a development build in a marked test container
+  whether this is the e2e harness's build in a marked test container
   (`test_container_pid_namespace`, the visibility rule's one test-only
   exception); and the configured loop devices with their backing files
-  (`loop_backing_files`, `/sys/block/loop<N>`, read-only). Reading a list
+  (`loop_backing_files`, `/sys/block/loop<N>`, read-only) and each held
+  file's identity by the device's own word (`loop_backing_identity`:
+  `/dev/loop<N>` opened read-only for `LOOP_GET_STATUS64`, where diskgc's
+  user may open it). Reading a list
   of processes is a provided method (`proc_views`) that calls the readers
   one process after another, so `ModelHost` sees every reader call;
   `LinuxHost` reads several processes at once, each on its own, and the

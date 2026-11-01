@@ -236,6 +236,7 @@ mod tests {
             reason,
             detail: None,
             process_blockers: None,
+            unknown_cause: None,
             estimated_bytes: None,
         }
     }

@@ -516,6 +516,7 @@ pub(super) fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev
                         reason: Reason::OtherFs,
                         detail: Some(crate::report::OTHER_FS_ROOT_DETAIL.to_owned()),
                         process_blockers: None,
+                        unknown_cause: None,
                         estimated_bytes: None,
                     });
                 }

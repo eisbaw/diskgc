@@ -48,7 +48,9 @@ path = "src/bin/diskgc-e2e-release-check.rs"
 
 [dependencies]
 diskgc-core = { path = "../crates/diskgc-core" }
-diskgc-linux = { path = "../crates/diskgc-linux" }
+# The harness's test driver runs the in-use scan in its own PID namespace
+# (TASK-263): only e2e builds have this feature (docs/safety.md, In use).
+diskgc-linux = { path = "../crates/diskgc-linux", features = ["e2e-test-container-pid-namespace"] }
 # Pure Rust (linux_raw backend): statx with mount ids and birth times, mount,
 # getuid, and the raw setgroups/setresgid/setresuid that drop to tester.
 # Works the same under static musl; no C toolchain needed.

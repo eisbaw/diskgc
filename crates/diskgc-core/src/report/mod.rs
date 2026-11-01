@@ -22,7 +22,7 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::engine::{Checkouts, ProcessBlocker, Reason};
+use crate::engine::{Checkouts, ProcessBlocker, Reason, UnknownCause};
 use crate::units::{Size, format_bytes};
 use json::Json;
 
@@ -229,6 +229,8 @@ pub struct PlanEntry {
     /// (programs branch on `reason`).
     pub detail: Option<String>,
     pub process_blockers: Option<Vec<ProcessBlocker>>,
+    /// The skip's `unknown_cause`, for the human plan only.
+    pub unknown_cause: Option<UnknownCause>,
 }
 
 /// Source evidence from discovery, with age only after an eligibility walk.
@@ -279,6 +281,9 @@ pub struct SkipEntry {
     /// Attributed scan-time process evidence, or `None` when attribution is
     /// unavailable or this is an aggregated row.
     pub process_blockers: Option<Vec<ProcessBlocker>>,
+    /// Why an `in_use_unknown` could not be judged (JSON `unknown_cause`);
+    /// `None` for every other reason.
+    pub unknown_cause: Option<UnknownCause>,
     /// A complete tally made before this refusal, when available.
     pub estimated_bytes: Option<u64>,
 }
@@ -518,6 +523,7 @@ impl Report {
                         reason: skip.reason,
                         detail: None,
                         process_blockers: None,
+                        unknown_cause: None,
                         estimated_bytes: None,
                     });
                 }
@@ -730,6 +736,10 @@ impl Report {
                                             blockers.iter().map(process_blocker_json).collect(),
                                         )
                                     }),
+                                ),
+                                (
+                                    "unknown_cause",
+                                    Json::opt(s.unknown_cause, |cause| Json::str(cause.as_str())),
                                 ),
                                 ("estimated_bytes", opt_u64(s.estimated_bytes)),
                             ])

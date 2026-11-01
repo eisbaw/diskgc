@@ -1,0 +1,40 @@
+# TASK-169, TASK-263 review (Codex 2, 3): as
+# loop-backing-file-in-candidate-in-use.yaml, but diskgc cannot open the
+# devices (a user outside the disk group). The name proves nothing: the
+# user's own file it reaches may be a decoy over the real one. Every
+# candidate is in_use_unknown, cause loop_device, nothing deleted.
+profile_vector: 1
+user_profiles:
+  - {"name": "scratch-probe", "find": {"roots": ["/tmp"], "paths": ["scratch-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/scratch-a"]}}
+profile: scratch-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  loops:
+    - {dev: "7:0", backing: /tmp/scratch-a/vm/disk.img}
+    - {dev: "7:1", backing: /srv/other.img}
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /srv/other.img: {size: 1M}
+    /tmp/scratch-a: {vm: {disk.img: {size: 64K}}}
+    /tmp/scratch-b: {data: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /tmp/scratch-a, reason: in_use_unknown}
+    - {candidate: /tmp/scratch-b, reason: in_use_unknown}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /tmp/scratch-a, reason: in_use_unknown, process_blockers: []}
+    - {candidate: /tmp/scratch-b, reason: in_use_unknown, process_blockers: []}
+  preserved: [/tmp/scratch-a/vm/disk.img, /tmp/scratch-b/data, /srv/other.img]
+  report:
+    skipped:
+      - {unknown_cause: loop_device}
+      - {unknown_cause: loop_device}

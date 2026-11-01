@@ -99,6 +99,25 @@ pub struct PidTable {
 pub const NOT_INITIAL_PID_NAMESPACE: &str = "diskgc is not in the initial PID namespace";
 pub const HIDEPID: &str = "the held /proc is mounted with hidepid";
 
+/// The PID namespace facts of a scan, from the read before its first
+/// listing and the one after its last read (Owner PID's `NSpid` reads
+/// included): any difference between the two (a `/proc` remounted
+/// mid-scan), or a failed read, makes them unknown. The one confirmation,
+/// which both Owner PID ([`PidTable::confirm_namespace`]) and the in-use
+/// check's visibility rule ([`crate::inuse::visibility`]) take.
+pub fn confirmed_namespace(
+    before: Result<PidNamespace, String>,
+    after: Result<PidNamespace, String>,
+) -> Result<PidNamespace, String> {
+    match (before, after) {
+        (Ok(before), Ok(after)) if before == after => Ok(after),
+        (Ok(before), Ok(after)) => Err(format!(
+            "the PID namespace facts changed during the scan ({before:?}, then {after:?})"
+        )),
+        (Err(why), _) | (Ok(_), Err(why)) => Err(why),
+    }
+}
+
 impl PidTable {
     /// Owner PID's preconditions 3 and 4 (docs/safety.md): whether the
     /// held `/proc` can list every process of this kernel, or the rule that
@@ -133,17 +152,11 @@ impl PidTable {
         matches!(self.namespace, Ok(ns) if ns.initial && !ns.hidepid)
     }
 
-    /// The facts read again after the lookups: any difference from the
-    /// first read, or a failure, makes them unknown.
-    pub fn confirm_namespace(&mut self, after: Result<PidNamespace, String>) {
-        self.namespace = match (&self.namespace, after) {
-            (Ok(before), Ok(after)) if *before == after => Ok(after),
-            (Ok(before), Ok(after)) => Err(format!(
-                "the PID namespace facts changed during the scan ({before:?}, then {after:?})"
-            )),
-            (Err(why), _) => Err(why.clone()),
-            (Ok(_), Err(why)) => Err(why),
-        };
+    /// The facts as the scan confirmed them ([`confirmed_namespace`]):
+    /// they replace the first read, so a change or a failed read makes
+    /// every answer unknown.
+    pub fn confirm_namespace(&mut self, confirmed: Result<PidNamespace, String>) {
+        self.namespace = confirmed;
     }
 
     /// The namespace facts, or why they are unknown.

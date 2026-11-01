@@ -932,6 +932,12 @@ pub static TESTS: &[Test] = &[
         run: release_suite::candidate_refuses_a_reclaiming_watch,
     },
     Test {
+        name: "development_package_refuses_in_its_own_pid_namespace",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: owner_pid_suite::development_package_refuses_in_its_own_pid_namespace,
+    },
+    Test {
         name: "release_candidate_refuses_in_its_own_pid_namespace",
         tier: Tier::Fast,
         expect: Expect::Pass,

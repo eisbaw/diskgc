@@ -35,7 +35,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::engine::{
-    self, Candidate, DeleteOptions, Deletion, IpcKind, Reason, Rules, Skip, WalkRecord,
+    self, Candidate, DeleteOptions, Deletion, IpcKind, Reason, Rules, Skip, UnknownCause,
+    WalkRecord,
 };
 use crate::host::{
     Access, Base, BoundSocket, Delete, Dev, DevIno, Errno, FileType, Host, HostError, LockMode,
@@ -190,36 +191,20 @@ pub fn visibility(facts: &PidNamespace, test_container: bool) -> Result<(), Stri
     Ok(())
 }
 
-/// What every refusal and `in_use_unknown` detail of [`visibility`] holds:
-/// [`standing_cause`] recognises the cause by it (not the host's load).
+/// What every refusal and `in_use_unknown` detail of [`visibility`] says.
 pub const HIDDEN_PROCESSES: &str = "the in-use check cannot see every process";
 
-/// Whether an `in_use_unknown` detail names a cause that is not the host's
-/// load and stays until someone changes it (TASK-263, TASK-169): a process
-/// list the in-use check cannot see whole ([`HIDDEN_PROCESSES`]), or a
-/// loop device whose backing file could be in any candidate
-/// ([`loops::LOOP_UNKNOWN`]). Waiting does not help there, so neither the
-/// human summary nor the tier's give-up names a busy host for it.
-pub fn standing_cause(detail: &str) -> bool {
-    detail.contains(HIDDEN_PROCESSES) || detail.contains(loops::LOOP_UNKNOWN)
-}
-
-/// [`visibility`] over a scan: the facts read before its first listing and
-/// after its last read must both be known and equal (a `/proc` remounted
-/// with `hidepid` mid-scan is caught), and satisfy the rule.
+/// [`visibility`] over a scan's confirmed facts
+/// ([`crate::liveness::confirmed_namespace`]): unknown facts (a failed
+/// read, a `/proc` remounted mid-scan) fail it too.
 fn scan_visibility(
-    before: &Result<PidNamespace, String>,
-    after: &Result<PidNamespace, String>,
+    confirmed: &Result<PidNamespace, String>,
     test_container: bool,
 ) -> Result<(), String> {
-    match (before, after) {
-        (Ok(before), Ok(after)) if before == after => visibility(after, test_container),
-        (Ok(before), Ok(after)) => Err(format!(
-            "the PID namespace facts changed during the scan ({before:?}, then {after:?}), so \
-             {HIDDEN_PROCESSES}"
-        )),
-        (Err(why), _) | (Ok(_), Err(why)) => Err(format!(
-            "PID namespace unreadable, so {HIDDEN_PROCESSES}: {why}"
+    match confirmed {
+        Ok(facts) => visibility(facts, test_container),
+        Err(why) => Err(format!(
+            "the PID namespace facts are unknown, so {HIDDEN_PROCESSES}: {why}"
         )),
     }
 }
@@ -346,7 +331,7 @@ pub fn scan<H: Host>(
     // ([`scan::pid_table`]).
     let test_container = host.test_container_pid_namespace();
     let namespace_before = scan::namespace_or_run_error(host.pid_namespace())?;
-    let loops = loops::read(host)?;
+    let loops = loops::read(host, options.users)?;
     let gathered = scan::gather(host, options.users, options.pytest_facts, deadline)?;
     let pid_table = options
         .pid_lookup
@@ -361,11 +346,12 @@ pub fn scan<H: Host>(
         })
         .transpose()?;
     let namespace_after = scan::namespace_or_run_error(host.pid_namespace())?;
+    let namespace = crate::liveness::confirmed_namespace(namespace_before, namespace_after);
+    let visibility = scan_visibility(&namespace, test_container);
     let pid_table = pid_table.map(|mut table| {
-        table.confirm_namespace(namespace_after.clone());
+        table.confirm_namespace(namespace);
         table
     });
-    let visibility = scan_visibility(&namespace_before, &namespace_after, test_container);
     let pytest_facts = options.pytest_facts.then(|| {
         (
             options.users.to_vec(),
@@ -586,7 +572,7 @@ impl Scan {
     /// settled and nothing else blocks it first ([`Self::blocked`]). An
     /// unsettled scan has no complete attribution.
     pub fn blocking_unreadable(&self) -> Option<crate::engine::ProcessBlocker> {
-        if self.unsettled.is_some() || self.visibility.is_err() || self.loops.unknown.is_some() {
+        if self.blocked_by().map(|(cause, _)| cause) != Some(UnknownCause::UnreadableProcess) {
             return None;
         }
         let u = self.unreadable.iter().find(|u| u.excuse.is_none())?;
@@ -628,39 +614,49 @@ impl Scan {
     }
 
     /// The `in_use_unknown` skip of the candidate at `path` when this scan
-    /// cannot judge anything ([`Self::blocked`]), naming the unreadable
-    /// process that blocks, if one does; `None`: it can judge candidates.
+    /// cannot judge anything ([`Self::blocked`]), with its cause, naming
+    /// the unreadable process that blocks, if one does; `None`: it can
+    /// judge candidates.
     pub fn unknown(&self, path: &Path) -> Option<Skip> {
-        let why = self.blocked()?;
+        let (cause, why) = self.blocked_by()?;
         Some(
-            Skip::new(Reason::InUseUnknown, path.to_owned(), why)
+            Skip::in_use_unknown(path.to_owned(), cause, why)
                 .with_process_blockers(self.blocking_unreadable().into_iter().collect()),
         )
     }
 
-    /// Why this scan cannot clear anything, the first that applies: the
-    /// process list cannot be complete ([`visibility`]), a loop device's
-    /// backing file could be in any candidate ([`loops`]), the scan is
-    /// unsettled, or a process that blocks could not be read
-    /// (docs/safety.md, In use). `None`: it can judge candidates.
+    /// Why this scan cannot clear anything ([`Self::blocked_by`]), as text.
     pub fn blocked(&self) -> Option<String> {
+        self.blocked_by().map(|(_, why)| why)
+    }
+
+    /// Why this scan cannot clear anything, the first that applies, with
+    /// its cause: the process list cannot be complete ([`visibility`]), a
+    /// loop device's backing file could be in any candidate ([`loops`]),
+    /// the scan is unsettled, or a process that blocks could not be read
+    /// (docs/safety.md, In use). `None`: it can judge candidates (a loop
+    /// device may still refuse those on one filesystem, [`Self::check`]).
+    pub fn blocked_by(&self) -> Option<(UnknownCause, String)> {
         if let Err(why) = &self.visibility {
-            return Some(why.clone());
+            return Some((UnknownCause::IncompleteProcessList, why.clone()));
         }
         if let Some(why) = &self.loops.unknown {
-            return Some(why.clone());
+            return Some((UnknownCause::LoopDevice, why.clone()));
         }
         if let Some(why) = &self.unsettled {
-            return Some(why.clone());
+            return Some((UnknownCause::Busy, why.clone()));
         }
         let u = self.unreadable.iter().find(|u| u.excuse.is_none())?;
         let name = u
             .name
             .as_ref()
             .map_or("?".into(), |n| n.to_string_lossy().into_owned());
-        Some(format!(
-            "pid {} ({name}) cannot be inspected, so it may be using any candidate: {}",
-            u.pid, u.error
+        Some((
+            UnknownCause::UnreadableProcess,
+            format!(
+                "pid {} ({name}) cannot be inspected, so it may be using any candidate: {}",
+                u.pid, u.error
+            ),
         ))
     }
 
@@ -736,6 +732,16 @@ impl Scan {
         };
         if let Some(skip) = self.unknown(path) {
             return Err(skip);
+        }
+        if let Some(why) = record
+            .objects()
+            .find_map(|id| self.loops.unknown_on.get(&id.dev))
+        {
+            return Err(Skip::in_use_unknown(
+                path.to_owned(),
+                UnknownCause::LoopDevice,
+                why.clone(),
+            ));
         }
         let by_inode = MAPS_BY_INODE.contains(&candidate.fs_type());
         for id in record.objects() {
@@ -1386,9 +1392,9 @@ impl FreshAttempts {
         } else {
             ""
         };
-        Skip::new(
-            Reason::InUseUnknown,
+        Skip::in_use_unknown(
             path.to_owned(),
+            UnknownCause::Busy,
             format!(
                 "the host was too busy to check whether it is in use: {} attempt(s) found no \
                  in-use scan within the freshness bound of {} ms{cut}{last}; kept, run again \

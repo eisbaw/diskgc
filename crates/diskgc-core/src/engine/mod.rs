@@ -737,6 +737,60 @@ pub struct Skip {
     pub detail: String,
     /// Scan-time process evidence, when this refusal names a known process.
     pub process_blockers: Option<Vec<ProcessBlocker>>,
+    /// Why whether it is in use cannot be told: set on every
+    /// `in_use_unknown`, `None` on every other reason (docs/reference.md,
+    /// Output: `unknown_cause`).
+    pub unknown_cause: Option<UnknownCause>,
+}
+
+/// Why an `in_use_unknown` candidate could not be judged: a stable report
+/// enum (JSON `unknown_cause`), so programs and the human summary branch
+/// on it, not on the detail text (TASK-263 review, mped S2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnknownCause {
+    /// No in-use scan stayed fresh or settled (a busy host), or the tier
+    /// stopped checking after candidates in a row were so: a later run may
+    /// judge it.
+    Busy,
+    /// A process of the user could not be inspected (TASK-190; its
+    /// `process_blockers` name it).
+    UnreadableProcess,
+    /// The held `/proc` cannot list every process (`hidepid`, a PID
+    /// namespace other than the initial one, facts unread or changed):
+    /// it stays so until the environment changes (TASK-263).
+    IncompleteProcessList,
+    /// A loop device's backing file could be in the candidate and cannot
+    /// be told apart from it: it stays so until the device is detached
+    /// (TASK-169).
+    LoopDevice,
+}
+
+impl UnknownCause {
+    pub const ALL: [UnknownCause; 4] = [
+        UnknownCause::Busy,
+        UnknownCause::UnreadableProcess,
+        UnknownCause::IncompleteProcessList,
+        UnknownCause::LoopDevice,
+    ];
+
+    /// The cause's name in reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Busy => "busy",
+            Self::UnreadableProcess => "unreadable_process",
+            Self::IncompleteProcessList => "incomplete_process_list",
+            Self::LoopDevice => "loop_device",
+        }
+    }
+
+    /// Whether the cause stays until someone changes the environment or
+    /// the device, so that running again later does not help: an
+    /// incomplete process list, a loop device. A busy host passes, and an
+    /// unreadable process may end; those keep the "host too busy" wording
+    /// they had before causes were recorded.
+    pub fn stays(self) -> bool {
+        matches!(self, Self::IncompleteProcessList | Self::LoopDevice)
+    }
 }
 
 /// A process observed by the in-use scan. The evidence value is a stable
@@ -833,6 +887,19 @@ impl Skip {
             path,
             detail: detail.into(),
             process_blockers: None,
+            unknown_cause: None,
+        }
+    }
+
+    /// An `in_use_unknown` skip and its cause.
+    pub(crate) fn in_use_unknown(
+        path: PathBuf,
+        cause: UnknownCause,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            unknown_cause: Some(cause),
+            ..Self::new(Reason::InUseUnknown, path, detail)
         }
     }
 

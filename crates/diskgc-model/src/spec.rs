@@ -78,8 +78,9 @@ pub struct HostModel {
     pub users: BTreeMap<String, u32>,
     /// The PID namespace diskgc runs in, as its held `/proc` answers
     /// (docs/safety.md, Producer liveness; In use: Visibility): `initial`
-    /// (the default), `nested`, or `test_container` (nested, in a marked
-    /// test container of a development build: `Host::test_container_pid_namespace`).
+    /// (the default), `nested`, or `test_container` (nested, the e2e
+    /// harness's build in a marked test container:
+    /// `Host::test_container_pid_namespace`).
     #[serde(default, skip_serializing_if = "PidNamespaceSpec::is_initial")]
     pub pid_namespace: PidNamespaceSpec,
     /// The held `/proc` is mounted with `hidepid`.
@@ -508,9 +509,10 @@ pub enum PidNamespaceSpec {
     Initial,
     /// Any other (a container, `unshare --pid`).
     Nested,
-    /// Nested, and diskgc is a development build inside a marked
-    /// disposable test container: the in-use scan takes the namespace as
-    /// complete; Owner PID does not (docs/safety.md, In use: Visibility).
+    /// Nested, and diskgc is the e2e harness's build inside a marked
+    /// disposable test container: the in-use scan assumes the namespace
+    /// complete, for tests; Owner PID does not (docs/safety.md, In use:
+    /// Visibility). Refused with `sandbox_gate: closed`.
     TestContainer,
 }
 
@@ -521,8 +523,19 @@ pub struct LoopSpec {
     /// The loop block device (major 7).
     pub dev: DevSpec,
     /// Its `loop/backing_file` as the kernel prints it (` (deleted)`
-    /// included), a path of the model's tree or not.
+    /// included), a path of the model's tree or not. When it is the held
+    /// file's own path (no `file`), later reads follow that file's renames
+    /// and deletion as `d_path` does.
     pub backing: PathBuf,
+    /// The file the device holds, by the name it opened, when the text
+    /// does not reach it here (another mount namespace's rendering, or a
+    /// mount made over its directory since: a decoy). Default: `backing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+    /// diskgc can open the block device for `LOOP_GET_STATUS64` (the `disk`
+    /// group); root always can. Default: it cannot.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub readable: bool,
 }
 
 impl PidNamespaceSpec {
@@ -861,6 +874,7 @@ pub enum Op {
     FsUuid,
     LoopBackingFile,
     LoopBackingFiles,
+    LoopBackingIdentity,
     BootId,
     StateLock,
     StateRead,
@@ -918,6 +932,7 @@ impl Op {
             Self::FsUuid => "fs_uuid",
             Self::LoopBackingFile => "loop_backing_file",
             Self::LoopBackingFiles => "loop_backing_files",
+            Self::LoopBackingIdentity => "loop_backing_identity",
             Self::BootId => "boot_id",
             Self::StateLock => "state_lock",
             Self::StateRead => "state_read",
