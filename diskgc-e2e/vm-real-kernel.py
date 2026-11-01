@@ -201,14 +201,51 @@ def cleanup(scenario: str) -> None:
         raise
 
 
-def kernel_threads() -> int:
-    """Processes with PF_KTHREAD in their stat flags (field 9)."""
-    count = 0
+def kernel_threads() -> list[str]:
+    """Pids with PF_KTHREAD in their stat flags (field 9), read as root."""
+    pids = []
     for line in run("cat /proc/[0-9]*/stat 2>/dev/null || true").splitlines():
+        pid = line.split(" ", 1)[0]
         fields = line.rsplit(")", 1)[-1].split()
         if len(fields) > 6 and int(fields[6]) & 0x0020_0000:
-            count += 1
-    return count
+            pids.append(pid)
+    return pids
+
+
+def kernel_thread_facts(pids: list[str]) -> str:
+    """What a kernel thread shows the in-use scan (TASK-306 premise): its
+    environ's error, its fd table, memory map, cwd and root, its PPid and
+    status Kthread line, and an unprivileged reader's view of its stat."""
+    rows = run(
+        f"for p in {' '.join(pids)}; do "
+        "if cat /proc/$p/environ >/dev/null 2>/work/ev/kt.err; then e=ok; else e=$(cat /work/ev/kt.err); fi; "
+        "echo \"$p|$e|$(ls /proc/$p/fd 2>&1 | wc -l)|$(wc -c </proc/$p/maps)|$(readlink /proc/$p/cwd)|"
+        "$(readlink /proc/$p/root)|$(awk '/^PPid/{print $2}' /proc/$p/status)|$(awk '/^Kthread/{print $2}' /proc/$p/status)\"; "
+        "done"
+    ).splitlines()
+    environ_errors: dict[str, int] = {}
+    with_fds, with_maps, odd_dirs, not_kthreadd, status_disagrees = [], [], [], [], []
+    for row in rows:
+        pid, error, fds, maps, cwd, root_dir, ppid, kthread = row.split("|")
+        message = error.rsplit(": ", 1)[-1]
+        environ_errors[message] = environ_errors.get(message, 0) + 1
+        if fds != "0":
+            with_fds.append(pid)
+        if maps != "0":
+            with_maps.append(pid)
+        if (cwd, root_dir) != ("/", "/"):
+            odd_dirs.append(f"{pid}:{cwd}:{root_dir}")
+        if ppid != "2" and pid != "2":
+            not_kthreadd.append(pid)
+        if kthread != "1":
+            status_disagrees.append(pid)
+    unprivileged = run(f"cut -d' ' -f1 /proc/{pids[0]}/stat >/dev/null && echo readable", TESTER).strip()
+    return (
+        f"kernel threads: {len(pids)}\nenviron as root: {environ_errors}\n"
+        f"with fds: {with_fds}\nwith a memory map: {with_maps}\ncwd/root other than /: {odd_dirs}\n"
+        f"not children of kthreadd: {not_kthreadd}\nstatus Kthread not 1: {status_disagrees}\n"
+        f"stat of pid {pids[0]} as tester: {unprivileged}\n"
+    )
 
 
 # ---- The guest and its one container ----
@@ -258,16 +295,21 @@ def scenario_root_scan() -> None:
         "for f in environ maps cmdline; do if cat /proc/2/$f >/dev/null 2>/work/ev/kt.err; "
         "then rc=0; else rc=$?; fi; echo \"/proc/2/$f exit $rc $(cat /work/ev/kt.err)\"; done"
     )
-    save("s0-kthread-proc.txt", probe + f"kernel threads: {kernel_threads()}\n")
+    save("s0-kthread-proc.txt", probe + kernel_thread_facts(kernel_threads()))
     run("install -d -m 0755 -o 1000 -g 1000 /work/s0")
     run("mkdir /work/s0/scratch-a && echo a > /work/s0/scratch-a/f", TESTER)
     cfg = config("s0-root", ["/work/s0"], owners=True)
     before = tree("/work/s0")
-    code, out, _ = ensure("s0-root", ROOT, cfg, "/work/s0")
+    code, out, _ = ensure("s0-root-dry", ROOT, cfg, "/work/s0", "--dry-run")
+    dry_ms = report(out, 0, "dry_run")["duration_ms"]
+    code, out, stderr = ensure("s0-root", ROOT, cfg, "/work/s0")
     result = report(out, 1, "exhausted")
     require_removed(before, tree("/work/s0"), acted(result), "s0-root")
     assert acted(result) == {"/work/s0/scratch-a"}, result["skipped"]
-    passed("0 root scan", "an unheld candidate reclaimed by root with every guest process visible")
+    unreadable = [line for line in stderr.splitlines() if "initial environment unreadable" in line]
+    assert not unreadable, unreadable[:3]
+    passed("0 root scan", f"an unheld candidate reclaimed by root with every guest process visible; "
+           f"dry run {dry_ms} ms, reclaim {result['duration_ms']} ms; no kernel thread's environment noted")
 
 
 # ---- 1. btrfs: two loop members, subvolumes, snapshot key, membership ----

@@ -66,7 +66,12 @@
 //!   from such a misbound read: a process whose environment or fd table
 //!   really is empty (`env -i`, all fds closed) is reported as unreadable
 //!   (`Failed`), which costs candidates while it runs. The leader's own
-//!   entry vanishing is not trusted either.
+//!   entry vanishing is not trusted either. A kernel thread (`PF_KTHREAD`
+//!   in the `stat`s around the read) has no memory map or environment of
+//!   its own: for the memory map and environment, its read that found
+//!   nothing is the answer, nothing (TASK-306: Linux 6.18 answers its
+//!   `environ` with `ESRCH`, which root's scan retried for every kernel
+//!   thread).
 //!
 //! A round is the answer when its listing is complete, every task in it
 //! gave a trusted read, and one of them is live ([`shortfall`] says what a
@@ -657,14 +662,28 @@ impl Shortfall {
 /// because every task of a process shares the memory map and environment
 /// it reads, and that read is bracketed by the task's own `stat`s. Its
 /// listing only names the tasks to try ([`Listing::candidates`]); here it
-/// only says why no task gave one.
+/// only says why no task gave one, unless every read was trusted and one
+/// task was a kernel thread: it has no memory map or environment of its
+/// own (Linux 6.18 answers its `environ` with `ESRCH`), so a read that gave
+/// nothing is the answer, nothing (TASK-306; a user task's `ESRCH` is
+/// [`Seen::Missing`], untrusted, and keeps its rounds). `PF_KTHREAD` is
+/// read from the task's `stat` before and after the read, with one start
+/// time; no user task can set it.
 fn shortfall(listing: &Listing, seen: &BTreeMap<u32, Seen>, want: Want) -> Option<Shortfall> {
     if want == Want::FirstLiveTask {
-        return seen
+        if let Some((&tid, &seen)) = seen
             .iter()
             .find(|(_, seen)| !matches!(seen, Seen::Trusted(_)))
-            .map(|(&tid, &seen)| Shortfall::Untrusted { tid, seen })
-            .or(Some(Shortfall::NoLiveRead));
+        {
+            return Some(Shortfall::Untrusted { tid, seen });
+        }
+        if seen
+            .values()
+            .any(|seen| *seen == Seen::Trusted(Status::KernelThread))
+        {
+            return None;
+        }
+        return Some(Shortfall::NoLiveRead);
     }
     if !listing.confirmed {
         Some(Shortfall::Changed)
@@ -1685,6 +1704,72 @@ mod tests {
             Want::EveryTask,
         );
         assert_eq!(got, Ok(vec![]));
+    }
+
+    /// TASK-306: a kernel thread has no memory map or environment of its
+    /// own, and Linux 6.18 answers its `environ` with `ESRCH` (no mm; the
+    /// vm-real-kernel check, as root). A read bracketed by `stat`s that show
+    /// `PF_KTHREAD` with one start time is the answer: nothing, in one
+    /// round, not sixteen.
+    #[test]
+    fn a_kernel_threads_missing_environment_is_answered_in_one_round() {
+        for error in [Errno::ESRCH, Errno::ENOENT] {
+            let made = Cell::new(0);
+            let got = scan(
+                2,
+                rounds(vec![complete(&[2])]),
+                |_| {
+                    made.set(made.get() + 1);
+                    Err(errno(error))
+                },
+                |_| task('S', false, true),
+                Want::FirstLiveTask,
+            );
+            assert_eq!(got, Ok(vec![]), "{error:?}");
+            assert_eq!(made.get(), 1, "{error:?}: one read, no retries");
+        }
+    }
+
+    /// The same `ESRCH` from a user task (live by its `stat`s, no
+    /// `PF_KTHREAD`) is not trusted and keeps its retries (TASK-306).
+    #[test]
+    fn a_user_tasks_missing_environment_is_still_retried() {
+        let made = Cell::new(0);
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10])]),
+            |_| {
+                made.set(made.get() + 1);
+                Err(errno(Errno::ESRCH))
+            },
+            |_| live(),
+            Want::FirstLiveTask,
+        );
+        assert!(
+            failed_saying(&got, "task 10 is live but its table said ENOENT"),
+            "{got:?}"
+        );
+        assert_eq!(made.get(), MAX_ROUNDS);
+    }
+
+    /// A kernel thread whose task was replaced during the read (another
+    /// start time) is not the answer either: that round is untrusted.
+    #[test]
+    fn a_reused_kernel_thread_tid_is_not_the_answer() {
+        let stats = Cell::new(0u64);
+        let got = scan(
+            2,
+            rounds(vec![complete(&[2])]),
+            |_| Err(errno(Errno::ESRCH)),
+            |_| {
+                stats.set(stats.get() + 1);
+                let mut stat = task('S', false, true)?;
+                stat.start_ticks = stats.get();
+                Ok(stat)
+            },
+            Want::FirstLiveTask,
+        );
+        assert!(failed_saying(&got, "changed identity"), "{got:?}");
     }
 
     /// Dead (`X`) is never final: neither the answer's source nor "exited".
