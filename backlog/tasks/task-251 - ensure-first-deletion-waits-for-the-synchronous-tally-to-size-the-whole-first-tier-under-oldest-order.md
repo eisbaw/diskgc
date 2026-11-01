@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-30T22:48:00Z'
-updated_date: '2026-11-01T05:58:00Z'
+updated_date: '2026-11-01T06:52:00Z'
 labels:
   - wave-3
   - performance
@@ -40,4 +40,6 @@ FINDINGS. (1) On tmpfs pass 2 was ~3.3 s of the ~8 s TTFD; discovery (pass 1, ev
 NOT MEASURED: a real disk (ext4/LUKS, cold cache): tmpfs understates the I/O of both sizing and discovery; the read-only host dry run was skipped (the dry-run path is unchanged, and a dry run runs no synchronous tally, so it cannot show TTFD); warm (snapshot) runs; config B with the rc build.
 
 FOLLOW-UPS (not filed): total walk time per candidate on a 140k tier and its degradation (profile with perf, likely before 0.1 for the laptop's /tmp); pass 1 before the first deletion (needs a PRD decision); TASK-245 now applies to the deferred sizing too (sizing and the read-only tally walk the same tree back to back); a VM (vm-cold-scale-like) reclaim of the laptop shape for disk numbers.
+
+2026-11-01 review round (Codex + mped on 842f2f2), fixed in dd4df65 on t251-first-deletion (rebased on b525560): stored keys from an earlier run are re-read from the unit's root before the lazy merge (Codex 1, red first: two seeded cases deleted a-2 instead of a-1); the deferred work's budget window opens before the mount table read (Codex 2, red first); architecture.md/safety.md split the TASK-31 queue rule (tally before the lock) from deferred-sizing failures (run errors, possibly after earlier queued deletions; Codex 3/mped S2; TASK-31's AC #1 wording predates this); the deferral survives a root dropped at preflight and an unused one is logged (mped S1, red first); queue merge moved to executor/indexed/tier_queue.rs with a proptest (two mutants caught). Gates: nix develop -c just check exit 0; just e2e-one fs_reclaim_time_to_first_deletion_is_measured_cold_and_warm PASS (cold 47 ms, tally 32 ms, under strace) and fs_reclaim_100k_entry_time_to_first_deletion_is_measured_cold_and_warm PASS (cold 199 ms, tally 181 ms; warm 129 ms). Full just e2e not rerun (no flake or e2e code changed).
 <!-- SECTION:NOTES:END -->
