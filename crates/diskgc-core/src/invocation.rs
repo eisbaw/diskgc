@@ -20,7 +20,7 @@ use crate::engine::Checkouts;
 use crate::executor::{self, CompiledSelection, Request, SelectionFailure, Tier};
 use crate::host::{Delete, Host, MountEntry};
 use crate::profile::{Body, Finds, Library, Release, Roots, Source};
-use crate::report::{ErrorCause, ErrorEntry, Report, Status};
+use crate::report::{ErrorCause, Report, Status};
 use crate::resolve::{MountScreenError, ResolveError, Want, resolve_in};
 use crate::select;
 use crate::snapshot::RunIndex;
@@ -365,21 +365,10 @@ pub fn refused(
     log: &mut dyn FnMut(&str),
 ) -> Report {
     log(&format!("error: {why}"));
-    let mut report = options.report(refusal_status(cause));
-    report.errors.push(ErrorEntry::run(cause, why));
-    report
+    options.report(refusal_status(cause)).refused(cause, why)
 }
 
-/// The status of a refusal before the executor (`ensure`'s and `watch`'s
-/// start): `error` (exit 3) when a host read failed (`host`: diskgc's own
-/// capability set), `usage_error` (exit 2) for every other cause.
-pub fn refusal_status(cause: ErrorCause) -> Status {
-    if cause == ErrorCause::Host {
-        Status::Error
-    } else {
-        Status::UsageError
-    }
-}
+pub use crate::report::refusal_status;
 
 /// [`ensure`], with a refusal before the executor as its error.
 fn run<H: Delete>(
@@ -394,16 +383,25 @@ fn run<H: Delete>(
     // The in-use check's visibility (TASK-263), where a tier relies on that
     // check, for a dry run here, before anything is measured: a plan judges
     // every candidate whether or not the goal is met. A reclaim asks it in
-    // the executor, after the gate and only when its first sample is below
-    // `--min-free` (TASK-298): a met goal is the usual no-op. The call's own
-    // errors come before the environment's: a missing root (above) or
-    // `PATH` is named first.
+    // the executor right after its first sample, and is refused only below
+    // `--min-free` (TASK-298). The call's own errors come before the
+    // environment's: a missing root (above) or `PATH` is named first.
     if options.dry_run && prepared.uses_in_use_scan() {
         executor::reach_path(host, &options.path).map_err(|failure| match failure {
             executor::MeasureFailure::Usage(why) => (ErrorCause::Usage, why),
             executor::MeasureFailure::Host(why) => (ErrorCause::Host, why),
         })?;
-        executor::process_visibility(host).map_err(|e| (e.cause, e.message))?;
+        executor::process_visibility(host).map_err(|e| match e.cause {
+            ErrorCause::Safety => (
+                e.cause,
+                format!(
+                    "{}; a reclaiming ensure here exits 0 while --min-free is met and is \
+                     refused below it",
+                    e.message
+                ),
+            ),
+            _ => (e.cause, e.message),
+        })?;
     }
     let mut index = if options.no_index {
         RunIndex::no_index()

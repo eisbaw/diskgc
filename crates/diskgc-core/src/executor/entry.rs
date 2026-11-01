@@ -7,9 +7,10 @@
 //! 1. Every tier's action is one this build reclaims ([`reclaimable`]),
 //!    then the pre-release sandbox gate, then the first sample. At or above
 //!    `--min-free` the run ends there, without the host lock, the tally or
-//!    the snapshot. Below it, an `ensure` whose tiers rely on the in-use
-//!    check is refused where that check cannot see every process
-//!    ([`process_visibility`]).
+//!    the snapshot. Right after the sample, before the deadline is asked,
+//!    a run whose tiers rely on the in-use check asks whether that check
+//!    can see every process ([`process_visibility`]): below `--min-free`
+//!    it is refused where it cannot, met it says so in one line.
 //! 2. The synchronous tally, before the host lock.
 //! 3. Under the host lock ([`Tallied::walk`]), in this order:
 //!    [`Tallied::sample_and_protect`] (another reclaim may have freed the
@@ -33,16 +34,14 @@ use crate::engine::Reason;
 use crate::host::{Delete, Host, MonoTime, SecondSignal};
 use crate::hostlock::{self, LockError};
 use crate::profile::Action;
-use crate::report::{
-    ErrorCause, ErrorEntry, Final, Report, Status, after_lock_timeout, conclude, human_space_values,
-};
+use crate::report::{Final, Report, Status, after_lock_timeout, conclude, human_space_values};
 use crate::snapshot::{Reclaimed, RunIndex};
 use crate::tally::TallyState;
 use crate::units::format_bytes;
 
 use super::preflight::{
-    Measured, PrivilegeError, deadline_before_first_sample, measure_failure, measure_until,
-    preflight_roots, process_visibility, warn_if_host_lock_unready_timed,
+    Measured, deadline_before_first_sample, measure_failure, measure_until, preflight_roots,
+    process_visibility, warn_if_host_lock_unready_timed,
 };
 use super::tier_policy::Protection;
 use super::{
@@ -175,26 +174,6 @@ fn reclaimable(tier: &Tier) -> Result<(), String> {
     }
 }
 
-/// A reclaim refused where its in-use check cannot see every process
-/// ([`process_visibility`]): exit 2 (`safety`), or 3 (`host`) when the
-/// facts could not be read; nothing was locked or judged.
-fn visibility_refusal(
-    mut report: Report,
-    log: &mut dyn FnMut(&str),
-    refused: PrivilegeError,
-) -> Report {
-    log(&format!("error: {}", refused.message));
-    if refused.cause == ErrorCause::Host {
-        report.status = Status::Error;
-        report
-            .errors
-            .push(ErrorEntry::run(ErrorCause::Host, refused.message));
-        report
-    } else {
-        report.usage_error_with_cause(refused.cause, refused.message)
-    }
-}
-
 /// The deadline passed after the first sample, before the tally: the
 /// final sample decides 0 or 124.
 fn deadline_before_reclaim<H: Host>(
@@ -275,25 +254,35 @@ fn run<H: Delete>(
         Err(_) if host.interrupted().is_some() => return report,
         Err(error) => return measure_failure(report, log, error),
     };
+    let avail = report.avail_before_bytes.expect("measured");
+    // The in-use check's visibility (TASK-263, TASK-298), asked right after
+    // the first sample, before the deadline decides anything: below
+    // `--min-free` a reclaim would judge with an incomplete process list,
+    // so the run is refused (2, or 3 for facts it cannot read), deadline
+    // or not; met, it only says so. In a `watch` cycle it fires only when
+    // the facts changed since its start (which refused them) or cannot be
+    // read. It reads diskgc's own namespace facts, no other process.
+    if tiers.iter().any(|(tier, _)| tier.relies_on_in_use_check())
+        && let Err(refused) = process_visibility(host)
+    {
+        if avail < measured.min {
+            log(&format!("error: {}", refused.message));
+            return report.refused(refused.cause, refused.message);
+        }
+        log(&format!(
+            "warning: the space is there, so this run exits 0; a reclaim here would be \
+             refused: {}",
+            refused.message
+        ));
+    }
     if deadline_passed(host, deadline) {
         return deadline_before_reclaim(host, &measured, deadline, report, log, first);
     }
-    let avail = report.avail_before_bytes.expect("measured");
     if avail >= measured.min {
         report.status = Status::Met;
         report.avail_after_bytes = Some(avail);
         warn_if_host_lock_unready_timed(host, &mut report, deadline, log);
         return report;
-    }
-    // The reclaim starts here: where it would judge with an incomplete
-    // process list it is refused instead (TASK-263, TASK-298), after the
-    // gate and the sample, before the tally and the lock. A `watch` asked
-    // at its start; within it every scan reads the facts again.
-    if request.watch.is_none()
-        && tiers.iter().any(|(tier, _)| tier.relies_on_in_use_check())
-        && let Err(refused) = process_visibility(host)
-    {
-        return visibility_refusal(report, log, refused);
     }
     let [avail_text, min_text, _] = human_space_values([Some(avail), Some(measured.min), None]);
     log(&format!(

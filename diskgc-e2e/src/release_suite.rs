@@ -432,7 +432,7 @@ pub fn candidate_runs_watch_tally_only(ctx: &Ctx) -> TestResult {
 /// planned, nothing deleted (the oracle judges every run). TASK-298: with
 /// the space already there (`--min-free 1M`) the same reclaiming `ensure`
 /// is the usual no-op, exit 0 `met`, as a CI pre-job hook in a container
-/// needs. Positive control: the same dry run from the container's
+/// needs, and says on stderr that a reclaim there would be refused. Positive control: the same dry run from the container's
 /// namespace, the host's (`--pid=host`), plans.
 pub fn candidate_refuses_in_its_own_pid_namespace(ctx: &Ctx) -> TestResult {
     ctx.scratch.mkdirs("release-pidns/project", 0o755, TESTER)?;
@@ -495,6 +495,14 @@ pub fn candidate_refuses_in_its_own_pid_namespace(ctx: &Ctx) -> TestResult {
                 && report["errors"].as_array().is_some_and(Vec::is_empty)
                 && report["actions"].as_array().is_some_and(Vec::is_empty),
             "{rule}: a met run in its own namespace is not the usual no-op: {report}"
+        );
+        ensure!(
+            met_run
+                .stderr
+                .lines()
+                .any(|l| l.contains("a reclaim here would be refused: ") && l.contains(rule)),
+            "{rule}: the met run does not say a reclaim would be refused: {}",
+            met_run.stderr
         );
         drop(namespace);
     }

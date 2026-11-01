@@ -71,6 +71,19 @@ impl Signal {
     }
 }
 
+/// The status of a refusal (`ensure`'s and `watch`'s start, a reclaim
+/// that cannot start): `error` (exit 3) when the host failed (`host`: a
+/// read of diskgc's own capability set or PID namespace facts, a lock
+/// that failed), `usage_error` (exit 2) for every other cause (usage,
+/// configuration, `safety`, `provisioning`).
+pub fn refusal_status(cause: ErrorCause) -> Status {
+    if cause == ErrorCause::Host {
+        Status::Error
+    } else {
+        Status::UsageError
+    }
+}
+
 impl Status {
     /// Every status, one of each kind (both signals).
     pub const ALL: [Status; 9] = [
@@ -567,6 +580,15 @@ impl Report {
 
     pub fn usage_error_with_cause(mut self, cause: ErrorCause, message: impl Into<String>) -> Self {
         self.status = Status::UsageError;
+        self.errors.push(ErrorEntry::run(cause, message));
+        self
+    }
+
+    /// A refusal for `cause` saying `message` ([`refusal_status`]: exit 3
+    /// for `host`, 2 for every other cause); the fields determined so far
+    /// are kept.
+    pub fn refused(mut self, cause: ErrorCause, message: impl Into<String>) -> Self {
+        self.status = refusal_status(cause);
         self.errors.push(ErrorEntry::run(cause, message));
         self
     }

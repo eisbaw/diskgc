@@ -1111,7 +1111,7 @@ namespace, reused, zombie, nested and `hidepid` vectors and the frozen
 definition), dropping its `min_idle_for` (`nix-shell-rc-fresh-not-idle`,
 frozen definition), dropping the `nix-develop-*-*` pattern (its `examples`,
 golden set, `builtins/nix-shell-rc.yaml`), skipping `hidepid` (the three
-`hidepid` vectors; since TASK-263 refusals at start, so the core's unit
+`hidepid` vectors; since TASK-263 refused runs, so the core's unit
 tests carry that bite now), skipping the namespace (the nested vector), naming the
 namespace before `hidepid` (`a_failed_precondition_names_its_rule_hidepid_first`),
 tabling only the first level and ignoring a listed carrier
@@ -1123,7 +1123,7 @@ oracle), skipping the namespace fails
 `owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace`
 (deletion oracle), naming the namespace first fails
 `owner_pid_is_unknown_under_hidepid` (its detail; since TASK-263
-`ensure_is_refused_under_hidepid`, whose runs are refused at start);
+`ensure_is_refused_under_hidepid`, whose runs are refused);
 skipping the
 filesystem rule fails `owner_pid_is_unknown_on_an_unlisted_filesystem`
 (deletion oracle: the overlay candidate deleted; step 7, 2026-10-24).
@@ -1241,7 +1241,7 @@ reader):
 | `nix-shell-rc-outer-level-pid-refused` | `nix-develop-3025375-1`; process with `nspid: [3025375, 9]` | `in_use` (any level counts) |
 | `nix-shell-rc-reused-pid-refused` | the shell is gone; an unrelated `sleep` now has pid 4242 | `in_use` (reuse retains, never deletes) |
 | `nix-shell-rc-zombie-owner-refused` | process 4242 `zombie: true` | `in_use` |
-| `nix-shell-rc-nested-namespace-unknown` | `pid_namespace: test_container` (anywhere else ensure refuses at start); no process 4242 | `producer_unknown` |
+| `nix-shell-rc-nested-namespace-unknown` | `pid_namespace: test_container` (anywhere else a reclaim below the goal is refused); no process 4242 | `producer_unknown` |
 | `nix-shell-rc-hidepid-refused` | `proc_hidepid: true`; no process 4242 | refused below the goal, dry run too (exit 2, `safety`, TASK-263): a hidden `newgrp` shell would be unlisted |
 | `nix-shell-rc-hidepid-root-refused` | as above with `own_uid: 0` | the same (root does not lift the rule) |
 | `nix-shell-rc-unlisted-filesystem-unknown` | one candidate each on mounts of type `virtiofs`, `9p`, `overlay`, `zfs`; no owners | `producer_unknown` each (one file per type, so dropping one bites) |

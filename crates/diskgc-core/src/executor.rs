@@ -359,24 +359,16 @@ fn usage(report: Report, log: &mut dyn FnMut(&str), message: String) -> Report {
 fn lock_refusal(report: Report, log: &mut dyn FnMut(&str), error: LockError) -> Report {
     let message = error.to_string();
     log(&format!("error: {message}"));
-    match &error {
+    let cause = match &error {
         LockError::Missing { .. }
         | LockError::Unusable { .. }
-        | LockError::UserLockRefused { .. } => {
-            report.usage_error_with_cause(ErrorCause::Provisioning, message)
-        }
-        LockError::Failed(..) => {
-            let mut report = report;
-            report.status = Status::Error;
-            report
-                .errors
-                .push(ErrorEntry::run(ErrorCause::Host, message));
-            report
-        }
+        | LockError::UserLockRefused { .. } => ErrorCause::Provisioning,
+        LockError::Failed(..) => ErrorCause::Host,
         LockError::DeadlinePassed(_) | LockError::Interrupted(_) => {
             unreachable!("the caller handles the deadline and signals: {error}")
         }
-    }
+    };
+    report.refused(cause, message)
 }
 
 /// The path of the lock [`hostlock::acquire`] took, waited for or failed

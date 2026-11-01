@@ -1200,9 +1200,11 @@ is accepted until measured otherwise.
   Nix, Docker and Cargo are optional. It needs the `/proc` of its own pid
   namespace and `pidfd_open` (not blocked by seccomp), and refuses to start
   otherwise ([safety.md](safety.md#in-use), unreadable or vanishing
-  processes). `ensure` and a reclaiming `watch` also need the initial PID
-  namespace and a `/proc` without `hidepid`, so they run on the host, not
-  in a container or a unit with `PrivatePIDs=` or `ProtectProc=`
+  processes). To reclaim (and for a dry run) it also needs the initial
+  PID namespace and a `/proc` without `hidepid`, so a reclaiming
+  `ensure` or `watch` runs on the host, not in a container or a unit
+  with `PrivatePIDs=` or `ProtectProc=`; in a container, `ensure` only
+  confirms space that is already there
   ([safety.md](safety.md#in-use), Visibility: a process list that cannot be
   complete). Its in-use scan also needs a hard `RLIMIT_NOFILE` above the
   number of processes it can see; it raises its soft limit itself
@@ -1474,9 +1476,8 @@ Sandboxing and Capabilities), so only seccomp-based options remain
 there; they are the shipped list in both units. Checked against
 `systemd-analyze syscall-filter` and systemd.exec of systemd 260.
 Operator-added `ProtectProc=` or `PrivatePIDs=` is **refused**: a
-reclaiming `watch` exits 2 at start naming the rule (an `ensure` once
-it would reclaim), so the unit fails where its operator looks instead
-of running blind
+reclaiming `watch` exits 2 at start naming the rule, so the unit fails
+where its operator looks instead of running blind
 ([safety.md](safety.md#in-use), Visibility: a process list that cannot be complete;
 TASK-263).
 

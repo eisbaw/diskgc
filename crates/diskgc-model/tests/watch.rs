@@ -1136,15 +1136,14 @@ fn watch_is_refused_where_the_in_use_check_cannot_see_every_process() {
     assert!(deletions(&excepted) > 0, "{:?}", run.lines);
 }
 
-/// TASK-298: `ensure` asks the visibility rule when its reclaim would
-/// start; a watch asked it at start, and its cycles leave a change since
-/// to their scans, which read the facts again (docs/safety.md, In use:
-/// Visibility): facts that cannot be read in a cycle make its candidates
-/// `in_use_unknown` (`incomplete_process_list`), they do not refuse the
-/// cycle as a start check would. The start's read is the first; the
-/// cycle's scan's first read fails.
+/// TASK-298 review (mped S3): a watch asked the visibility rule at start;
+/// each reclaim cycle asks it again right after its sample, so facts that
+/// changed since (a `/proc` remounted with `hidepid`) or cannot be read
+/// end the cycle naming the rule, with nothing judged, and back off,
+/// instead of a cycle whose every candidate is `in_use_unknown`. The
+/// start's read is the first; the cycle's fails.
 #[test]
-fn a_watch_cycle_leaves_the_visibility_facts_to_its_scan() {
+fn a_watch_cycle_asks_the_visibility_rule_again() {
     let events = "events:\n  - {at: {elapsed: 90s}, other_used: {mount: /tmp, bytes: 6656M}}\n  \
                   - {at: {op: pid_namespace, nth: 2, when: before}, fail: EIO}\n  \
                   - {at: {elapsed: 2m}, signal: term}\n";
@@ -1156,20 +1155,21 @@ fn a_watch_cycle_leaves_the_visibility_facts_to_its_scan() {
         "{:?}",
         run.lines
     );
-    let (_, record) = run.records.first().expect("a cycle record");
+    assert_eq!(run.records.len(), 1, "{:?}", run.records);
+    let (_, record) = &run.records[0];
+    assert_eq!(record["status"], "error", "{record:#}");
+    assert_eq!(record["errors"][0]["cause"], "host", "{record:#}");
     assert!(
-        !run.has("could not read its PID namespace facts"),
-        "{:?}",
-        run.lines
-    );
-    let skipped = record["skipped"].as_array().expect("skipped");
-    assert!(
-        !skipped.is_empty()
-            && skipped.iter().all(|s| s["reason"] == "in_use_unknown"
-                && s["unknown_cause"] == "incomplete_process_list"),
+        record["errors"][0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("could not read its PID namespace facts")),
         "{record:#}"
     );
+    assert_eq!(record["skipped"], serde_json::json!([]), "{record:#}");
+    assert!(record["watch"]["backoff"].is_object(), "{record:#}");
+    assert_eq!(host.trace_count(Op::Pids), 0, "nothing judged");
     assert_eq!(deletions(&host), 0);
+    assert_eq!(host_locks(&host), 0);
     assert!(host.unfired_events().is_empty());
 }
 

@@ -103,10 +103,11 @@ kinds), and where those guarantees end. The protocols are in
   namespace), so stale test fixtures do not block forever.
 - Nothing at all where diskgc cannot see every process (`hidepid` on
   `/proc`, a PID namespace other than the initial one, as in a
-  container): `ensure` refuses to reclaim there (space already there
-  is still exit 0) and a reclaiming `watch` to start, when a tier
-  relies on diskgc's own in-use check (pending Mark's confirmation,
-  TASK-263, TASK-298).
+  container), when a tier relies on diskgc's own in-use check: a
+  reclaiming `ensure` whose space is already there still exits 0, but
+  its dry run, a reclaim below `--min-free` and a reclaiming `watch` are
+  refused ([safety.md](docs/safety.md#in-use); pending Mark's
+  confirmation, TASK-263, TASK-298).
 - Nor, for a source with a liveness contract, unless that contract
   permits it ([safety.md](docs/safety.md#producer-liveness)); a `/tmp` or
   cache built-in ships only with a contract whose class admits it, and

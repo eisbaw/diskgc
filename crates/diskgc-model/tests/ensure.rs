@@ -916,30 +916,97 @@ fn reads_processes_or_locks(op: Op) -> bool {
 /// PRD: `ensure` exits 0 without taking the lock when the space is already
 /// there, also where diskgc cannot see every process: the met run is the
 /// usual no-op, call for call the same as with every process visible, and
-/// reads no process, no namespace fact and no lock on the way (premises
-/// a to c of TASK-298: the sample needs no process, nothing between it and
-/// the exit reads one, no lock is taken or made).
+/// reads no process and no lock on the way, only diskgc's own namespace
+/// facts (premises a to c of TASK-298: the sample needs no process,
+/// nothing between it and the exit reads another one, no lock is taken or
+/// made). It says in one line that a reclaim here would be refused, and
+/// why; with every process visible it says nothing of the kind.
 #[test]
 fn a_met_goal_is_the_usual_no_op_where_the_process_list_is_incomplete() {
+    const WOULD: &str = "a reclaim here would be refused: ";
     let visible = host(&yaml(true, ""));
-    let expected = ensure(&visible, &cargo("1G", None));
+    let (expected, lines) = ensure_logged(&visible, &cargo("1G", None));
     assert_eq!(expected.status, Status::Met, "{expected:#?}");
+    assert!(!lines.iter().any(|l| l.contains(WOULD)), "{lines:#?}");
     let expected_ops: Vec<Op> = visible.trace().iter().map(|c| c.op).collect();
-    for (facts, _) in INCOMPLETE_PROCESS_LISTS {
+    let unreadable = "events:\n  - {at: {op: pid_namespace, nth: 1, when: before}, fail: EIO}\n";
+    let mut cases: Vec<(&str, &str)> = INCOMPLETE_PROCESS_LISTS.to_vec();
+    cases.push((unreadable, "diskgc could not read its PID namespace facts"));
+    for (facts, rule) in cases {
         let hidden = host(&format!("{facts}{}", yaml(true, "")));
-        let report = ensure(&hidden, &cargo("1G", None));
+        let (report, lines) = ensure_logged(&hidden, &cargo("1G", None));
         assert_eq!(report.status, Status::Met, "{facts}: {report:#?}");
         assert_eq!(report.exit_code(), 0, "{facts}");
         assert!(report.errors.is_empty(), "{facts}: {report:#?}");
         assert_eq!(report.avail_after_bytes, report.avail_before_bytes);
+        let warned: Vec<&String> = lines.iter().filter(|l| l.contains(WOULD)).collect();
+        assert!(
+            warned.len() == 1
+                && warned[0].starts_with("warning: the space is there, so this run exits 0")
+                && warned[0].contains(rule),
+            "{facts}: {lines:#?}"
+        );
         let ops: Vec<Op> = hidden.trace().iter().map(|c| c.op).collect();
         assert_eq!(ops, expected_ops, "{facts}: the met run differs");
         assert!(ops.contains(&Op::Statvfs), "{facts}: sampled");
         let read: Vec<Op> = ops
             .into_iter()
-            .filter(|op| reads_processes_or_locks(*op))
+            .filter(|op| *op != Op::PidNamespace && reads_processes_or_locks(*op))
             .collect();
         assert!(read.is_empty(), "{facts}: {read:?}");
+        assert_eq!(hidden.trace_count(Op::PidNamespace), 1, "{facts}");
+    }
+}
+
+/// Codex blocker (TASK-298 review): the rule is asked right after the
+/// first sample, before the deadline decides anything, so a deadline that
+/// passes during the sample cannot turn a permanent refusal into "retry
+/// later" (124): below the goal, exit 2 (or 3 for facts it cannot read);
+/// met at the first sample, exit 0. A deadline that passes before the
+/// sample (here, in the sandbox gate) ends the run before the rule is
+/// asked: 124, as documented (docs/reference.md, Exit codes).
+#[test]
+fn a_deadline_during_the_first_sample_does_not_hide_the_refusal() {
+    let late = |op: &str| {
+        format!("events:\n  - {{at: {{op: {op}, nth: 1, when: after}}, advance: 11m}}\n")
+    };
+    let unreadable = "  - {at: {op: pid_namespace, nth: 1, when: before}, fail: EIO}\n";
+    let mut cases: Vec<(String, &str, ErrorCause)> = INCOMPLETE_PROCESS_LISTS
+        .iter()
+        .map(|(facts, rule)| ((*facts).to_owned(), *rule, ErrorCause::Safety))
+        .collect();
+    cases.push((
+        String::new(),
+        "diskgc could not read its PID namespace facts",
+        ErrorCause::Host,
+    ));
+    for (facts, rule, cause) in cases {
+        let events = if cause == ErrorCause::Host {
+            format!("{}{unreadable}", late("statvfs"))
+        } else {
+            late("statvfs")
+        };
+        let model = format!("{facts}{events}{}", yaml(true, ""));
+        let below = host(&model);
+        let report = ensure(&below, &cargo("12G", None));
+        let code = if cause == ErrorCause::Host { 3 } else { 2 };
+        assert_eq!(report.exit_code(), code, "{facts}{events}: {report:#?}");
+        assert_eq!(report.errors.len(), 1, "{report:#?}");
+        assert_eq!(report.errors[0].cause, cause);
+        assert!(report.errors[0].message.contains(rule), "{report:#?}");
+        assert!(calls(&below, Op::Flock).is_empty() && calls(&below, Op::Pids).is_empty());
+        assert!(below.unfired_events().is_empty());
+        let met = host(&model);
+        let report = ensure(&met, &cargo("1G", None));
+        assert_eq!(report.exit_code(), 0, "{facts}{events}: {report:#?}");
+        assert!(report.errors.is_empty(), "{report:#?}");
+    }
+    for (facts, _) in INCOMPLETE_PROCESS_LISTS {
+        let host = host(&format!("{facts}{}{}", late("may_delete"), yaml(true, "")));
+        let report = ensure(&host, &cargo("12G", None));
+        assert_eq!(report.status, Status::Deadline, "{facts}: {report:#?}");
+        assert_eq!(report.exit_code(), 124);
+        assert_eq!(host.trace_count(Op::PidNamespace), 0, "{facts}: not asked");
     }
 }
 

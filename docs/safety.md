@@ -1239,26 +1239,41 @@ its command actions included, which are rechecked against a scan before
 they start, and `cargo-target`; not the Docker kinds, whose daemon decides
 what is in use), diskgc refuses whenever it would judge a candidate:
 exit 2, `cause: safety`, naming the rule and where to run instead;
-facts that cannot be read are exit 3 (`host`). So `ensure` is refused
-when its first sample is below `--min-free`, before the tally and the
-lock; at or above it the run is the usual no-op (exit 0, `met`, no
-lock, no candidate judged and no other process read: the PRD's "exits 0
-without taking the lock when space is already there", so a CI pre-job
-hook in a container passes when nothing needs freeing; TASK-298). Its dry run is refused at start,
-before anything is measured, whatever the space: a plan judges every
-candidate, also when the goal is met. A reclaiming `watch` is refused
-at start (Watch start, step 4), whatever the space: a watcher that
-could never reclaim fails where its operator looks, not on the day the
-space runs short. A reclaim asks the [Pre-release sandbox
-gate](#pre-release-sandbox-gate) first, so outside a test container a
-development build names the gate, in its own PID namespace too, met
-goal or not; and the call's own errors (a missing root or `PATH`) are
-named before this rule. `watch --tally-only`, `check`, `survey` and
-`profiles` judge no candidate and are not refused. Every scan reads the facts again, before its first
+facts that cannot be read are exit 3 (`host`). The rule reads only
+diskgc's own `self/ns/pid` and the held mount's `mountinfo`, no other
+process and no lock.
+
+- A reclaiming `ensure`, and every `watch` reclaim cycle, asks it right
+  after its first sample, before the deadline, the tally and the lock
+  (TASK-298). Below `--min-free` the run is refused, also when the
+  deadline has passed meanwhile, so a permanent condition never reads as
+  "retry later" (124); a deadline that passes before the first sample
+  ends the run before the rule is asked. At or above `--min-free` the
+  run is the usual no-op (exit 0, `met`, no lock, no candidate judged:
+  the PRD's "exits 0 without taking the lock when space is already
+  there", so a CI pre-job hook in a container passes when nothing needs
+  freeing), and says on stderr in one line that a reclaim here would be
+  refused, and why (unreadable facts too); the JSON report has no
+  warnings field and is unchanged.
+- Its dry run is refused at start, before anything is measured, whatever
+  the space: a plan judges every candidate, also when the goal is met.
+- A reclaiming `watch` is refused at start (Watch start, step 4),
+  whatever the space: a watcher that could never reclaim fails where
+  its operator looks, not on the day the space runs short. Its cycles
+  ask again, so facts that changed since (a `/proc` remounted with
+  `hidepid`) or cannot be read end the cycle naming the rule, with
+  nothing judged, and back off ([reference.md](reference.md#watch)).
+
+A reclaim asks the [Pre-release sandbox gate](#pre-release-sandbox-gate)
+first, so outside a test container a development build names the gate,
+in its own PID namespace too, met goal or not; and the call's own errors
+(a missing root or `PATH`) are named before this rule. `watch
+--tally-only`, `check`, `survey` and `profiles` judge no candidate and
+are not refused. Every scan reads the facts again, before its first
 listing and after its last read, and confirms them once for both this
 rule and Owner PID: a failed read, a change between the two (a `/proc`
-remounted with `hidepid` under a running `watch`) or a failed rule makes
-every candidate `in_use_unknown` (`unknown_cause:
+remounted with `hidepid` during a cycle) or a failed rule makes every
+candidate `in_use_unknown` (`unknown_cause:
 incomplete_process_list`). Decided 2026-11-01 for TASK-263 (implementer's choice,
 for Mark to confirm): refusing is the simplest sound rule and the loud
 one; the alternative, every candidate `in_use_unknown` without a
@@ -2225,9 +2240,9 @@ schema only with its first producer.
 
 - Outside the initial PID namespace, under `hidepid`, or on a filesystem
   not on the local list, no PID-based answer permits a deletion; those
-  candidates are kept as `producer_unknown`. Since TASK-263 `ensure`
-  refuses to reclaim, and a reclaiming `watch` to start, under `hidepid`
-  or outside the initial PID namespace ([In use](#in-use), Visibility: a process list that cannot be
+  candidates are kept as `producer_unknown`. Since TASK-263 diskgc
+  does not reclaim under `hidepid` or outside the initial PID namespace
+  ([In use](#in-use), Visibility: a process list that cannot be
   complete), so these preconditions decide only where that rule's
   test-container exception lets a run start, and as a second guard.
   There, in its own PID namespace, diskgc reclaims no `nix-shell` rc
@@ -4163,7 +4178,8 @@ How it holds:
 
 ## Privileges
 
-- Visibility of the process list, checked before a reclaim, root or not:
+- Visibility of the process list, checked before a reclaim and a dry
+  run, root or not:
   [In use](#in-use), Visibility: a process list that cannot be complete.
 - diskgc refuses to run as root (uid 0) unless `--allow-root` is given;
   the laptop service runs as the owner, CI as the runner user. `profiles
