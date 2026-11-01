@@ -5,14 +5,15 @@ title: >-
   references, mounts in other namespaces, hidepid, non-initial pid namespace
 status: To Do
 assignee: []
-created_date: '2026-10-25 01:14'
+created_date: 2026-10-25 01:14
+updated_date: '2026-11-01T05:37:00Z'
 labels:
   - hardening
   - safety
 dependencies: []
 references:
   - docs/safety.md
-priority: medium
+priority: high
 ---
 
 ## Description
@@ -34,3 +35,9 @@ To confirm 1-3: container tests (io_uring register+close, then ensure --dry-run:
 - [ ] #1 Each item reproduced in a container/VM or argued unreachable, evidence recorded
 - [ ] #2 Reproduced items fixed or documented in docs/safety.md (In use, Visibility, cargo-target) as limits
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Periodic full review #2 on master 794e0e1 (2026-11-01; Codex tmp/reviews/codex-full2-794e0e1.md + mped), static reading, not reproduced. mped: a candidate holding the backing file of a live loop device (udisksctl loop-setup) passes the in-use check and is unlinked; data gone when the device detaches. Now cheap: Host::loop_backing_file exists (TASK-268); list /sys/block/loop*/loop/backing_file at each in-use scan and add their (dev, ino) to the uses.
+<!-- SECTION:NOTES:END -->
