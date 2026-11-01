@@ -343,7 +343,8 @@
             install -Dm0644 ${./docs/safety.md} $doc/safety.md
             # From the section's heading to the next heading of its level;
             # its in-page links (#x) point into reference.md.
-            awk '/^### Release notes \(next release, draft\)$/ { on = 1; print ${lib.escapeShellArg releaseNotesTitle}; next }
+            awk -v title=${lib.escapeShellArg releaseNotesTitle} \
+              '/^### Release notes \(next release, draft\)$/ { on = 1; print title; next }
                  on && /^#{1,3} / { exit }
                  on' ${./docs/reference.md} \
               | sed 's/](#/](reference.md#/g' > $doc/RELEASE-NOTES.md
