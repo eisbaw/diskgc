@@ -310,6 +310,12 @@ pub struct Mount {
     /// An idmapped mount's ids, stored to shown
     /// ([`crate::spec::MountSpec::idmap`]); empty: not idmapped.
     pub idmap: Vec<(u32, u32)>,
+    /// An overlay's upper layer: what mountinfo shows as `upperdir=`
+    /// ([`crate::spec::MountSpec::overlay_upperdir_shown`], else
+    /// `overlay_upper`), and the device a `statx` of the upper directory
+    /// reports through the mount it lies on (its subvolume's on btrfs), from
+    /// which a nested subvolume's own overrides. `None` for any other mount.
+    pub upper: Option<(PathBuf, Dev)>,
 }
 
 /// The id Linux shows for an id the mapping of an idmapped mount does not
@@ -722,9 +728,16 @@ impl State {
         if fs.missing.contains(&StatxField::Subvol) {
             return None;
         }
+        // An overlay passes its layer's through (`ovl_getattr` fills the
+        // stat from the upper entry and overrides only the device and
+        // inode): the model's overlays show their upper directory's tree.
+        let layer = self.mount(loc.mnt).upper.as_ref().map(|(_, dev)| *dev);
         match fs.fs_type.as_str() {
             "btrfs" => {
-                let dev = self.stat_dev(loc);
+                let dev = match layer {
+                    Some(dev) => self.inode(loc).subvolume.unwrap_or(dev),
+                    None => self.stat_dev(loc),
+                };
                 Some(0x1_0000_0000 | (u64::from(dev.major) << 20) | u64::from(dev.minor))
             }
             "bcachefs" => Some(self.inode(loc).subvol.unwrap_or(1)),
@@ -828,6 +841,7 @@ impl State {
             overlay: None,
             subvolume: None,
             idmap: Vec::new(),
+            upper: None,
         });
         Ok(())
     }
@@ -902,6 +916,7 @@ impl State {
             subvolume: from.subvolume,
             // A bind of an idmapped mount is idmapped alike.
             idmap: from.idmap.clone(),
+            upper: from.upper.clone(),
         });
         Ok(())
     }
@@ -938,6 +953,7 @@ impl State {
                     fs_type,
                     read_only: m.read_only,
                     idmapped: !m.idmap.is_empty(),
+                    upper_dir: m.upper.as_ref().map(|(shown, _)| shown.clone()),
                 }
             })
             .collect()

@@ -230,6 +230,7 @@ fn mount(
         source: "src".into(),
         read_only: false,
         idmapped: false,
+        upper_dir: None,
     }
 }
 

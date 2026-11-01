@@ -2691,6 +2691,7 @@ mod best_fit_tests {
             source: "fixture".to_owned(),
             read_only: false,
             idmapped: false,
+            upper_dir: None,
         };
         vec![
             mount(1, 0, "/", 1, "/"),
@@ -2854,6 +2855,7 @@ mod best_fit_tests {
             source: "fixture".to_owned(),
             read_only: false,
             idmapped: false,
+            upper_dir: None,
         };
         let mounts = [
             mount(1, "/", "ext4"),

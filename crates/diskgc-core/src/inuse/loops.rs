@@ -521,6 +521,7 @@ mod tests {
             source: fs_type.to_owned(),
             read_only: false,
             idmapped: false,
+            upper_dir: None,
         }
     }
 

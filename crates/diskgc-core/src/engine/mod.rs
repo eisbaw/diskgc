@@ -44,6 +44,7 @@
 pub(crate) mod container_storage;
 mod delete;
 mod frames;
+mod overlay;
 mod walk;
 
 use std::ffi::{OsStr, OsString};
@@ -157,8 +158,10 @@ pub const SUBVOLUMES_SHARE_DEV: &[&str] = &["bcachefs"];
 /// Filesystem types with subvolumes, whose `stx_subvol` is compared. Not
 /// for any other: overlayfs passes a layer's `stx_subvol` through (its
 /// `getattr` copies the real inode's), so a merged directory and a
-/// lower-only one can differ in it on an overlay over btrfs and ext4,
-/// while `rmdir` through an overlay never removes a subvolume.
+/// lower-only one can differ in it on an overlay over btrfs and ext4; an
+/// overlay's upper layer is proved in that layer instead (`overlay`, the
+/// eligibility walk), as an `rmdir` through the overlay removes an upper
+/// entry, a subvolume of the upper layer included.
 pub const SUBVOLUME_FILESYSTEMS: &[&str] = &["btrfs", "bcachefs"];
 
 /// Whether the directory at `path` (`inner`), reached from the directory
@@ -179,7 +182,7 @@ pub const SUBVOLUME_FILESYSTEMS: &[&str] = &["btrfs", "bcachefs"];
 /// without `xino` shows a file of a lower layer under that layer's device.
 /// The discovery of a candidate, the eligibility walk and the Cargo
 /// inspection and discovery all ask it, as the tally does not enter such a
-/// directory ([`enters_same_subvolume`]).
+/// directory.
 pub fn same_subvolume(
     path: &Path,
     inner: Volume,
@@ -232,18 +235,6 @@ pub fn same_subvolume(
             None => Ok(()),
         },
     }
-}
-
-/// Whether the tally may enter `inner` below `outer`: the same subvolume
-/// by [`same_subvolume`]'s device and `stx_subvol` rules (the tally sizes,
-/// it never refuses, so a filesystem type is not asked).
-pub fn enters_same_subvolume(inner: Volume, outer: Volume) -> bool {
-    inner.dev == outer.dev
-        && match (inner.subvol, outer.subvol) {
-            (Some(a), Some(b)) => a == b,
-            (None, None) => true,
-            _ => false,
-        }
 }
 
 /// Work a resumable discovery walk reports to its pause callback
@@ -1016,11 +1007,6 @@ mod tests {
             Err(Reason::ContainsMount)
         );
         assert_eq!(same_subvolume(path, at(None), at(None), None), Ok(()));
-        assert!(enters_same_subvolume(at(Some(1)), at(Some(1))));
-        assert!(enters_same_subvolume(at(None), at(None)));
-        assert!(!enters_same_subvolume(at(Some(2)), at(Some(1))));
-        assert!(!enters_same_subvolume(at(None), at(Some(1))));
-        assert!(!enters_same_subvolume(other, at(Some(1))));
     }
 
     /// `changed` details name identities as a user reads them, never as

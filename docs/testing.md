@@ -1870,8 +1870,9 @@ The `vm-real-kernel` flake check (`just e2e-vm-real-kernel`, also in
 `just e2e-full`; `diskgc-e2e/vm-real-kernel.{nix,py}`, TASK-304) runs the
 rules no rootless container can reach on a real kernel: loop devices,
 btrfs, idmapped mounts, a `hidepid` `/proc`, udisks and overlays. The
-NixOS guest runs the pinned default kernel (Linux 6.18 at the time of
-writing) with bcachefs from NixOS's out-of-tree module. The development
+NixOS guest runs a kernel pinned in the check (`linuxPackages_6_18`) with
+bcachefs from NixOS's out-of-tree module; scenario 7 asserts the kernel it
+ran on, so a `flake.lock` bump cannot move it unnoticed. The development
 package runs inside one privileged rootful Podman container of the VM
 image (`localhost/diskgc-e2e-vm`), so both sandbox markers are present.
 The container shares the guest's PID namespace (`--pid=host`), so the
@@ -1930,11 +1931,24 @@ architecture.md, Filesystem matching):
 7. bcachefs on a loop device (the out-of-tree module): a nested
    subvolume keeps its parent's `st_dev`, and a candidate holding one is
    `contains_mount` by its `stx_subvol` (TASK-307).
+8. An overlay whose upper layer is a btrfs and whose lower layer is on
+   ext4 (TASK-307 review): a candidate holding a btrfs subvolume of the
+   upper layer is `contains_mount`, proved there through `upperdir=`;
+   a merged candidate with a lower-only part and a lower-only candidate
+   are reclaimed, the lower layer untouched. A second overlay names its
+   upper layer through a symlink, which diskgc does not follow: only a
+   directory whose `stx_subvol` differs from its candidate's is refused.
+0. Root's scan on a real kernel, with every guest process visible
+   (kernel threads included), clears an unheld candidate (TASK-306); the
+   kernel-thread facts the rule rests on (environ `ESRCH`, no fd, map,
+   cwd or root of their own, `PF_KTHREAD` readable by a user) are
+   asserted on the guest.
 
 Root cases are dry-run first (the plan's verdicts), then reclaimed.
-Every command, exit code, JSON report, stderr and ioctl strace is kept
-under `evidence/` and printed in the build log; one run takes about
-five minutes.
+Every command, exit code, JSON report, stderr and strace (ioctls, and
+`statx` for the `stx_subvol` each subvolume filesystem reports) is kept
+under `evidence/` and printed in the build log; one run takes about two
+minutes.
 
 ## 5. End-to-end tests in containers
 

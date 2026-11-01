@@ -17,6 +17,10 @@
 # container's mount namespace, on a guest ext4 directory bound at /work, so
 # the backing names the kernel prints are the container's own paths.
 let
+  # Pinned (TASK-307 review), so a flake.lock bump cannot move the guest to
+  # another kernel, or one the out-of-tree bcachefs module does not build
+  # for, without this file changing; the script asserts it ran on it.
+  kernelPackages = pkgs.linuxPackages_6_18;
   # Every tool a scenario runs inside the container, from the guest's
   # read-only Nix store (the image itself has only BusyBox and strace).
   tools = pkgs.buildEnv {
@@ -51,6 +55,7 @@ pkgs.testers.nixosTest {
 
   nodes.machine = { ... }: {
     boot.kernelParams = [ "diskgc.e2e.real_kernel=1" ];
+    boot.kernelPackages = kernelPackages;
     # bcachefs left mainline in 6.18; NixOS builds the out-of-tree module
     # for the guest's kernel (scenario 7 says which it ran on).
     boot.supportedFilesystems = {
@@ -99,5 +104,6 @@ pkgs.testers.nixosTest {
     TOOLS = "${tools}"
     LIVE_ISO = "${liveIso}"
     BCACHEFS_TOOLS_VERSION = "${pkgs.bcachefs-tools.version}"
+    KERNEL_VERSION = "${kernelPackages.kernel.modDirVersion}"
   '' + builtins.readFile ./vm-real-kernel.py;
 }

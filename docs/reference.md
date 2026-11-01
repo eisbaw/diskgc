@@ -2583,6 +2583,27 @@ line says it was reproduced.
   is a mount point by place is `contains_mount` too, where its covered
   entries were deleted (both reproduced in the model and in a container).
   0.1.0: yes; it has the same path-only mount test (static reading).
+- TASK-286: a directory on another device than the one it is in, with
+  no mount between (a nested btrfs subvolume or snapshot), keeps its
+  candidate or Cargo target (`contains_mount`), and the tally does not
+  enter it; another subvolume of `PATH`'s btrfs is `PATH`'s filesystem
+  (Filesystem matching). 0.1.0: yes; its walk compared mount ids only,
+  so it emptied a nested subvolume inside a candidate and removed its
+  top (static reading).
+- TASK-306: as root (`--allow-root`), a kernel thread's environment
+  read that says `ESRCH` (Linux 6.18) is its answer in one round. Before,
+  each was retried for 16 rounds, the scan outlasted its one-second
+  freshness bound, and every root reclaim ended `in_use_unknown`
+  (measured in the `vm-real-kernel` check). 0.1.0: yes on such a kernel;
+  it has the same read rounds (static reading).
+- TASK-307: a nested bcachefs subvolume (same device as its parent) and
+  a subvolume in an overlay's btrfs upper layer keep their candidate
+  (`contains_mount`), by `stx_subvol` and in the upper layer; on bcachefs
+  without `stx_subvol` (before Linux 6.10) every directory is
+  `unsupported_fs`. 0.1.0: yes; it compared mount ids only (static
+  reading). Reproduced on master before the fix: the bcachefs case in
+  the `vm-real-kernel` check and the model, the overlay case in the
+  model.
 - TASK-285: a delete action's cached `protect` and `!profile` matches are
   enumerated again when the mount table differs in anything from the one
   read before the enumeration (a rename above a bind's source, a bind
@@ -2755,7 +2776,12 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   nested btrfs subvolume inside a candidate keeps it, TASK-286:
   [architecture.md](architecture.md#filesystem-matching)). None is reproduced yet; the 0.1 `/tmp` built-ins
   are less exposed (their contracts keep a session or rc directory on
-  their own evidence).
+  their own evidence). A nested subvolume keeps its candidate on btrfs
+  by its device and on bcachefs by its `stx_subvol` (TASK-307), and in an
+  overlay's upper layer, proved there; before Linux 6.10 the kernel
+  reports no `stx_subvol`, so every directory on a bcachefs is refused
+  (`unsupported_fs`), and on an overlay whose upper layer cannot be
+  reached a nested btrfs subvolume there is not seen.
 - **diskgc in its own PID namespace** (most containers, `PrivatePIDs=`)
   refuses to run `ensure`, its dry run and a reclaiming `watch` with an
   `fs` or `cargo-target` tier (exit 2,

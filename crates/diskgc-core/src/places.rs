@@ -38,6 +38,16 @@ pub use space::{
 /// The mount a path is on: the deepest mount point that is a (component-
 /// wise) prefix of `path`; of mounts stacked on that point, the topmost (the
 /// one no other mount there is stacked on).
+/// The filesystem type of mount `mount_id` in `mounts`; `None` when the
+/// table does not list it (a subvolume boundary is then judged by device
+/// and `stx_subvol` alone, [`crate::engine::same_subvolume`]).
+pub fn fs_type_of(mounts: &[MountEntry], mount_id: u64) -> Option<&str> {
+    mounts
+        .iter()
+        .find(|mount| mount.id == mount_id)
+        .map(|mount| mount.fs_type.as_str())
+}
+
 pub fn mount_for<'m>(mounts: &'m [MountEntry], path: &Path) -> Result<&'m MountEntry, Unsafe> {
     let depth = |m: &MountEntry| m.mount_point.components().count();
     let deepest = mounts

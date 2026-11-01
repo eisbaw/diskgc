@@ -73,7 +73,24 @@ fn parse_line(line: &[u8]) -> Result<MountEntry, String> {
         // Per-mount options only: the kernel prints `idmapped` there
         // (`show_vfsmnt_opts`), never among a superblock's options.
         idmapped: fields[5].split(|b| *b == b',').any(|o| o == b"idmapped"),
+        upper_dir: if fields[sep + 1] == b"overlay" {
+            overlay_upper_dir(fields[sep + 3])
+                .map_err(|e| format!("{e} in mountinfo line: {}", shown()))?
+        } else {
+            None
+        },
     })
+}
+
+/// The `upperdir=` value among an overlay's superblock options, unescaped.
+/// overlayfs shows it with `seq_show_option`, which octal-escapes a comma,
+/// `=`, whitespace and a backslash, so the options split at commas.
+fn overlay_upper_dir(options: &[u8]) -> Result<Option<PathBuf>, String> {
+    options
+        .split(|b| *b == b',')
+        .find_map(|option| option.strip_prefix(b"upperdir="))
+        .map(|value| Ok(PathBuf::from(OsString::from_vec(unescape(value)?))))
+        .transpose()
 }
 
 /// What the `hidepid` and `gid` superblock options of a procfs mount say.
@@ -220,6 +237,25 @@ mod tests {
         assert!(hidepid_of(table, 28).is_err(), "not proc");
         assert!(hidepid_of(table, 32).is_err(), "gid not a number");
         assert!(hidepid_of(table, 99).is_err(), "absent");
+    }
+
+    /// TASK-307 review: an overlay's `upperdir=` is read and unescaped
+    /// (`seq_show_option` escapes the comma and the `=` in it); other types
+    /// and an overlay without an upper layer have none.
+    #[test]
+    fn an_overlays_upper_dir_is_read_from_its_superblock_options() {
+        let table = b"\
+50 28 0:60 / /live rw - overlay overlay rw,lowerdir=/rofs,upperdir=/cow/up\\054per\\075x,workdir=/cow/work,uuid=on
+51 28 0:61 / /ro rw - overlay overlay ro,lowerdir=/a:/b
+52 28 254:1 / /e rw - ext4 /dev/x rw,upperdir=/nope
+";
+        let mounts = parse_mountinfo(table).expect("parses");
+        assert_eq!(
+            mounts[0].upper_dir.as_deref(),
+            Some(Path::new("/cow/up,per=x"))
+        );
+        assert_eq!(mounts[1].upper_dir, None, "no upper layer");
+        assert_eq!(mounts[2].upper_dir, None, "not an overlay");
     }
 
     const SAMPLE: &[u8] = b"\

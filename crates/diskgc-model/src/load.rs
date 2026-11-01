@@ -491,7 +491,12 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
             }
         };
         if let Some(upper) = &spec.overlay_upper {
+            let shown = spec
+                .overlay_upperdir_shown
+                .clone()
+                .unwrap_or_else(|| upper.clone());
             let upper = overlay_upper(state, &paths, upper).map_err(|m| LoadError::new(&at, m))?;
+            let layer = state.mount(upper.mnt).stat_dev();
             state.mounts.push(Mount {
                 id: spec.id,
                 parent: spec.parent,
@@ -503,6 +508,7 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
                 overlay: Some(dev),
                 subvolume: None,
                 idmap: Vec::new(),
+                upper: Some((shown, layer)),
             });
             paths.insert(spec.id, spec.at.clone());
             continue;
@@ -533,6 +539,7 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
             overlay: None,
             subvolume,
             idmap: spec.idmap.iter().map(|id| (id.stored, id.shown)).collect(),
+            upper: None,
         });
         paths.insert(spec.id, spec.at.clone());
     }

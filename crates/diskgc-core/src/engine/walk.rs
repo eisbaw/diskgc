@@ -39,11 +39,15 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::host::{Base, DirListing, Errno, FileType, Host, HostError, MonoTime, Stat, Timestamp};
+use crate::host::{
+    Base, DirListing, Errno, FileType, Host, HostError, MonoTime, MountEntry, Stat, Timestamp,
+};
 use crate::resolve::{ResolveError, Unsafe};
 
 use super::frames::{OpenFailed, OpenFailure, Stack};
-use super::{Candidate, Entry, Identity, Reason, Skip, Volume, WalkRecord, deadline_passed};
+use super::{
+    Candidate, Entry, Identity, Reason, Skip, Volume, WalkRecord, deadline_passed, overlay,
+};
 
 /// The keep marker (docs/reference.md, Protection marker).
 pub const KEEP_MARKER: &str = ".diskgc-keep";
@@ -331,6 +335,7 @@ pub fn walk<H: Host>(
     // The candidate's own subvolume, which every directory below must be
     // in (no nested subvolume, TASK-286, TASK-307); a directory candidate
     // in another than its parent directory is itself the top of one.
+    let mut overlay = overlay::State::Off;
     if stat.file_type == Some(FileType::Directory) {
         let parent = match host.statx(Base::Dir(candidate.parent), Path::new("")) {
             Ok(parent) => parent,
@@ -342,11 +347,15 @@ pub fn walk<H: Host>(
             Volume::of(&parent),
             Some(candidate.fs_type()),
         )?;
+        if candidate.fs_type() == "overlay" {
+            overlay = overlay_state(host, &mounts, candidate, &stat, &parent)?;
+        }
     }
     let mut walker = Walker {
         host,
         candidate,
         volume: Volume::of(&stat),
+        overlay,
         rules,
         deadline,
         mount_points,
@@ -405,12 +414,67 @@ pub fn walk<H: Host>(
     })
 }
 
+/// The overlay proof for a directory candidate on an overlay mount
+/// ([`overlay`]): its upper entry must be in its directory's upper
+/// subvolume, and its directories are checked against its own.
+fn overlay_state<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    candidate: &Candidate<'_, H::Fd>,
+    stat: &Stat,
+    parent: &Stat,
+) -> Result<overlay::State<H::Fd>, Skip> {
+    let path = candidate.path;
+    let upper = match mounts.iter().find(|m| m.id == candidate.mount_id) {
+        Some(mount) => overlay::upper_of(host, mounts, mount),
+        None => overlay::Upper::Unreached("its mount is not in the mount table".to_owned()),
+    };
+    match upper {
+        overlay::Upper::None => Ok(overlay::State::Off),
+        overlay::Upper::Unreached(why) => {
+            overlay::unreached(path, stat.subvol, parent.subvol, &why)?;
+            Ok(overlay::State::Unreached {
+                why,
+                candidate: stat.subvol,
+            })
+        }
+        overlay::Upper::Reached {
+            root,
+            fs_type,
+            at,
+            mount_point,
+        } => {
+            let unproved = |why: String| overlay::unproved(path, &why);
+            let Some(own) =
+                overlay::upper_volume(host, &root, &mount_point, path).map_err(unproved)?
+            else {
+                // Lower-only: so is everything below it.
+                return Ok(overlay::State::Off);
+            };
+            let dir = path.parent().unwrap_or(path);
+            let outer = overlay::upper_volume(host, &root, &mount_point, dir)
+                .map_err(unproved)?
+                .ok_or_else(|| unproved("its upper entry's directory has none".to_owned()))?;
+            overlay::upper_boundary(path, own, outer, &fs_type, &at)?;
+            Ok(overlay::State::Upper {
+                root,
+                fs_type,
+                at,
+                mount_point,
+                candidate: own,
+            })
+        }
+    }
+}
+
 struct Walker<'w, H: Host> {
     host: &'w H,
     candidate: &'w Candidate<'w, H::Fd>,
     /// The candidate's own subvolume: a directory below in another one is
     /// a nested subvolume ([`super::same_subvolume`]).
     volume: Volume,
+    /// On an overlay, the upper layer's proof ([`overlay`]).
+    overlay: overlay::State<H::Fd>,
     rules: &'w Rules<'w>,
     deadline: Option<MonoTime>,
     mount_points: Vec<PathBuf>,
@@ -534,6 +598,25 @@ impl<H: Host> Walker<'_, H> {
                 self.volume,
                 Some(self.candidate.fs_type()),
             )?;
+            match &self.overlay {
+                overlay::State::Off => {}
+                overlay::State::Upper {
+                    root,
+                    fs_type,
+                    at,
+                    mount_point,
+                    candidate,
+                } => {
+                    let upper = overlay::upper_volume(self.host, root, mount_point, &path())
+                        .map_err(|why| overlay::unproved(&path(), &why))?;
+                    if let Some(upper) = upper {
+                        overlay::upper_boundary(&path(), upper, *candidate, fs_type, at)?;
+                    }
+                }
+                overlay::State::Unreached { why, candidate } => {
+                    overlay::unreached(&path(), stat.subvol, *candidate, why)?;
+                }
+            }
         }
         if name == KEEP_MARKER {
             return Err(skip(Reason::KeepMarker, "inside the candidate".to_owned()));

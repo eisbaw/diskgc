@@ -983,6 +983,7 @@ mod tests {
             source: "/dev/diskgc-no-such-device".to_owned(),
             read_only: false,
             idmapped: false,
+            upper_dir: None,
         };
         assert_eq!(
             fs_uuid(dir.as_fd(), &mount(4095, 1_048_575)).expect("listing"),
@@ -1100,6 +1101,7 @@ mod tests {
             source: "/dev/loop0".to_owned(),
             read_only: false,
             idmapped: false,
+            upper_dir: None,
         };
         let error = loop_devices(&mount, None).expect_err("no descriptor");
         assert!(error.to_string().contains("descriptor"), "{error}");

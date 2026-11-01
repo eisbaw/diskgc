@@ -1992,6 +1992,7 @@ fn python_mounted_cache_vector(stacked: bool) -> Result<ProfileVector, String> {
         bind_of: None,
         bind_root: None,
         overlay_upper: None,
+        overlay_upperdir_shown: None,
         loop_backing: None,
         subvolume: None,
         idmap: Vec::new(),

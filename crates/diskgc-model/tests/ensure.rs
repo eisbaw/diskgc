@@ -1768,6 +1768,232 @@ fn a_cargo_target_that_is_a_bcachefs_subvolume_top_is_refused() {
     );
 }
 
+/// `ensure --min-free MIN PATH` with `policy`'s groups.
+fn policy_at(host: &ModelHost, policy: &str, path: &str, min: &str) -> Report {
+    let (tiers, timeouts) = configured(policy);
+    let mut request = request("profile:cargo-target", &[path], path, min, None);
+    request.tier = tiers[0].clone();
+    let mut lines = Vec::new();
+    let report =
+        executor::ensure_grouped(host, &request, &tiers, &timeouts, &[1000], &mut |line| {
+            lines.push(line.to_owned())
+        });
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    report
+}
+
+/// The btrfs of [`btrfs_yaml`] with an overlay at `/ov` whose upper
+/// directory is `/work/upper` (on the `@work` subvolume); `shown` replaces
+/// the `upperdir=` mountinfo shows when given.
+fn overlay_on_btrfs(shown: Option<&str>, tree: &str) -> String {
+    let shown = shown.map_or(String::new(), |s| format!(", overlay_upperdir_shown: {s}"));
+    btrfs_yaml(
+        &format!(
+            "  - {{id: 60, at: /ov, fs: overlay, dev: \"0:60\", size: 1G, parent: 1, overlay_upper: /work/upper{shown}}}\n"
+        ),
+        tree,
+    )
+}
+
+const OVERLAY_TREE: &str = "  /work/upper/cache:\n    c-a:\n      .: {mtime: 2026-10-01T00:00:00Z}\n      data: {size: 4G, mtime: 2026-10-01T00:00:00Z}\n      inner:\n        .: {mtime: 2026-10-01T00:00:00Z, subvolume: \"0:50\"}\n        f: {size: 4G, mtime: 2026-10-01T00:00:00Z}\n    c-b:\n      .: {mtime: 2026-10-01T00:00:00Z}\n      sub: {.: {mtime: 2026-10-01T00:00:00Z}, f: {size: 4G, mtime: 2026-10-01T00:00:00Z}}\n";
+
+/// TASK-307 review (Codex blocker): a btrfs subvolume in an overlay's
+/// upper layer, inside a candidate on the overlay. overlayfs shows every
+/// directory under its own device, so the device rule cannot see it, and
+/// an `rmdir` through the overlay removes the upper entry (`ovl_do_rmdir`
+/// -> `vfs_rmdir` -> `btrfs_rmdir` deletes an empty subvolume). The
+/// boundary is proved in the upper layer itself: `contains_mount`, nothing
+/// deleted; the candidate beside it, plain directories in the same
+/// subvolume (Docker's overlay2 on btrfs), is reclaimed.
+#[test]
+fn an_upper_layer_subvolume_under_an_overlay_candidate_refuses_it() {
+    let host = host(&overlay_on_btrfs(None, OVERLAY_TREE));
+    let report = policy_at(&host, &cache_dirs("/ov/cache"), "/ov", "100%");
+    skip_saying(
+        &report,
+        "/ov/cache/c-a",
+        Reason::ContainsMount,
+        "/ov/cache/c-a/inner",
+    );
+    skip_saying(
+        &report,
+        "/ov/cache/c-a",
+        Reason::ContainsMount,
+        "upper layer",
+    );
+    assert!(
+        0 == unlinked_below(&host, "/ov/cache/c-a"),
+        "{:#?}",
+        host.trace()
+    );
+    assert!(
+        0 == unlinked_below(&host, "/work/upper/cache/c-a"),
+        "{:#?}",
+        host.trace()
+    );
+    let acted: Vec<&Path> = report
+        .actions
+        .iter()
+        .map(|a| a.candidate.as_path())
+        .collect();
+    assert_eq!(acted, [Path::new("/ov/cache/c-b")], "{report:#?}");
+}
+
+/// TASK-307 review: where the upper layer cannot be reached by the name
+/// mountinfo shows (here relative, as a mounter may give it), a directory
+/// whose `stx_subvol` differs from its candidate's cannot be proved a
+/// lower layer's: refused (fail closed). One that does not differ is
+/// judged as usual.
+#[test]
+fn an_unreachable_upper_layer_refuses_only_a_differing_subvolume() {
+    let host = host(&overlay_on_btrfs(Some("upper"), OVERLAY_TREE));
+    let report = policy_at(&host, &cache_dirs("/ov/cache"), "/ov", "100%");
+    skip_saying(
+        &report,
+        "/ov/cache/c-a",
+        Reason::ContainsMount,
+        "cannot be reached",
+    );
+    assert!(
+        0 == unlinked_below(&host, "/ov/cache/c-a"),
+        "{:#?}",
+        host.trace()
+    );
+    let acted: Vec<&Path> = report
+        .actions
+        .iter()
+        .map(|a| a.candidate.as_path())
+        .collect();
+    assert_eq!(acted, [Path::new("/ov/cache/c-b")], "{report:#?}");
+}
+
+/// TASK-307 review: the candidate itself the top of an upper-layer
+/// subvolume (its `rmdir` through the overlay would delete it).
+#[test]
+fn an_overlay_candidate_that_is_an_upper_layer_subvolume_is_refused() {
+    let tree = "  /work/upper/cache:\n    c-a:\n      .: {mtime: 2026-10-01T00:00:00Z, subvolume: \"0:50\"}\n      f: {size: 4G, mtime: 2026-10-01T00:00:00Z}\n";
+    let host = host(&overlay_on_btrfs(None, tree));
+    let report = policy_at(&host, &cache_dirs("/ov/cache"), "/ov", "100%");
+    skip_saying(
+        &report,
+        "/ov/cache/c-a",
+        Reason::ContainsMount,
+        "upper layer",
+    );
+    assert!(
+        0 == unlinked_below(&host, "/ov/cache/c-a"),
+        "{:#?}",
+        host.trace()
+    );
+}
+
+/// A Cargo target at `/work/src/{at}`, with a 4G profile entry.
+fn target_tree(at: &str, attrs: &str) -> String {
+    let t = "2026-10-01T00:00:00Z";
+    format!(
+        "  /work/src/{at}:\n    .: {{{attrs}}}\n    CACHEDIR.TAG: {{cachedir_tag: true}}\n    debug: {{.: {{mtime: {t}}}, .cargo-lock: {{mtime: {t}}}, deps: {{.: {{mtime: {t}}}, p-1: {{size: 4G, mtime: {t}}}}}}}\n"
+    )
+}
+
+/// TASK-307 review (Codex medium): a target directly below the discovery
+/// root was judged against no parent (the root frame had no volume), so a
+/// target that is itself a nested subvolume's top was taken there.
+#[test]
+fn a_cargo_target_directly_below_its_root_that_is_a_subvolume_top_is_refused() {
+    let host = host(&btrfs_yaml(
+        "",
+        &target_tree("target", "subvolume: \"0:50\""),
+    ));
+    let report = ensure(
+        &host,
+        &request(
+            "profile:cargo-target",
+            &["/work/src"],
+            "/home/mark",
+            "30G",
+            None,
+        ),
+    );
+    skip_saying(
+        &report,
+        "/work/src/target",
+        Reason::ContainsMount,
+        "nested subvolume",
+    );
+    assert!(
+        0 == unlinked_below(&host, "/work/src/target"),
+        "{:#?}",
+        host.trace()
+    );
+}
+
+/// TASK-307 review (Codex medium): the discovery root itself a target that
+/// is a nested subvolume's top is judged against its real parent.
+#[test]
+fn a_cargo_target_that_is_its_own_root_and_a_subvolume_top_is_refused() {
+    let host = host(&bcachefs_yaml("", &target_tree("old/target", "subvol: 2")));
+    let report = ensure(
+        &host,
+        &request(
+            "profile:cargo-target",
+            &["/work/src/old/target"],
+            "/work",
+            "30G",
+            None,
+        ),
+    );
+    skip_saying(
+        &report,
+        "/work/src/old/target",
+        Reason::ContainsMount,
+        "subvolume 2",
+    );
+    assert!(
+        0 == unlinked_below(&host, "/work/src/old/target"),
+        "{:#?}",
+        host.trace()
+    );
+}
+
+/// The controls: the same targets in the root's own subvolume reclaim.
+#[test]
+fn cargo_targets_at_or_directly_below_their_root_in_its_subvolume_reclaim() {
+    let below = host(&btrfs_yaml("", &target_tree("target", "")));
+    let report = ensure(
+        &below,
+        &request(
+            "profile:cargo-target",
+            &["/work/src"],
+            "/home/mark",
+            "30G",
+            None,
+        ),
+    );
+    let acted: Vec<&Path> = report
+        .actions
+        .iter()
+        .map(|a| a.candidate.as_path())
+        .collect();
+    assert_eq!(acted, [Path::new("/work/src/target")], "{report:#?}");
+    let own = host(&bcachefs_yaml("", &target_tree("old/target", "")));
+    let report = ensure(
+        &own,
+        &request(
+            "profile:cargo-target",
+            &["/work/src/old/target"],
+            "/work",
+            "30G",
+            None,
+        ),
+    );
+    let acted: Vec<&Path> = report
+        .actions
+        .iter()
+        .map(|a| a.candidate.as_path())
+        .collect();
+    assert_eq!(acted, [Path::new("/work/src/old/target")], "{report:#?}");
+}
+
 /// TASK-286 review (Codex 2): on bcachefs the superblock device does not
 /// identify the filesystem alone, so "the same filesystem" also needs its
 /// id (`f_fsid`) read from both held descriptors; read and equal, the run

@@ -546,10 +546,10 @@ Immediately before acting, diskgc walks the candidate's whole tree
   places on one device only; a device-mapper or md device stacked on a
   loop device (a LUKS container file) is not related to its file. The
   backing path is the one the kernel prints for diskgc's own root and
-  mount namespace. Btrfs subvolumes are reasoned (mountinfo names the
-  subvolume in the root field); the `vm-real-kernel` VM check tests a
-  btrfs mounted by subvolume, whose second member's image lies in a
-  protected Cargo target ([testing.md](testing.md)).
+  mount namespace. Btrfs subvolumes are tested: the `vm-real-kernel` VM
+  check mounts a btrfs by subvolume (mountinfo names the subvolume in the
+  root field), whose second member's image lies in a protected Cargo
+  target ([testing.md](testing.md)).
 
   `protect` matches are enumerated
   before the first deletion of the run and again before each later tier;
@@ -1078,13 +1078,11 @@ memory map, environment or fd table of a live process counts as no
 trustworthy read, so a process whose environment or fd table really is
 empty (`env -i`, all fds closed) is treated as unreadable while it runs,
 which costs candidates. A kernel thread (`PF_KTHREAD` in its `stat`,
-readable by any user, before and after the read with one start time) has
-no memory map or environment of its own: a read of either that finds
-nothing, or `ESRCH` as Linux 6.18 answers a kernel thread's `environ`,
-is its answer, nothing, in one round. Retrying it as a vanished task took
-root's scan of a guest's 95 kernel threads past the Freshness bound, so
-every root reclaim was `in_use_unknown` (TASK-306, the `vm-real-kernel`
-check); a user task's `ESRCH` is still retried. A live task that cannot be read is treated like an
+readable by any user, in both `stat`s around the read, with one start
+time) has no memory map or environment of its own: a read of either that
+finds nothing, or `ESRCH` as Linux 6.18 answers a kernel thread's
+`environ`, is its answer, nothing, in one round (TASK-306); a user
+task's `ESRCH` is still retried. A live task that cannot be read is treated like an
 unreadable process, and so is a process that keeps creating and ending
 threads faster than a round completes (each round needs its listing to
 hold still from the first listing to the second); while that lasts it

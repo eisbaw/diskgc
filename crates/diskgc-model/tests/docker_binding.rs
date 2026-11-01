@@ -27,6 +27,7 @@ fn space(dev: Dev) -> diskgc_core::places::Space {
         source: "/dev/fixture".to_owned(),
         read_only: false,
         idmapped: false,
+        upper_dir: None,
     })
 }
 

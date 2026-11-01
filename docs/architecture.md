@@ -1000,8 +1000,28 @@ btrfs subvolume or snapshot, which `rmdir` deletes once it is empty
 6.18; TASK-307), so the boundary is also a directory whose `stx_subvol`
 (`STATX_SUBVOL`, Linux 6.10 on, reported by btrfs and bcachefs) differs
 from the one it is in, or is reported on one side only; compared on
-btrfs and bcachefs mounts only (an overlay passes a layer's through, and
-an `rmdir` through it never removes a subvolume). diskgc never
+btrfs and bcachefs mounts, or a mount of an unknown type. An overlay
+shows every directory under its own device and passes the real entry's
+`stx_subvol` through, so a difference there may be only between layers;
+but an `rmdir` through it removes the directory's upper entry (a
+subvolume of a btrfs upper layer with it), and leaves a lower-only one
+alone, writing a whiteout (Linux 6.18 `fs/overlayfs/dir.c`). So on an
+overlay the eligibility walk proves the boundary in the upper layer,
+reached by the overlay's `upperdir=` (mountinfo's superblock options):
+each directory of a candidate with an upper entry must be in the
+candidate's upper entry's subvolume, by device and `stx_subvol`, and the
+candidate's in its directory's; one without an upper entry is
+lower-only, as is everything below it. An upper layer on a filesystem
+without subvolumes needs no proof. Where the upper layer cannot be
+reached by that name (relative, through a symlink, unreadable), a
+directory whose `stx_subvol` through the overlay differs from its
+candidate's, or a candidate whose differs from its directory's, is
+`contains_mount` (fail closed: a lower-only candidate below a merged
+directory is refused there too, where layers differ). Limits: `upperdir=` is the
+mounter's string at mount time, in its namespace, so an upper layer
+moved since, or covered by a mount made since, is not detected; and
+before Linux 6.10 (no `stx_subvol`) an unreachable btrfs upper layer's
+nested subvolume goes unseen. diskgc never
 removes one: such a directory matched as a candidate (or as a Cargo
 target), met by the eligibility walk anywhere inside a candidate or a
 Cargo profile entry, or met by the Cargo inspection inside a target is
@@ -1010,12 +1030,15 @@ enter one. On a filesystem whose subvolumes keep its device (bcachefs)
 where the kernel reports no `stx_subvol` (before Linux 6.10), a nested
 subvolume cannot be told from a directory: every directory candidate
 there, and every directory a walk meets, is `unsupported_fs` (fail
-closed; files are still taken, as no file is a subvolume). btrfs without
+closed; files are still taken, as no file is a subvolume); a `protect`
+match or a negated profile's match that is such a directory is refused
+at enumeration, which stops the run or excludes the tier. btrfs without
 `stx_subvol` keeps the device rule alone. What lies inside a subvolume is
 taken like anything on its mount. Directories only: overlayfs without
 `xino` shows a file of a lower layer under that layer's device, never a
-directory. Tested on a real kernel by `vm-real-kernel` (btrfs and
-bcachefs, [testing.md](testing.md)).
+directory. Tested on a real kernel by `vm-real-kernel` (btrfs,
+bcachefs and an overlay with a btrfs upper layer,
+[testing.md](testing.md)).
 
 Deleting needs the same filesystem proved. Writing diskgc's own state
 needs the opposite proved: the snapshot is guarded (Snapshot: Never at the

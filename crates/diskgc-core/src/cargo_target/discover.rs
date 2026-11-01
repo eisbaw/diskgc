@@ -142,7 +142,8 @@ pub fn discover<H: Host>(
         }
         let mut cursor = DiscoverCursor::new(root.to_owned());
         cursor.root_id = Some(identity);
-        cursor.frames.push(Frame::root(resolved.stat.ino));
+        let outer = root_outer(host, &mounts, root, &resolved);
+        cursor.frames.push(Frame::root(&resolved.stat, outer));
         cursor.seen = std::mem::take(&mut seen);
         let space = places::space_at(host, &resolved.mount, &resolved.fd);
         let walked = cursor.walk(
@@ -372,23 +373,12 @@ fn subdir<H: Host>(
             path,
             Volume::of(&stat),
             within,
-            fs_type_of(mounts, mount_id),
+            places::fs_type_of(mounts, mount_id),
         )
     {
         return Ok(Err(skip));
     }
     Ok(Ok((file_type == FileType::Directory).then_some(stat)))
-}
-
-/// The filesystem type of mount `mount_id` in `mounts` (`None` when the
-/// table does not list it: [`crate::engine::same_subvolume`] then judges by
-/// device and `stx_subvol` alone, and the eligibility walk, which knows its
-/// candidate's mount, fails closed for it).
-fn fs_type_of(mounts: &[MountEntry], mount_id: u64) -> Option<&str> {
-    mounts
-        .iter()
-        .find(|mount| mount.id == mount_id)
-        .map(|mount| mount.fs_type.as_str())
 }
 
 fn mounted(path: &Path) -> Skip {
@@ -719,6 +709,9 @@ struct Frame {
     id: Option<DevIno>,
     /// Its `stx_subvol` when entered, if reported (TASK-307).
     subvol: Option<u64>,
+    /// The root frame only: what the root, if it is a target, is judged
+    /// against for a nested subvolume's top ([`root_outer`]).
+    outer: Option<Result<Volume, String>>,
     /// Its inode, if reported: the parent inode of a target found in it.
     ino: Option<u64>,
     /// Its entries, sorted, once listed and judged not to be a target
@@ -729,16 +722,38 @@ struct Frame {
 }
 
 impl Frame {
-    fn root(ino: Option<u64>) -> Self {
+    /// The root, with its own volume, which a target directly below it is
+    /// judged against (TASK-307 review), and `outer` for the root itself.
+    fn root(stat: &Stat, outer: Option<Result<Volume, String>>) -> Self {
         Self {
             name: None,
             depth: 0,
-            id: None,
-            subvol: None,
-            ino,
+            id: stat.dev_ino(),
+            subvol: stat.subvol,
+            ino: stat.ino,
             names: None,
             next: 0,
+            outer,
         }
+    }
+}
+
+/// What a discovery root that is itself a target is judged against for a
+/// nested subvolume's top (TASK-307 review): its own directory's volume,
+/// resolved like the root; nothing when that directory is on another mount
+/// (the root is a mount's root: no subvolume top without a mount between);
+/// why when it cannot be resolved (the target is then refused).
+fn root_outer<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    root: &Path,
+    resolved: &Resolved<H::Fd>,
+) -> Option<Result<Volume, String>> {
+    let parent = root.parent()?;
+    match resolve_in(host, mounts, parent, Want::Directory) {
+        Ok(dir) if dir.mount.id != resolved.mount.id => None,
+        Ok(dir) => Some(Ok(Volume::of(&dir.stat))),
+        Err(e) => Some(Err(format!("{}: {e}", parent.display()))),
     }
 }
 
@@ -847,7 +862,8 @@ impl DiscoverCursor {
         match self.root_id {
             None => {
                 self.root_id = Some(identity);
-                self.frames.push(Frame::root(resolved.stat.ino));
+                let outer = root_outer(host, &mounts, &root, &resolved);
+                self.frames.push(Frame::root(&resolved.stat, outer));
             }
             Some(id) if id != identity => {
                 out.refused.push(Skip::new(
@@ -951,12 +967,15 @@ impl DiscoverCursor {
                     }
                     let parent = depth.checked_sub(1).map(|p| &self.frames[p]);
                     let parent_ino = parent.and_then(|p| p.ino);
-                    let parent_volume = parent.and_then(|p| {
-                        p.id.map(|id| Volume {
-                            dev: id.dev,
-                            subvol: p.subvol,
-                        })
-                    });
+                    let parent_volume = match parent {
+                        Some(p) => p.id.map(|id| {
+                            Ok(Volume {
+                                dev: id.dev,
+                                subvol: p.subvol,
+                            })
+                        }),
+                        None => self.frames[depth].outer.clone(),
+                    };
                     let at_depth = self.frames[depth].depth;
                     match walk.visit(&open[depth], &path, at_depth, (parent_ino, parent_volume))? {
                         Some(names) => {
@@ -1017,6 +1036,7 @@ impl DiscoverCursor {
                             ino: stat.ino,
                             names: None,
                             next: 0,
+                            outer: None,
                         });
                     }
                     Err(skip) => walk.refuse(skip),
@@ -1060,7 +1080,7 @@ impl<H: Host> Walk<'_, H> {
         fd: &H::Fd,
         path: &Path,
         depth: usize,
-        (parent_ino, parent_volume): (Option<u64>, Option<Volume>),
+        (parent_ino, parent_volume): (Option<u64>, Option<Result<Volume, String>>),
     ) -> Result<Option<Vec<OsString>>, Stop> {
         let names = match list(self.host, fd, path, self.deadline)? {
             Ok(names) => names,
@@ -1101,7 +1121,7 @@ impl<H: Host> Walk<'_, H> {
         fd: &H::Fd,
         path: &Path,
         parent_ino: Option<u64>,
-        parent_volume: Option<Volume>,
+        parent_volume: Option<Result<Volume, String>>,
     ) -> Judged<bool> {
         let tag = path.join(CACHEDIR_TAG);
         if is_mount_point(self.mounts, &tag) {
@@ -1154,15 +1174,29 @@ impl<H: Host> Walk<'_, H> {
         };
         // The top of a nested subvolume is never a target (TASK-286,
         // TASK-307).
-        if let Some(parent_volume) = parent_volume
-            && let Err(skip) = crate::engine::same_subvolume(
-                path,
-                Volume::of(&stat),
-                parent_volume,
-                fs_type_of(self.mounts, self.mount_id),
-            )
-        {
-            return Ok(Err(skip));
+        match parent_volume {
+            None => {}
+            Some(Ok(parent_volume)) => {
+                if let Err(skip) = crate::engine::same_subvolume(
+                    path,
+                    Volume::of(&stat),
+                    parent_volume,
+                    places::fs_type_of(self.mounts, self.mount_id),
+                ) {
+                    return Ok(Err(skip));
+                }
+            }
+            Some(Err(why)) => {
+                return Ok(Err(Skip::new(
+                    Reason::ContainsMount,
+                    path.to_owned(),
+                    format!(
+                        "{} is a target whose directory cannot be read to tell whether it is \
+                         a nested subvolume's top ({why}): not touched",
+                        path.display()
+                    ),
+                )));
+            }
         }
         if self.seen.insert(identity.id) {
             self.found.targets.push(Target {
@@ -1421,6 +1455,7 @@ mod private_tmp_tests {
             source: "tmpfs".into(),
             read_only: false,
             idmapped: false,
+            upper_dir: None,
         };
         let root = MountEntry {
             id: 1,
@@ -1432,6 +1467,7 @@ mod private_tmp_tests {
             source: "/dev/test".into(),
             read_only: false,
             idmapped: false,
+            upper_dir: None,
         };
         let bound = Path::new("/srv/bound");
         assert!(matches!(

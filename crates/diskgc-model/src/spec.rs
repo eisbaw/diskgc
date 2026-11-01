@@ -249,13 +249,20 @@ pub struct MountSpec {
     /// identity relates the two names of one entry, and an unlink through
     /// either removes it from both. Its space is the upper's filesystem's
     /// (`size` is not used). Lower layers, whiteouts and copy-up are not
-    /// modelled, and mountinfo shows no `upperdir=` (diskgc reads none).
+    /// modelled: every entry is an upper one. mountinfo shows this path as
+    /// `upperdir=` (or [`Self::overlay_upperdir_shown`]), and `statx`
+    /// passes the upper entry's `stx_subvol` through, as overlayfs does.
     /// Only `statx`, mountinfo and `fstatfs` report the overlay: a memory
     /// map shows the upper filesystem's device (as Linux shows the
     /// layer's), and processes' open files and directories are matched by
     /// the object itself, whichever name opened it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay_upper: Option<PathBuf>,
+    /// With `overlay_upper`: what mountinfo shows as `upperdir=` instead
+    /// (the mounter's string: relative, through a symlink, or moved since),
+    /// for an upper layer diskgc cannot reach by that name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_upperdir_shown: Option<PathBuf>,
     /// For a filesystem on a loop device (`dev` of major 7): the file the
     /// device reads and writes (`/sys/dev/block/7:N/loop/backing_file`, as
     /// printed, ` (deleted)` included), a path of the model's tree or not.

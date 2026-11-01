@@ -833,6 +833,7 @@ mod tests {
             source: "fixture".to_owned(),
             read_only: false,
             idmapped: false,
+            upper_dir: None,
         }
     }
 

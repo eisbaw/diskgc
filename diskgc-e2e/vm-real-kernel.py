@@ -1,6 +1,7 @@
 # vm-real-kernel (TASK-304) test script, appended to the prelude in
 # vm-real-kernel.nix that defines IMAGE, IMAGE_REF, UNDER_TEST, TOOLS,
-# LIVE_ISO and BCACHEFS_TOOLS_VERSION. Runs in the NixOS test driver.
+# LIVE_ISO, BCACHEFS_TOOLS_VERSION and KERNEL_VERSION. Runs in the NixOS
+# test driver.
 #
 # Every diskgc run is the development package inside the guest's one
 # privileged Podman container (see the .nix file for why). Each scenario
@@ -252,12 +253,20 @@ def kernel_thread_facts(pids: list[str]) -> str:
         if kthread != "1":
             status_disagrees.append(pid)
     unprivileged = run(f"cut -d' ' -f1 /proc/{pids[0]}/stat >/dev/null && echo readable", TESTER).strip()
-    return (
+    facts = (
         f"kernel threads: {len(pids)}\nenviron as root: {environ_errors}\n"
         f"with fds: {with_fds}\nwith a memory map: {with_maps}\ncwd/root other than /: {odd_dirs}\n"
         f"not children of kthreadd: {not_kthreadd}\nstatus Kthread not 1: {status_disagrees}\n"
         f"stat of pid {pids[0]} as tester: {unprivileged}\n"
     )
+    # The premise of TASK-306's rule, asserted: kernel threads hold no fd,
+    # memory map, cwd or root a user file could be, and their environ says
+    # ESRCH on this kernel; their stat is readable unprivileged.
+    assert pids and environ_errors == {"No such process": len(pids)}, facts
+    assert not with_fds and not with_maps and not odd_dirs, facts
+    assert not not_kthreadd and not status_disagrees, facts
+    assert unprivileged == "readable", facts
+    return facts
 
 
 # ---- The guest and its one container ----
@@ -301,8 +310,8 @@ def scenario_root_scan() -> None:
     # does. Root's scan must still be young enough to clear a candidate
     # (safety.md, In use, Freshness: a deletion starts on a scan younger
     # than one second). On Linux 6.18 a kernel thread's environ says ESRCH,
-    # which the scan reads as a vanished task and retries for 16 rounds
-    # (TASK-304 finding): every root reclaim here ends in_use_unknown, busy.
+    # which the scan once retried for 16 rounds per kernel thread, so every
+    # root reclaim ended in_use_unknown, busy (TASK-306).
     probe = run(
         "for f in environ maps cmdline; do if cat /proc/2/$f >/dev/null 2>/work/ev/kt.err; "
         "then rc=0; else rc=$?; fi; echo \"/proc/2/$f exit $rc $(cat /work/ev/kt.err)\"; done"
@@ -704,6 +713,10 @@ mount -o ro,loop /live/var/lib/snapd/snaps/core_1.snap /live/snap/core/1
 # the boundary there is its stx_subvol (TASK-307; before the fix this
 # candidate was deleted, subvolume included).
 def scenario_bcachefs() -> None:
+    # The pinned kernel (vm-real-kernel.nix) the out-of-tree module is
+    # built for: a flake.lock bump that moves it fails here, not silently.
+    kernel = run("uname -r").strip()
+    assert kernel == KERNEL_VERSION, (kernel, KERNEL_VERSION)
     if "bcachefs" not in run("cat /proc/filesystems"):
         summary.append("UNAVAILABLE 7 bcachefs: not in the guest kernel's /proc/filesystems")
         return
@@ -736,9 +749,95 @@ echo "$L"
     nested = outcomes(result).get("/mnt/bcfs/scratch-nested")
     assert acted(result) == {"/mnt/bcfs/scratch-a"}, (result["actions"], result["skipped"])
     assert nested is not None and nested[0] == "contains_mount", (nested, devs)
-    passed("7 bcachefs", f"scratch-a reclaimed, scratch-nested (a subvolume inside) kept contains_mount "
+    passed("7 bcachefs", f"on Linux {kernel}: scratch-a reclaimed, scratch-nested (a subvolume inside) kept contains_mount "
            f"({row_of(result, '/mnt/bcfs/scratch-nested')['detail']}); st_dev {' vs '.join(devs.split()[0::2])}; "
            f"stx_subvol {bc_subvols}")
+
+
+# ---- 8. An overlay whose upper layer is on btrfs ----
+# architecture.md, Filesystem matching, Subvolume boundaries (TASK-307
+# review): an rmdir through an overlay removes a directory's upper entry, a
+# btrfs subvolume of the upper layer included, and leaves a lower-only
+# directory alone. The upper layer is proved through upperdir=; a lower
+# layer on another filesystem (ext4 here: Docker's overlay2 on a btrfs
+# upper with images elsewhere) changes stx_subvol between layers and must
+# still reclaim. Where upperdir= cannot be reached (a name through a
+# symlink), only a directory whose stx_subvol differs is refused.
+def scenario_overlay_upper() -> None:
+    loop = run("""
+install -d -m 0755 /work/s8 /mnt/ovb /mnt/ov /mnt/ov2
+truncate -s 300M /work/s8/upper.img
+L=$(losetup -f --show /work/s8/upper.img)
+mkfs.btrfs -q -f "$L" >/dev/null
+mount "$L" /mnt/ovb
+for n in 1 2; do
+  install -d -m 0755 /mnt/ovb/upper$n /mnt/ovb/work$n
+  install -d -m 0755 -o 1000 -g 1000 /mnt/ovb/upper$n/cache /work/s8/lower$n/cache
+done
+ln -s /mnt/ovb /work/s8/ovlink
+echo "$L"
+""").strip()
+    run("""
+for n in 1 2; do
+  U=/mnt/ovb/upper$n/cache; L=/work/s8/lower$n/cache
+  mkdir -p $U/scratch-a && echo a > $U/scratch-a/f && btrfs -q subvolume create $U/scratch-a/inner && echo i > $U/scratch-a/inner/f
+  mkdir -p $U/scratch-mixed && echo m > $U/scratch-mixed/f
+  mkdir -p $L/scratch-mixed/lowsub && echo l > $L/scratch-mixed/lowsub/f
+  mkdir -p $L/scratch-low/sub && echo l > $L/scratch-low/sub/f
+done
+""", TESTER)
+    # Overlay 1 names its upper layer plainly; overlay 2 through a symlink,
+    # which diskgc does not follow (its upperdir= cannot be reached).
+    run("mount -t overlay overlay -o lowerdir=/work/s8/lower1,upperdir=/mnt/ovb/upper1,workdir=/mnt/ovb/work1 /mnt/ov && "
+        "mount -t overlay overlay -o lowerdir=/work/s8/lower2,upperdir=/work/s8/ovlink/upper2,workdir=/work/s8/ovlink/work2 /mnt/ov2")
+    save("s8-mounts.txt", run("grep ' overlay ' /proc/self/mountinfo"))
+    assert "upperdir=/work/s8/ovlink/upper2" in run("grep ' /mnt/ov2 ' /proc/self/mountinfo")
+    cfg = config("s8", ["/mnt/ov/cache"])
+    code, out, _ = ensure("s8-statx", TESTER, cfg, "/mnt/ov", "--dry-run", strace=True, trace="statx")
+    plan = plan_of(report(out, 0, "dry_run"))
+    # The control: different stx_subvol between layers (btrfs upper, ext4
+    # lower) refuses nothing; only the upper-layer subvolume does.
+    assert plan == {
+        "/mnt/ov/cache/scratch-a": "contains_mount",
+        "/mnt/ov/cache/scratch-mixed": None,
+        "/mnt/ov/cache/scratch-low": None,
+    }, plan
+    shown = subvols_seen("s8-statx", ["scratch-a", "inner", "scratch-mixed", "lowsub", "scratch-low"])
+    save("s8-stx-subvol.txt", f"{shown}\n")
+    before = tree("/mnt/ov/cache", "/mnt/ovb/upper1", "/work/s8/lower1")
+    code, out, _ = ensure("s8-upper", TESTER, cfg, "/mnt/ov")
+    result = report(out, 1, "exhausted")
+    after = tree("/mnt/ov/cache", "/mnt/ovb/upper1", "/work/s8/lower1")
+    gone = {p for p in before if p not in after}
+    save("s8-upper.oracle", "gone:\n" + "\n".join(sorted(gone)) + "\nadded:\n" + "\n".join(sorted(set(after) - set(before))) + "\n")
+    row = row_of(result, "/mnt/ov/cache/scratch-a")
+    assert row["reason"] == "contains_mount" and "upper layer" in (row["detail"] or ""), row
+    # The oracle across the layers: nothing of scratch-a, in the merged view
+    # or its upper layer, and nothing of the lower layer is gone; the
+    # upper subvolume still exists.
+    assert not any(p.startswith(("/mnt/ov/cache/scratch-a", "/mnt/ovb/upper1/cache/scratch-a", "/work/s8/lower1")) for p in gone), sorted(gone)
+    run("btrfs subvolume show /mnt/ovb/upper1/cache/scratch-a/inner >/dev/null")  # still a subvolume
+    # The control's reclaim: not refused for a subvolume. Deleting a lower
+    # entry copies its directory up, which changes the directory's birth
+    # time: the walk then stops `changed` (a finding of TASK-307's review,
+    # outside this rule: recorded, not asserted as wanted).
+    others = {c: outcomes(result).get(c, ("reclaimed", None))[0]
+              for c in ("/mnt/ov/cache/scratch-mixed", "/mnt/ov/cache/scratch-low")}
+    assert all(o not in ("contains_mount", "unsupported_fs") for o in others.values()), others
+    assert acted(result) == {"/mnt/ov/cache/scratch-mixed", "/mnt/ov/cache/scratch-low"}, (result["actions"], result["skipped"])
+    passed("8 overlay upper layer", f"scratch-a (upper btrfs subvolume inside) kept ({row['detail']}); the mixed-layer "
+           f"and lower-only candidates eligible in the plan and acted on ({others}); lower layer and upper subvolume "
+           f"untouched; stx_subvol through the overlay {shown}")
+    cfg2 = config("s8-unreached", ["/mnt/ov2/cache"])
+    code, out, _ = ensure("s8-unreached", TESTER, cfg2, "/mnt/ov2")
+    result = report(out, 1, "exhausted")
+    kept = outcomes(result)
+    assert kept.get("/mnt/ov2/cache/scratch-a", ("",))[0] == "contains_mount", kept
+    assert "cannot be reached" in (row_of(result, "/mnt/ov2/cache/scratch-a")["detail"] or ""), kept
+    run("btrfs subvolume show /mnt/ovb/upper2/cache/scratch-a/inner >/dev/null")  # still a subvolume
+    passed("8 overlay upper layer unreached", f"upperdir= through a symlink: scratch-a kept "
+           f"({row_of(result, '/mnt/ov2/cache/scratch-a')['detail']}); outcomes {kept}; acted {sorted(acted(result))}")
+    run(f"umount /mnt/ov /mnt/ov2 /mnt/ovb && losetup -d {loop}")
 
 
 # ---- 5. udisksctl loop-setup by a user outside disk ----
@@ -816,7 +915,8 @@ def scenario_hidepid() -> None:
 failures: list[str] = []
 for scenario in (scenario_btrfs, scenario_loop_in_candidate, scenario_loop_deleted_name,
                  scenario_loop_partition, scenario_idmapped, scenario_live_overlay,
-                 scenario_bcachefs, scenario_udisks, scenario_hidepid, scenario_root_scan):
+                 scenario_bcachefs, scenario_overlay_upper, scenario_udisks, scenario_hidepid,
+                 scenario_root_scan):
     name = scenario.__name__.removeprefix("scenario_")
     began = time.monotonic()
     try:

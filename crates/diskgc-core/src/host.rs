@@ -449,6 +449,16 @@ pub struct MountEntry {
     /// not be the one stored, nor the one another mount of the filesystem
     /// shows (TASK-299). Which mapping is not said.
     pub idmapped: bool,
+    /// An `overlay` mount's `upperdir=` superblock option, unescaped: the
+    /// path its mounter gave for the upper layer, in the mounter's
+    /// namespace and as given (it may be relative or name a symlink, and
+    /// it is not updated if the directory is moved later; overlayfs
+    /// `ovl_do_parse_layer` keeps the string, `ovl_show_options` shows it).
+    /// `None` for every other type and for an overlay without one
+    /// (read-only). The eligibility walk proves subvolume boundaries in
+    /// the upper layer through it (docs/architecture.md, Filesystem
+    /// matching: Subvolume boundaries).
+    pub upper_dir: Option<PathBuf>,
 }
 
 /// Space on a filesystem, from `statvfs` (docs/architecture.md, Measuring

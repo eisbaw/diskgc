@@ -228,6 +228,7 @@ impl Cursor {
         let walk = Walk {
             host,
             mount_id: parent.mount.id,
+            fs_type: &parent.mount.fs_type,
             mount_points: &mount_points,
             entries_max,
         };
@@ -365,6 +366,8 @@ fn mount_points_beneath(mounts: &[MountEntry], key: &MountKey, root: &Path) -> B
 struct Walk<'a, H: Host> {
     host: &'a H,
     mount_id: u64,
+    /// The unit's mount's type: the subvolume boundary is judged on it.
+    fs_type: &'a str,
     mount_points: &'a BTreeSet<PathBuf>,
     entries_max: usize,
 }
@@ -473,13 +476,16 @@ impl<H: Host> Walk<'_, H> {
                 return Ok(Step::Refused(Reason::TooManyEntries));
             }
             let enter = stat.file_type == Some(FileType::Directory)
-                && crate::engine::enters_same_subvolume(
+                && crate::engine::same_subvolume(
+                    Path::new(&name),
                     crate::engine::Volume::of(&stat),
                     crate::engine::Volume {
                         dev: cursor.identity.dev,
                         subvol: cursor.subvol,
                     },
+                    Some(self.fs_type),
                 )
+                .is_ok()
                 && cursor.levels.len() < LEVELS_MAX;
             if !enter {
                 continue;
