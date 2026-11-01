@@ -5805,7 +5805,7 @@ mod tests {
         let parent = resolve(&host, &dir.0, Want::Directory).expect("resolve");
         let owners = [uid];
         let rules = Rules::new(&owners);
-        let scan = scan(
+        let scan = match scan(
             &host,
             &Options {
                 users: &[uid],
@@ -5814,8 +5814,22 @@ mod tests {
                 pytest_facts: false,
             },
             None,
-        )
-        .expect("scan");
+        ) {
+            Ok(scan) => scan,
+            // The Nix build sandbox mounts no sysfs: the loop devices
+            // cannot be listed, so the scan is an error of the run
+            // (TASK-169), never a shorter list. The dev shell's run of this
+            // test reaches the checks below.
+            Err(diskgc_core::inuse::ScanError::Failed(e)) if !Path::new("/sys/block").exists() => {
+                assert!(
+                    e.subject == "/sys/block" && e.is(Errno::ENOENT),
+                    "without sysfs the loop listing fails, nothing else: {e}"
+                );
+                eprintln!("no sysfs here: the scan fails, as it must ({e})");
+                return;
+            }
+            Err(e) => panic!("scan: {e}"),
+        };
         // Owner PID's table over the real process list: the holder (a
         // live child of this test) is carried at its own number, and
         // `status` is readable for every listed process without hidepid.

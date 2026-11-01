@@ -353,10 +353,12 @@ fn timeout_and_tally_budget_zero_as_documented_parse() {
         "0",
         "--tally-budget",
         "0",
+        // A Docker tier does not rely on diskgc's own in-use check, so the
+        // run gets as far as PATH whatever its PID namespace (the Nix build
+        // sandbox has one of its own, where an `fs` or Cargo tier is
+        // refused first: docs/safety.md, In use: Visibility).
         "--select",
-        "profile:cargo-target",
-        "--roots",
-        "/nonexistent-diskgc-test",
+        "profile:docker-build-cache",
         "/nonexistent-diskgc-test",
     ]);
     assert_eq!(out.status.code(), Some(2));
