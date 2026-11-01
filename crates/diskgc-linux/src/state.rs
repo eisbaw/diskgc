@@ -560,10 +560,12 @@ pub(crate) struct BtrfsInfo {
     /// the filesystem itself, never a path (TASK-286 review: a mountinfo
     /// source can name another device in diskgc's namespace).
     pub fsid: String,
-    /// `num_devices`: the filesystem's own devices (`fs_devices->devices`),
-    /// a missing one and a replace target included, a seed filesystem's
-    /// not.
-    pub num_devices: u64,
+    /// `max_id`: the highest device id among the filesystem's own devices
+    /// (`fs_devices->devices`, a replace target's 0 included). A seed
+    /// filesystem's devices have lower ids: a sprout's new device takes the
+    /// next id after every id its chunk tree holds, the seed's included
+    /// (`find_next_devid`).
+    pub max_id: u64,
 }
 
 /// `BTRFS_IOC_FS_INFO` on `fd`, which must be opened for reading (an
@@ -590,7 +592,7 @@ pub(crate) fn btrfs_info(fd: BorrowedFd<'_>, shown: &str) -> Result<BtrfsInfo, H
             hex[8..10].concat(),
             hex[10..16].concat()
         ),
-        num_devices: info.num_devices,
+        max_id: info.max_id,
     })
 }
 
@@ -683,16 +685,138 @@ fn loop_of(dev: Dev) -> Result<Option<Dev>, HostError> {
     }
 }
 
+/// `BTRFS_IOC_DEV_INFO` (`include/uapi/linux/btrfs.h`):
+/// `_IOWR(0x94, 30, struct btrfs_ioctl_dev_info_args)`, 4096 bytes. No
+/// capability is needed; it only reports.
+const BTRFS_IOC_DEV_INFO: rustix::ioctl::Opcode = 0xd000_941e;
+
+/// `BTRFS_DEVICE_PATH_NAME_MAX`.
+const BTRFS_DEVICE_PATH_NAME_MAX: usize = 1024;
+
+/// `struct btrfs_ioctl_dev_info_args` (`include/uapi/linux/btrfs.h`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BtrfsDevInfo {
+    devid: u64,
+    uuid: [u8; 16],
+    bytes_used: u64,
+    total_bytes: u64,
+    fsid: [u8; 16],
+    unused: [u64; 377],
+    path: [u8; BTRFS_DEVICE_PATH_NAME_MAX],
+}
+
+const _: () = assert!(std::mem::size_of::<BtrfsDevInfo>() == 4096);
+
+/// The highest device id diskgc asks about, so a corrupt or hostile
+/// `max_id` cannot keep it asking: a btrfs takes the next id on every
+/// `device add`, so a filesystem past this many has seen thousands of
+/// device changes. More is an error (fail closed), never a shorter list.
+const BTRFS_DEVID_MAX: u64 = 4096;
+
+/// The name `BTRFS_IOC_DEV_INFO` gives the device with id `devid` of the
+/// btrfs `fd` is on: `Ok(None)` when no device has that id (`ENODEV`: ids
+/// have gaps once a device is removed), `Ok(Some(empty))` for a member
+/// without a name (missing: it has no block device, so no loop device
+/// holds an image for it). Looked up among the filesystem's own devices,
+/// then its seed filesystems' (`btrfs_find_device`).
+fn btrfs_dev_name(
+    fd: BorrowedFd<'_>,
+    devid: u64,
+    shown: &str,
+) -> Result<Option<Vec<u8>>, HostError> {
+    // SAFETY: zeroes are a valid `btrfs_ioctl_dev_info_args` (an empty
+    // uuid asks by id alone); BTRFS_IOC_DEV_INFO reads and fills exactly
+    // one through its pointer argument, whose layout `BtrfsDevInfo` is.
+    let mut args: BtrfsDevInfo = unsafe { std::mem::zeroed() };
+    args.devid = devid;
+    let asked = unsafe {
+        rustix::ioctl::ioctl(
+            fd,
+            rustix::ioctl::Updater::<BTRFS_IOC_DEV_INFO, BtrfsDevInfo>::new(&mut args),
+        )
+    };
+    match asked {
+        Ok(()) => {
+            let end = args
+                .path
+                .iter()
+                .position(|b| *b == 0)
+                .unwrap_or(args.path.len());
+            Ok(Some(args.path[..end].to_vec()))
+        }
+        Err(rustix::io::Errno::NODEV) => Ok(None),
+        Err(e) => Err(HostError::errno(
+            "ioctl BTRFS_IOC_DEV_INFO",
+            format!("{shown} (device id {devid})"),
+            errno_of(e),
+        )),
+    }
+}
+
+/// The names of every member of a btrfs whose highest id is `max_id`
+/// (seed devices and a replace target, id 0, included), asked one id at a
+/// time by `ask` ([`btrfs_dev_name`]); a member without a name (missing)
+/// is left out. Ids above [`BTRFS_DEVID_MAX`] are an error.
+fn btrfs_member_names(
+    max_id: u64,
+    mut ask: impl FnMut(u64) -> Result<Option<Vec<u8>>, HostError>,
+    shown: &str,
+) -> Result<Vec<Vec<u8>>, HostError> {
+    if max_id > BTRFS_DEVID_MAX {
+        return Err(HostError::invalid(
+            "ioctl BTRFS_IOC_FS_INFO",
+            shown,
+            format!("device ids up to {max_id}, more than the {BTRFS_DEVID_MAX} diskgc asks about"),
+        ));
+    }
+    let mut names = Vec::new();
+    for devid in 0..=max_id {
+        if let Some(name) = ask(devid)?
+            && !name.is_empty()
+        {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+/// The block device a btrfs member's name is in diskgc's namespace
+/// (`stat`, following links, as `/dev/disk/by-*` names are). A name that
+/// is not there, or not a block device, cannot be told: an error.
+fn member_device(name: &[u8], shown: &str) -> Result<Dev, HostError> {
+    let path = Path::new(OsStr::from_bytes(name));
+    let st = rustix::fs::stat(path).map_err(|e| {
+        HostError::errno(
+            "stat",
+            format!("{} (a member of {shown})", path.display()),
+            errno_of(e),
+        )
+    })?;
+    if file_type_of(st.st_mode) != FileType::BlockDevice {
+        return Err(HostError::invalid(
+            "stat",
+            path.display(),
+            format!("a member of {shown} is not a block device here"),
+        ));
+    }
+    Ok(Dev {
+        major: rustix::fs::major(st.st_rdev),
+        minor: rustix::fs::minor(st.st_rdev),
+    })
+}
+
 /// The loop devices the filesystem `mount` shows is stored on
 /// ([`diskgc_core::host::Host::loop_devices`]). A btrfs's members are read
-/// through `fd`, a directory of it opened for reading: its FSID
-/// (`BTRFS_IOC_FS_INFO`), then `/sys/fs/btrfs/<fsid>/devices`, which links
-/// every member that has a block device (a seed filesystem's included).
-/// Fewer links than the filesystem's own device count (`num_devices`: a
-/// missing member, a link the kernel failed to make) is an incomplete
-/// membership, an error (TASK-299: fail closed); a btrfs without `fd` is
-/// an error too, never answered from mountinfo's source, which names one
-/// member. Read-only.
+/// through `fd`, a directory of it opened for reading: every device id up
+/// to `max_id` (`BTRFS_IOC_FS_INFO`) asked by `BTRFS_IOC_DEV_INFO`, which
+/// finds the filesystem's own devices (a replace target included) and its
+/// seed filesystems'; each name is the block device it stands for here,
+/// and a loop device or a partition of one among them is reported (TASK-299
+/// review: no count is compared, a seed's link hid a missing member). A
+/// member without a name is missing and holds no image. Any failure is an
+/// error (fail closed); so is a btrfs without `fd`: mountinfo's source
+/// names one member only. Read-only.
 pub(crate) fn loop_devices(
     mount: &MountEntry,
     fd: Option<BorrowedFd<'_>>,
@@ -710,24 +834,13 @@ pub(crate) fn loop_devices(
             )
         })?;
         let info = btrfs_info(fd, &shown)?;
-        let members = PathBuf::from(format!("/sys/fs/btrfs/{}/devices", info.fsid));
-        let listing =
-            std::fs::read_dir(&members).map_err(|e| io_error("read_dir", members.display(), &e))?;
-        for entry in listing {
-            let entry = entry.map_err(|e| io_error("read_dir", members.display(), &e))?;
-            devices.push(read_dev_file(&entry.path().join("dev"))?);
-        }
-        if (devices.len() as u64) < info.num_devices {
-            return Err(HostError::invalid(
-                "read_dir",
-                members.display(),
-                format!(
-                    "{} member devices listed, the filesystem has {}: a member is missing or \
-                     not linked, so its loop devices cannot be told",
-                    devices.len(),
-                    info.num_devices
-                ),
-            ));
+        let names = btrfs_member_names(
+            info.max_id,
+            |devid| btrfs_dev_name(fd, devid, &shown),
+            &shown,
+        )?;
+        for name in names {
+            devices.push(member_device(&name, &shown)?);
         }
     }
     let mut loops = Vec::new();
@@ -785,6 +898,78 @@ mod tests {
         let dir = rustix::fs::open("/proc", OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty())
             .expect("open /proc");
         assert!(btrfs_info(dir.as_fd(), "/proc").is_err());
+    }
+
+    /// TASK-299 review (Codex 5): every id up to `max_id` is asked, id 0
+    /// (a replace target) and gaps (`ENODEV`) included; a nameless member
+    /// (missing) is left out; an error of any one fails the whole list; an
+    /// absurd `max_id` is refused before anything is asked.
+    #[test]
+    fn btrfs_members_are_every_id_asked() {
+        let mut asked = Vec::new();
+        let names = btrfs_member_names(
+            4,
+            |devid| {
+                asked.push(devid);
+                Ok(match devid {
+                    0 => Some(b"/dev/loop9".to_vec()),
+                    1 => Some(b"/dev/sda2".to_vec()),
+                    2 => None,
+                    3 => Some(Vec::new()),
+                    _ => Some(b"/dev/loop3".to_vec()),
+                })
+            },
+            "/data",
+        )
+        .expect("members");
+        assert_eq!(asked, [0, 1, 2, 3, 4]);
+        assert_eq!(
+            names,
+            [
+                b"/dev/loop9".to_vec(),
+                b"/dev/sda2".to_vec(),
+                b"/dev/loop3".to_vec()
+            ]
+        );
+        let failed = btrfs_member_names(
+            2,
+            |devid| {
+                if devid == 1 {
+                    Err(HostError::errno(
+                        "ioctl",
+                        "x",
+                        diskgc_core::host::Errno::EIO,
+                    ))
+                } else {
+                    Ok(Some(b"/dev/loop1".to_vec()))
+                }
+            },
+            "/data",
+        );
+        assert!(failed.is_err());
+        let mut called = false;
+        let absurd = btrfs_member_names(
+            u64::MAX,
+            |_| {
+                // Asked at all: refused too late. Stop a loop to u64::MAX.
+                called = true;
+                Err(HostError::errno(
+                    "ioctl",
+                    "x",
+                    diskgc_core::host::Errno::EIO,
+                ))
+            },
+            "/data",
+        );
+        assert!(absurd.is_err() && !called);
+    }
+
+    /// A member's name is the block device it stands for here; anything
+    /// else (missing, a regular file) cannot be told.
+    #[test]
+    fn a_member_name_must_be_a_block_device_here() {
+        assert!(member_device(b"/diskgc-no-such-device", "/data").is_err());
+        assert!(member_device(b"/proc/self/status", "/data").is_err());
     }
 
     /// TASK-299: a btrfs's members are never answered without a

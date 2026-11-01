@@ -502,15 +502,26 @@ Immediately before acting, diskgc walks the candidate's whole tree
   never asked about. A filesystem's loop devices are its own device of
   major 7, the loop device a partition of one belongs to (`loop0p1`, the
   extended major 259, by its sysfs parent), and for btrfs, whose
-  mountinfo device is anonymous, every member that is one: read through
-  a directory of the mount held for the check (its mount point, which
-  must reach that mount, not one covering it), by its FSID
-  (`BTRFS_IOC_FS_INFO`) and `/sys/fs/btrfs/<fsid>/devices` (TASK-299:
-  mountinfo's source names one member, so a second member's image inside
-  a protected Cargo target was missed). Each image is judged: a candidate
-  on a filesystem with several is inside each. A membership that cannot
-  be read completely (fewer members listed than the filesystem has, a
-  member missing, a mount point that cannot be reached) is an error.
+  mountinfo device is anonymous, every member that is one, or a
+  partition of one (TASK-299: mountinfo's source names one member, so a
+  second member's image inside a protected Cargo target was missed).
+  **Btrfs membership** is read through a directory of the mount held for
+  the check (its mount point, which must reach that mount, not one
+  covering it): `BTRFS_IOC_FS_INFO` gives the highest device id, and
+  `BTRFS_IOC_DEV_INFO` asks every id from 0 to it (both unprivileged),
+  which finds the filesystem's own devices (a replace target is id 0)
+  and its seed filesystems' (`btrfs_find_device` searches the seed list;
+  a sprout's devices take ids above every seed's, `find_next_devid`).
+  Each member's name is the block device it stands for in diskgc's
+  namespace (`stat`); one without a name is missing and holds no image.
+  No count is compared (TASK-299 review, Codex 5: a seed's link hid a
+  missing member). Each image is judged: a candidate on a filesystem
+  with several is inside each. A membership that cannot be read (an
+  ioctl that fails, a name that is not a block device here, device ids
+  above 4096, a mount point that cannot be reached or reaches another
+  mount) is an error, never a shorter list. The ioctls need a descriptor
+  opened for reading; a resolved `O_PATH` one is reopened read-only
+  through `/proc/self/fd` first (an ioctl on `O_PATH` is `EBADF`).
   Limits: the translation knows only the mount table read for the check
   (a bind made after it is the enumeration limit below) and compares
   places on one device only; a device-mapper or md device stacked on a
@@ -1298,13 +1309,17 @@ while it is bound, `loop/backing_file`; read-only) and judges each:
    (all layers on one filesystem, or `xino`) or a layer's anonymous one,
    and perhaps the inode of the copy-up origin (`ovl_getattr`,
    `ovl_map_dev_ino`), eCryptfs its own device (`ecryptfs_getattr`), while
-   a name on the underlying filesystem shows that one's. So while such a
-   device is configured, every candidate is `in_use_unknown`
-   (`unknown_cause: loop_device`): told by the identity's device being
-   such a mount's, or by the name the device prints (its parent, when
-   deleted) lying on one, from the mount table alone; a name the table
-   cannot place counts too. Bind and idmapped mounts and btrfs subvolumes
-   show one identity for a file by every name, and keep the exact match.
+   a name on the underlying filesystem shows that one's. The aliasing
+   filesystem is told from the mount table alone: the identity's device
+   is such a mount's, or the name the device prints (its parent, when
+   deleted) lies on one. Its own mounts show the file as the device did
+   (the same `getattr`), so a candidate on one of them is matched
+   exactly; every other candidate is `in_use_unknown` (`unknown_cause:
+   loop_device`) while the device is configured (TASK-299 review, mped
+   B1: the layers' filesystems are not named). A name the table cannot
+   place leaves every candidate in doubt. Bind and idmapped mounts and
+   btrfs subvolumes show one identity for a file by every name, and keep
+   the exact match.
 2. Otherwise only the path the kernel prints (`d_path`) is left, and it
    proves nothing about identity: a mount made over the file's directory
    after the device opened it makes a fresh lookup reach another file (a
@@ -1316,21 +1331,28 @@ while it is bound, `loop/backing_file`; read-only) and judges each:
      for a user's run): no candidate can hold that file, since the
      eligibility walk admits only the owners' entries, on a mount that
      shows owners as stored. Noted, not blocking, except for candidates
-     on a mount that may show another owner (TASK-299): an idmapped
-     mount (mountinfo's per-mount option `idmapped`, Linux 5.12 on), an
-     `overlay` (its layers may be idmapped mounts it holds privately,
-     which the table does not list), and the other types of Not
-     protected, not excluded (`shiftfs` shifts owners; `aufs`, FUSE and
-     network types say nothing of theirs) but `ecryptfs`, which reports
-     its lower file's owner unmapped. Those candidates are
-     `in_use_unknown` (`unknown_cause: loop_device`): an idmapped bind of
-     a Cargo target holding root's image shows it as the user's, and the
-     walk through the bind admits it. And where the name reaches the file
-     through such a mount itself, the owner it shows proves nothing:
-     every candidate, as below. Limit: a decoy of another user's mounted
-     over a real file of an owner's hides it; such a mount in diskgc's own
-     mount namespace takes root; an idmapped mount made after the scan is
-     the check-to-delete race (limit 5);
+     on a mount of the same filesystem (the device mountinfo names for
+     the mount the name reached it on) that may show another owner
+     (TASK-299): an idmapped mount (mountinfo's per-mount option
+     `idmapped`, Linux 5.12 on), and the other types of Not protected,
+     not excluded (`shiftfs` shifts owners; `aufs`, FUSE and network
+     types say nothing of theirs) but `overlay` and `ecryptfs`, which show
+     their lower files' owners as the table tells them: overlayfs copies
+     each owner through its layer's mapping (`ovl_copyattr`), unmapped for
+     a layer that is not idmapped; eCryptfs copies its lower owner
+     unmapped (`fsstack_copy_attr_all`), its mounts cannot be idmapped (no
+     `FS_ALLOW_IDMAP`), and `ecryptfs_mount` refuses an idmapped lower
+     path (`-EINVAL`, since 5.12). Those candidates are `in_use_unknown`
+     (`unknown_cause: loop_device`): an idmapped bind of a Cargo target
+     holding root's image shows it as the user's, and the walk through the
+     bind admits it. A mount of another filesystem shows other files, so
+     systemd-homed's idmapped home is not in doubt for its own root-owned
+     image on `/`, nor are Docker overlays or `gvfs` for a snap (TASK-299
+     review, mped S1). Where the name reaches the file through such a
+     mount itself, the owner it shows proves nothing: every candidate, as
+     below. A live system whose root is an overlay (Ubuntu's casper) with
+     root's snaps and squashfs reclaims (vector
+     `inuse/loop-live-overlay-root-snaps-reclaims`);
    - it is not an absolute path (`d_dname`, an object no directory names):
      noted, not blocking;
    - it ends in ` (deleted)`: the name the device opened is gone, and
@@ -1350,6 +1372,32 @@ while it is bound, `loop/backing_file`; read-only) and judges each:
      be a decoy, or it reaches nothing. A name that reaches nothing is
      read again first, up to three times (`d_path` follows renames, so a
      rename racing the lookup shows the new name).
+
+Each device is kept with its own scope and cause (where it may lie: in
+no candidate, on one filesystem, on some mounts, on all but some mounts,
+or anywhere); a candidate is `in_use_unknown` for the first device whose
+scope covers it.
+
+**Limits of the loop rules** (each 0 events: a static configuration that
+needs a mount only root makes in diskgc's mount namespace, or one in
+another namespace; decided 2026-11-01 for TASK-299 on the orchestrator's
+convergence call, Mark may veto). The rules read what the mount table
+shows; these hide behind what it does not:
+- a decoy of another user's mounted over a real file of an owner's hides
+  it (above);
+- the reverse alias (Codex 1): a device attached through a plain
+  filesystem to an image whose other name lies in an overlay's upper or
+  lower directory, the candidate reached through the overlay, which shows
+  that name under another identity: the device's exact identity, or the
+  filesystem a deleted name scopes to, misses it, and deleting through the
+  overlay removes the upper name;
+- an overlay visible only in another mount namespace (Codex 2): its layer
+  identity is in no table here and its printed name can look plain, the
+  "other namespaces" class of Not protected, not excluded;
+- an overlay whose layers are idmapped private clones: it shows mapped
+  owners while the table shows a plain overlay;
+- eCryptfs over such an overlay (Codex 3): eCryptfs copies the owner the
+  overlay already mapped.
 
 So a user outside the `disk` group whose own image is attached as a loop
 device (the common udisks case) reclaims no `fs` or Cargo candidate until

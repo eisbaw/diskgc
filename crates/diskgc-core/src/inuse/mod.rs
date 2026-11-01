@@ -501,7 +501,7 @@ impl Scan {
             notes.push(format!("process scan unsettled: {why}"));
         }
         notes.extend(self.reader_notes.iter().cloned());
-        notes.extend(self.loops.notes.iter().cloned());
+        notes.extend(self.loops.notes().map(str::to_owned));
         let others = self
             .unreadable
             .iter()
@@ -641,8 +641,8 @@ impl Scan {
         if let Err(why) = &self.visibility {
             return Some((UnknownCause::IncompleteProcessList, why.clone()));
         }
-        if let Some(why) = &self.loops.unknown {
-            return Some((UnknownCause::LoopDevice, why.clone()));
+        if let Some(backing) = self.loops.everywhere() {
+            return Some((UnknownCause::LoopDevice, backing.why.clone()));
         }
         if let Some(why) = &self.unsettled {
             return Some((UnknownCause::Busy, why.clone()));
@@ -740,15 +740,11 @@ impl Scan {
         if let Some(skip) = self.unknown(path) {
             return Err(skip);
         }
-        if let Some(why) = record
-            .objects()
-            .find_map(|id| self.loops.unknown_on.get(&id.dev))
-            .or_else(|| self.loops.unknown_through.get(&candidate.mount_id()))
-        {
+        if let Some(backing) = self.loops.doubt(candidate.mount_id(), record.objects()) {
             return Err(Skip::in_use_unknown(
                 path.to_owned(),
                 UnknownCause::LoopDevice,
-                why.clone(),
+                backing.why.clone(),
             ));
         }
         let by_inode = MAPS_BY_INODE.contains(&candidate.fs_type());
@@ -775,7 +771,7 @@ impl Scan {
                     )),
                 );
             }
-            if let Some(device) = self.loops.uses.get(&id) {
+            if let Some(device) = self.loops.held_by(id) {
                 return in_use(
                     at(),
                     format!(

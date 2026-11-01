@@ -380,24 +380,71 @@ fn a_backing_name_read_through_an_idmapped_mount_proves_no_owner() {
     assert!(skip.detail.contains("/mnt/r"), "{skip}");
 }
 
-/// TASK-299: an overlay may show its layers' files under other owners
-/// (an idmapped layer is a private mount the table does not list), so a
-/// candidate on an overlay is not cleared by the owner rule either.
+/// TASK-299 review (mped B1, Codex 4): a live system whose root is an
+/// overlay (Ubuntu's casper: `/live` here, its upper directory `/cow/upper`)
+/// with root's snap images on it and the casper squashfs loop-mounted from
+/// the ISO (`/cdrom`, mounted at `/rofs`), for a user outside `disk`. Both
+/// images are root's; a plain overlay shows owners as stored, so neither
+/// keeps a candidate, on the overlay or elsewhere: it reclaims.
 #[test]
-fn a_foreign_image_does_not_clear_a_candidate_on_an_overlay() {
+fn a_live_overlay_root_with_snaps_and_its_squashfs_reclaims() {
     let text = yaml(
-        "loops:\n  - {dev: \"7:0\", backing: /var/lib/snapd/snaps/core_1.snap}",
-        "  /var/lib/snapd/snaps/core_1.snap: {size: 1M, uid: 0}\n  /data/upper/c/f: {size: 1K}",
+        "loops:\n  - {dev: \"7:0\", backing: /live/var/lib/snapd/snaps/core_1.snap}",
+        "  /cow/upper/var/lib/snapd/snaps/core_1.snap: {size: 1M, uid: 0, gid: 0}\n  /cow/upper/home/u/c/f: {size: 1K}\n  /cdrom/casper/filesystem.squashfs: {size: 1M, uid: 0, gid: 0}",
     )
     .replacen(
         "  - {id: 30,",
-        "  - {id: 60, at: /merged, fs: overlay, dev: \"0:60\", size: 1G, parent: 1, overlay_upper: /data/upper}\n  - {id: 30,",
+        "  - {id: 60, at: /live, fs: overlay, dev: \"0:60\", size: 1G, parent: 1, overlay_upper: /cow/upper}\n  - {id: 61, at: /rofs, fs: squashfs, dev: \"7:1\", size: 1G, parent: 1, read_only: true, loop_backing: /cdrom/casper/filesystem.squashfs}\n  - {id: 30,",
         1,
     );
     let host = common::host(&text);
-    loop_unknown(check_at(&host, "/merged", "/merged/c"), "on an overlay");
+    assert_eq!(
+        check_at(&host, "/live/home/u", "/live/home/u/c"),
+        Ok(()),
+        "on the overlay"
+    );
     let host = common::host(&text);
-    assert_eq!(check_c(&host).0, Ok(()), "on a plain mount");
+    let (result, scan) = check_c(&host);
+    assert_eq!(result, Ok(()), "on another mount");
+    for device in ["7:0", "7:1"] {
+        assert!(
+            scan.notes().iter().any(|note| note
+                .starts_with(&format!("loop device {device}: its backing file"))
+                && note.contains("uid 0, which no candidate of this run may hold")),
+            "{device}: {:?}",
+            scan.notes()
+        );
+    }
+}
+
+/// TASK-299 review (mped S1): only a mount of the image's own filesystem
+/// can show its file. systemd-homed's home `/home/u` is an idmapped mount
+/// of its own LUKS filesystem (`253:5`), whose image `/home/u.home` is
+/// root's on `/`; a Docker overlay and a gvfs FUSE mount stand by. The
+/// image keeps no candidate in the home, and adds no doubt for the others.
+#[test]
+fn a_foreign_image_is_doubted_only_through_mounts_of_its_own_filesystem() {
+    let text = yaml(
+        "loops:\n  - {dev: \"7:2\", backing: /home/u.home}",
+        "  /home/u.home: {size: 1M, uid: 0, gid: 0}\n  /home/u/c/f: {size: 1K}\n  /var/lib/docker/upper/x: {size: 1K}",
+    )
+    .replacen(
+        "  - {id: 30,",
+        "  - {id: 40, at: /home/u, fs: ext4, dev: \"253:5\", size: 1G, parent: 1, idmap: [{stored: 60514, shown: 1000}, {stored: 1000, shown: 1000}]}\n  - {id: 41, at: /var/lib/docker/merged, fs: overlay, dev: \"0:70\", size: 1G, parent: 1, overlay_upper: /var/lib/docker/upper}\n  - {id: 42, at: /run/user/1000/gvfs, fs: fuse.gvfsd-fuse, dev: \"0:71\", size: 1G, parent: 1}\n  - {id: 30,",
+        1,
+    );
+    let host = common::host(&text);
+    assert_eq!(check_at(&host, "/home/u", "/home/u/c"), Ok(()), "the home");
+    let host = common::host(&text);
+    let (result, scan) = check_c(&host);
+    assert_eq!(result, Ok(()));
+    assert!(
+        scan.notes()
+            .iter()
+            .all(|note| !note.contains("may show other owners")),
+        "{:?}",
+        scan.notes()
+    );
 }
 
 /// TASK-299 (Codex, full review #3): the device opened `/merged/img`
@@ -438,20 +485,21 @@ fn a_deleted_name_on_an_overlay_keeps_every_candidate_in_doubt() {
 /// with the (device, inode) of the file as the mount it was opened through
 /// shows it (`vfs_getattr` of its path), and overlayfs shows a file under
 /// its own device (or a layer's anonymous one), never the underlying
-/// filesystem's. The device opened `/merged/img`; its only other name is
+/// filesystem's. The device opened `/merged/v/img`; its other name is
 /// `/data/keep/c/img-link`, which the walk sees on `/`. The identity
-/// matches no object there, so a device on a filesystem stored in
-/// another's directories leaves every candidate in doubt, whatever its
-/// name says (here a rendering from another namespace, `/ns/img`). An
-/// identity whose file is reached on a plain mount is still exact.
+/// matches no object there, so candidates off the overlay are in doubt,
+/// whatever the device's name says (here a rendering from another
+/// namespace, `/ns/img`). A candidate on the overlay sees the identity the
+/// device gave (review round, mped B1): `in_use`, as an identity whose file
+/// is reached on a plain mount is everywhere.
 #[test]
-fn a_device_identity_on_an_overlay_keeps_every_candidate_in_doubt() {
+fn a_device_identity_on_an_overlay_doubts_every_candidate_off_it() {
     let text = |backing: &str, file: &str| {
         yaml(
             &format!(
                 "loops:\n  - {{dev: \"7:1\", backing: {backing}, file: {file}, readable: true}}"
             ),
-            "  /data/upper/img: {size: 1M}\n  /data/keep/c/img-link: {link: /data/upper/img}",
+            "  /data/upper/v/img: {size: 1M}\n  /data/keep/c/img-link: {link: /data/upper/v/img}",
         )
         .replacen(
             "  - {id: 30,",
@@ -459,14 +507,16 @@ fn a_device_identity_on_an_overlay_keeps_every_candidate_in_doubt() {
             1,
         )
     };
-    let host = common::host(&text("/ns/img", "/merged/img"));
-    let skip = loop_unknown(
-        check_at(&host, "/data/keep", "/data/keep/c"),
-        "identity on an overlay",
-    );
-    assert!(skip.detail.contains("overlay"), "{skip}");
+    for (candidate, parent) in [("/data/keep/c", "/data/keep"), ("/tmp/c", "/tmp")] {
+        let host = common::host(&text("/ns/img", "/merged/v/img"));
+        let skip = loop_unknown(check_at(&host, parent, candidate), candidate);
+        assert!(skip.detail.contains("overlay mount /merged"), "{skip}");
+    }
+    let host = common::host(&text("/ns/img", "/merged/v/img"));
+    let skip = check_at(&host, "/merged", "/merged/v").expect_err("in use");
+    assert_eq!(skip.reason, Reason::InUse, "{skip}");
     // Opened on `/`: the identity is the link's own, `in_use`.
-    let host = common::host(&text("/ns/img", "/data/upper/img"));
+    let host = common::host(&text("/ns/img", "/data/upper/v/img"));
     let skip = check_at(&host, "/data/keep", "/data/keep/c").expect_err("in use");
     assert_eq!(skip.reason, Reason::InUse, "{skip}");
 }
@@ -517,8 +567,11 @@ fn a_mounted_loop_image_is_listed() {
         1,
     );
     let host = host(&text);
-    let skip = loop_unknown(check_c(&host).0, "mounted");
+    let (result, scan) = check_c(&host);
+    let skip = loop_unknown(result, "mounted");
     assert!(skip.detail.starts_with("loop device 7:3"), "{skip}");
+    // The whole scan clears nothing (a tier stops checking after three).
+    assert_eq!(scan.blocked().as_deref(), Some(skip.detail.as_str()));
 }
 
 /// mped S4: the model's text follows the entry the device opened, as

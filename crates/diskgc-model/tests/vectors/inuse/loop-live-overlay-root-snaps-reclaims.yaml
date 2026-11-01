@@ -1,0 +1,37 @@
+# TASK-299 review (mped B1, Codex 4): a live system whose root is an
+# overlay (Ubuntu's casper; `/live` here, upper directory `/cow/upper`),
+# with root's snap image attached on it and the casper squashfs from the
+# ISO (`/cdrom`) loop-mounted at `/rofs`, for a user outside `disk`.
+# Both images are root's and a plain overlay shows owners as stored, so
+# neither keeps the user's candidates on the overlay: they are reclaimed.
+# (After the first round of TASK-299 every candidate here was
+# in_use_unknown.)
+profile_vector: 1
+user_profiles:
+  - {"name": "scratch-probe", "find": {"roots": ["/live/home/u"], "paths": ["scratch-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/live/home/u/scratch-a"]}}
+profile: scratch-probe
+path: /live/home/u
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  loops:
+    - {dev: "7:0", backing: /live/var/lib/snapd/snaps/core_1.snap}
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /cdrom, fs: iso9660, dev: "11:0", size: 4G, parent: 1, read_only: true}
+    - {id: 60, at: /live, fs: overlay, dev: "0:60", size: 1G, parent: 1, overlay_upper: /cow/upper}
+    - {id: 61, at: /rofs, fs: squashfs, dev: "7:1", size: 2G, parent: 1, read_only: true, loop_backing: /cdrom/casper/filesystem.squashfs}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /cdrom/casper/filesystem.squashfs: {size: 1M, uid: 0, gid: 0}
+    /cow/upper/var/lib/snapd/snaps/core_1.snap: {size: 1M, uid: 0, gid: 0}
+    /cow/upper/home/u/scratch-a: {.: {mtime: 2026-10-01T00:00:00Z}, data: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+expect:
+  plan:
+    - {candidate: /live/home/u/scratch-a}
+  reclaim_exit: 1
+  actions: [/live/home/u/scratch-a]
+  removed: [/live/home/u/scratch-a]
+  skipped: []
+  preserved: [/cow/upper/var/lib/snapd/snaps/core_1.snap, /cdrom/casper/filesystem.squashfs]

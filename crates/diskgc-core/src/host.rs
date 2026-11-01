@@ -1362,12 +1362,12 @@ pub trait Host {
     /// (`/sys/dev/block/M:m/loop`) or a partition of one (`losetup -P`,
     /// the parent's); for btrfs, whose superblock device is anonymous, each
     /// member device that is one, found through the filesystem's id read
-    /// from `fd`, a directory on it (`BTRFS_IOC_FS_INFO` and
-    /// `/sys/fs/btrfs/<fsid>/devices`). A btrfs without `fd`, or with fewer
-    /// members listed than it has (a missing member), is an error: never
-    /// answered from the device mountinfo names as its source, which is
-    /// one member (TASK-299). Empty: none (another block device, tmpfs, an
-    /// overlay). Read-only.
+    /// from `fd`, a directory on it (`BTRFS_IOC_FS_INFO`, then
+    /// `BTRFS_IOC_DEV_INFO` for every device id, seeds and a replace target
+    /// included). A btrfs without `fd`, or whose members cannot be read, is
+    /// an error: never answered from the device mountinfo names as its
+    /// source, which is one member (TASK-299). Empty: none (another block
+    /// device, tmpfs, an overlay). Read-only.
     fn loop_devices(
         &self,
         mount: &MountEntry,

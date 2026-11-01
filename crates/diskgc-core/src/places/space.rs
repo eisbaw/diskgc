@@ -315,20 +315,25 @@ pub fn on_loop<H: Host>(
     }
 }
 
-/// Filesystem types the mount screen does not refuse whose `statx` owner
-/// is the stored one even though they stack on another filesystem's
-/// directories: eCryptfs copies its lower inode's owner unmapped
-/// (`fsstack_copy_attr_all`) and reports it without an id mapping
-/// (`ecryptfs_getattr`), and its mounts cannot be idmapped.
-const SHOWS_STORED_OWNERS: &[&str] = &["ecryptfs"];
+/// Filesystem types that stack on another filesystem's directories yet
+/// show their lower files' owners as the mount table can tell them:
+/// overlayfs copies each owner from its real inode through the layer's
+/// id mapping (`ovl_copyattr`), and a layer that is not idmapped shows it
+/// unmapped (its idmapped layers are private clones the table does not
+/// list: a documented limit, docs/safety.md, Loop devices); eCryptfs
+/// copies its lower inode's owner unmapped (`fsstack_copy_attr_all`,
+/// `ecryptfs_getattr`), its own mounts cannot be idmapped (no
+/// `FS_ALLOW_IDMAP`), and `ecryptfs_mount` refuses an idmapped lower path
+/// (`-EINVAL`, since 5.12). Without them a live overlay root or an
+/// eCryptfs home with root's snap images would clear nothing (TASK-299
+/// review, mped B1).
+const SHOWS_STORED_OWNERS: &[&str] = &[OVERLAY, "ecryptfs"];
 
 /// Whether `statx` through `mount` may report an owner other than the one
-/// stored, and so another than a different mount of the same file shows
-/// (TASK-299): an idmapped mount; an overlay, whose layers may be idmapped
-/// mounts the table does not list (private clones the overlay holds); and
-/// every other type that may store its data elsewhere ([`stored_elsewhere`]:
+/// stored, as the mount table shows it (TASK-299): an idmapped mount, and
+/// every type that may store its data elsewhere ([`stored_elsewhere`]:
 /// shiftfs exists to shift owners, aufs and the FUSE and network types say
-/// nothing of theirs) but eCryptfs ([`SHOWS_STORED_OWNERS`]).
+/// nothing of theirs) but those of [`SHOWS_STORED_OWNERS`].
 pub fn may_show_other_owners(mount: &MountEntry) -> bool {
     mount.idmapped
         || (stored_elsewhere(&mount.fs_type)

@@ -18,8 +18,9 @@
 //!    by (`vfs_getattr`), so a file opened through a filesystem stored in
 //!    another's directories (overlayfs: its own or a layer's anonymous
 //!    device, perhaps the copy-up origin's inode) shows an identity no
-//!    other name of it has: every candidate is `in_use_unknown` while such
-//!    a device is configured (TASK-299, [`stacked_alias`]).
+//!    other name of it has. Candidates on that filesystem's own mounts see
+//!    the same identity; every other candidate is `in_use_unknown` while
+//!    such a device is configured (TASK-299, [`stacked_alias`]).
 //! 2. Otherwise only the name the kernel prints (`d_path`) is left, which
 //!    proves nothing about identity: a mount made over the file's directory
 //!    after the device opened it makes a fresh lookup reach another file (a
@@ -30,13 +31,14 @@
 //!      the run's owners owns: a candidate holds only its owners' entries
 //!      (the eligibility walk refuses any other), so it cannot be in one
 //!      on a mount that shows owners as stored. Noted; candidates on a
-//!      mount that may show other owners (idmapped, an overlay:
-//!      [`crate::places::may_show_other_owners`]) are `in_use_unknown` (TASK-299:
-//!      an idmapped bind shows root's image as the user's). An owner read
-//!      through such a mount proves nothing: as below, every candidate.
-//!      Limit: a decoy owned by another user over a real file of an
-//!      owner's (a mount in diskgc's own mount namespace, which only root
-//!      makes) hides it.
+//!      mount of the same filesystem that may show other owners (idmapped:
+//!      [`crate::places::may_show_other_owners`]) are `in_use_unknown`
+//!      (TASK-299: an idmapped bind shows root's image as the user's). An
+//!      owner read through such a mount proves nothing: as below, every
+//!      candidate. Limits (docs/safety.md, Limits of the loop rules): a
+//!      decoy owned by another user over a real file of an owner's, and
+//!      what the mount table does not show (an overlay's idmapped private
+//!      layers, another namespace's mounts).
 //!    - The text is not an absolute path: an anonymous object (`d_dname`),
 //!      which no directory can name. Noted, not blocking.
 //!    - The text ends in ` (deleted)`: the name the device opened is gone;
@@ -53,11 +55,15 @@
 //!      again first (`d_path` follows renames, so a rename racing the
 //!      lookup shows the new name), up to [`LOOP_REREADS`] times.
 //!
+//! Each device is kept with its own [`Scope`] and cause; a candidate is
+//! `in_use_unknown` for the first one whose scope covers it
+//! ([`LoopBackings::doubt`]).
+//!
 //! diskgc out of file descriptors, a listing that fails or a backing file
 //! or device that cannot be read for another reason is an error of the
 //! run (as the process list's is, TASK-166), never a shorter list.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeSet;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -71,25 +77,108 @@ use crate::resolve::{Want, resolve_in};
 /// here and changed since the last read (a rename racing the lookup).
 pub const LOOP_REREADS: usize = 3;
 
-/// The configured loop devices as the in-use check uses them.
+/// Which candidates a configured loop device's backing file could lie in,
+/// where its identity alone does not tell (module docs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// In none: no candidate can hold the file, or its identity is exact.
+    Nowhere,
+    /// In a candidate holding an object `statx` shows on this device (the
+    /// filesystem of a deleted name's surviving directory).
+    Filesystem(Dev),
+    /// In a candidate on one of these mounts (ids of the mount table the
+    /// scan read).
+    Mounts(BTreeSet<u64>),
+    /// In any candidate but those on these mounts (ids of the scan's
+    /// table), which show the file under the identity the device gave.
+    AllBut(BTreeSet<u64>),
+    /// In any candidate.
+    Everywhere,
+}
+
+impl Scope {
+    /// Whether a candidate on mount `mount_id`, whose objects lie on the
+    /// devices `devices` (`statx`), may hold the file.
+    fn covers(&self, mount_id: u64, devices: &BTreeSet<Dev>) -> bool {
+        match self {
+            Self::Nowhere => false,
+            Self::Filesystem(dev) => devices.contains(dev),
+            Self::Mounts(ids) => ids.contains(&mount_id),
+            Self::AllBut(ids) => !ids.contains(&mount_id),
+            Self::Everywhere => true,
+        }
+    }
+}
+
+/// One configured loop device as the in-use check judges it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopBacking {
+    pub device: Dev,
+    /// Its `backing_file` text, as last read.
+    pub text: PathBuf,
+    /// The held file's identity (`LOOP_GET_STATUS64`), where diskgc can ask
+    /// the device: a use, matched like an open fd.
+    pub identity: Option<DevIno>,
+    /// The candidates it may lie in beyond its identity.
+    pub scope: Scope,
+    /// What the report says of it: the note (scope [`Scope::Nowhere`]
+    /// without an identity) or the `in_use_unknown` detail (any other).
+    pub why: String,
+}
+
+/// The configured loop devices as the in-use check uses them, every one
+/// with its own cause.
 #[derive(Debug, Clone, Default)]
 pub struct LoopBackings {
-    /// Each backing file's identity, with its loop device.
-    pub uses: HashMap<DevIno, Dev>,
-    /// Why some device's backing file could be in any candidate: every
-    /// candidate is `in_use_unknown`. The first cause found.
-    pub unknown: Option<String>,
-    /// Why some device's backing file could be in a candidate on this
-    /// filesystem (by `statx` device): those candidates are
-    /// `in_use_unknown`.
-    pub unknown_on: BTreeMap<Dev, String>,
-    /// Why some device's backing file, none of the owners' as stored, could
-    /// still show as an owner's on this mount (by mount id: one that may
-    /// show other owners, [`crate::places::may_show_other_owners`]): candidates on
-    /// it are `in_use_unknown` (TASK-299).
-    pub unknown_through: BTreeMap<u64, String>,
-    /// Devices whose backing file no candidate can hold, and why.
-    pub notes: Vec<String>,
+    pub backings: Vec<LoopBacking>,
+}
+
+impl LoopBackings {
+    /// The first device whose file could be in any candidate: the scan
+    /// clears none.
+    pub fn everywhere(&self) -> Option<&LoopBacking> {
+        self.backings
+            .iter()
+            .find(|backing| backing.scope == Scope::Everywhere)
+    }
+
+    /// The first device whose file a candidate on mount `mount_id` holding
+    /// `objects` may hold ([`Scope`]): it is `in_use_unknown`.
+    pub fn doubt(
+        &self,
+        mount_id: u64,
+        objects: impl IntoIterator<Item = DevIno>,
+    ) -> Option<&LoopBacking> {
+        let by_device = self
+            .backings
+            .iter()
+            .any(|backing| matches!(backing.scope, Scope::Filesystem(_)));
+        // Only read the objects when some scope is a filesystem's.
+        let devices: BTreeSet<Dev> = if by_device {
+            objects.into_iter().map(|id| id.dev).collect()
+        } else {
+            BTreeSet::new()
+        };
+        self.backings
+            .iter()
+            .find(|backing| backing.scope.covers(mount_id, &devices))
+    }
+
+    /// The loop device holding the file `id`, if the device said so.
+    pub fn held_by(&self, id: DevIno) -> Option<Dev> {
+        self.backings
+            .iter()
+            .find(|backing| backing.identity == Some(id))
+            .map(|backing| backing.device)
+    }
+
+    /// The notes of the devices no candidate can hold.
+    pub fn notes(&self) -> impl Iterator<Item = &str> {
+        self.backings
+            .iter()
+            .filter(|backing| backing.identity.is_none() && backing.scope == Scope::Nowhere)
+            .map(|backing| backing.why.as_str())
+    }
 }
 
 /// Lists the configured loop devices and judges each backing file (module
@@ -103,7 +192,9 @@ pub fn read<H: Host>(host: &H, owners: &[u32]) -> Result<LoopBackings, ScanError
     }
     let mounts = host.mountinfo().map_err(run_error)?;
     for (device, text) in listed {
-        judge(host, &mounts, owners, device, text, &mut backings)?;
+        if let Some(backing) = judge(host, &mounts, owners, device, text)? {
+            backings.backings.push(backing);
+        }
     }
     Ok(backings)
 }
@@ -116,118 +207,91 @@ fn run_error(e: HostError) -> ScanError {
     }
 }
 
-/// What the backing file's name shows (step 2 of the module docs).
-enum Named {
-    /// No candidate can hold the file: why.
-    Nowhere(String),
-    /// None of the owners owns the file as stored: no candidate on a mount
-    /// that shows owners as stored can hold it; why.
-    ForeignOwner(String),
-    /// It could be in a candidate on this filesystem: why.
-    On(Dev, String),
-    /// It could be in any candidate: why; `reread`: the text may have
-    /// changed (a lookup that failed).
-    Anywhere { why: String, reread: bool },
+/// Where a backing file may lie and why (step 2 of the module docs, and the
+/// alias check of step 1).
+struct Judgment {
+    scope: Scope,
+    why: String,
+    /// The text may have changed (a lookup that failed): read it again.
+    reread: bool,
 }
 
+impl Judgment {
+    fn new(scope: Scope, why: impl Into<String>) -> Self {
+        Self {
+            scope,
+            why: why.into(),
+            reread: false,
+        }
+    }
+}
+
+/// Judges one device; `None`: it was detached meanwhile.
 fn judge<H: Host>(
     host: &H,
     mounts: &[MountEntry],
     owners: &[u32],
     device: Dev,
     first: PathBuf,
-    backings: &mut LoopBackings,
-) -> Result<(), ScanError> {
+) -> Result<Option<LoopBacking>, ScanError> {
     let unavailable = match host.loop_backing_identity(device).map_err(run_error)? {
         LoopIdentity::Known(id) => {
-            backings.uses.insert(id, device);
-            if let Some(why) = stacked_alias(mounts, id, &first) {
-                backings.unknown.get_or_insert_with(|| {
-                    format!(
-                        "loop device {device} is backed by {} and its file cannot be told apart \
-                         from a candidate: {why}. Detach it (`losetup -d`, `udisksctl \
-                         loop-delete`)",
-                        first.display()
-                    )
-                });
-            }
-            return Ok(());
+            let alias = stacked_alias(mounts, id, &first);
+            let why = match alias.scope {
+                Scope::Nowhere => format!("its identity {id} is exact"),
+                _ => format!(
+                    "loop device {device} is backed by {} and its file cannot be told apart \
+                     from a candidate: {}. Detach it (`losetup -d`, `udisksctl loop-delete`)",
+                    first.display(),
+                    alias.why
+                ),
+            };
+            return Ok(Some(LoopBacking {
+                device,
+                text: first,
+                identity: Some(id),
+                scope: alias.scope,
+                why,
+            }));
         }
-        LoopIdentity::Detached => return Ok(()),
+        LoopIdentity::Detached => return Ok(None),
         LoopIdentity::Unavailable(why) => why,
+    };
+    let backing = |text: PathBuf, judged: Judgment| {
+        let why = match judged.scope {
+            Scope::Nowhere => format!(
+                "loop device {device}: its backing file {} is in no candidate ({})",
+                text.display(),
+                judged.why
+            ),
+            _ => cause(device, &text, &unavailable, &judged.why),
+        };
+        LoopBacking {
+            device,
+            text,
+            identity: None,
+            scope: judged.scope,
+            why,
+        }
     };
     let mut text = first;
     for _ in 0..=LOOP_REREADS {
-        match by_name(host, mounts, owners, &text)? {
-            Named::Nowhere(why) => {
-                backings.notes.push(format!(
-                    "loop device {device}: its backing file {} is in no candidate ({why})",
-                    text.display()
-                ));
-                return Ok(());
-            }
-            Named::ForeignOwner(why) => {
-                let showing: Vec<&MountEntry> = mounts
-                    .iter()
-                    .filter(|mount| may_show_other_owners(mount))
-                    .collect();
-                backings.notes.push(format!(
-                    "loop device {device}: its backing file {} is in no candidate{} ({why})",
-                    text.display(),
-                    if showing.is_empty() {
-                        ""
-                    } else {
-                        " but one on a mount that may show other owners"
-                    }
-                ));
-                for mount in showing {
-                    let shows = format!(
-                        "{why}, but {} mount {} may show it as an owner's",
-                        shown_type(mount),
-                        mount.mount_point.display()
-                    );
-                    backings
-                        .unknown_through
-                        .entry(mount.id)
-                        .or_insert_with(|| cause(device, &text, &unavailable, &shows));
+        let judged = by_name(host, mounts, owners, &text)?;
+        if judged.reread {
+            match host.loop_backing_file(device).map_err(run_error)? {
+                // Detached meanwhile: it holds nothing now.
+                None => return Ok(None),
+                Some(again) if again != text => {
+                    text = again;
+                    continue;
                 }
-                return Ok(());
-            }
-            Named::On(fs, why) => {
-                backings
-                    .unknown_on
-                    .entry(fs)
-                    .or_insert_with(|| cause(device, &text, &unavailable, &why));
-                return Ok(());
-            }
-            Named::Anywhere { why, reread } => {
-                if reread {
-                    match host.loop_backing_file(device).map_err(run_error)? {
-                        // Detached meanwhile: it holds nothing now.
-                        None => return Ok(()),
-                        Some(again) if again != text => {
-                            text = again;
-                            continue;
-                        }
-                        Some(_) => {}
-                    }
-                }
-                backings
-                    .unknown
-                    .get_or_insert_with(|| cause(device, &text, &unavailable, &why));
-                return Ok(());
+                Some(_) => {}
             }
         }
+        return Ok(Some(backing(text, judged)));
     }
-    backings.unknown.get_or_insert_with(|| {
-        cause(
-            device,
-            &text,
-            &unavailable,
-            &format!("its name kept changing over {} reads", LOOP_REREADS + 1),
-        )
-    });
-    Ok(())
+    let why = format!("its name kept changing over {} reads", LOOP_REREADS + 1);
+    Ok(Some(backing(text, Judgment::new(Scope::Everywhere, why))))
 }
 
 /// The `in_use_unknown` detail of a device whose file cannot be told apart
@@ -242,37 +306,38 @@ fn cause(device: Dev, text: &Path, unavailable: &str, why: &str) -> String {
     )
 }
 
+/// What the backing file's name shows (step 2 of the module docs).
 fn by_name<H: Host>(
     host: &H,
     mounts: &[MountEntry],
     owners: &[u32],
     text: &Path,
-) -> Result<Named, ScanError> {
+) -> Result<Judgment, ScanError> {
     if let Some(name) = text.as_os_str().as_bytes().strip_suffix(b" (deleted)") {
         let name = Path::new(std::ffi::OsStr::from_bytes(name));
         let parent = name.parent().filter(|p| p.is_absolute());
         let Some(parent) = parent else {
-            return Ok(Named::Anywhere {
-                why: "the name it was opened by was deleted, and has no parent directory"
-                    .to_owned(),
-                reread: false,
-            });
+            return Ok(Judgment::new(
+                Scope::Everywhere,
+                "the name it was opened by was deleted, and has no parent directory",
+            ));
         };
         return Ok(match resolve_in(host, mounts, parent, Want::Directory) {
-            // An overlay shows its layers' files under its own device;
-            // another link lies on a layer's filesystem under that one's.
-            Ok(dir) if stored_elsewhere(&dir.mount.fs_type) => Named::Anywhere {
-                why: format!(
+            // An overlay shows its layers' files under its own device or a
+            // layer's anonymous one; another link lies on a layer's
+            // filesystem under that one's. Neither is the directory's.
+            Ok(dir) if stored_elsewhere(&dir.mount.fs_type) => Judgment::new(
+                Scope::Everywhere,
+                format!(
                     "the name it was opened by was deleted on {} mount {}, which stores its \
                      files in another filesystem's directories, so another link of the file \
                      need not show its device",
                     dir.mount.fs_type,
                     dir.mount.mount_point.display()
                 ),
-                reread: false,
-            },
-            Ok(dir) => Named::On(
-                dir.stat.dev,
+            ),
+            Ok(dir) => Judgment::new(
+                Scope::Filesystem(dir.stat.dev),
                 format!(
                     "the name it was opened by was deleted, and another link of the file can \
                      be anywhere on the filesystem of {}",
@@ -282,53 +347,88 @@ fn by_name<H: Host>(
             Err(crate::resolve::ResolveError::Host(e)) if e.is_out_of_descriptors() => {
                 return Err(run_error(e));
             }
-            Err(e) => Named::Anywhere {
-                why: format!(
+            Err(e) => Judgment::new(
+                Scope::Everywhere,
+                format!(
                     "the name it was opened by was deleted, and its directory cannot be \
                      reached ({e})"
                 ),
-                reread: false,
-            },
+            ),
         });
     }
     if !text.is_absolute() {
         // `d_path` prints a relative text only for an object in no
         // directory (an anonymous inode).
-        return Ok(Named::Nowhere("an object in no directory".to_owned()));
+        return Ok(Judgment::new(Scope::Nowhere, "an object in no directory"));
     }
     Ok(match resolve_in(host, mounts, text, Want::Any) {
-        Ok(resolved) if may_show_other_owners(&resolved.mount) => Named::Anywhere {
-            why: format!(
+        Ok(resolved) if may_show_other_owners(&resolved.mount) => Judgment::new(
+            Scope::Everywhere,
+            format!(
                 "its name reaches the file through {} mount {}, which may show another owner \
                  than the one stored",
                 shown_type(&resolved.mount),
                 resolved.mount.mount_point.display()
             ),
-            reread: false,
-        },
+        ),
         Ok(resolved) => match resolved.stat.uid {
-            Some(uid) if !owners.contains(&uid) => Named::ForeignOwner(format!(
-                "its name reaches a file of uid {uid}, which no candidate of this run may hold"
-            )),
-            Some(_) => Named::Anywhere {
-                why: "its name reaches a file the run's owners hold, which need not be the \
-                      device's own (a mount over its directory hides that)"
-                    .to_owned(),
-                reread: false,
-            },
-            None => Named::Anywhere {
-                why: "the kernel did not report the owner of the file its name reaches".to_owned(),
-                reread: false,
-            },
+            Some(uid) if !owners.contains(&uid) => foreign_owner(mounts, &resolved.mount, uid),
+            Some(_) => Judgment::new(
+                Scope::Everywhere,
+                "its name reaches a file the run's owners hold, which need not be the device's \
+                 own (a mount over its directory hides that)",
+            ),
+            None => Judgment::new(
+                Scope::Everywhere,
+                "the kernel did not report the owner of the file its name reaches",
+            ),
         },
         Err(crate::resolve::ResolveError::Host(e)) if e.is_out_of_descriptors() => {
             return Err(run_error(e));
         }
-        Err(e) => Named::Anywhere {
+        Err(e) => Judgment {
+            scope: Scope::Everywhere,
             why: format!("its name reaches nothing here ({e})"),
             reread: true,
         },
     })
+}
+
+/// A file of uid `uid`, none of the owners', reached on `on` (a mount that
+/// shows owners as stored): the walk admits only the owners' entries, so
+/// only a candidate on a mount of the same filesystem that may show
+/// another owner (an idmapped one, [`may_show_other_owners`]) can hold it
+/// (TASK-299 review, mped S1: a mount of another filesystem shows other
+/// files). The same filesystem by the device mountinfo names: one device
+/// may stand for more than one filesystem (bcachefs after a member's
+/// reuse), which only widens the doubt.
+fn foreign_owner(mounts: &[MountEntry], on: &MountEntry, uid: u32) -> Judgment {
+    let why =
+        format!("its name reaches a file of uid {uid}, which no candidate of this run may hold");
+    let showing: Vec<&MountEntry> = mounts
+        .iter()
+        .filter(|mount| mount.dev == on.dev && may_show_other_owners(mount))
+        .collect();
+    if showing.is_empty() {
+        return Judgment::new(Scope::Nowhere, why);
+    }
+    let shown: Vec<String> = showing
+        .iter()
+        .map(|mount| {
+            format!(
+                "{} mount {}",
+                shown_type(mount),
+                mount.mount_point.display()
+            )
+        })
+        .collect();
+    Judgment::new(
+        Scope::Mounts(showing.iter().map(|mount| mount.id).collect()),
+        format!(
+            "{why} as stored, but {} may show it as an owner's",
+            shown.join(", ")
+        ),
+    )
 }
 
 /// How a mount that may show other owners is named in messages: its type,
@@ -341,47 +441,64 @@ fn shown_type(mount: &MountEntry) -> String {
     }
 }
 
-/// Why the identity `id` the device reported may be no other name's
-/// (TASK-299): the kernel takes it from the path the file was opened by,
-/// and a filesystem stored in another's directories ([`stored_elsewhere`]:
-/// overlayfs, eCryptfs, FUSE) reports its own device there, or for
-/// overlayfs a layer's anonymous one and perhaps the copy-up origin's
-/// inode, never what a name on the underlying filesystem shows. Told by
-/// the identity's device being such a mount's, or by the name the device
-/// prints (its parent, when deleted) lying on such a mount, from the table
-/// alone; a name the table cannot place is a doubt too. `None`: an
-/// identity other names of the file share.
-pub(crate) fn stacked_alias(mounts: &[MountEntry], id: DevIno, text: &Path) -> Option<String> {
+/// Where a file the device identified as `id` may lie under another
+/// identity (TASK-299). The kernel takes the identity from the path the
+/// file was opened by, and a filesystem stored in another's directories
+/// ([`stored_elsewhere`]: overlayfs, eCryptfs, FUSE) reports its own device
+/// there, or for overlayfs a layer's anonymous one and perhaps the copy-up
+/// origin's inode, never what a name on the underlying filesystem shows.
+/// Its own mounts show the file as the device did (`ovl_getattr` is the
+/// same call), so candidates on them are matched exactly and the rest are
+/// in doubt ([`Scope::AllBut`]). The aliasing filesystem is told from the
+/// table alone: the identity's device being such a mount's, or the name
+/// the device prints (its parent, when deleted) lying on one; a name the
+/// table cannot place leaves every candidate in doubt. [`Scope::Nowhere`]:
+/// an identity every name of the file shares.
+fn stacked_alias(mounts: &[MountEntry], id: DevIno, text: &Path) -> Judgment {
+    let of_superblock = |dev: Dev| -> BTreeSet<u64> {
+        mounts
+            .iter()
+            .filter(|mount| mount.dev == dev)
+            .map(|mount| mount.id)
+            .collect()
+    };
+    let aliasing = |mount: &MountEntry, how: String| {
+        Judgment::new(
+            Scope::AllBut(of_superblock(mount.dev)),
+            format!(
+                "{how} {} mount {}, which shows files stored in another filesystem's \
+                 directories under identities their names there do not have (candidates on \
+                 its mounts are matched by it)",
+                mount.fs_type,
+                mount.mount_point.display()
+            ),
+        )
+    };
     if let Some(mount) = mounts
         .iter()
         .find(|mount| mount.dev == id.dev && stored_elsewhere(&mount.fs_type))
     {
-        return Some(format!(
-            "its identity {id} is the device of {} mount {}, which shows files stored in \
-             another filesystem's directories, where their other names show other identities",
-            mount.fs_type,
-            mount.mount_point.display()
-        ));
+        return aliasing(mount, format!("its identity {id} is the device of"));
     }
     let bytes = text.as_os_str().as_bytes();
     let name = Path::new(std::ffi::OsStr::from_bytes(
         bytes.strip_suffix(b" (deleted)").unwrap_or(bytes),
     ));
     if !name.is_absolute() {
-        return None;
+        return Judgment::new(Scope::Nowhere, "an object in no directory");
     }
     match mount_for(mounts, name) {
-        Ok(mount) if stored_elsewhere(&mount.fs_type) => Some(format!(
-            "it was opened through {} mount {}, which shows files stored in another \
-             filesystem's directories under identities their other names do not have",
-            mount.fs_type,
-            mount.mount_point.display()
-        )),
-        Ok(_) => None,
-        Err(why) => Some(format!(
-            "the mount its name {} is on cannot be told ({why:?})",
-            name.display()
-        )),
+        Ok(mount) if stored_elsewhere(&mount.fs_type) => {
+            aliasing(mount, "it was opened through".to_owned())
+        }
+        Ok(_) => Judgment::new(Scope::Nowhere, "an identity every name shares"),
+        Err(why) => Judgment::new(
+            Scope::Everywhere,
+            format!(
+                "the mount its name {} is on cannot be told ({why:?})",
+                name.display()
+            ),
+        ),
     }
 }
 
@@ -411,14 +528,16 @@ mod tests {
     /// shows a layer's file under that layer's anonymous device, which no
     /// mount lists: only the name the device prints shows the overlay. And
     /// an overlay's own device tells it whatever the name says (another
-    /// namespace's rendering). Plain filesystems, bind mounts and btrfs
-    /// subvolumes (whose `statx` device the table does not list either)
-    /// keep an exact identity.
+    /// namespace's rendering). Candidates on the overlay's own mounts see
+    /// the identity the device gave, so only the others are in doubt.
+    /// Plain filesystems, bind mounts and btrfs subvolumes (whose `statx`
+    /// device the table does not list either) keep an exact identity.
     #[test]
     fn an_identity_shown_through_a_stacking_filesystem_is_an_alias() {
         let mounts = [
             mount(1, (254, 1), "/", "ext4"),
             mount(60, (0, 60), "/merged", "overlay"),
+            mount(63, (0, 60), "/again", "overlay"),
             mount(61, (0, 61), "/home/u", "ecryptfs"),
             mount(62, (0, 62), "/data", "btrfs"),
         ];
@@ -427,23 +546,78 @@ mod tests {
             ino: 12,
         };
         let pseudo = id(0, 99);
-        for (identity, text, alias) in [
-            (pseudo, "/merged/img", true),
-            (pseudo, "/merged/img (deleted)", true),
-            (id(0, 60), "/ns/img", true),
-            (id(0, 61), "/home/u/img", true),
-            (id(254, 1), "/srv/img", false),
-            (id(254, 1), "/srv/img (deleted)", false),
-            (id(0, 77), "/data/sub/img", false),
-            (pseudo, "anon_inode:[loop]", false),
+        let all_but = |ids: &[u64]| Scope::AllBut(ids.iter().copied().collect());
+        for (identity, text, scope) in [
+            (pseudo, "/merged/img", all_but(&[60, 63])),
+            (pseudo, "/merged/img (deleted)", all_but(&[60, 63])),
+            (id(0, 60), "/ns/img", all_but(&[60, 63])),
+            (id(0, 61), "/home/u/img", all_but(&[61])),
+            (id(254, 1), "/srv/img", Scope::Nowhere),
+            (id(254, 1), "/srv/img (deleted)", Scope::Nowhere),
+            (id(0, 77), "/data/sub/img", Scope::Nowhere),
+            (pseudo, "anon_inode:[loop]", Scope::Nowhere),
         ] {
             assert_eq!(
-                stacked_alias(&mounts, identity, Path::new(text)).is_some(),
-                alias,
+                stacked_alias(&mounts, identity, Path::new(text)).scope,
+                scope,
                 "{identity} by {text}"
             );
         }
-        // A table that cannot place the name: in doubt.
-        assert!(stacked_alias(&mounts[1..], id(254, 1), Path::new("/srv/img")).is_some());
+        // A table that cannot place the name: in doubt everywhere.
+        assert_eq!(
+            stacked_alias(&mounts[1..], id(254, 1), Path::new("/srv/img")).scope,
+            Scope::Everywhere
+        );
+    }
+
+    /// TASK-299 review (mped S2): each scope covers what it says, and
+    /// `doubt` names the first device in doubt for a candidate; a scope by
+    /// filesystem reads the candidate's objects, the others its mount.
+    #[test]
+    fn each_scope_covers_its_candidates() {
+        let backing = |minor, scope| LoopBacking {
+            device: Dev { major: 7, minor },
+            text: PathBuf::from("/x"),
+            identity: None,
+            scope,
+            why: format!("device {minor}"),
+        };
+        let object = |minor| DevIno {
+            dev: Dev { major: 254, minor },
+            ino: 2,
+        };
+        let backings = LoopBackings {
+            backings: vec![
+                backing(0, Scope::Nowhere),
+                backing(
+                    1,
+                    Scope::Filesystem(Dev {
+                        major: 254,
+                        minor: 9,
+                    }),
+                ),
+                backing(2, Scope::Mounts([40].into())),
+                backing(3, Scope::AllBut([60, 40].into())),
+            ],
+        };
+        let doubt = |mount, objects: &[DevIno]| {
+            backings
+                .doubt(mount, objects.iter().copied())
+                .map(|b| b.device.minor)
+        };
+        assert_eq!(doubt(60, &[object(1)]), None);
+        assert_eq!(doubt(60, &[object(1), object(9)]), Some(1));
+        assert_eq!(doubt(40, &[object(1)]), Some(2));
+        assert_eq!(doubt(30, &[object(1)]), Some(3));
+        assert!(backings.everywhere().is_none());
+        assert_eq!(backings.notes().collect::<Vec<_>>(), ["device 0"]);
+        let all = LoopBackings {
+            backings: vec![backing(4, Scope::Everywhere)],
+        };
+        assert_eq!(all.everywhere().map(|b| b.device.minor), Some(4));
+        assert_eq!(
+            all.doubt(60, std::iter::empty()).map(|b| b.device.minor),
+            Some(4)
+        );
     }
 }

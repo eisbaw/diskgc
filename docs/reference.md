@@ -2515,15 +2515,26 @@ line says it was reproduced.
   once the device detached (static reading).
 - TASK-299: three holes in the loop rules close (static configurations,
   found by review, reproduced in the model). A root-owned image that an
-  idmapped mount or an overlay may show as the user's no longer clears
-  candidates on such a mount; a device opened through an overlay (by a
-  deleted name, or as the device's own identity) keeps every candidate
-  `in_use_unknown`, not only those on the overlay's device; and a
-  `protect` or `!profile` check reads every member of a btrfs on loop
-  devices, not only the one mountinfo names
-  ([safety.md](safety.md#in-use), Loop devices; Not protected, not
-  excluded). 0.1.0: yes, more broadly; it read no loop device (static
-  reading).
+  idmapped mount of its own filesystem may show as the user's no longer
+  clears candidates on that mount; a device opened through an overlay
+  (by a deleted name, or as the device's own identity) keeps candidates
+  off that overlay `in_use_unknown`, not only those on the overlay's
+  device; and a `protect` or `!profile` check reads every member of a
+  btrfs on loop devices, seeds included, not only the one mountinfo
+  names ([safety.md](safety.md#in-use), Loop devices, with the
+  configurations it does not see listed as limits). 0.1.0: yes, more
+  broadly; it read no loop device (static reading). Seen on a btrfs:
+  - the snapshot key (`ensure` and `watch`) becomes `uuid-<fsid>` where
+    it was `dev-0-<N>`: one run starts cold, and the old `index-dev-*`
+    files are left in the state directory;
+  - a state directory on a btrfs now writes its snapshot where it was
+    skipped ("cannot tell whether ... is on a loop device");
+  - a `protect` or `!profile` check now stops the run where a btrfs's
+    mount root cannot be reached, a btrfs below a match is covered by
+    another mount, or its members cannot be read.
+  These follow from reading the btrfs id at all: every descriptor diskgc
+  held was `O_PATH`, on which the ioctl fails (`EBADF`), so the id was
+  never read before.
 - TASK-263 review: `skipped[].unknown_cause` says why an
   `in_use_unknown` could not be judged (Output). 0.1.0: no such field
   (static reading).

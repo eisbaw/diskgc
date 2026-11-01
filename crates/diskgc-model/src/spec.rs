@@ -278,7 +278,7 @@ pub struct MountSpec {
     pub idmap: Vec<IdMapSpec>,
     /// A btrfs on an anonymous device (`fs: btrfs`, `dev` of major 0): the
     /// block devices it is stored on, in order, as `BTRFS_IOC_FS_INFO` on
-    /// a descriptor of it and `/sys/fs/btrfs/<fsid>/devices` list them
+    /// a descriptor of it and `BTRFS_IOC_DEV_INFO` list them
     /// (`loop_devices`); a loop device among them (major 7) is one of
     /// `loops:`. mountinfo's source names only the first. Partitions of a
     /// loop device are not modelled. Not with `bind_of` (a bind shows the

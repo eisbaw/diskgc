@@ -1006,8 +1006,9 @@ cost of the goal) unless the state directory's filesystem is proved
 superblock; neither filesystem one that may keep its data on another (an
 `overlay`; `ecryptfs`, `aufs`, `shiftfs`; FUSE, network types and
 `autofs`); neither stored on a loop device (`on_loop`: a loop device, a
-partition of one, or a btrfs with a member on one, found through its FSID
-read from the held directory); and not two ZFS datasets of one pool (by
+partition of one, or a btrfs with a member on one, read through the held
+directory as [safety.md](safety.md#filesystem-candidates) says under Not
+protected, not excluded, Btrfs membership); and not two ZFS datasets of one pool (by
 the source's pool name). Guarded, the state directory and `PATH` are both
 sampled and the lower decides. A state directory on a filesystem stored
 on a loop device is not written at all (one log line, warmth only): its

@@ -396,10 +396,11 @@ fn one_superblock_is_one_space_and_independence_must_be_proved() {
 
 /// TASK-299: which mounts may show an owner other than the one stored, so
 /// that a file no owner of a run owns may still look like an owner's
-/// through them: an idmapped mount of any type, an overlay (its layers may
-/// be idmapped mounts the table does not list), the other types that store
-/// their data elsewhere, but not eCryptfs, which reports its lower file's
-/// owner unmapped. A plain mount, a bind and btrfs show the stored owner.
+/// through them, as the mount table tells: an idmapped mount of any type
+/// and the types that store their data elsewhere, but not an overlay or
+/// eCryptfs, which show their lower files' owners as stored (an overlay's
+/// idmapped private layers are a documented limit). A plain mount, a bind
+/// and btrfs show the stored owner.
 #[test]
 fn which_mounts_may_show_other_owners() {
     let typed = |fs_type: &str, idmapped: bool| MountEntry {
@@ -413,7 +414,8 @@ fn which_mounts_may_show_other_owners() {
         ("tmpfs", false, false),
         ("ext4", true, true),
         ("btrfs", true, true),
-        ("overlay", false, true),
+        ("overlay", false, false),
+        ("overlay", true, true),
         ("shiftfs", false, true),
         ("aufs", false, true),
         ("fuse.bindfs", false, true),
