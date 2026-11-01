@@ -244,10 +244,10 @@ pub fn start<H: Delete>(
         }),
         Mode::TallyOnly { .. } => None,
     };
-    // 3. The pre-release sandbox gate, then the in-use check's visibility
-    //    (TASK-263), unless nothing can be deleted. The gate first: outside
-    //    a test container a development build names the gate wherever it
-    //    runs, its own PID namespace included.
+    // 3. The pre-release sandbox gate, unless nothing can be deleted
+    //    (before the in-use check's visibility, 4b: outside a test
+    //    container a development build names the gate wherever it runs,
+    //    its own PID namespace included).
     if goal.is_some()
         && let Err(gate) = host.may_delete()
     {
@@ -260,12 +260,14 @@ pub fn start<H: Delete>(
             ),
         ));
     }
-    if goal.is_some() && prepared.uses_in_use_scan() {
-        crate::executor::process_visibility(host).map_err(|e| refuse((e.cause, e.message)))?;
-    }
     // 4. PATH, reached safely and held. The first sample is not a start
     //    check: a goal whose percentage needs it waits for one that works.
     let at = reach_path(host, path).map_err(|e| Refused::measure(path, e))?;
+    // 4b. The in-use check's visibility (TASK-263), where a tier relies on
+    //     it: after the gate, and after PATH, the call's own error.
+    if goal.is_some() && prepared.uses_in_use_scan() {
+        crate::executor::process_visibility(host).map_err(|e| refuse((e.cause, e.message)))?;
+    }
     let first = host.statvfs(&at.fd);
     if let Some(goal) = &mut goal {
         match &first {

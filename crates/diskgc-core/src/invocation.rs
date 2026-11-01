@@ -361,15 +361,20 @@ fn run<H: Delete>(
     progress: &mut dyn FnMut(&str),
 ) -> Result<Report, (ErrorCause, String)> {
     let prepared = prepare(host, loaded, platform)?;
+    prepared.refuse_missing_roots(host)?;
     // The in-use check's visibility (TASK-263), where a tier relies on that
     // check. A reclaim asks the pre-release sandbox gate first: where it is
     // closed the executor names the gate (exit 2), wherever diskgc runs,
     // its own PID namespace included. A dry run is refused where its
-    // reclaim would be.
+    // reclaim would be. The call's own errors come before the
+    // environment's: a missing root (above) or `PATH` is named first.
     if prepared.uses_in_use_scan() && (options.dry_run || host.may_delete().is_ok()) {
+        executor::reach_path(host, &options.path).map_err(|failure| match failure {
+            executor::MeasureFailure::Usage(why) => (ErrorCause::Usage, why),
+            executor::MeasureFailure::Host(why) => (ErrorCause::Host, why),
+        })?;
         executor::process_visibility(host).map_err(|e| (e.cause, e.message))?;
     }
-    prepared.refuse_missing_roots(host)?;
     let mut index = if options.no_index {
         RunIndex::no_index()
     } else {

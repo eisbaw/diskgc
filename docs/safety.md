@@ -1222,7 +1222,8 @@ at start, before anything is measured: exit 2, `cause: safety`, naming
 the rule and where to run instead; facts that cannot be read are exit 3
 (`host`). A reclaim asks the [Pre-release sandbox
 gate](#pre-release-sandbox-gate) first, so outside a test container a
-development build names the gate, in its own PID namespace too.
+development build names the gate, in its own PID namespace too; and the
+call's own errors (a missing root or `PATH`) are named before this rule.
 `watch --tally-only`, `check`, `survey` and `profiles` judge no candidate
 and are not refused. Every scan reads the facts again, before its first
 listing and after its last read, and confirms them once for both this

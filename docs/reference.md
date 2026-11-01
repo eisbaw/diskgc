@@ -318,10 +318,7 @@ In this order; the first failure exits with its code and deletes nothing:
    `ensure` does (Open-file limit under `ensure`).
 3. Running as root without `--allow-root`, or `--allow-root` not as root
    or without `CAP_SYS_PTRACE` ([safety.md](safety.md#privileges)): exit 2
-   (`safety`); a capability set that cannot be read: exit 3 (`host`).
-   After the sandbox gate below, without `--tally-only`: the in-use
-   check's visibility ([safety.md](safety.md#in-use), Visibility), exit 2
-   (`safety`) or 3 (`host`). The
+   (`safety`); a capability set that cannot be read: exit 3 (`host`). The
    configuration's checks that depend on the user diskgc runs as
    (`owners:` names, `protect` and tier roots with `{uid}`): exit 2. In a
    development build, the pre-release sandbox gate: exit 2 outside a test
@@ -330,7 +327,10 @@ In this order; the first failure exits with its code and deletes nothing:
 4. `PATH` (absolute, reached safely, [safety.md](safety.md#path-traversal)):
    exit 2 when invalid, 3 when an operation fails before `PATH` is open.
    The first space sample is not a start check: if it fails, it is the
-   first cycle (The reclaim cycle).
+   first cycle (The reclaim cycle). Then, without `--tally-only` and when
+   a tier relies on the in-use check: its visibility
+   ([safety.md](safety.md#in-use), Visibility), exit 2 (`safety`) or 3
+   (`host`).
 5. The lock its cycles take ([safety.md](safety.md#host-lock)): one its
    cycles could never take (the host lock not a regular file or missing
    as root, an unsafe per-user lock) exits 2 (`cause: provisioning`,
