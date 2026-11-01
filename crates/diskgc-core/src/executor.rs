@@ -363,7 +363,7 @@ fn lock_refusal(report: Report, log: &mut dyn FnMut(&str), error: LockError) -> 
         LockError::Missing { .. }
         | LockError::Unusable { .. }
         | LockError::UserLockRefused { .. } => ErrorCause::Provisioning,
-        LockError::Failed(..) => ErrorCause::Host,
+        LockError::Failed(..) | LockError::UserLockLookup(_) => ErrorCause::Host,
         LockError::DeadlinePassed(_) | LockError::Interrupted(_) => {
             unreachable!("the caller handles the deadline and signals: {error}")
         }

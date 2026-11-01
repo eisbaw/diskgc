@@ -3914,7 +3914,12 @@ the other documents link here.
   - otherwise `<home>/.local/state/diskgc/lock`, the home being the
     user's account entry's (`getpwuid_r`), and `$HOME` only when that
     lookup finds none (a static musl build without nscd cannot resolve
-    NSS-only accounts).
+    NSS-only accounts; `ENOENT`, which musl returns when there is no
+    `/etc/passwd`, counts as none). A lookup that fails (an NSS source
+    unreachable, `EIO`, `EMFILE`, ...) is not "none": where the lock is
+    cannot be told, and `$HOME`, which a cron job and a login session of
+    one user may set differently, is not guessed. It is a failure of the
+    host (below; TASK-288), asked again at the next use.
 
   The place is decided at each use: while the user has a session the
   lock is in `/run/user/<uid>`, after the last session ends (without
@@ -3928,8 +3933,12 @@ the other documents link here.
   never fails with `EACCES`: the directory must be a directory of the
   user that no one else may write to, the file a regular file of the
   user that no one else may open (`mode & 0o077 == 0`: anyone who can
-  open it can hold it). The checked file is then reopened read-only
-  through `/proc/self/fd` and checked to be the same object. What is
+  open it can hold it). The checked file is then reopened through
+  `/proc/self/fd`, for writing and never truncated (an NFS client
+  emulates `flock` with byte-range locks, and an exclusive one needs a
+  descriptor open for writing, flock(2); read-only only where the user
+  may not write it, `EACCES` or `EROFS`, which a local `flock` needs no
+  more than; TASK-288), and checked to be the same object. What is
   missing is made: the directory mode 0700, the file mode 0600 with
   `O_EXCL`, never over something else. Making them is a state write (Pre-release
   sandbox gate: an ungated wrapper of its own, like the snapshot's).
@@ -3951,7 +3960,8 @@ the other documents link here.
     the path and the reason. A user whose disk is full must still be
     able to reclaim (Mark, 2026-10-31);
   - any other failure of the host (`EIO`, `ENOMEM`, `EMFILE`, ...),
-    making or locking the per-user lock or the host lock, is exit 3
+    finding (the account lookup), making or locking the per-user lock
+    or the host lock, is exit 3
     (status `error`, `cause: host`); in a `watch` cycle a `retry`
     back-off.
 - **One line says which.** The reclaim says in one log line which lock it

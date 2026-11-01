@@ -301,6 +301,7 @@ pub fn host_model(
                 call_cost: None,
                 state_dir: None,
                 home: None,
+                home_lookup_error: None,
                 boot_id: None,
                 events: Vec::new(),
                 expect: None,

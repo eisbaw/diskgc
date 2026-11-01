@@ -198,8 +198,12 @@ pub struct LinuxHost {
     /// `$HOME`, for the per-user lock only when the account database has
     /// no home for diskgc's user ([`LinuxHost::with_home_fallback`]).
     home_fallback: Option<PathBuf>,
-    /// diskgc's user's home from the account database, looked up once.
+    /// diskgc's user's home from the account database, once a lookup
+    /// worked (a failed one is not kept: the next use asks again).
     account_home: std::sync::OnceLock<Option<PathBuf>>,
+    /// The account database lookup ([`account_home`]; a test's own in the
+    /// unit tests).
+    account_lookup: fn(u32) -> Result<Option<PathBuf>, HostError>,
 }
 
 impl LinuxHost {
@@ -272,6 +276,7 @@ impl LinuxHost {
             state_dir: None,
             home_fallback: None,
             account_home: std::sync::OnceLock::new(),
+            account_lookup: account_home,
         })
     }
 
@@ -297,13 +302,21 @@ impl LinuxHost {
     }
 
     /// The home of diskgc's user for the per-user lock: the account
-    /// database's (looked up once), otherwise the `$HOME` fallback.
-    fn lock_home(&self) -> Option<PathBuf> {
+    /// database's (looked up until a lookup works), otherwise, only when it
+    /// has no entry, the `$HOME` fallback. A failed lookup is the error:
+    /// `$HOME` may differ between a login session, a cron job and a `su` of
+    /// one user, which must resolve the same lock (docs/safety.md, Host
+    /// lock; TASK-288).
+    fn lock_home(&self) -> Result<Option<PathBuf>, HostError> {
         let uid = rustix::process::geteuid().as_raw();
-        self.account_home
-            .get_or_init(|| account_home(uid).ok().flatten())
-            .clone()
-            .or_else(|| self.home_fallback.clone())
+        let account = match self.account_home.get() {
+            Some(home) => home.clone(),
+            None => {
+                let home = (self.account_lookup)(uid)?;
+                self.account_home.get_or_init(|| home).clone()
+            }
+        };
+        Ok(account.or_else(|| self.home_fallback.clone()))
     }
 
     fn state_dir(&self) -> Result<&Path, HostError> {
@@ -586,7 +599,10 @@ fn is_users_runtime_dir(dir: &Path, uid: u32) -> bool {
 }
 
 /// The home directory of `uid` in the account database (`getpwuid_r`):
-/// `None` when it has no entry, or a home that is not absolute.
+/// `None` when it has no entry, or a home that is not absolute. `ENOENT`
+/// is no entry too: musl returns it when `/etc/passwd` does not exist
+/// (without asking nscd), and glibc when a source such as `files` is
+/// absent; no other errno is (TASK-288).
 fn account_home(uid: u32) -> Result<Option<PathBuf>, HostError> {
     let mut storage = vec![0u8; 1024];
     loop {
@@ -608,11 +624,11 @@ fn account_home(uid: u32) -> Result<Option<PathBuf>, HostError> {
             storage.resize(storage.len() * 2, 0);
             continue;
         }
+        if code == libc::ENOENT || (code == 0 && result.is_null()) {
+            return Ok(None);
+        }
         if code != 0 {
             return Err(HostError::errno("getpwuid_r", uid, Errno(code)));
-        }
-        if result.is_null() {
-            return Ok(None);
         }
         // SAFETY: getpwuid_r returned success and a non-null pointer to
         // entry, whose pw_dir points into storage (NUL-terminated) or is null.
@@ -2880,17 +2896,21 @@ impl Host for LinuxHost {
         crate::state::read_snapshot(self.state_dir()?, key, limit, self.proc.as_fd())
     }
 
-    fn user_lock_path(&self) -> Option<PathBuf> {
+    fn user_lock_path(&self) -> Result<Option<PathBuf>, HostError> {
         let uid = rustix::process::geteuid().as_raw();
         if runtime_dir_is_users(uid) {
-            return Some(diskgc_core::hostlock::runtime_user_lock(uid));
+            return Ok(Some(diskgc_core::hostlock::runtime_user_lock(uid)));
         }
-        self.lock_home()
-            .map(|home| diskgc_core::hostlock::home_user_lock(&home))
+        Ok(self
+            .lock_home()?
+            .map(|home| diskgc_core::hostlock::home_user_lock(&home)))
     }
 
     fn user_lock(&self, make: MakeUserLock) -> Result<Option<UserLock<LinuxFd>>, UserLockError> {
-        let path = self.user_lock_path().ok_or(UserLockError::NoPlace)?;
+        let path = self
+            .user_lock_path()
+            .map_err(UserLockError::Lookup)?
+            .ok_or(UserLockError::NoPlace)?;
         let dir = path.parent().expect("the lock is in a directory");
         let opened = crate::state::open_user_lock_ungated(dir, make, self.proc.as_fd())?;
         Ok(opened.map(|(fd, path)| UserLock {
@@ -7439,6 +7459,61 @@ mod tests {
             & 0o7777
     }
 
+    /// TASK-288: an NFS client emulates `flock` with byte-range locks, so
+    /// an exclusive one needs a descriptor open for writing (flock(2)). A
+    /// local POSIX write lock (`F_SETLK`, `F_WRLCK`) makes the same check
+    /// (`EBADF` on a descriptor not open for writing), so it stands in for
+    /// NFS here: the per-user lock's and the single-writer lock's
+    /// descriptors take one, and nothing is truncated or written. A lock
+    /// file the user made read-only is still opened (read-only), and a
+    /// local `flock` still takes it.
+    #[test]
+    fn the_lock_files_are_open_for_writing_so_an_exclusive_lock_works_on_nfs() {
+        let tmp = TempDir::new();
+        let host = LinuxHost::new().expect("host setup");
+        let write_lock = |fd: &OwnedFd, what: &str| {
+            rustix::fs::fcntl_lock(fd, FlockOperation::NonBlockingLockExclusive)
+                .unwrap_or_else(|e| panic!("a write lock on {what}: {e}"));
+            rustix::fs::fcntl_lock(fd, FlockOperation::NonBlockingUnlock).expect("unlock");
+        };
+        let access = |fd: &OwnedFd| rustix::fs::fcntl_getfl(fd).expect("getfl") & OFlags::RWMODE;
+        let dir = tmp.0.join("run/diskgc");
+        let (fd, path) = open_user_lock(&host, &dir, MakeUserLock::IfAbsent)
+            .expect("made")
+            .expect("open");
+        write_lock(&fd, "the per-user lock");
+        assert_eq!(access(&fd), OFlags::RDWR);
+        drop(fd);
+        let state = state_host(&tmp.0);
+        let key = FsKey::dev(Dev {
+            major: 0,
+            minor: 42,
+        });
+        let lock = state.state_lock(&key).expect("state lock");
+        write_lock(&lock.fd.fd, "the single-writer lock");
+        assert_eq!(access(&lock.fd.fd), OFlags::RDWR);
+        drop(lock);
+        for file in [path.clone(), tmp.0.join("state/diskgc/index-dev-0-42.lock")] {
+            assert_eq!(std::fs::metadata(&file).expect("stat").len(), 0, "{file:?}");
+        }
+        // Made read-only by its user (still private): opened read-only
+        // (root may write it whatever its mode).
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).expect("chmod");
+        let (fd, shown) = open_user_lock(&host, &dir, MakeUserLock::Never)
+            .expect("opened")
+            .expect("present");
+        let root = rustix::process::geteuid().is_root();
+        assert_eq!(
+            access(&fd),
+            if root { OFlags::RDWR } else { OFlags::RDONLY }
+        );
+        assert!(matches!(
+            host.flock_try(LinuxFd { fd, shown }, LockMode::Exclusive)
+                .expect("flock"),
+            TryLock::Acquired(_)
+        ));
+    }
+
     #[test]
     fn the_per_user_lock_makes_a_private_directory_and_file_and_reuses_them() {
         let tmp = TempDir::new();
@@ -7657,7 +7732,7 @@ mod tests {
     fn the_per_user_lock_path_is_the_runtime_directory_or_the_home() {
         let host = LinuxHost::new().expect("host setup");
         let uid = rustix::process::geteuid().as_raw();
-        let path = host.user_lock_path();
+        let path = host.user_lock_path().expect("the account database");
         if runtime_dir_is_users(uid) {
             assert_eq!(path, Some(diskgc_core::hostlock::runtime_user_lock(uid)));
         } else {
@@ -7670,9 +7745,42 @@ mod tests {
         let with_fallback = LinuxHost::new()
             .expect("host setup")
             .with_home_fallback(PathBuf::from("/nonexistent-fallback"));
-        if account_home(uid).ok().flatten().is_some() || runtime_dir_is_users(uid) {
-            assert_eq!(with_fallback.user_lock_path(), path);
+        if account_home(uid).expect("account database").is_some() || runtime_dir_is_users(uid) {
+            assert_eq!(with_fallback.user_lock_path().expect("lookup"), path);
         }
+    }
+
+    /// TASK-288: `$HOME` stands in only for an account database without
+    /// an entry; a lookup that fails is the place's error, never `$HOME`,
+    /// and is asked again at the next use (not kept).
+    #[test]
+    fn a_failed_account_lookup_is_an_error_not_the_home_fallback() {
+        let uid = rustix::process::geteuid().as_raw();
+        let fallback = PathBuf::from("/nonexistent-fallback");
+        let with = |lookup: fn(u32) -> Result<Option<PathBuf>, HostError>| {
+            let mut host = LinuxHost::new()
+                .expect("host setup")
+                .with_home_fallback(fallback.clone());
+            host.account_lookup = lookup;
+            host
+        };
+        let failing = with(|uid| Err(HostError::errno("getpwuid_r", uid, Errno::EIO)));
+        let error = failing.lock_home().expect_err("a failed lookup");
+        assert!(error.is(Errno::EIO), "{error}");
+        assert!(
+            failing.account_home.get().is_none(),
+            "a failure is not kept"
+        );
+        let none = with(|_| Ok(None));
+        assert_eq!(none.lock_home().expect("no entry"), Some(fallback.clone()));
+        let found = with(|_| Ok(Some(PathBuf::from("/home/account"))));
+        assert_eq!(
+            found.lock_home().expect("an entry"),
+            Some(PathBuf::from("/home/account"))
+        );
+        // The real database: whatever it holds for this user, never an
+        // error on a healthy host.
+        assert!(account_home(uid).is_ok());
     }
 
     #[test]

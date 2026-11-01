@@ -232,7 +232,7 @@ impl Host for Short {
     ) -> Result<diskgc_core::host::StateLock<Self::Fd>, HostError> {
         self.0.state_lock(key)
     }
-    fn user_lock_path(&self) -> Option<std::path::PathBuf> {
+    fn user_lock_path(&self) -> Result<Option<std::path::PathBuf>, HostError> {
         self.0.user_lock_path()
     }
 

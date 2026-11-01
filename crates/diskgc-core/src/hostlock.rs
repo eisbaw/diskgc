@@ -10,7 +10,9 @@
 //! [`environmental`]) the reclaim runs without a lock, saying so
 //! ([`ReclaimLock::Unlocked`]). The per-user lock only serialises; it is
 //! not a safety boundary. Something unsafe at its path is refused
-//! ([`LockError::UserLockRefused`]). Root (and so `--allow-root`, which is
+//! ([`LockError::UserLockRefused`]); a place that cannot be told (the
+//! account lookup failed) is a failure of the host
+//! ([`LockError::UserLockLookup`]), never a guess at `$HOME`. Root (and so `--allow-root`, which is
 //! for root) never falls back. Anything else at the host lock's path (not a
 //! regular file, reached through a symlink) is refused for everyone, never
 //! fallen back from. Which lock it is, is decided afresh at every use.
@@ -99,8 +101,8 @@ pub fn runtime_user_lock(uid: u32) -> PathBuf {
 }
 
 /// Where the per-user lock is otherwise: `<home>/.local/state/diskgc/lock`,
-/// the home being the user's account entry's (`$HOME` only when that
-/// lookup fails; the host decides).
+/// the home being the user's account entry's (`$HOME` only when the
+/// account database has none; the host decides).
 pub fn home_user_lock(home: &Path) -> PathBuf {
     home.join(".local/state/diskgc").join(USER_LOCK_NAME)
 }
@@ -218,6 +220,10 @@ pub enum LockError {
     /// the per-user lock's path (a symlink, another type, another owner,
     /// open to others): a provisioning error (exit 2).
     UserLockRefused { path: PathBuf, error: HostError },
+    /// The host lock is not provisioned and where the per-user lock is
+    /// cannot be told ([`UserLockError::Lookup`]): a failure of the host
+    /// (exit 3, cause `host`), never a guess at `$HOME` (TASK-288).
+    UserLockLookup(HostError),
     /// Another reclaim held this lock until the deadline.
     DeadlinePassed(ReclaimLock),
     /// SIGINT or SIGTERM arrived before the lock could be used.
@@ -258,6 +264,12 @@ impl fmt::Display for LockError {
                 user.parent().unwrap_or(user).display(),
                 FixIt
             ),
+            Self::UserLockLookup(error) => write!(
+                f,
+                "the host lock {} is not provisioned, and {}",
+                path.display(),
+                UserLockError::Lookup(error.clone())
+            ),
             Self::DeadlinePassed(lock) => write!(
                 f,
                 "the {lock} was still held by another reclaim at the deadline"
@@ -293,9 +305,10 @@ pub fn readiness<H: Host>(host: &H) -> Result<Readiness, LockError> {
             drop(fd);
             Ok(Readiness::Host)
         }
-        Err(LockError::Missing { .. }) if may_fall_back(host) => {
-            Ok(Readiness::FallsBack(host.user_lock_path()))
-        }
+        Err(LockError::Missing { .. }) if may_fall_back(host) => host
+            .user_lock_path()
+            .map(Readiness::FallsBack)
+            .map_err(LockError::UserLockLookup),
         Err(e) => Err(e),
     }
 }
@@ -340,6 +353,7 @@ fn open_lock<H: Host>(host: &H) -> Result<Opened<H::Fd>, LockError> {
                     path: None,
                     why: UserLockError::NoPlace.to_string(),
                 })),
+                Err(UserLockError::Lookup(error)) => Err(LockError::UserLockLookup(error)),
                 Err(UserLockError::Unsafe { path, error }) => {
                     Err(LockError::UserLockRefused { path, error })
                 }
@@ -456,6 +470,9 @@ pub fn held_by_another<H: Host>(host: &H) -> Result<Option<ReclaimLock>, LockErr
                 Ok(None) | Err(UserLockError::NoPlace) => return Ok(None),
                 Err(UserLockError::Unsafe { path, error }) => {
                     return Err(LockError::UserLockRefused { path, error });
+                }
+                Err(UserLockError::Lookup(error)) => {
+                    return Err(LockError::UserLockLookup(error));
                 }
                 Err(UserLockError::Failed { path, error }) => {
                     return Err(LockError::Failed(ReclaimLock::User(path), error));

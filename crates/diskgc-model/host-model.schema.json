@@ -66,6 +66,17 @@
         "null"
       ]
     },
+    "home_lookup_error": {
+      "description": "The account database lookup of diskgc's user's home fails with this\nerrno (an NSS source unreachable: `getpwuid_r`'s error), so where\nthe per-user lock is cannot be told unless `/run/user/<own_uid>` is\nthe user's; `home` is then not used (TASK-288).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ErrnoName"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "host_model": {
       "description": "Format version; must be 1.",
       "type": "integer",

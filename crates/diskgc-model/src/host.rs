@@ -827,8 +827,9 @@ impl Inner {
     /// Where the per-user lock is, as `LinuxHost::user_lock_path` decides
     /// it: `/run/user/<own_uid>/diskgc/lock` when `/run/user/<own_uid>` is a
     /// directory of diskgc's user with mode 0700, otherwise
-    /// `<home>/.local/state/diskgc/lock`; `None` without a home.
-    fn user_lock_path(&self) -> Option<PathBuf> {
+    /// `<home>/.local/state/diskgc/lock`; `None` without a home; the
+    /// account lookup's error (`home_lookup_error`) when it is asked.
+    fn user_lock_path(&self) -> Result<Option<PathBuf>, HostError> {
         let uid = self.state.own_uid;
         let runtime = PathBuf::from(format!("/run/user/{uid}"));
         let is_users = self.state.lookup_link(&runtime).is_ok_and(|loc| {
@@ -836,12 +837,16 @@ impl Inner {
             inode.file_type() == FileType::Directory && inode.uid == uid && inode.perm == 0o700
         });
         if is_users {
-            return Some(diskgc_core::hostlock::runtime_user_lock(uid));
+            return Ok(Some(diskgc_core::hostlock::runtime_user_lock(uid)));
         }
-        self.state
+        if let Some(errno) = self.state.home_lookup_error {
+            return Err(HostError::errno("getpwuid_r", uid, errno));
+        }
+        Ok(self
+            .state
             .home
             .as_deref()
-            .map(diskgc_core::hostlock::home_user_lock)
+            .map(diskgc_core::hostlock::home_user_lock))
     }
 
     /// Opens the per-user lock at `path` as `LinuxHost::user_lock` does
@@ -2485,22 +2490,25 @@ impl Host for ModelHost {
         })
     }
 
-    fn user_lock_path(&self) -> Option<PathBuf> {
+    fn user_lock_path(&self) -> Result<Option<PathBuf>, HostError> {
         self.call(Op::UserLockPath, None, None, |inner| {
             let path = inner.user_lock_path();
-            let text = path
-                .as_ref()
-                .map_or_else(|| "none".to_owned(), |p| p.display().to_string());
+            let text = match &path {
+                Ok(Some(p)) => p.display().to_string(),
+                Ok(None) => "none".to_owned(),
+                Err(e) => e.to_string(),
+            };
             (path, None, text)
         })
     }
 
     fn user_lock(&self, make: MakeUserLock) -> Result<Option<UserLock<ModelFd>>, UserLockError> {
         let path = self.inner.borrow().user_lock_path();
-        let opened = self.call(Op::UserLock, path.clone(), None, |inner| {
+        let opened = self.call(Op::UserLock, path.clone().ok().flatten(), None, |inner| {
             let result = match &path {
-                None => Err(UserLockError::NoPlace),
-                Some(path) => inner.user_lock(path, make),
+                Err(e) => Err(UserLockError::Lookup(e.clone())),
+                Ok(None) => Err(UserLockError::NoPlace),
+                Ok(Some(path)) => inner.user_lock(path, make),
             };
             let text = match &result {
                 Ok(Some(_)) => "ok".to_owned(),
@@ -2511,7 +2519,7 @@ impl Host for ModelHost {
         });
         Ok(opened?.map(|ofd| UserLock {
             fd: self.wrap(ofd),
-            path: path.expect("opened at a path"),
+            path: path.ok().flatten().expect("opened at a path"),
         }))
     }
 

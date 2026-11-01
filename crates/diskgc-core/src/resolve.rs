@@ -904,7 +904,7 @@ pub(crate) mod tests {
         ) -> Result<crate::host::StateLock<Self::Fd>, HostError> {
             unreachable!()
         }
-        fn user_lock_path(&self) -> Option<PathBuf> {
+        fn user_lock_path(&self) -> Result<Option<PathBuf>, HostError> {
             unreachable!()
         }
 

@@ -225,6 +225,7 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
         require_normal("home", home)?;
         state.home = Some(home.clone());
     }
+    state.home_lookup_error = model.home_lookup_error.as_ref().map(|e| e.0);
     if let Some(id) = &model.boot_id {
         state.boot_id = id.clone();
     }

@@ -515,6 +515,8 @@ pub struct State {
     pub state_dir: Option<PathBuf>,
     /// diskgc's user's home for the per-user lock (`user_lock_path`).
     pub home: Option<PathBuf>,
+    /// The account lookup's error, when it fails (`home` is then unused).
+    pub home_lookup_error: Option<Errno>,
     pub boot_id: String,
 }
 
@@ -559,6 +561,7 @@ impl State {
             loop_readable: BTreeSet::new(),
             state_dir: None,
             home: None,
+            home_lookup_error: None,
             boot_id: DEFAULT_BOOT_ID.to_owned(),
         }
     }

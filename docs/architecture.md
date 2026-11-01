@@ -1128,16 +1128,21 @@ is accepted until measured otherwise.
   is a second typed operation beside it, `state_lock`: `LinuxHost` opens
   (creating if absent, with the state directory, mode 0700)
   `index-<fs>.lock` beneath the state-directory fd,
-  `O_RDONLY|O_CREAT|O_NOFOLLOW|O_CLOEXEC`, mode 0600, for `flock` only;
-  nothing is ever written to it or renamed onto it. Each of the two is
+  `O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC` (never `O_TRUNC`), mode 0600, for
+  `flock` only: an NFS client emulates `flock` with byte-range locks, and
+  an exclusive one needs a descriptor open for writing (TASK-288; where
+  the user may not write the file, `EACCES` or `EROFS`, `O_RDONLY` as
+  before, which a local `flock` needs no more than); nothing is ever
+  written to it or renamed onto it. Each of the two is
   its own ungated entry in the source scan's allowlist
-  (`diskgc-linux/src/state.rs`, with its reason and exact match count);
+  (`diskgc-linux/src/state.rs`, with its reason and exact match count;
+  the open for writing, `open_for_flock`, is a third);
   the per-user reclaim lock is a third, `user_lock` (what it checks and
   makes: [safety.md](safety.md#host-lock)): it takes no name, only
   whether it may make what is missing; `LinuxHost` finds the place
   itself (`user_lock_path`, read-only: `/run/user/<uid>` and the account
-  database), and `ModelHost` has the same operations, refusals and
-  errnos included. With the `mkdir -p` the state directory and that
+  database, whose failed lookup is its error), and `ModelHost` has the
+  same operations, refusals and errnos included. With the `mkdir -p` the state directory and that
   lock's parent share (`make_dirs_ungated`), these are the only
   writes, creations or renames the scan allows outside
   `Delete`. Read-only beside them: `state_read` (the snapshot, never

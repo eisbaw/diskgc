@@ -1512,13 +1512,19 @@ pub trait Host {
     /// `/run/user/<euid>/diskgc` when `/run/user/<euid>` is a directory of
     /// diskgc's user with mode 0700, otherwise in
     /// `<home>/.local/state/diskgc`, the home being the user's account
-    /// entry's (`$HOME` only when that lookup fails). `None`: no place for
-    /// one. Read-only: it creates and opens nothing.
-    fn user_lock_path(&self) -> Option<PathBuf>;
+    /// entry's (`$HOME` only when the account database has no entry for
+    /// the user). `Ok(None)`: no place for one. An error: the account
+    /// lookup failed (an NSS source unreachable, `EIO`, `EMFILE`, ...), so
+    /// where the lock is cannot be told; it is never guessed from `$HOME`
+    /// (TASK-288), and asked again at the next use. Read-only: it creates
+    /// and opens nothing.
+    fn user_lock_path(&self) -> Result<Option<PathBuf>, HostError>;
 
-    /// Opens diskgc's per-user reclaim lock at [`Host::user_lock_path`],
-    /// read-only, for [`Host::flock_try`] or [`Host::flock_wait`] only:
-    /// nothing is ever written to it or renamed onto it. It takes no name
+    /// Opens diskgc's per-user reclaim lock at [`Host::user_lock_path`]
+    /// (its failure is [`UserLockError::Lookup`]) for [`Host::flock_try`]
+    /// or [`Host::flock_wait`] only, for writing where the user may (an
+    /// exclusive `flock` on NFS needs it), never truncated: nothing is
+    /// ever written to it or renamed onto it. It takes no name
     /// from the caller. What exists is inspected before it is opened for
     /// reading (an `O_PATH` open that never follows a symlink): the
     /// directory must be a directory of diskgc's user writable by no one
@@ -1558,6 +1564,9 @@ pub struct UserLock<F> {
 pub enum UserLockError {
     /// No place for a per-user lock ([`Host::user_lock_path`] is `None`).
     NoPlace,
+    /// Where the per-user lock is cannot be told: [`Host::user_lock_path`]
+    /// failed (the account lookup).
+    Lookup(HostError),
     /// Something unsafe stands at the lock's directory or file: a symlink,
     /// another type, another owner, or a mode that lets others write the
     /// directory or open the file. Never opened for reading, never made
@@ -1575,6 +1584,11 @@ impl fmt::Display for UserLockError {
             Self::NoPlace => f.write_str(
                 "no place for a per-user lock: no /run/user/<uid> of this user (its own, mode \
                  0700) and no home directory",
+            ),
+            Self::Lookup(error) => write!(
+                f,
+                "where the per-user lock is cannot be told: looking up this user's home in \
+                 the account database failed: {error}"
             ),
             Self::Unsafe { error, .. } | Self::Failed { error, .. } => write!(f, "{error}"),
         }

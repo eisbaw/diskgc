@@ -439,6 +439,57 @@ fn a_per_user_lock_that_cannot_be_made_runs_unlocked_and_a_host_failure_is_exit_
     assert_eq!(unlinks(&host), 0);
 }
 
+/// TASK-288: the account lookup of the user's home fails (an NSS source
+/// unreachable): where the per-user lock is cannot be told, and `$HOME`
+/// (the model's `home`) is not guessed, since a cron job and a login
+/// session of one user may differ there and must take one lock. A reclaim
+/// is exit 3 (`host`), nothing deleted, nothing made; a dry run warns; a
+/// met `ensure` still exits 0. With the user's runtime directory the
+/// lookup is never made.
+#[test]
+fn an_account_lookup_error_is_exit_3_never_the_home_fallback() {
+    let model = yaml(false, "home_lookup_error: EIO\n", "");
+    let host = host(&model);
+    let (report, _) = ensure(&host, &cargo("12G"), false);
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert_eq!(report.exit_code(), 3);
+    assert_eq!(report.errors.len(), 1, "{:#?}", report.errors);
+    assert_eq!(report.errors[0].cause, ErrorCause::Host);
+    let message = &report.errors[0].message;
+    assert!(
+        message.contains("cannot be told")
+            && message.contains("getpwuid_r")
+            && message.contains("EIO"),
+        "{message}"
+    );
+    assert_eq!(unlinks(&host), 0);
+    assert!(locked(&host).is_empty(), "{:?}", locked(&host));
+    assert!(!exists(&host, STATE), "nothing made under the home");
+
+    let host = common::host(&model);
+    let (report, lines) = dry_run(&host, &cargo("12G"), false);
+    assert_eq!(report.status, Status::DryRun, "{report:#?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("warning: host lock is not ready") && l.contains("getpwuid_r")),
+        "{lines:#?}"
+    );
+
+    let host = common::host(&model);
+    let (report, _) = ensure(&host, &cargo("1G"), false);
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+
+    let host = common::host(&yaml(
+        false,
+        &format!("home_lookup_error: EIO\n{}", runtime_head()),
+        &runtime_tree(""),
+    ));
+    let (report, _) = ensure(&host, &cargo("12G"), false);
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert_eq!(locked(&host), [PathBuf::from(RUNTIME_LOCK)]);
+}
+
 /// An `ensure` that finds the space already there stays an instant no-op:
 /// it makes no per-user lock (a state write) and, for a user, does not
 /// warn that the host lock is missing.

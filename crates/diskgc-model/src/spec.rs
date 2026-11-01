@@ -140,6 +140,12 @@ pub struct HostModel {
     /// Absent, and no such runtime directory: no place for one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<PathBuf>,
+    /// The account database lookup of diskgc's user's home fails with this
+    /// errno (an NSS source unreachable: `getpwuid_r`'s error), so where
+    /// the per-user lock is cannot be told unless `/run/user/<own_uid>` is
+    /// the user's; `home` is then not used (TASK-288).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_lookup_error: Option<ErrnoName>,
     /// What `boot_id` reports; default a fixed id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_id: Option<String>,
