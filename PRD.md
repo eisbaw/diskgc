@@ -87,7 +87,8 @@ kinds), and where those guarantees end. The protocols are in
   an explicit `owners:` list under `--allow-root`).
 - Not if a visible process has any of the candidate's files open, mapped,
   as its working directory, or (heuristically) named in its initial
-  environment; not if the candidate directory is `flock`ed by someone
+  environment, nor if one of its files backs a configured loop device;
+  not if the candidate directory is `flock`ed by someone
   else (a locked *file* inside is only caught as an open file of a visible
   process), nor if it contains a mount, a `.diskgc-keep` file, a Cargo
   target or a version-control checkout, nor if it lies inside one's
@@ -98,6 +99,9 @@ kinds), and where those guarantees end. The protocols are in
   configurable policy may block only live ones instead (a FIFO some
   visible process holds open, a socket bound in diskgc's network
   namespace), so stale test fixtures do not block forever.
+- Nothing at all where diskgc cannot see every process (`hidepid` on
+  `/proc`, a PID namespace other than the initial one, as in a
+  container): `ensure` and a reclaiming `watch` refuse to start there.
 - Nor, for a source with a liveness contract, unless that contract
   permits it ([safety.md](docs/safety.md#producer-liveness)); a `/tmp` or
   cache built-in ships only with a contract whose class admits it, and
@@ -347,8 +351,9 @@ where they apply ([safety.md](docs/safety.md) for Cargo, Docker and Nix).
 - **Half-deleted Cargo `incremental/` state** might make rustc fail despite
   the fingerprints (`.fingerprint/`, or `build/<pkg>/<hash>/fingerprint` on the
   per-unit layout) being deleted first; resolved by race test 6.
-- **`hidepid`** hides even more processes from the in-use checks on hardened
-  systems.
+- **`hidepid` and private PID namespaces** hide processes from the in-use
+  check, so diskgc refuses to reclaim there (TASK-263): hardened hosts
+  (`ProtectProc=`) and containers must run it on the host.
 - **Docker containerd root discovery** for filesystem matching must be
   settled during implementation; unknown layouts are skipped as
   `unsupported_backend`.

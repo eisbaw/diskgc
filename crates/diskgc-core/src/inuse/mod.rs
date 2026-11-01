@@ -26,6 +26,7 @@
 //! inode number alone: more matches, the conservative side.
 
 pub(crate) mod environ;
+pub mod loops;
 pub mod scan;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -38,10 +39,10 @@ use crate::engine::{
 };
 use crate::host::{
     Access, Base, BoundSocket, Delete, Dev, DevIno, Errno, FileType, Host, HostError, LockMode,
-    Locked, MonoTime, Pid, TryLock,
+    Locked, MonoTime, Pid, PidNamespace, TryLock,
 };
-use crate::liveness::PidTable;
 use crate::liveness::pytest::Processes;
+use crate::liveness::{HIDEPID, NOT_INITIAL_PID_NAMESPACE, PidTable};
 use crate::outcome::Stop;
 use crate::resolve::{ResolveError, Want, open_beneath};
 
@@ -166,9 +167,71 @@ impl Options<'_> {
     }
 }
 
+/// Whether the held `/proc` lists every process that can use a candidate
+/// (docs/safety.md, In use: Visibility): it is not mounted with `hidepid`,
+/// and diskgc is in the initial PID namespace, or in its own one inside a
+/// marked test container of a development build (`test_container`,
+/// [`Host::test_container_pid_namespace`]). `Err`: the rule that fails,
+/// starting with the words Owner PID names it by. The one home of this
+/// rule for the in-use scan and for the refusal at start
+/// ([`crate::executor::process_visibility`]).
+pub fn visibility(facts: &PidNamespace, test_container: bool) -> Result<(), String> {
+    if facts.hidepid {
+        return Err(format!(
+            "{HIDEPID}, so {HIDDEN_PROCESSES} (ProtectProc=, or hidepid= on /proc)"
+        ));
+    }
+    if !facts.initial && !test_container {
+        return Err(format!(
+            "{NOT_INITIAL_PID_NAMESPACE}, so {HIDDEN_PROCESSES}, only those of its own (a \
+             container, or PrivatePIDs=)"
+        ));
+    }
+    Ok(())
+}
+
+/// What every refusal and `in_use_unknown` detail of [`visibility`] holds:
+/// [`standing_cause`] recognises the cause by it (not the host's load).
+pub const HIDDEN_PROCESSES: &str = "the in-use check cannot see every process";
+
+/// Whether an `in_use_unknown` detail names a cause that is not the host's
+/// load and stays until someone changes it (TASK-263, TASK-169): a process
+/// list the in-use check cannot see whole ([`HIDDEN_PROCESSES`]), or a
+/// loop device whose backing file could be in any candidate
+/// ([`loops::LOOP_UNKNOWN`]). Waiting does not help there, so neither the
+/// human summary nor the tier's give-up names a busy host for it.
+pub fn standing_cause(detail: &str) -> bool {
+    detail.contains(HIDDEN_PROCESSES) || detail.contains(loops::LOOP_UNKNOWN)
+}
+
+/// [`visibility`] over a scan: the facts read before its first listing and
+/// after its last read must both be known and equal (a `/proc` remounted
+/// with `hidepid` mid-scan is caught), and satisfy the rule.
+fn scan_visibility(
+    before: &Result<PidNamespace, String>,
+    after: &Result<PidNamespace, String>,
+    test_container: bool,
+) -> Result<(), String> {
+    match (before, after) {
+        (Ok(before), Ok(after)) if before == after => visibility(after, test_container),
+        (Ok(before), Ok(after)) => Err(format!(
+            "the PID namespace facts changed during the scan ({before:?}, then {after:?}), so \
+             {HIDDEN_PROCESSES}"
+        )),
+        (Err(why), _) | (Ok(_), Err(why)) => Err(format!(
+            "PID namespace unreadable, so {HIDDEN_PROCESSES}: {why}"
+        )),
+    }
+}
+
 /// One read of every visible process (see the module docs).
 #[derive(Debug, Clone)]
 pub struct Scan {
+    /// Whether the process list can be complete ([`visibility`]); `Err`
+    /// blocks every candidate.
+    visibility: Result<(), String>,
+    /// The configured loop devices' backing files ([`loops`]).
+    loops: loops::LoopBackings,
     started: MonoTime,
     finished: MonoTime,
     listings: usize,
@@ -276,22 +339,33 @@ pub fn scan<H: Host>(
         answer => Ok(answer),
     });
     let sockets = sockets.transpose()?;
-    // Owner PID's namespace facts are read before the first listing and
-    // again after the NSpid reads, so they cover the window of the
-    // listings they qualify ([`scan::pid_table`]).
-    let namespace_before = options.pid_lookup.then(|| host.pid_namespace());
+    // The namespace facts are read before the first listing and again
+    // after the last read (Owner PID's NSpid reads included), so they
+    // cover the window of the listings they qualify: the in-use check's
+    // own precondition ([`visibility`]) and Owner PID's
+    // ([`scan::pid_table`]).
+    let test_container = host.test_container_pid_namespace();
+    let namespace_before = scan::namespace_or_run_error(host.pid_namespace())?;
+    let loops = loops::read(host)?;
     let gathered = scan::gather(host, options.users, options.pytest_facts, deadline)?;
-    let pid_table = namespace_before
-        .map(|before| {
+    let pid_table = options
+        .pid_lookup
+        .then(|| {
             scan::pid_table(
                 host,
-                before,
+                namespace_before.clone(),
                 &gathered.listed,
                 gathered.unsettled.is_none(),
                 deadline,
             )
         })
         .transpose()?;
+    let namespace_after = scan::namespace_or_run_error(host.pid_namespace())?;
+    let pid_table = pid_table.map(|mut table| {
+        table.confirm_namespace(namespace_after.clone());
+        table
+    });
+    let visibility = scan_visibility(&namespace_before, &namespace_after, test_container);
     let pytest_facts = options.pytest_facts.then(|| {
         (
             options.users.to_vec(),
@@ -299,6 +373,8 @@ pub fn scan<H: Host>(
         )
     });
     let mut s = Scan {
+        visibility,
+        loops,
         started,
         finished: gathered.finished,
         listings: gathered.listings,
@@ -356,7 +432,7 @@ pub struct HeldByDeleted {
 
 impl Scan {
     fn blocks_all(&self) -> bool {
-        self.unsettled.is_some() || self.unreadable.iter().any(|u| u.excuse.is_none())
+        self.blocked().is_some()
     }
 
     /// Owner PID's lookup table (`None`: not asked for, see
@@ -438,6 +514,7 @@ impl Scan {
             notes.push(format!("process scan unsettled: {why}"));
         }
         notes.extend(self.reader_notes.iter().cloned());
+        notes.extend(self.loops.notes.iter().cloned());
         let others = self
             .unreadable
             .iter()
@@ -506,9 +583,10 @@ impl Scan {
     }
 
     /// The one unreadable process that blocks every candidate, if a scan
-    /// settled. An unsettled scan has no complete attribution.
+    /// settled and nothing else blocks it first ([`Self::blocked`]). An
+    /// unsettled scan has no complete attribution.
     pub fn blocking_unreadable(&self) -> Option<crate::engine::ProcessBlocker> {
-        if self.unsettled.is_some() {
+        if self.unsettled.is_some() || self.visibility.is_err() || self.loops.unknown.is_some() {
             return None;
         }
         let u = self.unreadable.iter().find(|u| u.excuse.is_none())?;
@@ -560,10 +638,18 @@ impl Scan {
         )
     }
 
-    /// Why this scan cannot clear anything: it is unsettled, or a process
-    /// that blocks could not be read (docs/safety.md, In use). `None`: it
-    /// can judge candidates.
+    /// Why this scan cannot clear anything, the first that applies: the
+    /// process list cannot be complete ([`visibility`]), a loop device's
+    /// backing file could be in any candidate ([`loops`]), the scan is
+    /// unsettled, or a process that blocks could not be read
+    /// (docs/safety.md, In use). `None`: it can judge candidates.
     pub fn blocked(&self) -> Option<String> {
+        if let Err(why) = &self.visibility {
+            return Some(why.clone());
+        }
+        if let Some(why) = &self.loops.unknown {
+            return Some(why.clone());
+        }
         if let Some(why) = &self.unsettled {
             return Some(why.clone());
         }
@@ -622,12 +708,15 @@ impl Scan {
     /// this scan (no I/O; freshness is the caller's, see [`Checker`]). In
     /// order, the first that applies:
     ///
-    /// 1. the scan is unsettled, or a process that blocks could not be
-    ///    read: `in_use_unknown` (it could be using anything, and whether
-    ///    it does cannot be told; TASK-190: not `in_use`, which would give
-    ///    a harness evidence that does not exist);
+    /// 1. the scan cannot judge anything ([`Self::blocked`]: the process
+    ///    list cannot be complete, a loop device's backing file could be
+    ///    anywhere, the scan is unsettled, or a process that blocks could
+    ///    not be read): `in_use_unknown` (it could be using anything, and
+    ///    whether it does cannot be told; TASK-190: not `in_use`, which
+    ///    would give a harness evidence that does not exist);
     /// 2. a process uses one of the record's objects (fd, cwd, root, exe,
-    ///    mapping; a FIFO held open is found here): `in_use`;
+    ///    mapping; a FIFO held open is found here), or one of them is the
+    ///    backing file of a configured loop device: `in_use`;
     /// 3. a process's initial environment names a path inside the
     ///    candidate: `in_use`;
     /// 4. a socket in the record is bound in diskgc's network namespace, or
@@ -670,6 +759,16 @@ impl Scan {
                             How::Map => ProcessEvidence::Map,
                         },
                     )),
+                );
+            }
+            if let Some(device) = self.loops.uses.get(&id) {
+                return in_use(
+                    at(),
+                    format!(
+                        "loop device {device} is backed by it ({id}): the kernel holds it open, \
+                         and its data is lost when the device detaches"
+                    ),
+                    None,
                 );
             }
             if by_inode && let Some(pid) = self.maps_by_inode.get(&id.ino).and_then(|p| p.first()) {

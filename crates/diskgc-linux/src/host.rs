@@ -847,6 +847,21 @@ fn check_pidfd_open(opened: Result<(), Errno>) -> Result<(), HostError> {
     })
 }
 
+/// A sysfs `dev` file: `MAJOR:MINOR` and a newline.
+fn parse_dev(text: &[u8]) -> Option<Dev> {
+    let text = std::str::from_utf8(text).ok()?.strip_suffix('\n')?;
+    let (major, minor) = text.split_once(':')?;
+    let number = |part: &str| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse().ok())
+            .flatten()
+    };
+    Some(Dev {
+        major: number(major)?,
+        minor: number(minor)?,
+    })
+}
+
 pub(crate) fn errno_of(e: rustix::io::Errno) -> Errno {
     Errno(e.raw_os_error())
 }
@@ -2314,6 +2329,12 @@ impl Host for LinuxHost {
         Ok(PidNamespace { initial, hidepid })
     }
 
+    /// [`sandbox::test_container_pid_namespace`]: the gate's own cached
+    /// decision in a development build, `false` in a release build.
+    fn test_container_pid_namespace(&self) -> bool {
+        sandbox::test_container_pid_namespace()
+    }
+
     /// One read of `/proc/<pid>/status` under a pidfd taken first, as
     /// [`Host::proc_status`] does: a read that fails because the entry
     /// vanished is `Gone` only when the pidfd says the process has no task
@@ -2544,6 +2565,59 @@ impl Host for LinuxHost {
                 Errno(e.raw_os_error().unwrap_or(5)),
             )),
         }
+    }
+
+    /// `/sys/block/loop<N>`: each one's `dev` and `loop/backing_file`
+    /// (present only while the device is bound). A device whose files
+    /// vanish between the listing and the reads, or whose backing file
+    /// reads empty (the kernel prints nothing once the device lost its
+    /// file), was detached meanwhile: left out. Reads only.
+    fn loop_backing_files(&self) -> Result<Vec<(Dev, PathBuf)>, HostError> {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        const SYS_BLOCK: &str = "/sys/block";
+        let read_optional = |path: &Path| match std::fs::read(path) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io_error("read", path.display(), &e)),
+        };
+        let mut found = Vec::new();
+        let listing =
+            std::fs::read_dir(SYS_BLOCK).map_err(|e| io_error("read_dir", SYS_BLOCK, &e))?;
+        for entry in listing {
+            let entry = entry.map_err(|e| io_error("read_dir", SYS_BLOCK, &e))?;
+            let name = entry.file_name();
+            let is_loop = name
+                .as_bytes()
+                .strip_prefix(b"loop")
+                .is_some_and(|n| !n.is_empty() && n.iter().all(u8::is_ascii_digit));
+            if !is_loop {
+                continue;
+            }
+            let dir = Path::new(SYS_BLOCK).join(&name);
+            let dev_path = dir.join("dev");
+            let Some(dev_text) = read_optional(&dev_path)? else {
+                continue;
+            };
+            let dev = parse_dev(&dev_text).ok_or_else(|| {
+                HostError::invalid(
+                    "parse",
+                    dev_path.display(),
+                    format!("not MAJOR:MINOR: {:?}", String::from_utf8_lossy(&dev_text)),
+                )
+            })?;
+            let Some(mut backing) = read_optional(&dir.join("loop/backing_file"))? else {
+                continue;
+            };
+            if backing.last() == Some(&b'\n') {
+                backing.pop();
+            }
+            if backing.is_empty() {
+                continue;
+            }
+            found.push((dev, PathBuf::from(std::ffi::OsString::from_vec(backing))));
+        }
+        found.sort();
+        Ok(found)
     }
 
     fn boot_id(&self) -> Result<String, HostError> {
@@ -5209,6 +5283,59 @@ mod tests {
             .expect("stat own pid namespace")
             .ino();
         assert_eq!(facts.initial, inode == PROC_PID_INIT_INO, "{facts:?}");
+    }
+
+    /// TASK-169, read-only on whatever host runs the tests: every listed
+    /// loop device is major 7 and its backing file reads the same through
+    /// the per-device reader (`/sys/dev/block`) as through the listing
+    /// (`/sys/block`); a host without bound loop devices lists none. A
+    /// build sandbox without sysfs fails the listing with `ENOENT` on
+    /// `/sys/block`, an error, never an empty list; any other failure
+    /// fails the test.
+    #[test]
+    fn loop_backing_files_agree_with_each_device() {
+        let host = LinuxHost::new().expect("host setup");
+        let listed = match host.loop_backing_files() {
+            Ok(listed) => listed,
+            Err(e) if e.is(Errno::ENOENT) && !Path::new("/sys/block").exists() => {
+                eprintln!("no sysfs here ({e}): the listing failed, as it must");
+                return;
+            }
+            Err(e) => panic!("loop listing: {e}"),
+        };
+        for (dev, text) in &listed {
+            assert_eq!(dev.major, 7, "{dev} {}", text.display());
+            assert_eq!(
+                host.loop_backing_file(*dev).expect("per-device read"),
+                Some(text.clone()),
+                "{dev}"
+            );
+        }
+        eprintln!("bound loop devices here: {listed:?}");
+    }
+
+    /// A sysfs `dev` file is `MAJOR:MINOR` and one newline, nothing else.
+    #[test]
+    fn a_sysfs_dev_file_parses_strictly() {
+        assert_eq!(
+            parse_dev(b"7:12\n"),
+            Some(Dev {
+                major: 7,
+                minor: 12
+            })
+        );
+        for bad in [
+            &b"7:12"[..],
+            b"7:12\n\n",
+            b"7:\n",
+            b":1\n",
+            b"7:1:2\n",
+            b"+7:1\n",
+            b" 7:1\n",
+            b"99999999999:1\n",
+        ] {
+            assert_eq!(parse_dev(bad), None, "{:?}", String::from_utf8_lossy(bad));
+        }
     }
 
     /// ESRCH is the absence of a path only below a `/proc` root; elsewhere

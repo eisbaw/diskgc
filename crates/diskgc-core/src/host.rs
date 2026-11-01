@@ -834,7 +834,8 @@ impl BoundSocket {
 }
 
 /// What the held `/proc` says about the PID namespace diskgc runs in,
-/// for Owner PID's preconditions (docs/safety.md, Producer liveness).
+/// for Owner PID's preconditions (docs/safety.md, Producer liveness) and
+/// the in-use scan's (docs/safety.md, In use: Visibility).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PidNamespace {
     /// `self/ns/pid`, read through the held `/proc`, is on nsfs and has the
@@ -1298,9 +1299,21 @@ pub trait Host {
     /// holds a truncated datagram is an error, never a shorter list.
     fn bound_unix_sockets(&self) -> Result<Vec<BoundSocket>, HostError>;
 
-    /// Owner PID's namespace preconditions, read through the held `/proc`
-    /// (docs/safety.md, Producer liveness, Owner PID steps 3 and 4).
+    /// The PID namespace facts, read through the held `/proc`: Owner PID's
+    /// preconditions (docs/safety.md, Producer liveness, Owner PID steps 3
+    /// and 4) and the in-use scan's (docs/safety.md, In use: Visibility).
     fn pid_namespace(&self) -> Result<PidNamespace, HostError>;
+
+    /// Whether this is a development build running inside a marked
+    /// disposable test container (both sandbox markers, docs/safety.md,
+    /// Pre-release sandbox gate): the one place where the in-use scan
+    /// takes diskgc's own PID namespace as holding every process that can
+    /// use a candidate (docs/safety.md, In use: Visibility), since the
+    /// container's files are its own. Always `false` in the
+    /// release-candidate build. Decided once, at startup; read-only. It
+    /// never touches Owner PID, which still permits nothing outside the
+    /// initial namespace.
+    fn test_container_pid_namespace(&self) -> bool;
 
     /// The `NSpid:` line of `/proc/<pid>/status`: the process's pid in
     /// every PID namespace from diskgc's down to its own, the first being
@@ -1378,6 +1391,17 @@ pub trait Host {
     /// `!profile:` verdict needs to relate a loop-mounted image to the file
     /// holding it (docs/safety.md, Not protected, not excluded). Read-only.
     fn loop_backing_file(&self, dev: Dev) -> Result<Option<PathBuf>, HostError>;
+
+    /// Every configured loop device and its backing file's text, as
+    /// [`Self::loop_backing_file`] reads it, in device order: the loop
+    /// block devices (`/sys/block/loop*`) that have a `loop/backing_file`.
+    /// A device that is unconfigured, or detached during the listing, is
+    /// left out; any other failure (sysfs unreadable, a device number that
+    /// does not parse) is an error, never a shorter list. What the in-use
+    /// scan needs: a loop device holds its backing file open in the kernel,
+    /// where no process shows it (docs/safety.md, In use: Loop devices).
+    /// Read-only.
+    fn loop_backing_files(&self) -> Result<Vec<(Dev, PathBuf)>, HostError>;
 
     /// The kernel's boot id (`/proc/sys/kernel/random/boot_id`): a
     /// snapshot of a filesystem without a UUID is valid only in the boot

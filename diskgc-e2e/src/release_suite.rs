@@ -2,7 +2,7 @@
 //! the release derivation, under the disposable container's deletion oracle.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -10,6 +10,7 @@ use crate::cargo_harness::reclaimable;
 use crate::cargo_under_test::{Cargo, SMOKE, Toolchain};
 use crate::holder::Holder;
 use crate::oracle::{Fixture, Oracle};
+use crate::owner_pid_suite::{HIDEPID, NOT_INITIAL, Namespace, expect_refused};
 use crate::suite::{Ctx, TestResult};
 use crate::{TESTER, ensure};
 
@@ -73,6 +74,17 @@ fn run_binary(
     run_binary_with(ctx, binary, args, expected, Fixture::new(), &[])
 }
 
+/// The binary named `binary` under test: `diskgc-release` is the
+/// release-candidate package's, which the release runner installs as the
+/// default `diskgc` ([`crate::RELEASE_DEFAULT_MARKER`]).
+fn binary_path(ctx: &Ctx, binary: &str) -> PathBuf {
+    if binary == "diskgc-release" && ctx.bin_dir.join(crate::RELEASE_DEFAULT_MARKER).exists() {
+        ctx.diskgc()
+    } else {
+        ctx.bin_dir.join(binary)
+    }
+}
+
 fn run_binary_with(
     ctx: &Ctx,
     binary: &str,
@@ -81,12 +93,7 @@ fn run_binary_with(
     fixture: Fixture,
     env: &[(String, String)],
 ) -> Result<crate::under_test::Run, String> {
-    let binary =
-        if binary == "diskgc-release" && ctx.bin_dir.join("diskgc-release-default").exists() {
-            ctx.diskgc()
-        } else {
-            ctx.bin_dir.join(binary)
-        };
+    let binary = binary_path(ctx, binary);
     let oracle = Oracle::arm(fixture)?;
     let output = crate::under_test::run_as_tester_with_env(
         &ctx.ledger,
@@ -340,6 +347,57 @@ pub fn candidate_refuses_a_reclaiming_watch(ctx: &Ctx) -> TestResult {
         "reclaiming watch --json was not refused as such: {error}"
     );
     ensure!(keep.exists(), "a refused watch mutated the fixture");
+    Ok(())
+}
+
+/// TASK-263: the release-candidate build has no test-container exception
+/// (docs/safety.md, In use: A process list that cannot be complete). In a
+/// PID namespace of its own (`unshare -p`, as a container), and under
+/// `hidepid`, `ensure` refuses at start, its dry run too: exit 2, `cause:
+/// safety`, naming the rule; nothing planned, nothing deleted (the oracle
+/// judges every run). Positive control: the same dry run from the
+/// container's namespace, the host's (`--pid=host`), plans.
+pub fn candidate_refuses_in_its_own_pid_namespace(ctx: &Ctx) -> TestResult {
+    ctx.scratch.mkdirs("release-pidns/project", 0o755, TESTER)?;
+    let keep = ctx.scratch.write_file(
+        "release-pidns/project/keep",
+        b"a refused run must preserve this",
+        0o600,
+        TESTER,
+    )?;
+    let roots = ctx.scratch.path("release-pidns");
+    let roots = roots
+        .to_str()
+        .ok_or_else(|| format!("non-UTF-8 path {}", roots.display()))?
+        .to_owned();
+    let reclaim = [
+        "--json",
+        "--no-index",
+        "--min-free",
+        "100%",
+        "--select",
+        "profile:cargo-target",
+        "--roots",
+        &roots,
+        &roots,
+    ];
+    let mut dry_run = vec!["--dry-run"];
+    dry_run.extend(reclaim);
+    let binary = binary_path(ctx, "diskgc-release");
+    for (hidepid, rule) in [(false, NOT_INITIAL), (true, HIDEPID)] {
+        let namespace = Namespace::start(hidepid)?;
+        let oracle = Oracle::arm(Fixture::new())?;
+        let plan = namespace.binary_as_tester(ctx, &binary, &dry_run)?;
+        let run = namespace.binary_as_tester(ctx, &binary, &reclaim)?;
+        oracle.judge_runs(&[&plan, &run])?.assert_clean()?;
+        expect_refused(&plan, rule)?;
+        expect_refused(&run, rule)?;
+        drop(namespace);
+    }
+    let mut control = vec!["ensure"];
+    control.extend(dry_run);
+    run(ctx, &control, 0)?;
+    ensure!(keep.exists(), "a refused run mutated the fixture");
     Ok(())
 }
 

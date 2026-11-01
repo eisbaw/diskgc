@@ -1,0 +1,33 @@
+# A held /proc mounted with hidepid can hide the user's own processes (a
+# newgrp shell). Owner PID would permit nothing (step 4), but the in-use
+# check cannot see such a process either: ensure refuses at start, its dry
+# run too (TASK-263; inuse/hidepid-refused.yaml). Owner PID's own hidepid
+# precondition stays, covered by the core's unit tests
+# (a_failed_precondition_names_its_rule_hidepid_first).
+profile_vector: 1
+profile: nix-shell-rc
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  proc_hidepid: true
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /tmp/nix-shell-4242-17: {.: {mtime: 2026-10-01T00:00:00Z}, env-vars: {mtime: 2026-10-01T00:00:00Z}, rc: {mtime: 2026-10-01T00:00:00Z}}
+  processes:
+    - {pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: safety, contains: "the held /proc is mounted with hidepid, so the in-use check cannot see every process"}]
+  reclaim_exit: 2
+  errors: [{cause: safety, contains: "the held /proc is mounted with hidepid, so the in-use check cannot see every process"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/nix-shell-4242-17/rc]

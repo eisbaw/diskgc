@@ -1,0 +1,46 @@
+# TASK-169: a loop device whose backing file's name was deleted cannot be
+# matched by identity, and another name of the file could be in any
+# candidate: every candidate is in_use_unknown, naming the device, until it
+# is detached. After three in a row the tier skips the rest unchecked, and
+# those name the same cause, not a busy host.
+profile_vector: 1
+user_profiles:
+  - {"name": "scratch-probe", "find": {"roots": ["/tmp"], "paths": ["scratch-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/scratch-a"]}}
+profile: scratch-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  loops:
+    - {dev: "7:4", backing: "/tmp/old.img (deleted)"}
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/scratch-a: {.: {mtime: 2026-10-01T00:00:00Z}, data: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+    /tmp/scratch-b: {.: {mtime: 2026-10-02T00:00:00Z}, data: {size: 4K, mtime: 2026-10-02T00:00:00Z}}
+    /tmp/scratch-c: {.: {mtime: 2026-10-03T00:00:00Z}, data: {size: 4K, mtime: 2026-10-03T00:00:00Z}}
+    /tmp/scratch-d: {.: {mtime: 2026-10-04T00:00:00Z}, data: {size: 4K, mtime: 2026-10-04T00:00:00Z}}
+expect:
+  plan:
+    - {candidate: /tmp/scratch-a, reason: in_use_unknown}
+    - {candidate: /tmp/scratch-b, reason: in_use_unknown}
+    - {candidate: /tmp/scratch-c, reason: in_use_unknown}
+    - {candidate: /tmp/scratch-d, reason: in_use_unknown}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /tmp/scratch-a, reason: in_use_unknown, process_blockers: []}
+    - {candidate: /tmp/scratch-b, reason: in_use_unknown, process_blockers: []}
+    - {candidate: /tmp/scratch-c, reason: in_use_unknown, process_blockers: []}
+    - {candidate: /tmp/scratch-d, reason: in_use_unknown, process_blockers: []}
+  preserved: [/tmp/scratch-a/data, /tmp/scratch-b/data, /tmp/scratch-c/data, /tmp/scratch-d/data]
+  report:
+    skipped:
+      - {detail: "a loop device's backing file cannot be told apart from a candidate: loop device 7:4 is backed by /tmp/old.img (deleted) (the name it was opened by was deleted; another name of the file could be in any candidate); detach it (`losetup -d`, `udisksctl loop-delete`) or wait until it is"}
+      - {detail: "a loop device's backing file cannot be told apart from a candidate: loop device 7:4 is backed by /tmp/old.img (deleted) (the name it was opened by was deleted; another name of the file could be in any candidate); detach it (`losetup -d`, `udisksctl loop-delete`) or wait until it is"}
+      - {detail: "a loop device's backing file cannot be told apart from a candidate: loop device 7:4 is backed by /tmp/old.img (deleted) (the name it was opened by was deleted; another name of the file could be in any candidate); detach it (`losetup -d`, `udisksctl loop-delete`) or wait until it is"}
+      - {detail: "not checked: the 3 candidates before it in this tier could not be checked: a loop device's backing file cannot be told apart from a candidate: loop device 7:4 is backed by /tmp/old.img (deleted) (the name it was opened by was deleted; another name of the file could be in any candidate); detach it (`losetup -d`, `udisksctl loop-delete`) or wait until it is"}

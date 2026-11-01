@@ -864,6 +864,16 @@ pub(crate) mod tests {
             unreachable!()
         }
 
+        fn loop_backing_files(
+            &self,
+        ) -> Result<Vec<(crate::host::Dev, std::path::PathBuf)>, HostError> {
+            unreachable!()
+        }
+
+        fn test_container_pid_namespace(&self) -> bool {
+            unreachable!()
+        }
+
         fn boot_id(&self) -> Result<String, HostError> {
             unreachable!()
         }

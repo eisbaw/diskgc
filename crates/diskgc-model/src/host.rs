@@ -1990,6 +1990,11 @@ impl Host for ModelHost {
         })
     }
 
+    /// The model's `pid_namespace: test_container`.
+    fn test_container_pid_namespace(&self) -> bool {
+        self.inner.borrow().state.test_container_pid_namespace
+    }
+
     /// A process's `nspid` (default `[pid]`); `unreadable` is `Failed`.
     /// Zombies are readable here, as `status` is on Linux.
     fn proc_nspid(&self, pid: Pid) -> Result<Vec<u32>, ProcError> {
@@ -2215,8 +2220,8 @@ impl Host for ModelHost {
     fn loop_backing_file(&self, dev: diskgc_core::host::Dev) -> Result<Option<PathBuf>, HostError> {
         let path = PathBuf::from(format!("/sys/dev/block/{dev}/loop/backing_file"));
         self.call(Op::LoopBackingFile, Some(path.clone()), None, |inner| {
-            let result = match inner.state.loop_backings.get(&dev) {
-                Some(backing) => Ok(Some(backing.clone())),
+            let result = match inner.state.loop_text(dev) {
+                Some(backing) => Ok(Some(backing)),
                 None if dev.major == 7 => Err(HostError::errno(
                     "read",
                     path.display(),
@@ -2231,6 +2236,54 @@ impl Host for ModelHost {
             };
             (result, None, text)
         })
+    }
+
+    /// The loop devices of `loops:` and the mounts on major 7, with their
+    /// backing files; a mount on one without `loop_backing` cannot be read
+    /// (`EACCES`, as [`Self::loop_backing_file`]), which fails the listing.
+    fn loop_backing_files(&self) -> Result<Vec<(diskgc_core::host::Dev, PathBuf)>, HostError> {
+        const SYS_BLOCK: &str = "/sys/block";
+        self.call(
+            Op::LoopBackingFiles,
+            Some(PathBuf::from(SYS_BLOCK)),
+            None,
+            |inner| {
+                if let Some(e) = inner.injected.take() {
+                    return (
+                        Err(HostError::errno("read_dir", SYS_BLOCK, e)),
+                        None,
+                        errno_text(e),
+                    );
+                }
+                let unreadable = inner
+                    .state
+                    .mounts
+                    .iter()
+                    .map(|mount| mount.dev)
+                    .find(|dev| dev.major == 7 && !inner.state.loop_backings.contains_key(dev));
+                if let Some(dev) = unreadable {
+                    let e = HostError::errno(
+                        "read",
+                        format!("/sys/dev/block/{dev}/loop/backing_file"),
+                        diskgc_core::host::Errno::EACCES,
+                    );
+                    let text = e.to_string();
+                    return (Err(e), None, text);
+                }
+                let listed: Vec<_> = inner
+                    .state
+                    .loop_backings
+                    .keys()
+                    .filter_map(|dev| inner.state.loop_text(*dev).map(|text| (*dev, text)))
+                    .collect();
+                let text = listed
+                    .iter()
+                    .map(|(dev, backing)| format!("{dev}={}", backing.display()))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (Ok(listed), None, text)
+            },
+        )
     }
 
     fn boot_id(&self) -> Result<String, HostError> {

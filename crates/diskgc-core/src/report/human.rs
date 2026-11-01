@@ -161,7 +161,10 @@ fn live_text(report: &Report, held: Option<String>) -> String {
     lines.extend(busy_line(
         live.kept
             .iter()
-            .filter(|skip| skip.reason == Reason::InUseUnknown)
+            .filter(|skip| {
+                skip.reason == Reason::InUseUnknown
+                    && standing_cause(skip.detail.as_deref()).is_none()
+            })
             .map(|skip| skip.count)
             .fold(0, u64::saturating_add),
     ));
@@ -410,8 +413,20 @@ fn plain_diagnostic(
                 .as_deref()
                 .map_or_else(String::new, |command| format!(" ({})", one_line(command)))
         ),
-        None => "the host was too busy to check whether it is in use".to_owned(),
+        None => match standing_cause(detail) {
+            Some(cause) => brief(cause),
+            None => "the host was too busy to check whether it is in use".to_owned(),
+        },
     })
+}
+
+/// The detail of an `in_use_unknown` whose cause is not the host's load
+/// and stays until someone changes it (TASK-263, TASK-169): a process list
+/// the in-use check cannot see whole, or a loop device whose backing file
+/// could be in any candidate. Recognised by the texts [`crate::inuse`]
+/// gives those causes; [`busy_line`] does not count them.
+fn standing_cause(detail: Option<&str>) -> Option<&str> {
+    detail.filter(|d| crate::inuse::standing_cause(d))
 }
 
 /// Why diskgc cannot see every process, when that kept a candidate
@@ -615,7 +630,10 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
         folded
             .rows
             .iter()
-            .filter(|row| row.entry.reason == Some(Reason::InUseUnknown))
+            .filter(|row| {
+                row.entry.reason == Some(Reason::InUseUnknown)
+                    && standing_cause(row.entry.detail.as_deref()).is_none()
+            })
             .count() as u64,
     ));
     lines.extend(hidden_processes_line(folded.rows.iter().filter_map(

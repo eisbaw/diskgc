@@ -244,7 +244,11 @@ pub fn start<H: Delete>(
         }),
         Mode::TallyOnly { .. } => None,
     };
-    // 3. The pre-release sandbox gate, unless nothing can be deleted.
+    // 3. The in-use check's visibility (TASK-263) and the pre-release
+    //    sandbox gate, unless nothing can be deleted.
+    if goal.is_some() {
+        crate::executor::process_visibility(host).map_err(|e| refuse((e.cause, e.message)))?;
+    }
     if goal.is_some()
         && let Err(gate) = host.may_delete()
     {

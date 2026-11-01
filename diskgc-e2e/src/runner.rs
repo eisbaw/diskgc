@@ -620,7 +620,28 @@ fn fuse_device(name: &str) -> Vec<String> {
 /// The real Buildah fixture uses pinned executables reached through the
 /// under-test mount. Expose their Nix closure read-only for this one test,
 /// without changing or reloading the multi-gigabyte base image.
-fn test_mounts(name: &str) -> Vec<String> {
+/// Whether the container of test `name` shares the host's PID namespace
+/// ([`HOST_PID_NAMESPACE_ARGS`]): a test listed in
+/// [`crate::suite::HOST_PID_NAMESPACE_TESTS`], or every test when the
+/// release-candidate package is the binary under test
+/// ([`crate::RELEASE_DEFAULT_MARKER`]): that build refuses to plan or
+/// reclaim in a PID namespace of its own (docs/safety.md, In use;
+/// TASK-263). Such containers run one at a time.
+fn shares_host_pid_namespace(release_under_test: bool, name: &str) -> bool {
+    release_under_test || crate::suite::HOST_PID_NAMESPACE_TESTS.contains(&name)
+}
+
+/// Whether the release runner's under-test directory is mounted
+/// ([`crate::RELEASE_DEFAULT_MARKER`]).
+fn release_under_test(config: &Config) -> bool {
+    config
+        .under_test
+        .join("bin")
+        .join(crate::RELEASE_DEFAULT_MARKER)
+        .exists()
+}
+
+fn test_mounts(name: &str, host_pid_namespace: bool) -> Vec<String> {
     let mut extra = fuse_device(name);
     if name == crate::suite::BUILDAH_SPOOL_TEST
         || name == crate::suite::MESON_ANCHOR_TEST
@@ -630,7 +651,7 @@ fn test_mounts(name: &str) -> Vec<String> {
     {
         extra.extend(["--volume".to_owned(), "/nix/store:/nix/store:ro".to_owned()]);
     }
-    if crate::suite::HOST_PID_NAMESPACE_TESTS.contains(&name) {
+    if host_pid_namespace {
         extra.extend(HOST_PID_NAMESPACE_ARGS.iter().map(|a| (*a).to_owned()));
     }
     if crate::suite::DOCKER_ONLY_TESTS
@@ -808,7 +829,7 @@ fn run_parallel(
                     let next = queue.lock().expect("queue lock").pop_front();
                     let Some(test) = next else { break };
                     let result =
-                        if crate::suite::HOST_PID_NAMESPACE_TESTS.contains(&test.name.as_str()) {
+                        if shares_host_pid_namespace(release_under_test(config), &test.name) {
                             let _slot = host_pid_slot.lock().expect("host pid slot");
                             run_container(config, &test, deadline, false)
                         } else {
@@ -855,7 +876,7 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
         .map_err(|e| format!("create log {}: {e}", log.display()))
         .and_then(|(out, err)| {
             let mut podman = Command::new("podman");
-            if crate::suite::HOST_PID_NAMESPACE_TESTS.contains(&test.name.as_str()) {
+            if shares_host_pid_namespace(release_under_test(config), &test.name) {
                 // With a shifted uid map, crun runs as a subordinate uid in
                 // Podman's TMPDIR, which the dev shell points below the
                 // checkout in a 0700 home: "openat /proc/self/cwd:
@@ -867,7 +888,10 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
                     config,
                     &container,
                     keep,
-                    &test_mounts(&test.name),
+                    &test_mounts(
+                        &test.name,
+                        shares_host_pid_namespace(release_under_test(config), &test.name),
+                    ),
                 ))
                 .args(["run", &test.name])
                 .stdin(Stdio::null())
@@ -1056,26 +1080,33 @@ mod tests {
     }
 
     /// Only the listed tests share the host's PID namespace, and every
-    /// listed name is a registered test.
+    /// listed name is a registered test, unless the release candidate is
+    /// under test: then every test does (TASK-263).
     #[test]
-    fn only_the_owner_pid_tests_share_the_host_pid_namespace() {
+    fn only_the_listed_tests_share_the_host_pid_namespace_unless_the_release_is_under_test() {
+        let shared = |release: bool, name: &str| {
+            let args = test_mounts(name, shares_host_pid_namespace(release, name));
+            let host_pid = args.iter().any(|a| a == "--pid=host");
+            assert_eq!(
+                host_pid,
+                args.windows(2).any(|w| w == ["--uidmap", "0:1:65536"]),
+                "{name}: --pid=host always with the shifted uid map"
+            );
+            host_pid
+        };
         for name in crate::suite::HOST_PID_NAMESPACE_TESTS {
             assert!(
                 crate::suite::TESTS.iter().any(|t| t.name == *name),
                 "{name} is not a registered test"
             );
-            let args = test_mounts(name);
-            assert!(args.iter().any(|a| a == "--pid=host"), "{name}");
-            assert!(
-                args.windows(2).any(|w| w == ["--uidmap", "0:1:65536"]),
-                "{name}"
-            );
+            assert!(shared(false, name), "{name}");
         }
-        assert!(
-            !test_mounts("fs_reclaim_never_deletes_a_socket_or_fifo")
-                .iter()
-                .any(|a| a.starts_with("--pid"))
-        );
+        assert!(!shared(false, "fs_reclaim_never_deletes_a_socket_or_fifo"));
+        assert!(shared(true, "fs_reclaim_never_deletes_a_socket_or_fifo"));
+        assert!(shared(
+            true,
+            "ensure_dry_run_plans_real_targets_and_deletes_nothing@1.99.1"
+        ));
     }
 
     const GLOBAL: &[&str] = &[
@@ -1138,7 +1169,7 @@ mod tests {
             .collect();
         assert_eq!(
             selected.len(),
-            6,
+            7,
             "candidate suite lost a probe: {selected:?}"
         );
         assert!(

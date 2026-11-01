@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use diskgc_core::host::Dev;
 use diskgc_model::spec::{
-    At, Bytes, DevSpec, DirAttrs, DirSpec, EventSpec, FdSpec, FileSpec, HostModel, MountSpec,
-    NodeSpec, ProcAccess, ProcessSpec, Special, WallTime, When,
+    At, Bytes, DevSpec, DirAttrs, DirSpec, EventSpec, FdSpec, FileSpec, HostModel, LoopSpec,
+    MountSpec, NodeSpec, PidNamespaceSpec, ProcAccess, ProcessSpec, Special, WallTime, When,
 };
 use proptest::prelude::*;
 use proptest::sample::select;
@@ -286,6 +286,7 @@ pub fn host_model(
                 users: BTreeMap::new(),
                 pid_namespace: Default::default(),
                 proc_hidepid: false,
+                loops: Vec::new(),
                 sandbox_gate: diskgc_model::spec::GateSpec::Open,
                 command_exit: 0,
                 command_error_after_start: false,
@@ -299,6 +300,73 @@ pub fn host_model(
                 expect: None,
             }
         })
+}
+
+/// What diskgc's held `/proc` can show (docs/safety.md, In use:
+/// Visibility): mostly the initial PID namespace without `hidepid`, else a
+/// nested namespace (a container), one inside a marked test container, or
+/// `hidepid` (with either).
+pub fn visibility() -> impl Strategy<Value = (PidNamespaceSpec, bool)> {
+    let namespace = prop_oneof![
+        3 => Just(PidNamespaceSpec::Initial),
+        1 => Just(PidNamespaceSpec::Nested),
+        1 => Just(PidNamespaceSpec::TestContainer),
+    ];
+    (namespace, prop_oneof![3 => Just(false), 1 => Just(true)])
+}
+
+/// Up to two configured loop devices (`7:0`, `7:1`) that no mount shows
+/// (docs/safety.md, In use: Loop devices), each backed by one of `files`
+/// (a generated tree's), by [`EXE`] (outside the tree), by a path that
+/// names nothing here (another mount namespace's), or by a file since
+/// deleted (` (deleted)`).
+pub fn loop_devices(files: Vec<PathBuf>) -> impl Strategy<Value = Vec<LoopSpec>> {
+    let mut texts: Vec<BoxedStrategy<PathBuf>> = vec![
+        Just(PathBuf::from(EXE)).boxed(),
+        Just(PathBuf::from("/var/lib/images/disk.img")).boxed(),
+        Just(PathBuf::from(format!("{ROOT}/gone.img (deleted)"))).boxed(),
+    ];
+    if !files.is_empty() {
+        texts.push(select(files).boxed());
+    }
+    let backing = proptest::strategy::Union::new(texts);
+    proptest::collection::vec(backing, 0..=2).prop_map(|backings| {
+        backings
+            .into_iter()
+            .enumerate()
+            .map(|(minor, backing)| LoopSpec {
+                dev: DevSpec(Dev {
+                    major: 7,
+                    minor: minor as u32,
+                }),
+                backing,
+            })
+            .collect()
+    })
+}
+
+/// [`host_model`], also drawing what the in-use scan cannot learn from
+/// processes: [`visibility`] and [`loop_devices`] backed by the tree's
+/// files.
+pub fn host_model_with_kernel_holders(
+    depth: u32,
+    breadth: usize,
+    max_procs: usize,
+) -> impl Strategy<Value = HostModel> {
+    host_model(depth, breadth, max_procs).prop_flat_map(|model| {
+        let NodeSpec::Dir(root) = &model.tree[Path::new(ROOT)] else {
+            unreachable!("host_model's root is a directory");
+        };
+        let (_, files) = paths(Path::new(ROOT), root);
+        (Just(model), visibility(), loop_devices(files)).prop_map(
+            |(mut model, (namespace, hidepid), loops)| {
+                model.pid_namespace = namespace;
+                model.proc_hidepid = hidepid;
+                model.loops = loops;
+                model
+            },
+        )
+    })
 }
 
 /// `model` with one more event: `action` (an [`EventSpec`] whose `at` is

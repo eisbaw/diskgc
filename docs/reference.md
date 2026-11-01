@@ -318,7 +318,11 @@ In this order; the first failure exits with its code and deletes nothing:
    `ensure` does (Open-file limit under `ensure`).
 3. Running as root without `--allow-root`, or `--allow-root` not as root
    or without `CAP_SYS_PTRACE` ([safety.md](safety.md#privileges)): exit 2
-   (`safety`); a capability set that cannot be read: exit 3 (`host`). The
+   (`safety`); a capability set that cannot be read: exit 3 (`host`).
+   Without `--tally-only`: the held `/proc` mounted with `hidepid`, or
+   diskgc outside the initial PID namespace (a container, `PrivatePIDs=`),
+   exit 2 (`safety`; [safety.md](safety.md#in-use)), facts that cannot be
+   read exit 3 (`host`). The
    configuration's checks that depend on the user diskgc runs as
    (`owners:` names, `protect` and tier roots with `{uid}`): exit 2. In a
    development build, the pre-release sandbox gate: exit 2 outside a test
@@ -952,7 +956,7 @@ The first matching row wins:
 
 | Code | Meaning |
 |---|---|
-| 2 | Usage, config or provisioning error. Nothing was deleted. |
+| 2 | Usage, config, safety or provisioning error, the dry run's too (`safety` at start: privileges, or the in-use check's visibility, `hidepid` or a PID namespace other than the initial one, [safety.md](safety.md#in-use)). Nothing was deleted. |
 | 130 / 143 | Interrupted by SIGINT / SIGTERM. |
 | 75 | Deadline reached while waiting for another reclaim, and a fresh sample is still below `--min-free` (EX_TEMPFAIL). Nothing was deleted; retry later. If the other holder freed enough meanwhile, the result is 0. |
 | 0 | Final sample of available space ≥ `--min-free`. |
@@ -983,7 +987,9 @@ or planning error also exits 3, reports its partial plan and errors, and
 uses `avail_after_bytes: null` when its final sample failed. The JSON
 `status` of each: 2 `usage_error` (also for a refusal to
 run as root, or to run `--allow-root` other than as root or without
-`CAP_SYS_PTRACE`, [safety.md](safety.md#privileges), a lock a needed
+`CAP_SYS_PTRACE`, [safety.md](safety.md#privileges), to run under
+`hidepid` or outside the initial PID namespace,
+[safety.md](safety.md#in-use), a lock a needed
 reclaim cannot take, with `cause: provisioning`,
 [safety.md](safety.md#host-lock), and, in
 development builds, the pre-release sandbox gate,
@@ -1005,7 +1011,10 @@ development builds, the pre-release sandbox gate,
   which reads `keep marker`. A candidate kept as `in_use_unknown` because
   no scan stayed fresh or the process list did not settle reads "the host
   was too busy to check whether it is in use"; one kept because a process
-  of the user cannot be inspected names that process. One line counts
+  of the user cannot be inspected names that process; one kept because a
+  loop device's backing file cannot be located, or because the process
+  list stopped being complete during the run, gives that cause, and is
+  not counted as the host's load. One line counts
   them and says to run again when the host is less busy. A candidate kept
   `producer_unknown` because diskgc cannot see every process (it runs in
   its own PID namespace, as in most containers, or `/proc` has `hidepid`)
@@ -2415,6 +2424,19 @@ development package stays sandbox gated.
   image file is protected or negated (and the reverse), read from the
   loop device's `backing_file`; while any match exists, an unreadable one
   is an error.
+- TASK-263: `ensure` (its dry run too) and a reclaiming `watch` refuse to
+  start (exit 2, `cause: safety`) under `hidepid` or in a PID namespace
+  other than the initial one, so in a container: the in-use check cannot
+  see every process there. 0.1.0 ran there and judged candidates by the
+  processes it could see, so a Cargo target whose program ran outside
+  the container (Cargo holds no lock while it runs) could be deleted
+  (static reading). A CI hook that ran 0.1.0 inside its job
+  container must run diskgc on the runner host instead.
+- TASK-169: a candidate holding the backing file of a configured loop
+  device (`udisksctl loop-setup`, `losetup`, mounted or not) is `in_use`;
+  a device whose backing file was deleted keeps every candidate
+  `in_use_unknown` until it is detached. 0.1.0 deleted such an image; its
+  data was gone once the device detached.
 - TASK-269: a `protect` or `!profile` match removed after the tier
   enumerated it (a `cargo clean` of a protected target) no longer stops
   the run or the dry run (exit 3) at a candidate's first check: the
@@ -2551,21 +2573,25 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   it runs as, and not those the kernel hides from it (setuid, more
   capable or non-dumpable ones such as `sudo`, `systemd --user`,
   `ssh-agent`); their use of a candidate is not seen
-  ([safety.md](safety.md#in-use), Visibility). `hidepid` hides more.
+  ([safety.md](safety.md#in-use), Visibility). Under `hidepid` it hides
+  more, and diskgc refuses to start `ensure` or a reclaiming `watch`.
 - **In-use blind spots under review (TASK-169).** Kernel-held references
-  without a `/proc` descriptor or mapping (io_uring registered files, a
-  loop device backed by a candidate, overlay upper and work directories),
+  without a `/proc` descriptor or mapping (io_uring registered files,
+  overlay upper and work directories; a loop device's backing file is
+  seen, [safety.md](safety.md#in-use), Loop devices),
   a mount point that exists only in another mount namespace, Cargo locks
   taken through an overlay, a project directory shared over NFS or
   virtiofs with another kernel, and a nested btrfs subvolume are not seen
   or not fully handled. None is reproduced yet; the 0.1 `/tmp` built-ins
   are less exposed (their contracts keep a session or rc directory on
   their own evidence).
-- **diskgc in its own PID namespace** (most containers) keeps every
-  `nix-shell-rc` candidate as `producer_unknown`, and every `pytest-tmp`
-  session except those without a `.lock`, below pytest's retention rank
-  and older than its dead-lock age: Owner PID needs the complete process
-  list of the initial PID namespace.
+- **diskgc in its own PID namespace** (most containers, `PrivatePIDs=`)
+  refuses to run `ensure`, its dry run and a reclaiming `watch` (exit 2,
+  `safety`): the in-use check cannot see the processes outside it
+  ([safety.md](safety.md#in-use), A process list that cannot be
+  complete). Run it on the host. (In 0.1.0 it ran, and kept every
+  `nix-shell-rc` and most `pytest-tmp` candidates as `producer_unknown`,
+  but judged Cargo targets by the processes of its own namespace only.)
 - **Deadlines are cooperative.** `--timeout` is checked between
   operations; one filesystem operation blocked in the kernel (a dead
   network mount, a slow disk) overruns it, and the overrun is reported

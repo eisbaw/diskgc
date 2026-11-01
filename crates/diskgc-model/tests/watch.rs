@@ -820,6 +820,54 @@ fn watch_start_refusals() {
     }
 }
 
+/// TASK-263: a reclaiming watch under `hidepid`, or in a PID namespace
+/// other than the initial one, is refused at start (exit 2, `cause:
+/// safety`, naming the rule): a unit with `ProtectProc=` or `PrivatePIDs=`
+/// fails where its operator looks instead of running blind. `--tally-only`
+/// judges no candidate and runs; a marked test container's own namespace
+/// is excepted, `hidepid` never.
+#[test]
+fn watch_is_refused_where_the_in_use_check_cannot_see_every_process() {
+    let stop = "events:\n  - {at: {elapsed: 1m}, signal: term}\n";
+    for (facts, rule) in [
+        (
+            "pid_namespace: nested\n",
+            "diskgc is not in the initial PID namespace",
+        ),
+        (
+            "proc_hidepid: true\n",
+            "the held /proc is mounted with hidepid",
+        ),
+        (
+            "pid_namespace: test_container\nproc_hidepid: true\n",
+            "the held /proc is mounted with hidepid",
+        ),
+    ] {
+        let model = yaml("5G", &old_candidates(3, "1G"), &format!("{facts}{stop}"));
+        let refused = host(&model);
+        let run = watch(&refused, &reclaim("6G", "7G", "10s"));
+        assert_eq!(run.ended, Err(2), "{facts}");
+        assert!(run.has("\"cause\":\"safety\""), "{facts}: {:?}", run.lines);
+        assert!(run.has(rule), "{facts}: {:?}", run.lines);
+        assert_eq!(deletions(&refused), 0, "{facts}");
+        let tally = host(&model);
+        assert_eq!(
+            watch(&tally, &Mode::TallyOnly { min_free: None }).ended,
+            Ok(Ended::Stopped(Signal::Term)),
+            "{facts}"
+        );
+    }
+    let model = yaml(
+        "5G",
+        &old_candidates(3, "1G"),
+        &format!("pid_namespace: test_container\n{stop}"),
+    );
+    let excepted = host(&model);
+    let run = watch(&excepted, &reclaim("6G", "7G", "10s"));
+    assert_eq!(run.ended, Ok(Ended::Stopped(Signal::Term)));
+    assert!(deletions(&excepted) > 0, "{:?}", run.lines);
+}
+
 // ---- Signals ----
 
 /// SIGTERM in a cycle: the record says `interrupted`, the process stops

@@ -281,8 +281,14 @@ pub static FUSE_TESTS: &[&str] = &[
 pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
     "nix_shell_rc_shell_in_private_pid_namespace_is_kept",
     "owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace",
-    "owner_pid_is_unknown_under_hidepid",
+    "ensure_is_refused_under_hidepid",
     "owner_pid_is_unknown_on_an_unlisted_filesystem",
+    // The release-candidate build refuses to plan or reclaim in a PID
+    // namespace of its own (TASK-263): its tests that plan or reclaim run
+    // in the host's, and the refusal test contrasts it with a nested one.
+    "release_candidate_checkout_policy_accepts_only_admitted_builtin",
+    "release_candidate_cargo_busy_then_reclaims_real_target",
+    "release_candidate_refuses_in_its_own_pid_namespace",
     "pytest_live_policy_none_session_in_shell_root_is_kept",
     "pytest_live_basetemp_session_is_kept",
     "pytest_orphan_xdist_worker_keeps_session",
@@ -482,10 +488,10 @@ pub static TESTS: &[Test] = &[
         run: owner_pid_suite::owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace,
     },
     Test {
-        name: "owner_pid_is_unknown_under_hidepid",
+        name: "ensure_is_refused_under_hidepid",
         tier: Tier::Full,
         expect: Expect::Pass,
-        run: owner_pid_suite::owner_pid_is_unknown_under_hidepid,
+        run: owner_pid_suite::ensure_is_refused_under_hidepid,
     },
     Test {
         name: "owner_pid_is_unknown_on_an_unlisted_filesystem",
@@ -924,6 +930,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: release_suite::candidate_refuses_a_reclaiming_watch,
+    },
+    Test {
+        name: "release_candidate_refuses_in_its_own_pid_namespace",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: release_suite::candidate_refuses_in_its_own_pid_namespace,
     },
     Test {
         name: "release_candidate_checkout_policy_accepts_only_admitted_builtin",

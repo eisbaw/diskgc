@@ -56,8 +56,8 @@ fn undecidable(number: u32, rule: &str) -> String {
         "liveness_contract nix-shell: whether owner pid {number} ended cannot be decided: {rule}"
     )
 }
-const NOT_INITIAL: &str = "diskgc is not in the initial PID namespace";
-const HIDEPID: &str = "the held /proc is mounted with hidepid";
+pub(crate) const NOT_INITIAL: &str = "diskgc is not in the initial PID namespace";
+pub(crate) const HIDEPID: &str = "the held /proc is mounted with hidepid";
 
 /// A shell of `nix develop` in its own PID namespace, sharing `/tmp`
 /// (the TASK-39 counterexample's shape): its rc directory is named after
@@ -236,19 +236,21 @@ pub fn owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace(
 
 /// A `/proc` mounted with `hidepid=invisible` hides a process from every
 /// reader that may not ptrace it, the user's own included: a shell whose
-/// group differs (as after `newgrp`) is unlisted for tester. No PID answer
-/// permits under `hidepid`, for tester and for root (`--allow-root`, which
-/// sees the shell), and the detail names the `hidepid` rule. Rootless
-/// Podman cannot mount a `hidepid` `/proc` for the initial namespace, so
-/// diskgc runs in a nested one here and the rule is observed by its
-/// detail (Owner PID names `hidepid` before the namespace). Positive
-/// control: from the initial namespace without `hidepid` the shell is
-/// listed, and the same directory is `in_use_unknown`; In use decides it
-/// before the contract, since the shell's fd table is denied to tester
+/// group differs (as after `newgrp`) is unlisted for tester. The in-use
+/// check cannot see it, so `ensure` refuses at start under `hidepid`, its
+/// dry run too, for tester and for root (`--allow-root`, which sees the
+/// shell): exit 2, `cause: safety`, naming the `hidepid` rule (TASK-263;
+/// before, Owner PID kept the directory `producer_unknown` and the run
+/// went on blind to the shell's files). Rootless Podman cannot mount a
+/// `hidepid` `/proc` for the initial namespace, so diskgc runs in a nested
+/// one here (inside a marked test container, where only `hidepid` refuses:
+/// docs/safety.md, In use). Positive control: from the initial namespace
+/// without `hidepid` the shell is listed, and the same directory is
+/// `in_use_unknown`, since the shell's fd table is denied to tester
 /// (ptrace access, like `hidepid`, also compares groups), so evidence
 /// `unreadable` (a live process that cannot be inspected blocks every
 /// candidate, as unknown rather than seen use: TASK-190).
-pub fn owner_pid_is_unknown_under_hidepid(ctx: &Ctx) -> TestResult {
+pub fn ensure_is_refused_under_hidepid(ctx: &Ctx) -> TestResult {
     let base = free_pid_range()?;
     let namespace = Namespace::start(true)?;
     namespace.set_last_pid(base)?;
@@ -325,18 +327,13 @@ pub fn owner_pid_is_unknown_under_hidepid(ctx: &Ctx) -> TestResult {
     oracle
         .judge_runs(&[&tester_plan, &tester_run, &root_run, &initial_run])?
         .assert_clean()?;
-    tester_plan.expect_code(0)?;
-    expect_plan(&tester_plan, &[(&rc_dir, Some("producer_unknown"))])?;
-    for run in [&tester_run, &root_run] {
-        run.expect_code(1)?;
-        expect_skipped(
-            run,
-            &rc_dir,
-            "producer_unknown",
-            &[],
-            Some(&undecidable(inner, HIDEPID)),
-        )?;
+    for run in [&tester_plan, &tester_run, &root_run] {
+        expect_refused(run, HIDEPID)?;
     }
+    ensure!(
+        rc_dir.exists(),
+        "a refused run touched the hidden shell's directory"
+    );
     initial_run.expect_code(1)?;
     expect_skipped(
         &initial_run,
@@ -532,6 +529,32 @@ fn reclaim_args() -> Vec<&'static str> {
         NIX_SHELL_RC_SELECT,
         "/tmp",
     ]
+}
+
+/// `run` was refused at start (exit 2, status `usage_error`, one error with
+/// `cause: safety` whose message starts with `rule`), so it planned and
+/// deleted nothing (the deletion oracle judges that).
+pub(crate) fn expect_refused(run: &Run, rule: &str) -> TestResult {
+    run.expect_code(2)?;
+    let report = report(run)?;
+    let errors = report["errors"]
+        .as_array()
+        .ok_or_else(|| format!("no errors array: {report}"))?;
+    ensure!(
+        report["status"] == "usage_error"
+            && errors.len() == 1
+            && errors[0]["cause"] == "safety"
+            && errors[0]["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with(rule)),
+        "not refused by the rule {rule:?}: {report}"
+    );
+    ensure!(
+        report["plan"].as_array().is_none_or(Vec::is_empty)
+            && report["actions"].as_array().is_none_or(Vec::is_empty),
+        "a refused run planned or acted: {report}"
+    );
+    Ok(())
 }
 
 /// The plan has exactly these candidates with these reasons.
@@ -764,7 +787,7 @@ fn carriers_are_only(number: u32, host: u32) -> TestResult {
 /// Init is signalled only through a pidfd opened while `unshare` (its
 /// parent, which reaps it) still waits for it: a pidfd names that process,
 /// never a later holder of its number.
-struct Namespace {
+pub(crate) struct Namespace {
     /// Held for its drop, after init's: kills and reaps `unshare`.
     _unshare: KillOnDrop,
     init: u32,
@@ -772,7 +795,7 @@ struct Namespace {
 }
 
 impl Namespace {
-    fn start(hidepid: bool) -> Result<Self, String> {
+    pub(crate) fn start(hidepid: bool) -> Result<Self, String> {
         let options = if hidepid { "-o hidepid=invisible " } else { "" };
         let unshare = Command::new("/bin/unshare")
             .args(["-p", "-f", "-m", "--propagation", "private", "--"])
@@ -923,7 +946,18 @@ impl Namespace {
     /// `diskgc ARGS` in the namespace as tester, traced (strace follows
     /// nsenter's fork). `HOME` is tester's, as for every tester run.
     fn diskgc_as_tester(&self, ctx: &Ctx, args: &[&str]) -> Result<Run, String> {
-        let diskgc = ctx.diskgc();
+        self.binary_as_tester(ctx, &ctx.diskgc(), args)
+    }
+
+    /// `BINARY ensure ARGS` in the namespace as tester, traced, as
+    /// [`Self::diskgc_as_tester`] (the release suite passes the
+    /// release-candidate binary).
+    pub(crate) fn binary_as_tester(
+        &self,
+        ctx: &Ctx,
+        diskgc: &Path,
+        args: &[&str],
+    ) -> Result<Run, String> {
         let mut full: Vec<String> = self.enter_args();
         full.extend(["/bin/env".to_owned(), "HOME=/home/tester".to_owned()]);
         full.push(ctx.self_exe.display().to_string());

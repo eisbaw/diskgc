@@ -1,0 +1,28 @@
+# TASK-263, the other side of pid-namespace-nested-refused: a development
+# build inside a marked test container takes its own PID namespace as
+# complete (its files are the container's own), so the e2e containers
+# reclaim. The release-candidate build never does (diskgc-e2e,
+# release_suite).
+profile_vector: 1
+user_profiles:
+  - {"name": "scratch-probe", "find": {"roots": ["/tmp"], "paths": ["scratch-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/scratch-a"]}}
+profile: scratch-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  pid_namespace: test_container
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/scratch-a: {data: {size: 4K}}
+expect:
+  plan: [{candidate: /tmp/scratch-a}]
+  reclaim_exit: 1
+  actions: [/tmp/scratch-a]
+  removed: [/tmp/scratch-a]
+  skipped: []
+  preserved: []

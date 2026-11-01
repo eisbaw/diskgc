@@ -19,9 +19,9 @@ use diskgc_core::profile::{EntryType, Library, Where, parse_profiles};
 use diskgc_core::report::{Final, Signal, Status, after_lock_timeout, conclude};
 use diskgc_core::resolve::{Want, resolve};
 use diskgc_core::units::parse_size;
-use diskgc_model::spec::{DirSpec, FileSpec, HostModel, NodeSpec, Op, Special};
+use diskgc_model::spec::{DirSpec, FileSpec, HostModel, NodeSpec, Op, PidNamespaceSpec, Special};
 use diskgc_model::{Call, ModelHost};
-use diskgc_modelgen::{ROOT, host_model};
+use diskgc_modelgen::{ROOT, host_model, host_model_with_kernel_holders};
 use proptest::prelude::*;
 use proptest::test_runner::{TestError, TestRunner};
 
@@ -314,6 +314,57 @@ proptest! {
         }
         if let Some(call) = forbidden_traversal(&model, &oracle, &host.trace()) {
             return Err(failure(&model, format!("crossed a modelled mount or followed a symlink: {call}")));
+        }
+    }
+
+    /// TASK-263, TASK-169: what no process shows still keeps a candidate.
+    /// Judged from the model's specification, not from the scan: a process
+    /// list that cannot be complete (`hidepid`, or a PID namespace other
+    /// than the initial one outside a test container) or a loop device
+    /// whose backing file was deleted makes the candidate `in_use_unknown`;
+    /// otherwise a loop device backed by a file of the candidate keeps it
+    /// (`in_use`). The candidate is never cleared in either case.
+    #[test]
+    fn the_in_use_check_never_clears_what_it_cannot_see_or_a_loop_device_holds(
+        model in host_model_with_kernel_holders(3, 3, 2),
+    ) {
+        let host = loaded(&model)?;
+        let parent = resolve(&host, Path::new("/tmp"), Want::Directory)
+            .map_err(|error| failure(&model, format!("resolve /tmp: {error}")))?;
+        let candidate = Candidate::new(&parent, Path::new(ROOT))
+            .ok_or_else(|| failure(&model, "generated candidate has no basename"))?;
+        let rules = Rules::new(&[1000]);
+        let Ok(record) = walk(&host, &candidate, &rules, None) else {
+            // A refused walk deletes nothing: the other property's ground.
+            return Ok(());
+        };
+        let hidden = model.proc_hidepid || model.pid_namespace == PidNamespaceSpec::Nested;
+        let deleted = model
+            .loops
+            .iter()
+            .any(|spec| spec.backing.to_string_lossy().ends_with(" (deleted)"));
+        let objects: BTreeSet<DevIno> = record.objects().collect();
+        let held = model.loops.iter().any(|spec| {
+            host.stat_path(&spec.backing)
+                .and_then(|stat| stat.ino.map(|ino| DevIno { dev: stat.dev, ino }))
+                .is_some_and(|id| objects.contains(&id))
+        });
+        let scan = diskgc_core::inuse::scan(
+            &host,
+            &diskgc_core::inuse::Options::from_rules(&rules),
+            None,
+        )
+        .map_err(|error| failure(&model, format!("scan: {error}")))?;
+        let verdict = scan.check(&candidate, &record);
+        let reason = verdict.as_ref().err().map(|skip| skip.reason);
+        if hidden || deleted {
+            if reason != Some(diskgc_core::engine::Reason::InUseUnknown) {
+                return Err(failure(&model, format!(
+                    "hidden {hidden}, deleted loop backing {deleted}: {verdict:?}"
+                )));
+            }
+        } else if held && verdict.is_ok() {
+            return Err(failure(&model, "a loop device's backing file in the candidate was cleared"));
         }
     }
 

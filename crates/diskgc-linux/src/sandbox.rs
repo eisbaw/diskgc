@@ -193,6 +193,23 @@ pub fn status() -> Result<(), &'static str> {
     }
 }
 
+/// Whether the in-use scan takes this process's own PID namespace as
+/// holding every process that can use a candidate (docs/safety.md, In use:
+/// Visibility): exactly where the gate lets a development build delete,
+/// inside a marked test container ([`status`], the same cached decision).
+/// The container's files are its own, and a process outside it that uses
+/// them is not part of any test. A release build answers `false`.
+#[cfg(not(feature = "release-without-sandbox-gate"))]
+pub fn test_container_pid_namespace() -> bool {
+    status().is_ok()
+}
+
+/// A release build: no PID namespace but the initial one is complete.
+#[cfg(feature = "release-without-sandbox-gate")]
+pub fn test_container_pid_namespace() -> bool {
+    false
+}
+
 /// A release build (0.1 onwards): the gate is compiled out and every call is
 /// permitted. Only the release package enables this feature.
 #[cfg(feature = "release-without-sandbox-gate")]

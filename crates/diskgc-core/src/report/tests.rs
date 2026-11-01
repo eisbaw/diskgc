@@ -791,6 +791,48 @@ fn human_summary_says_a_busy_host_kept_candidates_and_to_run_again() {
     );
 }
 
+/// TASK-263, TASK-169: an `in_use_unknown` whose cause stays (a loop
+/// device's deleted backing file, a process list that cannot be complete)
+/// names that cause, and is not counted as the host's load: waiting does
+/// not help.
+#[test]
+fn human_summary_names_a_standing_cause_instead_of_a_busy_host() {
+    let loop_cause = format!(
+        "{}: loop device 7:4 is backed by /tmp/old.img (deleted) (...)",
+        crate::inuse::loops::LOOP_UNKNOWN
+    );
+    let hidden = format!(
+        "the held /proc is mounted with hidepid, so {}",
+        crate::inuse::HIDDEN_PROCESSES
+    );
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);
+    report.mount = Some("/tmp".into());
+    report
+        .skipped
+        .push(tier_skip("t", "/tmp/a", Reason::InUseUnknown, &loop_cause));
+    report
+        .skipped
+        .push(tier_skip("t", "/tmp/b", Reason::InUseUnknown, &hidden));
+    let text = report.summary().expect("summary");
+    assert!(!text.contains("too busy"), "{text}");
+    assert!(
+        text.contains("kept /tmp/a: in_use_unknown, a loop device's backing file"),
+        "{text}"
+    );
+    assert!(
+        text.contains("kept /tmp/b: in_use_unknown, the held /proc is mounted with hidepid"),
+        "{text}"
+    );
+    report
+        .skipped
+        .push(skip("/tmp/c", "t", "p", Reason::InUseUnknown));
+    let text = report.summary().expect("summary");
+    assert!(
+        text.contains("the host was too busy to check 1 candidate(s)"),
+        "{text}"
+    );
+}
+
 fn tier_skip(tier: &str, candidate: &str, reason: Reason, detail: &str) -> SkipEntry {
     SkipEntry {
         detail: Some(detail.into()),

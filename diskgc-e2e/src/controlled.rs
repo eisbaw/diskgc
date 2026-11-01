@@ -76,6 +76,8 @@ pub const OPS: &[&str] = &[
     "fchmod",
     "run_command",
     "fs_uuid",
+    "loop_backing_file",
+    "loop_backing_files",
     "boot_id",
     "state_lock",
     "state_read",
@@ -653,6 +655,17 @@ impl<H: Host> Host for Controlled<H> {
     ) -> Result<Option<std::path::PathBuf>, HostError> {
         self.before("loop_backing_file");
         self.host.loop_backing_file(dev)
+    }
+
+    fn loop_backing_files(
+        &self,
+    ) -> Result<Vec<(diskgc_core::host::Dev, std::path::PathBuf)>, HostError> {
+        self.before("loop_backing_files");
+        self.host.loop_backing_files()
+    }
+
+    fn test_container_pid_namespace(&self) -> bool {
+        self.host.test_container_pid_namespace()
     }
 
     fn boot_id(&self) -> Result<String, HostError> {

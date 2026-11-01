@@ -76,14 +76,20 @@ pub struct HostModel {
     /// resolve): user name to uid. A name not listed has no account.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub users: BTreeMap<String, u32>,
-    /// The answer of diskgc's held `/proc` to Owner PID's initial-namespace
-    /// check (docs/safety.md, Producer liveness): `initial` (the default)
-    /// or `nested`.
+    /// The PID namespace diskgc runs in, as its held `/proc` answers
+    /// (docs/safety.md, Producer liveness; In use: Visibility): `initial`
+    /// (the default), `nested`, or `test_container` (nested, in a marked
+    /// test container of a development build: `Host::test_container_pid_namespace`).
     #[serde(default, skip_serializing_if = "PidNamespaceSpec::is_initial")]
     pub pid_namespace: PidNamespaceSpec,
     /// The held `/proc` is mounted with `hidepid`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub proc_hidepid: bool,
+    /// Configured loop devices that no mount shows (`losetup`, `udisksctl
+    /// loop-setup` without a mount, a VM's disk): with the mounts'
+    /// [`MountSpec::loop_backing`], what `Host::loop_backing_files` lists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loops: Vec<LoopSpec>,
     /// The pre-release sandbox gate as `LinuxHost` has it (docs/safety.md):
     /// `open` (the default; the model deletes nothing real), `closed`
     /// (outside a test container: `may_delete`, `unlinkat`, `fchmod` and
@@ -492,7 +498,8 @@ pub enum CmdlineSpec {
     Unreadable(UnreadableTag),
 }
 
-/// Which PID namespace diskgc runs in, as Owner PID's precondition sees it.
+/// Which PID namespace diskgc runs in, as Owner PID's precondition and the
+/// in-use scan's see it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PidNamespaceSpec {
@@ -501,6 +508,21 @@ pub enum PidNamespaceSpec {
     Initial,
     /// Any other (a container, `unshare --pid`).
     Nested,
+    /// Nested, and diskgc is a development build inside a marked
+    /// disposable test container: the in-use scan takes the namespace as
+    /// complete; Owner PID does not (docs/safety.md, In use: Visibility).
+    TestContainer,
+}
+
+/// One configured loop device that no mount shows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoopSpec {
+    /// The loop block device (major 7).
+    pub dev: DevSpec,
+    /// Its `loop/backing_file` as the kernel prints it (` (deleted)`
+    /// included), a path of the model's tree or not.
+    pub backing: PathBuf,
 }
 
 impl PidNamespaceSpec {
@@ -838,6 +860,7 @@ pub enum Op {
     LowerPriority,
     FsUuid,
     LoopBackingFile,
+    LoopBackingFiles,
     BootId,
     StateLock,
     StateRead,
@@ -894,6 +917,7 @@ impl Op {
             Self::LowerPriority => "lower_priority",
             Self::FsUuid => "fs_uuid",
             Self::LoopBackingFile => "loop_backing_file",
+            Self::LoopBackingFiles => "loop_backing_files",
             Self::BootId => "boot_id",
             Self::StateLock => "state_lock",
             Self::StateRead => "state_read",

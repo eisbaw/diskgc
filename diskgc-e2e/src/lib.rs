@@ -137,6 +137,13 @@ pub const ROOT: Owner = Owner { uid: 0, gid: 0 };
 /// under test).
 pub const TESTER_NAME: &str = "tester";
 
+/// A file the release runner's under-test directory holds in `bin/`: the
+/// release-candidate package is the default `diskgc` there (flake.nix,
+/// `e2eReleaseUnderTest`). Its containers then share the host's PID
+/// namespace, since that build refuses to reclaim in one of its own
+/// (docs/safety.md, In use; [`crate::runner`]).
+pub const RELEASE_DEFAULT_MARKER: &str = "diskgc-release-default";
+
 /// Where the runner mounts the binaries under test, read-only.
 pub const UNDER_TEST_BIN_DIR: &str = "/opt/diskgc-e2e/bin";
 

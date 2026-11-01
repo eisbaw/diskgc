@@ -1,5 +1,9 @@
 # diskgc in a PID namespace other than the initial one cannot see sibling
-# namespaces: no PID answer permits (Owner PID step 3).
+# namespaces: no PID answer permits (Owner PID step 3). Only a development
+# build inside a marked test container gets this far (`test_container`):
+# anywhere else ensure refuses at start (TASK-263,
+# inuse/pid-namespace-nested-refused.yaml), and the test-container
+# exception is the in-use check's alone, never Owner PID's.
 profile_vector: 1
 profile: nix-shell-rc
 path: /tmp
@@ -7,7 +11,7 @@ min_free: 100%
 host:
   host_model: 1
   clock: 2026-10-15T03:00:00Z
-  pid_namespace: nested
+  pid_namespace: test_container
   mounts:
     - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
     - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}

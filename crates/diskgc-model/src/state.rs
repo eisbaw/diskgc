@@ -411,6 +411,8 @@ pub struct State {
     pub users: BTreeMap<String, u32>,
     /// Owner PID's preconditions as the held `/proc` answers them.
     pub pid_namespace_initial: bool,
+    /// [`crate::spec::PidNamespaceSpec::TestContainer`].
+    pub test_container_pid_namespace: bool,
     pub proc_hidepid: bool,
     /// The modelled sandbox gate.
     pub sandbox_gate: crate::spec::GateSpec,
@@ -428,8 +430,14 @@ pub struct State {
     pub elapsed: Duration,
     /// Filesystem UUIDs (`fs_uuid`), by device.
     pub fs_uuids: BTreeMap<Dev, String>,
-    /// [`crate::spec::MountSpec::loop_backing`], by device.
+    /// [`crate::spec::MountSpec::loop_backing`] and
+    /// [`crate::spec::HostModel::loops`], by device: the text as written.
+    /// What a read shows is [`State::loop_text`].
     pub loop_backings: BTreeMap<Dev, PathBuf>,
+    /// The object each backing text named in the loaded tree, by device
+    /// (none: the text names nothing in the model, as another mount
+    /// namespace's path or a deleted file's).
+    pub loop_objects: BTreeMap<Dev, Loc>,
     /// diskgc's state directory (`state_*` operations), if any.
     pub state_dir: Option<PathBuf>,
     /// diskgc's user's home for the per-user lock (`user_lock_path`).
@@ -461,6 +469,7 @@ impl State {
             own_cap_effective: 0,
             users: BTreeMap::new(),
             pid_namespace_initial: true,
+            test_container_pid_namespace: false,
             proc_hidepid: false,
             sandbox_gate: crate::spec::GateSpec::Open,
             command_exit: 0,
@@ -473,6 +482,7 @@ impl State {
             elapsed: Duration::ZERO,
             fs_uuids: BTreeMap::new(),
             loop_backings: BTreeMap::new(),
+            loop_objects: BTreeMap::new(),
             state_dir: None,
             home: None,
             boot_id: DEFAULT_BOOT_ID.to_owned(),
@@ -911,6 +921,33 @@ impl State {
             None => named,
         };
         u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    /// The backing file of loop device `dev` as the kernel prints it now
+    /// (`d_path`, which follows the file's own name): the text as written
+    /// while it still names the object it named at load; the object's
+    /// current path after a rename (a file with one link that is still
+    /// linked); otherwise the text with ` (deleted)`. A renamed file with
+    /// several links reads as deleted here (the model cannot tell which
+    /// name the device opened), the conservative side. `None`: no such
+    /// configured loop device.
+    pub fn loop_text(&self, dev: Dev) -> Option<PathBuf> {
+        let text = self.loop_backings.get(&dev)?;
+        let Some(&loc) = self.loop_objects.get(&dev) else {
+            return Some(text.clone());
+        };
+        if self.lookup_link(text).is_ok_and(|now| now == loc) {
+            return Some(text.clone());
+        }
+        if self.is_linked(loc)
+            && self.stat(loc).nlink == Some(1)
+            && let Some(path) = self.path_of(loc)
+        {
+            return Some(path);
+        }
+        let mut deleted = text.clone().into_os_string();
+        deleted.push(" (deleted)");
+        Some(PathBuf::from(deleted))
     }
 
     pub fn is_linked(&self, loc: Loc) -> bool {

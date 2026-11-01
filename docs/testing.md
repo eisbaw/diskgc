@@ -434,8 +434,15 @@ How the format reads (the schema documents every key):
   `zombie: true` (listed, its `status` readable and its pidfd open, every
   other reader `Gone`; no fds, maps or locks). The top-level
   `pid_namespace: nested` and `proc_hidepid: true` are the held `/proc`'s
-  answers to Owner PID's preconditions (default: the initial namespace,
-  no `hidepid`); a mount's `fs:` name gives `fstatfs` its magic (unknown
+  answers to Owner PID's preconditions and the in-use check's visibility
+  rule (default: the initial namespace, no `hidepid`);
+  `pid_namespace: test_container` is a nested namespace inside a marked
+  test container of a development build, which the visibility rule
+  excepts and Owner PID does not. The top-level `loops:` (`{dev: "7:N",
+  backing: TEXT}`) are configured loop devices no mount shows, listed with
+  the mounts' `loop_backing` by `loop_backing_files`; a backing text that
+  names an object of the tree follows it as the kernel's `d_path` does
+  (renamed: its new path; deleted: the text with ` (deleted)`). A mount's `fs:` name gives `fstatfs` its magic (unknown
   names: 0, never on the local list). The top-level `own_uid_map` is diskgc's
   own (same default, `none` too), `own_uid` its user id (default 1000; 0
   models running as root), `own_cap_effective` its effective capability
@@ -1088,7 +1095,8 @@ namespace, reused, zombie, nested and `hidepid` vectors and the frozen
 definition), dropping its `min_idle_for` (`nix-shell-rc-fresh-not-idle`,
 frozen definition), dropping the `nix-develop-*-*` pattern (its `examples`,
 golden set, `builtins/nix-shell-rc.yaml`), skipping `hidepid` (the three
-`hidepid` vectors), skipping the namespace (the nested vector), naming the
+`hidepid` vectors; since TASK-263 refusals at start, so the core's unit
+tests carry that bite now), skipping the namespace (the nested vector), naming the
 namespace before `hidepid` (`a_failed_precondition_names_its_rule_hidepid_first`),
 tabling only the first level and ignoring a listed carrier
 (`nix-shell-rc-namespace-local-pid-refused`), skipping the filesystem,
@@ -1098,7 +1106,9 @@ fails `nix_shell_rc_shell_in_private_pid_namespace_is_kept` (deletion
 oracle), skipping the namespace fails
 `owner_pid_candidates_are_kept_when_diskgc_has_its_own_pid_namespace`
 (deletion oracle), naming the namespace first fails
-`owner_pid_is_unknown_under_hidepid` (its detail); skipping the
+`owner_pid_is_unknown_under_hidepid` (its detail; since TASK-263
+`ensure_is_refused_under_hidepid`, whose runs are refused at start);
+skipping the
 filesystem rule fails `owner_pid_is_unknown_on_an_unlisted_filesystem`
 (deletion oracle: the overlay candidate deleted; step 7, 2026-10-24).
 Mutation record (step 5, `pytest`; vector corpus, the verdict's unit and
@@ -1174,8 +1184,10 @@ file's `content` and `fail` events on a listing already existed); each
 other extension lands with the contract that reads it (no field without a
 reader):
 
-- top level `pid_namespace: initial | nested` (default `initial`): the
-  answer of diskgc's held `/proc` to the initial-namespace check;
+- top level `pid_namespace: initial | nested | test_container` (default
+  `initial`): the answer of diskgc's held `/proc` to the
+  initial-namespace check, and for `test_container` the in-use check's
+  test-only exception (TASK-263);
 - top level `proc_hidepid: true` (default false): the held `/proc` is
   mounted with `hidepid`; the mounts' existing `fs:` names the type the
   local-filesystem list is checked against;
@@ -1213,9 +1225,9 @@ reader):
 | `nix-shell-rc-outer-level-pid-refused` | `nix-develop-3025375-1`; process with `nspid: [3025375, 9]` | `in_use` (any level counts) |
 | `nix-shell-rc-reused-pid-refused` | the shell is gone; an unrelated `sleep` now has pid 4242 | `in_use` (reuse retains, never deletes) |
 | `nix-shell-rc-zombie-owner-refused` | process 4242 `zombie: true` | `in_use` |
-| `nix-shell-rc-nested-namespace-unknown` | `pid_namespace: nested`; no process 4242 | `producer_unknown` |
-| `nix-shell-rc-hidepid-unknown` | `proc_hidepid: true`; no process 4242 | `producer_unknown` (a hidden `newgrp` shell would be unlisted) |
-| `nix-shell-rc-hidepid-root-unknown` | as above with `own_uid: 0` | `producer_unknown` (root does not lift the precondition) |
+| `nix-shell-rc-nested-namespace-unknown` | `pid_namespace: test_container` (anywhere else ensure refuses at start); no process 4242 | `producer_unknown` |
+| `nix-shell-rc-hidepid-refused` | `proc_hidepid: true`; no process 4242 | refused at start, dry run too (exit 2, `safety`, TASK-263): a hidden `newgrp` shell would be unlisted |
+| `nix-shell-rc-hidepid-root-refused` | as above with `own_uid: 0` | the same (root does not lift the rule) |
 | `nix-shell-rc-unlisted-filesystem-unknown` | one candidate each on mounts of type `virtiofs`, `9p`, `overlay`, `zfs`; no owners | `producer_unknown` each (one file per type, so dropping one bites) |
 | `nix-shell-rc-unreadable-status-unknown` | owner gone; process 77 of the user has `nspid: unreadable` | `producer_unknown`, `unreadable` 77 |
 | `nix-shell-rc-other-user-unreadable-status-unknown` | owner gone; a uid 2000 process 78 has `nspid: unreadable` | `producer_unknown`, `unreadable` 78 (Owner PID's set is every user's processes) |
@@ -1282,8 +1294,8 @@ and 1 are below the rank, 2 to 4 above. *proc*: a uid 1000 shell without
 | `pytest-tmp-excused-process-ignored` | B `{0..4}`; the only other process is the user's `non_dumpable` agent | 0 to 4 eligible (the stated residual) |
 | `pytest-tmp-lock-namespace-pid-refused` | A `{0}`, lock `9`; a process with `pid: 5000`, `nspid: [5000, 9]` | 0 `in_use`, `owner_pid` 5000 |
 | `pytest-tmp-lock-malformed-unknown` | A `{0..6}` whose `.lock` is: empty; `0042`; `42 43`; 17 bytes; `abc`; a directory; a symlink | 0 to 6 `producer_unknown` (row 3) |
-| `pytest-tmp-nested-namespace` | `pid_namespace: nested`; B `{0..4}`, `pytest-0/.lock` holds `42` | 0 `producer_unknown` (row 5); 1 eligible (row 7: a pytest counts as running, the session is old); 2, 3, 4 `producer_unknown` (row 8) |
-| `pytest-tmp-hidepid-unknown` | `proc_hidepid: true`; otherwise as above | the same |
+| `pytest-tmp-nested-namespace` | `pid_namespace: test_container`; B `{0..4}`, `pytest-0/.lock` holds `42` | 0 `producer_unknown` (row 5); 1 eligible (row 7: a pytest counts as running, the session is old); 2, 3, 4 `producer_unknown` (row 8) |
+| `pytest-tmp-hidepid-refused` | `proc_hidepid: true`; otherwise as above | refused at start, dry run too (exit 2, `safety`, TASK-263) |
 | `pytest-tmp-fresh-session-not-idle` | B `{0}` made 10 minutes before the clock; no processes | 0 `not_idle` (below the built-in's floor) |
 | `pytest-tmp-listing-unreadable` | B `{0..4}`; a `fail: EACCES` event on the second listing of `pytest-of-tester` | 0 to 4 `unreadable` (row 2) |
 | `pytest-tmp-claude-root` | `/tmp/claude-1000/pytest-of-tester` `{0..4}`; a process with `TMPDIR=/tmp/claude-1000` | 0, 1 eligible; 2, 3, 4 `in_use` |
@@ -1468,13 +1480,14 @@ reclaimed, judged by the deletion oracle, once it is killed and reaped),
 (diskgc in a nested namespace: a dead and a live owner's directory both
 `producer_unknown` naming the namespace rule, nothing deleted; then from
 the initial namespace the dead one is reclaimed and the live one `in_use`),
-`owner_pid_is_unknown_under_hidepid` (diskgc in a nested namespace whose
+`ensure_is_refused_under_hidepid` (diskgc in a nested namespace whose
 `/proc` has `hidepid=invisible`; a shell of tester's uid and another
 group, as after `newgrp`, owns a directory; tester cannot list it, root
-can; `producer_unknown` naming `hidepid` for tester and for root with
-`--allow-root`. Rootless Podman cannot mount a `hidepid` `/proc` for the
-initial namespace, so the rule is observed by its detail (safety.md, Owner
-PID). From the initial namespace without
+can; `ensure`, its dry run and root's `--allow-root` run are refused at
+start, exit 2, `cause: safety`, naming `hidepid` (TASK-263; safety.md, In
+use: A process list that cannot be complete). Rootless Podman cannot mount
+a `hidepid` `/proc` for the initial namespace, so diskgc runs in a nested
+one, which the test-container exception lets only `hidepid` refuse. From the initial namespace without
 `hidepid` the shell is listed and its fd table is denied to tester, so In
 use keeps the directory first, evidence `unreadable`),
 `owner_pid_is_unknown_on_an_unlisted_filesystem` (TASK-112 step 7; in the
@@ -2594,11 +2607,20 @@ permitted, effective and ambient capability sets to be empty and
 `NoNewPrivs` to be 1. With `--seccomp-bpf` it stops only
 at the traced calls, which the suite checks against a stated bound (a
 20,000-file create/stat/unlink churn: one seccomp filter more than the
-harness, at most 4 ptrace stops per file, at most 10 s). The Owner PID
-tests listed in `HOST_PID_NAMESPACE_TESTS` (`suite.rs`) also get
+harness, at most 4 ptrace stops per file, at most 10 s). The tests
+listed in `HOST_PID_NAMESPACE_TESTS` (`suite.rs`) also get
 `--pid=host`: Owner PID permits only in the initial PID namespace, so a
 test that shows a reclaim, or contrasts a nested namespace with the
-initial one, needs diskgc there. What that exposes, and how it is
+initial one, needs diskgc there; and the release-candidate build plans
+or reclaims only there (TASK-263; safety.md, In use: A process list that
+cannot be complete), so its tests that do are listed too, and the release
+runner (whose under-test directory holds `bin/diskgc-release-default`)
+gives every container the host's PID namespace and runs them one at a
+time. The development build in an ordinary container (its own PID
+namespace) reclaims through the test-container exception of that rule;
+`release_candidate_refuses_in_its_own_pid_namespace` shows that the
+release build has none (a nested namespace, with and without `hidepid`:
+refused at start; from the container's: plans). What that exposes, and how it is
 confined: every host process is visible in the container (its pid,
 `status` and command name; that is what Owner PID reads). The runner
 refuses rootful Podman, and these containers get `--uidmap 0:1:65536`

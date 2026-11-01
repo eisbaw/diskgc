@@ -1,0 +1,30 @@
+# TASK-263: a held /proc mounted with hidepid (ProtectProc=invisible) hides
+# processes the in-use check must see (a newgrp shell of the user; for root,
+# one an LSM keeps from it): ensure refuses at start, its dry run too
+# (exit 2, safety), whoever runs it.
+profile_vector: 1
+user_profiles:
+  - {"name": "scratch-probe", "find": {"roots": ["/tmp"], "paths": ["scratch-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/scratch-a"]}}
+profile: scratch-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  proc_hidepid: true
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/scratch-a: {data: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: safety, contains: "the held /proc is mounted with hidepid, so the in-use check cannot see every process"}]
+  reclaim_exit: 2
+  errors: [{cause: safety, contains: "the held /proc is mounted with hidepid"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/scratch-a/data]

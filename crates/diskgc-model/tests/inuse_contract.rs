@@ -189,6 +189,16 @@ impl Host for Short {
         self.0.loop_backing_file(dev)
     }
 
+    fn loop_backing_files(
+        &self,
+    ) -> Result<Vec<(diskgc_core::host::Dev, std::path::PathBuf)>, HostError> {
+        self.0.loop_backing_files()
+    }
+
+    fn test_container_pid_namespace(&self) -> bool {
+        self.0.test_container_pid_namespace()
+    }
+
     fn boot_id(&self) -> Result<String, HostError> {
         self.0.boot_id()
     }

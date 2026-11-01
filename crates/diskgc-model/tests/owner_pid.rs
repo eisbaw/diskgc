@@ -144,10 +144,10 @@ fn without_the_option_no_status_is_read() {
     )
     .expect("scan");
     assert!(scan.pid_table().is_none());
-    assert!(!model.trace().iter().any(|call| matches!(
-        call.op,
-        diskgc_model::spec::Op::ProcNspid | diskgc_model::spec::Op::PidNamespace
-    )));
+    assert_eq!(model.trace_count(diskgc_model::spec::Op::ProcNspid), 0);
+    // The namespace facts are the in-use check's own precondition too
+    // (TASK-263): read before and after every scan, Owner PID or not.
+    assert_eq!(model.trace_count(diskgc_model::spec::Op::PidNamespace), 2);
 }
 
 /// Many processes whose `NSpid` cannot be read are read again in rounds:

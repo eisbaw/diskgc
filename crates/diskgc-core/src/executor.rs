@@ -51,7 +51,8 @@ pub use entry::{ensure, ensure_grouped, ensure_grouped_with_index, ensure_with_i
 pub use indexed::tally_sources;
 pub use plan::{dry_run, dry_run_grouped};
 pub use preflight::{
-    CAP_SYS_PTRACE, MeasureFailure, PrivilegeError, goal_bytes, privileges, reach_path,
+    CAP_SYS_PTRACE, MeasureFailure, PrivilegeError, goal_bytes, privileges, process_visibility,
+    reach_path,
 };
 pub use tier::{
     CompiledSelection, FsUnionSource, NegatedKind, NegatedSource, ProtectedKind, ProtectedSource,
@@ -810,6 +811,11 @@ struct Reclaim<'a, 'l, H: Delete> {
     /// Candidates in a row, in the order taken, whose reclaim ended
     /// `in_use_unknown` ([`IN_USE_UNKNOWN_IN_A_ROW_MAX`]).
     in_use_unknown_in_a_row: usize,
+    /// The detail of the latest of them when its cause is not the host's
+    /// load but one that stays ([`crate::inuse::standing_cause`]: a loop
+    /// device, a process list that cannot be complete): the candidates
+    /// skipped unchecked then name it instead of a busy host.
+    in_use_unknown_cause: Option<String>,
     /// The run's index, which the reclaim walk takes its queue from
     /// ([`indexed`]); `None` for a tier that discovers only.
     index: Option<&'a mut TallyState>,
@@ -1118,15 +1124,19 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         if self.in_use_unknown_in_a_row < IN_USE_UNKNOWN_IN_A_ROW_MAX {
             return false;
         }
-        let skip = Skip::new(
-            Reason::InUseUnknown,
-            candidate.to_owned(),
-            format!(
+        let detail = match &self.in_use_unknown_cause {
+            Some(cause) => format!(
+                "not checked: the {} candidates before it in this tier could not be checked: \
+                 {cause}",
+                self.in_use_unknown_in_a_row
+            ),
+            None => format!(
                 "not checked: the host was too busy to check the {} candidates before it in \
                  this tier; kept, run again when the host is less busy",
                 self.in_use_unknown_in_a_row
             ),
-        );
+        };
+        let skip = Skip::new(Reason::InUseUnknown, candidate.to_owned(), detail);
         self.skip_as(candidate, profile, &skip);
         true
     }
@@ -2416,10 +2426,12 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 count: 1,
             });
         }
-        let in_use_unknown = matches!(
-            &outcome.end,
-            ReclaimEnd::Skipped(skip) if skip.reason == Reason::InUseUnknown
-        );
+        let in_use_unknown = match &outcome.end {
+            ReclaimEnd::Skipped(skip) if skip.reason == Reason::InUseUnknown => {
+                Some(skip.detail.clone())
+            }
+            _ => None,
+        };
         match outcome.end {
             ReclaimEnd::Complete => {}
             ReclaimEnd::Skipped(skip) => {
@@ -2447,17 +2459,23 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
         }
         // After the skip's own log line, so the give-up line follows it.
-        if in_use_unknown {
+        if let Some(detail) = in_use_unknown {
             self.in_use_unknown_in_a_row += 1;
+            self.in_use_unknown_cause = crate::inuse::standing_cause(&detail).then_some(detail);
             if self.in_use_unknown_in_a_row == IN_USE_UNKNOWN_IN_A_ROW_MAX {
+                let why = match &self.in_use_unknown_cause {
+                    Some(_) => "a cause that stays, named in each skip",
+                    None => "the host is too busy",
+                };
                 (self.log)(&format!(
-                    "{}: {} candidates in a row could not be checked (the host is too busy): \
-                     the rest of this tier is skipped unchecked",
+                    "{}: {} candidates in a row could not be checked ({why}): the rest of this \
+                     tier is skipped unchecked",
                     self.tier.name, self.in_use_unknown_in_a_row
                 ));
             }
         } else {
             self.in_use_unknown_in_a_row = 0;
+            self.in_use_unknown_cause = None;
         }
         if self.run_stopped { None } else { after }
     }

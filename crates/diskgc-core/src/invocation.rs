@@ -302,8 +302,9 @@ pub struct Platform<'a> {
 
 /// Runs `ensure` (or its dry run) from what [`load`] checked; every error
 /// is in the report. Every refusal before the executor (privileges, a
-/// static check for the user, a supplied root missing) is exit 2, or 3 for
-/// a host read, and deletes nothing ([`refused`]). `log` receives the
+/// static check for the user, the in-use check's visibility, a supplied
+/// root missing) is exit 2, or 3 for a host read, and deletes nothing
+/// ([`refused`]). `log` receives the
 /// diagnostics (`error: ...`), `progress` the executor's progress lines.
 /// `loaded` is [`load`] of `options.selection()`; `options` gives the goal.
 pub fn ensure<H: Delete>(
@@ -360,6 +361,7 @@ fn run<H: Delete>(
     progress: &mut dyn FnMut(&str),
 ) -> Result<Report, (ErrorCause, String)> {
     let prepared = prepare(host, loaded, platform)?;
+    executor::process_visibility(host).map_err(|e| (e.cause, e.message))?;
     prepared.refuse_missing_roots(host)?;
     let mut index = if options.no_index {
         RunIndex::no_index()

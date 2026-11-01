@@ -104,8 +104,9 @@ impl PidTable {
     /// held `/proc` can list every process of this kernel, or the rule that
     /// fails. `hidepid` is named before the namespace: both fail closed
     /// alike, and a rootless container can observe `hidepid` only by this
-    /// text (owner_pid_is_unknown_under_hidepid). The one home of these
-    /// texts for Owner PID and the pytest contract.
+    /// text. The one home of these texts for Owner PID, the pytest
+    /// contract and the in-use check's visibility rule
+    /// ([`crate::inuse::visibility`], which starts its own with them).
     pub fn process_list_complete(&self) -> Result<(), String> {
         match &self.namespace {
             Err(why) => Err(format!("PID namespace unreadable: {why}")),

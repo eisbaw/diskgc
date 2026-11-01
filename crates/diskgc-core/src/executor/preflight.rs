@@ -121,6 +121,35 @@ pub fn privileges<H: Host>(host: &H, allow_root: bool) -> Result<u32, PrivilegeE
     }
 }
 
+/// The in-use check's visibility (docs/safety.md, In use: Visibility),
+/// checked once at the start of every `ensure` (its dry run included: a
+/// plan shows what a reclaim would do, and a reclaim would not start) and
+/// of a reclaiming `watch`, before anything is measured: under `hidepid`,
+/// or in a PID namespace other than the initial one, the in-use scan would
+/// miss processes silently, so the run is refused (`safety`, exit 2),
+/// naming the rule ([`crate::inuse::visibility`], its one home; the scan
+/// checks it again on every scan). Facts that cannot be read are a failure
+/// of the host (`host`, exit 3). TASK-263.
+pub fn process_visibility<H: Host>(host: &H) -> Result<(), PrivilegeError> {
+    let facts = host.pid_namespace().map_err(|e| PrivilegeError {
+        cause: ErrorCause::Host,
+        message: format!(
+            "diskgc could not read its PID namespace facts, which the in-use check needs \
+             (docs/safety.md, In use: Visibility): {e}"
+        ),
+    })?;
+    crate::inuse::visibility(&facts, host.test_container_pid_namespace()).map_err(|why| {
+        PrivilegeError {
+            cause: ErrorCause::Safety,
+            message: format!(
+                "{why}; run diskgc where it sees every process: on the host, outside any \
+                 container, with /proc mounted without hidepid (docs/safety.md, In use: \
+                 Visibility)"
+            ),
+        }
+    })
+}
+
 /// The requested filesystem, measured.
 pub(super) struct Measured<F> {
     /// `PATH`, reached safely (held for the run: its fd is what is sampled).

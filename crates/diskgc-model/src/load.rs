@@ -195,6 +195,8 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
     });
     state.users = model.users.clone();
     state.pid_namespace_initial = model.pid_namespace == crate::spec::PidNamespaceSpec::Initial;
+    state.test_container_pid_namespace =
+        model.pid_namespace == crate::spec::PidNamespaceSpec::TestContainer;
     state.proc_hidepid = model.proc_hidepid;
     state.sandbox_gate = model.sandbox_gate;
     state.command_exit = model.command_exit;
@@ -231,7 +233,32 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
             state.loop_backings.insert(spec.dev.0, backing.clone());
         }
     }
+    for (i, spec) in model.loops.iter().enumerate() {
+        let at = format!("loops[{i}]");
+        if spec.dev.0.major != LOOP_MAJOR {
+            return Err(LoadError::new(at, "a loop device has dev major 7"));
+        }
+        if state
+            .loop_backings
+            .insert(spec.dev.0, spec.backing.clone())
+            .is_some()
+            || model.mounts.iter().any(|mount| mount.dev == spec.dev)
+        {
+            return Err(LoadError::new(
+                at,
+                format!("loop device {} is listed twice", spec.dev.0),
+            ));
+        }
+    }
     let deferred = load_tree(&mut state, model)?;
+    // What each loop device's text names in the tree, so a later read
+    // follows renames and deletions (`State::loop_text`).
+    let objects: Vec<(diskgc_core::host::Dev, Loc)> = state
+        .loop_backings
+        .iter()
+        .filter_map(|(dev, text)| state.lookup_link(text).ok().map(|loc| (*dev, loc)))
+        .collect();
+    state.loop_objects.extend(objects);
     load_processes(&mut state, model)?;
     load_locks(&mut state, model)?;
     remove_deleted(&mut state, model)?;
@@ -1112,6 +1139,7 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             Op::ProcCmdline,
             Op::ProcRootLookup,
             Op::PidNamespace,
+            Op::LoopBackingFiles,
             Op::ProcNspid,
             Op::PidAlive,
             Op::Pressure,

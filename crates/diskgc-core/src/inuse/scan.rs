@@ -668,10 +668,11 @@ pub(crate) fn gather<H: Host>(
 
 /// Owner PID's lookup table (docs/safety.md, Producer liveness, Owner PID
 /// step 5) of a scan whose listings ran after `before` was read: the
-/// `NSpid` of every process of its last listing, and the namespace facts,
-/// read again afterwards. Facts that changed between the two reads (a
-/// `/proc` remounted mid-scan) or failed either read are unknown, so the
-/// listings they guard are never taken as complete.
+/// `NSpid` of every process of its last listing. The caller confirms the
+/// namespace facts with a read made afterwards
+/// ([`PidTable::confirm_namespace`]): facts that changed between the two
+/// reads (a `/proc` remounted mid-scan) or failed either read are unknown,
+/// so the listings they guard are never taken as complete.
 ///
 /// Ordering the caller relies on: a process alive when the last listing
 /// was made is in it; one that ends after it has ended for good; a process
@@ -690,12 +691,12 @@ pub(crate) fn gather<H: Host>(
 /// checked after each pause, as in [`gather`].
 pub(crate) fn pid_table<H: Host>(
     host: &H,
-    before: Result<PidNamespace, HostError>,
+    before: Result<PidNamespace, String>,
     listed: &[Pid],
     settled: bool,
     deadline: Option<MonoTime>,
 ) -> Result<PidTable, ScanError> {
-    let mut table = PidTable::new(namespace_or_run_error(before)?, settled);
+    let mut table = PidTable::new(before, settled);
     if !table.preconditions_hold() {
         return Ok(table);
     }
@@ -730,14 +731,14 @@ pub(crate) fn pid_table<H: Host>(
             }
         }
     }
-    table.confirm_namespace(namespace_or_run_error(host.pid_namespace())?);
     Ok(table)
 }
 
-/// The PID namespace facts as [`PidTable`] takes them (a failed read: its
-/// reason, which makes every answer unknown), or diskgc out of file
+/// The PID namespace facts as [`PidTable`] and the in-use check's
+/// visibility take them (a failed read: its reason, which makes every
+/// answer unknown and blocks every candidate), or diskgc out of file
 /// descriptors as an error of the run (TASK-185).
-fn namespace_or_run_error(
+pub(crate) fn namespace_or_run_error(
     read: Result<PidNamespace, HostError>,
 ) -> Result<Result<PidNamespace, String>, ScanError> {
     match read {

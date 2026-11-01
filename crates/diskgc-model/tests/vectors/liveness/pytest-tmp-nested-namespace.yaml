@@ -1,6 +1,7 @@
 # diskgc outside the initial PID namespace: the lock's owner cannot be answered
 # (row 5); a pytest counts as running and naming as undecidable (row 8); an old
-# session below the rank still goes by row 7.
+# session below the rank still goes by row 7. Inside a marked test container
+# (`test_container`): anywhere else ensure refuses at start (TASK-263).
 profile_vector: 1
 profile: pytest-tmp
 path: /tmp
@@ -8,7 +9,7 @@ min_free: 100%
 host:
   host_model: 1
   clock: 2026-10-15T03:00:00Z
-  pid_namespace: nested
+  pid_namespace: test_container
   mounts:
     - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
     - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}

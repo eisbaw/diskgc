@@ -680,7 +680,8 @@ shallower than the window.
 
 ### In use
 
-A candidate is skipped (`in_use`) if a visible process:
+A candidate is skipped (`in_use`) if one of its files backs a configured
+loop device (Loop devices, below), or if a visible process:
 
 - has an open file descriptor, working directory, root, or memory mapping
   on any of the candidate's inodes. Matching is by **device and inode**:
@@ -1180,6 +1181,115 @@ above.
 so their use of *your* files is not seen; nor is the use of the user's own
 processes noted above as unreadable (setuid, more capable, non-dumpable).
 Fine for one-user machines and runners; weaker on shared hosts.
+
+**A process list that cannot be complete** (TASK-263). Two settings take
+processes out of the listing itself, where neither the rules above nor a
+note can see them:
+
+- `hidepid` on the held `/proc` (`invisible` or `2`, `ptraceable` or `4`;
+  systemd's `ProtectProc=`) lists only the processes diskgc may
+  ptrace-read. For a non-root diskgc the others are other users'
+  processes (invisible in effect anyway), the setuid, more capable and
+  non-dumpable ones (excused anyway, but no longer noted), and the
+  user's own processes the kernel refuses for another reason, a shell
+  started with `newgrp` or `sg` and its children, which block every
+  candidate while listed: hidden, their open files go unseen. For root
+  with `CAP_SYS_PTRACE` the hidden ones are those an LSM keeps from it,
+  which block while listed. `noaccess` (`1`) lists every process but
+  refuses its `status`, which blocks every candidate; it is refused
+  alike, for one rule. A `gid=` group whose members see everything is
+  not honoured: diskgc does not read its own groups, and refuses
+  whatever the group.
+- A PID namespace other than the initial one (a container; systemd's
+  `PrivatePIDs=`) shows only its own processes: every process outside
+  it, the host's, another container's, the user's own, can use a
+  candidate unseen, root or not.
+
+The rule: the in-use check runs only where its process list can be
+complete, the held `/proc` without `hidepid` and diskgc in the initial PID
+namespace. These are the facts of Owner PID's preconditions 3 and 4,
+read the same way through the held `/proc`: `self/ns/pid` is the initial
+namespace's nsfs inode, and the held mount's own `mountinfo` line names no
+`hidepid` other than `off`. Where the rule fails, `ensure` (its dry run
+too: a plan shows what a reclaim would do, and a reclaim would not start)
+and a reclaiming `watch` refuse at start, before anything is measured:
+exit 2, `cause: safety`, naming the rule and where to run instead; facts
+that cannot be read are exit 3 (`host`). `watch --tally-only`, `check`,
+`survey` and `profiles` judge no candidate and are not refused. Every
+scan reads the facts again, before its first listing and after its last
+read: a failed read, a change between the two (a `/proc` remounted with
+`hidepid` under a running `watch`) or a failed rule makes every candidate
+`in_use_unknown`. Decided 2026-11-01 for TASK-263 (implementer's choice,
+for Mark to confirm): refusing is the simplest sound rule and the loud
+one; the alternative, every candidate `in_use_unknown` without a
+refusal, keeps dry runs informative but makes a run that can never
+reclaim end like one on a busy host (exit 1).
+
+One exception, for tests only: a development build inside a marked test
+container (both markers, the gate's own cached decision, [Pre-release
+sandbox gate](#pre-release-sandbox-gate)) takes its own PID namespace as
+complete for this rule, since the container's files are its own; this is
+how the rootless e2e containers, each in its own PID namespace, reclaim.
+`hidepid` is never excepted, and Owner PID still permits nothing outside
+the initial namespace. The `release-without-sandbox-gate` feature compiles
+the exception out, so the release-candidate build refuses in every
+container (diskgc-e2e `candidate_refuses_in_its_own_pid_namespace`).
+Limits: a container that shares the host's PID namespace (`--pid=host`)
+passes, and sees the host's processes only as far as its user namespace
+lets it (a rootless one sees the user's processes as another user's:
+Visibility above, more capable); a `hidepid` mount made after the last
+scan is the check-to-delete race (limit 5).
+
+**Loop devices** (TASK-169). A configured loop device holds its backing
+file open in the kernel, where no process's fds, maps or directories show
+it: an image set up with `udisksctl loop-setup` or `losetup` (mounted or
+not) and deleted under the device keeps working until the device
+detaches, and then its data is gone. So every scan also lists the
+configured loop devices (`/sys/block/loop<N>`: its `dev` and, while it is
+bound, `loop/backing_file`; read-only) and looks each backing file up by
+the safe lookup every root takes ([Path traversal](#path-traversal): no
+symlink followed, network, FUSE and automount mounts never touched). The
+kernel prints the file's path for diskgc's root and mount namespace
+(`d_path`, which follows renames):
+
+- the text names an object here: its (device, inode) is a use, matched
+  like a process's open file, so a candidate holding it by any name (a
+  hard link) is `in_use`, its detail naming the device;
+- the text ends in ` (deleted)`: the name the device opened is gone and
+  the file's identity cannot be learned, while another name of it (a
+  hard link) could be in any candidate: every candidate is
+  `in_use_unknown`, naming the device and how to end it (`losetup -d`,
+  `udisksctl loop-delete`), until it is detached. Not narrowed to one
+  filesystem: the device's (device, inode) is in its `LOOP_GET_STATUS64`,
+  which needs the block device opened, root's or the `disk` group's
+  (a follow-up for `--allow-root`). A live file whose name really ends
+  in ` (deleted)` is taken as deleted, the conservative side;
+- the text names nothing the eligibility walk could reach (missing,
+  unsearchable by diskgc's user, a symlink or a network or FUSE mount on
+  the way, not an absolute path: an anonymous file): the walk reaches
+  candidates by the same safe lookups as the same user, so no candidate
+  holds the file by that name. The text is read once more first: a file
+  renamed between the listing and the lookup shows its new name, which is
+  looked up instead (up to three times; a name still changing then
+  blocks every candidate). What stays unreachable is noted in the log,
+  not blocking;
+- anything else (an I/O error, no inode number): every candidate is
+  `in_use_unknown`.
+
+A listing that fails, a `dev` that does not parse, or a backing file
+that cannot be read is an error of the run (exit 3 if the goal is not
+met), never a shorter list; a device detached during the listing is left
+out. No configured device costs one directory listing per scan. Limits:
+a device set up in another mount namespace (a privileged container's)
+prints that namespace's path, which can name nothing here, or another
+file, while the real file is in a candidate (not seen); a sysfs masked by
+a container runtime lists no device (diskgc then refuses anyway, being in
+a container); a device set up after the scan is the check-to-delete race
+(limit 5). No rootless container can attach a loop device, so these rules
+are tested in the model only (`inuse_visibility`, the vectors
+`inuse/loop-backing-file-*`, the generated property
+`the_in_use_check_never_clears_what_it_cannot_see_or_a_loop_device_holds`)
+and the listing by a read-only test of `LinuxHost` on the development host.
 
 ### Producer liveness
 
@@ -1980,13 +2090,17 @@ schema only with its first producer.
 
 - Outside the initial PID namespace, under `hidepid`, or on a filesystem
   not on the local list, no PID-based answer permits a deletion; those
-  candidates are kept as `producer_unknown`. diskgc in a container with
-  its own PID namespace reclaims no `nix-shell` rc directory and no pytest
-  session that needs the process list (rows 3 to 5 with a lock, rows 8 to
-  11); pytest's row 7 does not use the process list beyond "a pytest is
-  running", which it then assumes, so an old lockless session below the
-  rank is still reclaimed there (producer-equivalent;
-  `pytest-tmp-nested-namespace`).
+  candidates are kept as `producer_unknown`. Since TASK-263 `ensure` and
+  a reclaiming `watch` refuse to start under `hidepid` or outside the
+  initial PID namespace ([In use](#in-use), A process list that cannot be
+  complete), so these preconditions decide only where that rule's
+  test-container exception lets a run start, and as a second guard.
+  There, in its own PID namespace, diskgc reclaims no `nix-shell` rc
+  directory and no pytest session that needs the process list (rows 3 to
+  5 with a lock, rows 8 to 11); pytest's row 7 does not use the process
+  list beyond "a pytest is running", which it then assumes, so an old
+  lockless session below the rank is still reclaimed there
+  (producer-equivalent; `pytest-tmp-nested-namespace`).
 - The local-filesystem list rests on a deployment assumption diskgc
   cannot check: no listed filesystem holding candidates is written by
   another kernel.
@@ -3912,6 +4026,10 @@ How it holds:
 
 ## Privileges
 
+- `ensure` (its dry run too) and a reclaiming `watch` refuse to start
+  under `hidepid` or outside the initial PID namespace, as root or not
+  (exit 2, `safety`): the in-use check would miss processes there
+  ([In use](#in-use), A process list that cannot be complete).
 - diskgc refuses to run as root (uid 0) unless `--allow-root` is given;
   the laptop service runs as the owner, CI as the runner user. `profiles
   list` and `show` are exempt: they only read the configuration and

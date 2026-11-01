@@ -1017,7 +1017,12 @@ is accepted until measured otherwise.
   live task's `fd` directory (`proc_status`, readable for every process);
   diskgc's own pid; and two socket-diagnostics dumps of the Unix sockets
   bound in diskgc's network namespace (`bound_unix_sockets`, a read-only
-  `NETLINK_SOCK_DIAG` query: ungated, like the query runs). Reading a list
+  `NETLINK_SOCK_DIAG` query: ungated, like the query runs); the PID
+  namespace facts (`pid_namespace`: the initial namespace, `hidepid`) and
+  whether this is a development build in a marked test container
+  (`test_container_pid_namespace`, the visibility rule's one test-only
+  exception); and the configured loop devices with their backing files
+  (`loop_backing_files`, `/sys/block/loop<N>`, read-only). Reading a list
   of processes is a provided method (`proc_views`) that calls the readers
   one process after another, so `ModelHost` sees every reader call;
   `LinuxHost` reads several processes at once, each on its own, and the
@@ -1118,7 +1123,11 @@ is accepted until measured otherwise.
   Nix, Docker and Cargo are optional. It needs the `/proc` of its own pid
   namespace and `pidfd_open` (not blocked by seccomp), and refuses to start
   otherwise ([safety.md](safety.md#in-use), unreadable or vanishing
-  processes). Its in-use scan also needs a hard `RLIMIT_NOFILE` above the
+  processes). `ensure` and a reclaiming `watch` also need the initial PID
+  namespace and a `/proc` without `hidepid`, so they run on the host, not
+  in a container or a unit with `PrivatePIDs=` or `ProtectProc=`
+  ([safety.md](safety.md#in-use), A process list that cannot be
+  complete). Its in-use scan also needs a hard `RLIMIT_NOFILE` above the
   number of processes it can see; it raises its soft limit itself
   ([reference.md](reference.md#ensure), Open-file limit).
 - **Generic Linux:** the binary, the two `watch` units below, the tmpfiles
@@ -1376,12 +1385,15 @@ every option that edits the capability bounding set (systemd.exec,
 Sandboxing and Capabilities), so only seccomp-based options remain
 there; they are the shipped list in both units. Checked against
 `systemd-analyze syscall-filter` and systemd.exec of systemd 260.
-Operator-added `ProtectProc=` or `PrivatePIDs=` is **not detected
-today**: diskgc starts and runs blind (TASK-263).
+Operator-added `ProtectProc=` or `PrivatePIDs=` is **refused**: a
+reclaiming `watch` (and `ensure`) exits 2 at start naming the rule, so
+the unit fails where its operator looks instead of running blind
+([safety.md](safety.md#in-use), A process list that cannot be complete;
+TASK-263).
 
 | Option | Verdict | Why, by what diskgc reads and writes |
 |---|---|---|
-| `ProtectProc=` other than `default` | no (unsafe; not detected today, TASK-263) | mounts the unit's `/proc` with `hidepid`, which hides the user's own processes the kernel will not let diskgc read, a shell started with `newgrp` or `sg` and its children among them. Visible, such a process makes candidates `in_use_unknown`; hidden, its open files go unseen. Liveness contracts then keep everything ([safety.md](safety.md#producer-liveness), precondition 4). System units only. |
+| `ProtectProc=` other than `default` | no: refused at start (exit 2, TASK-263) | mounts the unit's `/proc` with `hidepid`, which hides the user's own processes the kernel will not let diskgc read, a shell started with `newgrp` or `sg` and its children among them (for root, those an LSM keeps from it). Visible, such a process makes candidates `in_use_unknown`; hidden, its open files would go unseen, so diskgc refuses ([safety.md](safety.md#in-use)). System units only. |
 | `ProcSubset=pid` | no | hides `/proc/sys/kernel/random/boot_id` (snapshot validity) and `/proc/pressure` (the pressure brake goes off and the tally loads the system). |
 | `PrivateTmp=` | fatal | an empty private `/tmp`: every `/tmp` candidate (`pytest-tmp`, `nix-shell-rc`) is invisible to discovery and walks. |
 | `ProtectHome=` | no | hides or freezes `/home`, `/root`, `/run/user`: Cargo roots, the user's configuration and the state directory vanish, or deleting and the snapshot write fail `EROFS`. |
@@ -1391,7 +1403,7 @@ today**: diskgc starts and runs blind (TASK-263).
 | `PrivateDevices=` | works, not shipped | hides `/dev/disk/by-uuid`, so the snapshot key falls back to the device number (warmth only); a mount namespace. |
 | `ProtectKernelTunables=`, `ProtectKernelModules=`, `ProtectKernelLogs=`, `ProtectControlGroups=`, `ProtectHostname=`, `PrivateMounts=`, `PrivateIPC=` | not shipped | harmless to what diskgc reads (`/proc/sys` stays readable), but each needs a namespace: the rule, and in a user manager a user namespace. |
 | `PrivateUsers=` (any value) | fatal, silently | in a child user namespace the kernel refuses the ptrace-read access to `/proc/<pid>/fd`, `maps`, `environ`, `cwd` of every process of the initial namespace, the user's own included (a reader in another user namespace needs `CAP_SYS_PTRACE` in the target's), and the "more capable" excuse is off there ([safety.md](safety.md#in-use)): every filesystem and Cargo candidate is `in_use_unknown`. Nothing is deleted wrongly, and only the daemon-side kinds (Docker, Nix) still reclaim. |
-| `PrivatePIDs=` | no (unsafe; not detected today, TASK-263) | a new PID namespace with its own `/proc`: the in-use scan sees only the unit's processes, so every other process's open files, maps and working directories go unseen; liveness contracts keep everything ([safety.md](safety.md#producer-liveness), precondition 3). |
+| `PrivatePIDs=` | no: refused at start (exit 2, TASK-263) | a new PID namespace with its own `/proc`: the in-use scan would see only the unit's processes, so every other process's open files, maps and working directories would go unseen; diskgc refuses ([safety.md](safety.md#in-use)). |
 | `PrivateNetwork=` | no (unsafe under `ipc: live-only`) | `bound_unix_sockets` dumps the Unix sockets bound in diskgc's network namespace; a private one is empty, so a socket another process has bound looks stale. Daemon sockets would still connect (path sockets cross network namespaces). |
 | `RemoveIPC=` | no | at stop it removes every System V and POSIX IPC object of `User=` (its `/dev/shm` segments, semaphores, message queues), the user's own programs' included. System units only. |
 | `ProtectClock=` | system: not shipped; user: fatal | it edits the capability bounding set, which in a user manager implies `PrivateUsers=`. |

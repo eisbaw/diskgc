@@ -93,6 +93,13 @@
         "$ref": "#/$defs/LockSpec"
       }
     },
+    "loops": {
+      "description": "Configured loop devices that no mount shows (`losetup`, `udisksctl\nloop-setup` without a mount, a VM's disk): with the mounts'\n[`MountSpec::loop_backing`], what `Host::loop_backing_files` lists.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LoopSpec"
+      }
+    },
     "mounts": {
       "description": "The mount table, in mount order (the order of mountinfo lines).\nExactly one mount, at `/`, has no parent.",
       "type": "array",
@@ -135,7 +142,7 @@
       ]
     },
     "pid_namespace": {
-      "description": "The answer of diskgc's held `/proc` to Owner PID's initial-namespace\ncheck (docs/safety.md, Producer liveness): `initial` (the default)\nor `nested`.",
+      "description": "The PID namespace diskgc runs in, as its held `/proc` answers\n(docs/safety.md, Producer liveness; In use: Visibility): `initial`\n(the default), `nested`, or `test_container` (nested, in a marked\ntest container of a development build: `Host::test_container_pid_namespace`).",
       "$ref": "#/$defs/PidNamespaceSpec"
     },
     "pressure": {
@@ -883,6 +890,25 @@
         "mode"
       ]
     },
+    "LoopSpec": {
+      "description": "One configured loop device that no mount shows.",
+      "type": "object",
+      "properties": {
+        "backing": {
+          "description": "Its `loop/backing_file` as the kernel prints it (` (deleted)`\nincluded), a path of the model's tree or not.",
+          "type": "string"
+        },
+        "dev": {
+          "description": "The loop block device (major 7).",
+          "$ref": "#/$defs/Dev"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "dev",
+        "backing"
+      ]
+    },
     "Mode": {
       "description": "Permission bits in octal, as a string, e.g. \"0755\".",
       "type": "string",
@@ -1132,6 +1158,7 @@
         "lower_priority",
         "fs_uuid",
         "loop_backing_file",
+        "loop_backing_files",
         "boot_id",
         "state_lock",
         "state_read",
@@ -1158,7 +1185,7 @@
       ]
     },
     "PidNamespaceSpec": {
-      "description": "Which PID namespace diskgc runs in, as Owner PID's precondition sees it.",
+      "description": "Which PID namespace diskgc runs in, as Owner PID's precondition and the\nin-use scan's see it.",
       "oneOf": [
         {
           "description": "The initial PID namespace (nsfs inode `0xEFFFFFFC`).",
@@ -1169,6 +1196,11 @@
           "description": "Any other (a container, `unshare --pid`).",
           "type": "string",
           "const": "nested"
+        },
+        {
+          "description": "Nested, and diskgc is a development build inside a marked\ndisposable test container: the in-use scan takes the namespace as\ncomplete; Owner PID does not (docs/safety.md, In use: Visibility).",
+          "type": "string",
+          "const": "test_container"
         }
       ]
     },
