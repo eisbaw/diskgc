@@ -30,7 +30,7 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::host::{Dev, FileType, FsKey, Host, LockMode, Locked, MonoTime, WaitLock};
+use crate::host::{Dev, FileType, FsKey, Host, LockMode, Locked, MonoTime, StateWritten, WaitLock};
 use crate::index::{BUDGET_BYTES, Finder, Index};
 use crate::tally::TallyState;
 use crate::units::format_bytes;
@@ -512,9 +512,12 @@ pub fn write_held<H: Host>(
         return log(&skipped(why));
     }
     match host.state_write(held.locked, held.key, bytes) {
-        Ok(()) => log(&format!(
+        Ok(StateWritten::Replaced) => log(&format!(
             "index: snapshot {name} written: {units} unit(s), {}",
             format_bytes(size)
+        )),
+        Ok(StateWritten::Cancelled) => log(&skipped(
+            "a second signal arrived before it was linked in; the old one is unchanged",
         )),
         Err(e) => log(&skipped(&e.to_string())),
     }

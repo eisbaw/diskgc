@@ -857,8 +857,13 @@ Model scenarios required by [safety.md](safety.md) and
     skip row, the other tiers delete to the goal, status `met`;
   - `watch_signals` (SIGTERM in a cycle:
     `watch_sigterm_in_a_cycle_writes_an_interrupted_record_and_stops`;
-    between samples: every scenario's end; the rest *open*, the second
-    signal TASK-257): SIGTERM between samples, during a back-off, during
+    between samples: every scenario's end; a second signal during the
+    stop's snapshot write and before it:
+    `a_second_signal_during_the_stops_snapshot_write_leaves_the_old_one`,
+    `a_second_signal_before_the_stops_write_skips_it`; during a child's
+    grace, which the model does not run, the container test
+    `watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock`;
+    the rest *open*): SIGTERM between samples, during a back-off, during
     the host-lock wait and in a cycle between two candidates: exit 0
     within one batch (50 ms) or at the next candidate boundary, a record
     with status `interrupted` for the cycle case only, no candidate
@@ -1961,7 +1966,11 @@ filesystem, processes and mounts from the developer's system.
   - (diskgc-e2e `watch_suite.rs`, TASK-32 and TASK-236:
     `watch_process_reclaims_to_target_then_stays_quiet_and_stops_on_sigterm`,
     `watch_tally_only_never_deletes_and_a_second_watch_exits_2`,
-    `watch_tally_pauses_while_another_process_holds_the_host_lock`; the
+    `watch_tally_pauses_while_another_process_holds_the_host_lock`;
+    TASK-257: `watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock`,
+    a second SIGTERM during a TERM-ignoring command child's grace: exit 0
+    within 4 s, the child still running and holding the host lock, no
+    snapshot, one `interrupted` record; the
     names below are still open where these do not cover them.)
   - `watch_process_reclaims_and_streams_json`: `watch --json` started,
     the tmpfs filled below `--min-free` with idle candidates by the

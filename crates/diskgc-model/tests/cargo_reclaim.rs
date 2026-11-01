@@ -1055,6 +1055,9 @@ impl Host for Gated {
     fn interrupted(&self) -> Option<diskgc_core::report::Signal> {
         self.0.interrupted()
     }
+    fn second_signal(&self) -> bool {
+        self.0.second_signal()
+    }
     fn wall_clock(&self) -> Timestamp {
         self.0.wall_clock()
     }
@@ -1197,7 +1200,7 @@ impl Host for Gated {
         lock: &diskgc_core::host::Locked<Self::Fd>,
         key: &diskgc_core::host::FsKey,
         bytes: &[u8],
-    ) -> Result<(), HostError> {
+    ) -> Result<diskgc_core::host::StateWritten, HostError> {
         self.0.state_write(lock, key, bytes)
     }
 }

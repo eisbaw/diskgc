@@ -466,6 +466,15 @@ pub struct Pressure {
     pub cpu: u32,
 }
 
+/// What [`Host::state_write`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateWritten {
+    /// The new snapshot replaced the old one.
+    Replaced,
+    /// A second signal arrived before the link: nothing changed.
+    Cancelled,
+}
+
 /// `flock` modes. There is deliberately no unlock: see the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockMode {
@@ -1145,6 +1154,15 @@ pub trait Host {
     /// observed between work units and during the host-lock wait.
     fn interrupted(&self) -> Option<crate::report::Signal>;
 
+    /// Whether a second SIGTERM, SIGINT or SIGHUP arrived after the first
+    /// ([`Host::interrupted`]): `watch`'s escalation (docs/reference.md,
+    /// Watch signals), which skips the snapshot write
+    /// ([`Host::state_write`] does not link it in) and the rest of a
+    /// running child's SIGTERM grace ([`Delete::run_command`] leaves it
+    /// running). `LinuxHost` counts only under `watch`'s handlers; under
+    /// `ensure`'s, which keep the first signal alone, it is always false.
+    fn second_signal(&self) -> bool;
+
     /// The monotonic clock including suspend time.
     fn now(&self) -> MonoTime;
 
@@ -1393,13 +1411,16 @@ pub trait Host {
     /// failed write leaves the old one. `lock` must be this key's
     /// single-writer lock from [`Host::state_lock`], held exclusively
     /// (`ModelHost` fails the test otherwise). No `fsync`. Ungated, as
-    /// [`Host::state_lock`].
+    /// [`Host::state_lock`]. After a second signal ([`Host::second_signal`],
+    /// checked while the new file is filled and right before it is linked
+    /// in) it is never linked in: [`StateWritten::Cancelled`], the old
+    /// snapshot unchanged.
     fn state_write(
         &self,
         lock: &Locked<Self::Fd>,
         key: &FsKey,
         bytes: &[u8],
-    ) -> Result<(), HostError>;
+    ) -> Result<StateWritten, HostError>;
 
     /// Where diskgc's per-user reclaim lock is now (docs/safety.md, Host
     /// lock), decided by the implementation from the system, never from

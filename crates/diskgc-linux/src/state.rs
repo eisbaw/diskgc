@@ -23,7 +23,9 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use diskgc_core::host::{Dev, FileType, FsKey, HostError, MakeUserLock, StateFile, UserLockError};
+use diskgc_core::host::{
+    Dev, FileType, FsKey, HostError, MakeUserLock, StateFile, StateWritten, UserLockError,
+};
 use diskgc_core::hostlock::USER_LOCK_NAME;
 use rustix::fs::{AtFlags, Mode, OFlags};
 
@@ -426,14 +428,18 @@ fn is_lock_of(dir_fd: &OwnedFd, key: &FsKey, lock: BorrowedFd<'_>) -> Result<boo
 /// leaves a complete `.new`, which the next write finds (`EEXIST`) and
 /// renames onto the snapshot first. `lock` must be this key's lock file
 /// (checked by identity), held exclusively by the caller. No `fsync`: a
-/// file torn by a crash fails its checksum and is ignored.
+/// file torn by a crash fails its checksum and is ignored. When
+/// `cancelled` says so (a second signal, asked between chunks and right
+/// before the link), the file is never linked in:
+/// [`StateWritten::Cancelled`], the old snapshot unchanged.
 pub(crate) fn write_snapshot_ungated(
     dir: &Path,
     key: &FsKey,
     lock: BorrowedFd<'_>,
     bytes: &[u8],
     proc: BorrowedFd<'_>,
-) -> Result<(), HostError> {
+    cancelled: &dyn Fn() -> bool,
+) -> Result<StateWritten, HostError> {
     let (dir_fd, _) = open_state_dir(dir)?;
     let target = key.snapshot_name();
     let shown = dir.join(&target).display().to_string();
@@ -451,8 +457,14 @@ pub(crate) fn write_snapshot_ungated(
         Mode::from_raw_mode(FILE_MODE),
     )
     .map_err(|e| HostError::errno("open O_TMPFILE", dir.display(), errno_of(e)))?;
+    // `cancelled` (a second signal) is asked between chunks and right
+    // before the link: until then the file has no name, and dropping it
+    // leaves nothing behind.
     let mut rest = bytes;
     while !rest.is_empty() {
+        if cancelled() {
+            return Ok(StateWritten::Cancelled);
+        }
         match rustix::io::write(&temp, rest) {
             Ok(0) => {
                 return Err(HostError::invalid(
@@ -480,6 +492,9 @@ pub(crate) fn write_snapshot_ungated(
         rustix::fs::renameat(dir_fd, new.as_str(), dir_fd, target.as_str())
             .map_err(|e| HostError::errno("renameat", &shown, errno_of(e)))
     };
+    if cancelled() {
+        return Ok(StateWritten::Cancelled);
+    }
     match link(&dir_fd) {
         Ok(()) => {}
         Err(rustix::io::Errno::EXIST) => {
@@ -489,7 +504,7 @@ pub(crate) fn write_snapshot_ungated(
         }
         Err(e) => return Err(HostError::errno("linkat", &new, errno_of(e))),
     }
-    promote(&dir_fd)
+    promote(&dir_fd).map(|()| StateWritten::Replaced)
 }
 
 /// The UUID of the filesystem whose files report `dev`, from the udev

@@ -143,7 +143,10 @@ impl<F: std::fmt::Debug> Writer<F> {
     }
 
     /// Writes what [`Self::encode`] made, under the held lock and the space
-    /// guard ([`write_held`]); the live index is not needed.
+    /// guard ([`write_held`]); the live index is not needed. Not after a
+    /// second signal ([`Host::second_signal`]: docs/reference.md, Watch
+    /// signals), checked right before the write and by the port before
+    /// the link.
     pub fn write<H: Host<Fd = F>>(&self, host: &H, encoded: &Encoded, log: &mut dyn FnMut(&str)) {
         let Some((locked, dir_fs)) = &self.held else {
             unreachable!("encoded only under the lock")
@@ -159,7 +162,10 @@ impl<F: std::fmt::Debug> Writer<F> {
             held,
             self.guard,
             &encoded.bytes,
-            &|_| None,
+            &|host| {
+                host.second_signal()
+                    .then_some("a second signal arrived: watch stops at once")
+            },
             log,
         );
     }

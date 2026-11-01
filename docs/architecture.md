@@ -953,7 +953,9 @@ is accepted until measured otherwise.
   and links it in as `index-<fs>.new` with `linkat`, never `O_TRUNC`, and
   renames only onto `index-<fs>`; the lock must be that key's lock file
   (same object) held exclusively, which `ModelHost` checks (a test fails
-  otherwise). It is not gated (it is diskgc's cache, not user data, and
+  otherwise). After a second signal to `watch` (`second_signal`, counted
+  by `watch`'s handlers only) it does not link the file in and reports
+  the write cancelled ([reference.md](reference.md#watch-signals)). It is not gated (it is diskgc's cache, not user data, and
   `watch --tally-only` must work anywhere). The single-writer lock file
   is a second typed operation beside it, `state_lock`: `LinuxHost` opens
   (creating if absent, with the state directory, mode 0700)

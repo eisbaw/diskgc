@@ -49,8 +49,8 @@ use diskgc_core::host::{
     DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, Host, HostError,
     Ids, LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MakeUserLock, MapEntry,
     MonoTime, MountEntry, OpenHow, Pid, PidNamespace, Pressure, ProcError, ProcFd, ProcLink,
-    ProcStatus, Space, Stat, StateFile, StateLock, Timestamp, TryLock, Unlink, UserLock,
-    UserLockError, WaitLock, is_single_name,
+    ProcStatus, Space, Stat, StateFile, StateLock, StateWritten, Timestamp, TryLock, Unlink,
+    UserLock, UserLockError, WaitLock, is_single_name,
 };
 use diskgc_core::hostlock::USER_LOCK_NAME;
 
@@ -680,6 +680,7 @@ impl Inner {
         let outcome = match &event.action {
             Action::DeliverSignal(signal) => {
                 state.interrupted.get_or_insert(*signal);
+                state.signals += 1;
                 Ok(())
             }
             Action::Create(path) => state
@@ -1614,6 +1615,10 @@ impl Host for ModelHost {
         self.inner.borrow().state.interrupted
     }
 
+    fn second_signal(&self) -> bool {
+        self.inner.borrow().state.signals >= 2
+    }
+
     fn now(&self) -> MonoTime {
         self.call(Op::Now, None, None, |inner| {
             let now = MonoTime(UPTIME_AT_START + inner.state.elapsed);
@@ -2359,7 +2364,7 @@ impl Host for ModelHost {
         lock: &Locked<ModelFd>,
         key: &FsKey,
         bytes: &[u8],
-    ) -> Result<(), HostError> {
+    ) -> Result<StateWritten, HostError> {
         let lock_ofd = self.fd_ofd(lock.fd());
         let path = self.state_path(&key.snapshot_name());
         let shown = path
@@ -2395,6 +2400,15 @@ impl Host for ModelHost {
                     key.lock_name()
                 ));
             }
+            // A second signal (an event before this call) cancels the write
+            // before the link: nothing is made, the old snapshot stays.
+            if inner.state.signals >= 2 {
+                return (
+                    Ok(StateWritten::Cancelled),
+                    None,
+                    "cancelled: a second signal".to_owned(),
+                );
+            }
             let size = u64::try_from(bytes.len()).expect("fits u64");
             if inner.state.space(dir.mnt).avail_bytes
                 < size.div_ceil(crate::state::BLOCK) * crate::state::BLOCK
@@ -2427,7 +2441,7 @@ impl Host for ModelHost {
                 .state
                 .rename_path(&dir_path.join(&new), &dir_path.join(key.snapshot_name()))
                 .unwrap_or_else(|f| model_error(format!("state_write rename: {f:?}")));
-            (Ok(()), None, format!("ok {size} bytes"))
+            (Ok(StateWritten::Replaced), None, format!("ok {size} bytes"))
         })
     }
 }

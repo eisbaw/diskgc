@@ -856,6 +856,73 @@ fn a_signal_during_the_start_wait_exits_0_writing_nothing() {
     assert_eq!(host.trace_count(Op::StateWrite), 0);
 }
 
+/// TASK-257 AC #1 (docs/reference.md, Watch signals): a second signal
+/// during the stop's snapshot write cancels it before the link: the old
+/// snapshot (the 5-minute write's) stays, and `watch` exits 0.
+#[test]
+fn a_second_signal_during_the_stops_snapshot_write_leaves_the_old_one() {
+    let events = "events:\n  - {at: {elapsed: 7m}, signal: term}\n  \
+                  - {at: {op: state_write, nth: 2, when: before}, signal: term}\n";
+    let host = host(&yaml("5G", &old_candidates(3, "1M"), events));
+    let run = watch(&host, &reclaim("2G", "3G", "10s"));
+    assert_eq!(
+        run.ended,
+        Ok(Ended::Stopped(Signal::Term)),
+        "{:?}",
+        run.lines
+    );
+    let writes: Vec<String> = host
+        .trace()
+        .into_iter()
+        .filter(|c| c.op == Op::StateWrite)
+        .map(|c| c.result)
+        .collect();
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    assert!(writes[0].starts_with("ok "), "{writes:?}");
+    assert!(writes[1].starts_with("cancelled"), "{writes:?}");
+    assert!(
+        host.stat_path(Path::new(SNAPSHOT)).is_some(),
+        "the old one stays"
+    );
+    assert!(
+        host.stat_path(Path::new(&format!("{SNAPSHOT}.new")))
+            .is_none(),
+        "nothing linked in"
+    );
+    assert!(
+        run.has("not written: a second signal arrived before it was linked in"),
+        "{:?}",
+        run.lines
+    );
+}
+
+/// TASK-257: a second signal before the stop's write skips it (no
+/// `state_write` at all); the first stop's write is not attempted.
+#[test]
+fn a_second_signal_before_the_stops_write_skips_it() {
+    let events = "events:\n  - {at: {elapsed: 7m}, signal: int}\n  \
+                  - {at: {elapsed: 7m}, signal: term}\n";
+    let host = host(&yaml("5G", &old_candidates(3, "1M"), events));
+    let run = watch(&host, &reclaim("2G", "3G", "10s"));
+    // The first signal decides what stopped it.
+    assert_eq!(
+        run.ended,
+        Ok(Ended::Stopped(Signal::Int)),
+        "{:?}",
+        run.lines
+    );
+    assert_eq!(
+        host.trace_count(Op::StateWrite),
+        1,
+        "the 5-minute write only"
+    );
+    assert!(
+        run.has("not written: a second signal arrived: watch stops at once"),
+        "{:?}",
+        run.lines
+    );
+}
+
 /// A record that cannot be written ends `watch` at once
 /// ([`Ended::OutputFailed`], exit 3 in the binary): no snapshot write
 /// after it, no later cycle.

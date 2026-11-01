@@ -387,6 +387,10 @@ pub struct WalkRules {
 pub struct State {
     /// First delivered signal, retained for the run.
     pub interrupted: Option<diskgc_core::report::Signal>,
+    /// Signals delivered so far: from the second on, `watch` stops at once
+    /// (`Host::second_signal`). The model counts for every command; on
+    /// Linux only `watch`'s handlers count.
+    pub signals: u32,
     /// In mount order.
     pub mounts: Vec<Mount>,
     pub fss: BTreeMap<Dev, Fs>,
@@ -445,6 +449,7 @@ impl State {
     pub fn new(wall_start: jiff::Timestamp, kernel: String) -> Self {
         Self {
             interrupted: None,
+            signals: 0,
             mounts: Vec::new(),
             fss: BTreeMap::new(),
             ofds: BTreeMap::new(),

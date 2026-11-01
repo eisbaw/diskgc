@@ -734,6 +734,9 @@ pub(crate) mod tests {
         fn interrupted(&self) -> Option<crate::report::Signal> {
             None
         }
+        fn second_signal(&self) -> bool {
+            false
+        }
         fn wall_clock(&self) -> crate::host::Timestamp {
             unreachable!()
         }
@@ -870,7 +873,7 @@ pub(crate) mod tests {
             _: &crate::host::Locked<Self::Fd>,
             _: &crate::host::FsKey,
             _: &[u8],
-        ) -> Result<(), HostError> {
+        ) -> Result<crate::host::StateWritten, HostError> {
             unreachable!()
         }
     }

@@ -221,9 +221,8 @@ process runs, even if that Cargo works in an unrelated directory; see
 ### `watch`
 
 The contract below was settled by TASK-117 and is implemented (TASK-32),
-with these limits in this build: the record's `index` block is `null`
-as in `ensure`'s report (TASK-244 defines it for both); a second signal
-during the stop does not skip the snapshot write.
+with this limit in this build: the record's `index` block is `null`
+as in `ensure`'s report (TASK-244 defines it for both).
 
 ```
 diskgc watch --min-free SIZE --target-free SIZE [--interval DUR] [--timeout DUR]
@@ -533,7 +532,11 @@ keeps protecting the disk).
   snapshot write (its temporary file is never linked in) and the rest of
   a running child's 10 s SIGTERM grace (the child is left running with
   the host lock it inherited, never killed unawaited), and exits 0 at
-  once. SIGKILL at any point is safe: deletions are crash-safe (the kill
+  once. The cycle's record (status `interrupted`, the child's action an
+  error saying it was left running) is still written. The child's output
+  pipes close with `watch`, so a child that writes output after it may
+  end then (`SIGPIPE`); one that does not keeps running, and keeps the
+  host lock, until it exits. SIGKILL at any point is safe: deletions are crash-safe (the kill
   points of [testing.md](testing.md#controlled-pause-and-kill-points))
   and a child keeps the host lock until it exits
   ([safety.md](safety.md#host-lock)); only the snapshot write is lost.

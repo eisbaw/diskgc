@@ -33,7 +33,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -43,8 +43,9 @@ use diskgc_core::host::{
     DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, Host, HostError,
     LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MakeUserLock, MapEntry,
     MonoTime, MountEntry, OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace, Pressure, ProcError,
-    ProcFd, ProcLink, ProcStatus, ProcView, Space, Stat, StateFile, StateLock, Timestamp, TryLock,
-    UidMap, Unlink, UserLock, UserLockError, WaitLock, is_single_name, read_proc_view,
+    ProcFd, ProcLink, ProcStatus, ProcView, Space, Stat, StateFile, StateLock, StateWritten,
+    Timestamp, TryLock, UidMap, Unlink, UserLock, UserLockError, WaitLock, is_single_name,
+    read_proc_view,
 };
 use diskgc_core::report::Signal;
 use rustix::event::PollFlags;
@@ -72,23 +73,38 @@ const PROC: &str = "/proc";
 const LOCK_POLL_FIRST: Duration = Duration::from_millis(10);
 const LOCK_POLL_MAX: Duration = Duration::from_millis(100);
 
+/// A signal handler: [`note_interrupt`] or [`note_watch_signal`].
+type SignalHandler = extern "C" fn(i32);
+
 /// A signal handler may only record the signal. The executor does all I/O,
 /// reporting and cleanup after it observes this lock-free flag.
 static INTERRUPTED: AtomicI32 = AtomicI32::new(0);
 
+/// How many SIGINT, SIGTERM and SIGHUP `watch`'s handlers have seen: from
+/// the second on, `watch` stops at once ([`Host::second_signal`]).
+static SIGNALS: AtomicU32 = AtomicU32::new(0);
+
+/// `ensure`'s handler: the first signal, kept.
 extern "C" fn note_interrupt(signal: i32) {
     let _ = INTERRUPTED.compare_exchange(0, signal, Ordering::Relaxed, Ordering::Relaxed);
+}
+
+/// `watch`'s handler: the first signal, kept, and the count (two lock-free
+/// atomic operations).
+extern "C" fn note_watch_signal(signal: i32) {
+    note_interrupt(signal);
+    SIGNALS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// The sole ungated signal-disposition wrapper. It changes only this
 /// process's SIGINT/SIGTERM handlers, never a filesystem or child process.
 /// The source scan counts every raw libc token here for explicit review.
-fn install_interrupt_handlers_ungated() -> Result<(), HostError> {
+fn install_interrupt_handlers_ungated(handler: SignalHandler) -> Result<(), HostError> {
     // SAFETY: sigaction writes only our process's signal dispositions;
-    // the handler itself performs one lock-free atomic operation.
+    // the handler itself performs only lock-free atomic operations.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = note_interrupt as *const () as usize;
+        action.sa_sigaction = handler as *const () as usize;
         if libc::sigemptyset(&mut action.sa_mask) != 0 {
             return Err(HostError::invalid(
                 "sigemptyset",
@@ -133,7 +149,7 @@ fn install_hangup_handler_ungated() -> Result<bool, HostError> {
             return Ok(false);
         }
         let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = note_interrupt as *const () as usize;
+        action.sa_sigaction = note_watch_signal as *const () as usize;
         if libc::sigemptyset(&mut action.sa_mask) != 0 {
             return Err(failed("sigemptyset"));
         }
@@ -197,14 +213,16 @@ impl LinuxHost {
     /// Install the cooperative handlers before an `ensure` starts. The
     /// binary runs one command then exits, so the first signal is retained.
     pub fn install_interrupt_handlers() -> Result<(), HostError> {
-        install_interrupt_handlers_ungated()
+        install_interrupt_handlers_ungated(note_interrupt)
     }
 
     /// `watch`'s handlers: SIGINT and SIGTERM as for `ensure`, and SIGHUP,
     /// which stops `watch` the same way, unless it was ignored at start
-    /// (`nohup`: then it stays ignored, and this returns `false`).
+    /// (`nohup`: then it stays ignored, and this returns `false`). They
+    /// also count the signals, so a second one stops `watch` at once
+    /// ([`Host::second_signal`]).
     pub fn install_watch_handlers() -> Result<bool, HostError> {
-        install_interrupt_handlers_ungated()?;
+        install_interrupt_handlers_ungated(note_watch_signal)?;
         install_hangup_handler_ungated()
     }
 
@@ -1851,6 +1869,10 @@ impl Host for LinuxHost {
         }
     }
 
+    fn second_signal(&self) -> bool {
+        SIGNALS.load(Ordering::Relaxed) >= 2
+    }
+
     fn now(&self) -> MonoTime {
         let t = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
         // CLOCK_BOOTTIME is never negative and tv_nsec is below 10^9.
@@ -2545,7 +2567,7 @@ impl Host for LinuxHost {
         lock: &Locked<LinuxFd>,
         key: &FsKey,
         bytes: &[u8],
-    ) -> Result<(), HostError> {
+    ) -> Result<StateWritten, HostError> {
         if lock.mode() != LockMode::Exclusive {
             return Err(HostError::invalid(
                 "write",
@@ -2559,6 +2581,7 @@ impl Host for LinuxHost {
             lock.fd().as_fd(),
             bytes,
             self.proc.as_fd(),
+            &|| self.second_signal(),
         )
     }
 }
@@ -3340,10 +3363,17 @@ fn run_command_permitted(
         // An output or wait failure must not leave a trusted cleaner
         // running after the caller has been told the action failed. A signal
         // or deadline uses the same TERM grace even if output setup failed.
-        if host.interrupted().is_some() || host.now() >= run.deadline {
+        // A second signal (watch) ends the grace and leaves the group
+        // running, never killed unawaited ([`left_running`]).
+        let mut left = host.second_signal();
+        if !left && (host.interrupted().is_some() || host.now() >= run.deadline) {
             let _ = signal_command_group(pid, rustix::process::Signal::TERM, &subject);
             let until = host.now().checked_add(COMMAND_TERMINATION_GRACE);
             while until.is_some_and(|until| host.now() < until) {
+                if host.second_signal() {
+                    left = true;
+                    break;
+                }
                 // An exited leader does not prove its descendants exited.
                 // Keep it waitable to pin the process-group ID until KILL.
                 let remaining = until
@@ -3352,10 +3382,25 @@ fn run_command_permitted(
                 host.sleep(Duration::from_millis(20).min(remaining));
             }
         }
-        let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
-        let _ = child.wait();
+        if !left {
+            let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
+            let _ = child.wait();
+        }
     }
     CommandInvocation::Started(result)
+}
+
+/// A command `watch` leaves running after a second signal during its
+/// SIGTERM grace (docs/reference.md, Watch signals): neither killed nor
+/// awaited, so it keeps the host lock it inherited until it exits, and no
+/// other reclaim starts beside it.
+fn left_running(subject: &str) -> HostError {
+    HostError::invalid(
+        "run command",
+        subject,
+        "a second signal during its SIGTERM grace: left running in its process group with \
+         the host lock it inherited, not awaited",
+    )
 }
 
 /// Reads both pipes in bounded, nonblocking chunks while monitoring the
@@ -3508,6 +3553,9 @@ fn terminate_command_group(
     };
     let mut draining = true;
     while host.now() < grace {
+        if host.second_signal() {
+            return Err(left_running(subject));
+        }
         // The leader remains waitable so its PID pins the group until KILL.
         if draining
             && (drain_command_output(stdout, out_line, grace_target).is_err()

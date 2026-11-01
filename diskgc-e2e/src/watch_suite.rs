@@ -336,3 +336,153 @@ pub fn watch_tally_pauses_while_another_process_holds_the_host_lock(ctx: &Ctx) -
     );
     verdict.assert_clean()
 }
+
+/// Whether `pid` has exited (gone, or a zombie its parent has not reaped).
+fn exited(pid: i32) -> bool {
+    match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat
+            .rfind(')')
+            .and_then(|close| stat.get(close + 2..close + 3))
+            .is_some_and(|state| state == "Z" || state == "X"),
+        Err(_) => true,
+    }
+}
+
+/// Whether `pid` is alive and not a zombie.
+fn alive(pid: i32) -> bool {
+    !exited(pid)
+}
+
+/// Whether some other process holds the host lock: a non-blocking
+/// exclusive `flock` on it fails with `EWOULDBLOCK`.
+fn host_lock_held_elsewhere() -> Result<bool, String> {
+    let lock =
+        fs::File::open(crate::suite::HOST_LOCK).map_err(|e| format!("open the host lock: {e}"))?;
+    match rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(false),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
+        Err(e) => Err(format!("flock the host lock: {e}")),
+    }
+}
+
+/// TASK-257 (docs/reference.md, Watch signals): a second SIGTERM during
+/// the stop skips the rest of a running child's 10 s SIGTERM grace and
+/// the snapshot write, and `watch` exits 0 at once. The child, a cleaner
+/// that ignores SIGTERM, is left running (never killed unawaited) and
+/// keeps the host lock it inherited, so no other reclaim starts beside
+/// it. The cycle's record (`interrupted`) is still written.
+pub fn watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock(ctx: &Ctx) -> TestResult {
+    let first = ctx.scratch.mkdir("stubborn-watch-first", 0o700, TESTER)?;
+    let removed = ctx
+        .scratch
+        .write_file("stubborn-watch-first/one", b"one", 0o600, TESTER)?;
+    let kept = ctx
+        .scratch
+        .write_file("stubborn-watch-first/two", b"two", 0o600, TESTER)?;
+    let marker = ctx.scratch.path("stubborn-watch-ready");
+    let cleaner = ctx.scratch.write_file(
+        "stubborn-watch-cleaner",
+        format!(
+            "#!/bin/sh\ntrap 'printf TERM > {}' TERM\n/bin/rm -- \"$1/one\"\nprintf '%s %s\\n' \"$PPID\" \"$$\" > {}\nwhile :; do /bin/sleep 1 || :; done\n",
+            ctx.scratch.path("stubborn-watch-term-seen").display(),
+            marker.display()
+        )
+        .as_bytes(),
+        0o755,
+        TESTER,
+    )?;
+    let config = format!(
+        "version: 1\nprofiles:\n  - name: stubborn-watch\n    find: {{roots: [/tmp], paths: [stubborn-watch-first], type: dir}}\n    action: {{command: [{}, \"{{path}}\"]}}\n    examples: {{match: [/tmp/stubborn-watch-first]}}\n",
+        cleaner.display()
+    );
+    ctx.home.write_file(
+        "diskgc-stubborn-watch.yaml",
+        config.as_bytes(),
+        0o644,
+        TESTER,
+    )?;
+    let oracle = Oracle::arm(Fixture::new().eligible(first.clone()))?;
+    let spawned = ctx.spawn_as_tester(
+        &ctx.diskgc(),
+        &[
+            "watch",
+            "--json",
+            "--config",
+            "/home/tester/diskgc-stubborn-watch.yaml",
+            "--min-free",
+            "100%",
+            "--target-free",
+            "100%",
+            "--interval",
+            "1s",
+            "--timeout",
+            "1m",
+            "--select",
+            "profile:stubborn-watch",
+            "/tmp",
+        ],
+    )?;
+    // The cleaner says who its parent (diskgc) and itself are.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let (pid, child) = loop {
+        if let Ok(text) = fs::read_to_string(&marker)
+            && let Some((parent, own)) = text.trim().split_once(' ')
+        {
+            let parse = |s: &str| s.parse::<i32>().map_err(|e| format!("{text:?}: {e}"));
+            break (parse(parent)?, parse(own)?);
+        }
+        ensure!(Instant::now() < deadline, "the cleaner never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    ensure!(
+        !removed.exists() && kept.exists(),
+        "the cleaner did not reach its partial deletion"
+    );
+    signal(pid, libc::SIGTERM)?;
+    // The child gets its SIGTERM (and ignores it): the grace has begun.
+    let term_seen = ctx.scratch.path("stubborn-watch-term-seen");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !term_seen.exists() {
+        ensure!(Instant::now() < deadline, "the child never got SIGTERM");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    ensure!(alive(pid), "watch ended before the second signal");
+    let second = Instant::now();
+    signal(pid, libc::SIGTERM)?;
+    let deadline = second + Duration::from_secs(4);
+    while !exited(pid) {
+        ensure!(
+            Instant::now() < deadline,
+            "watch did not exit within 4 s of the second signal (the grace is 10 s)"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let left_running = alive(child);
+    let lock_held = host_lock_held_elsewhere();
+    // Let the run end: the child is the harness's to stop (strace follows
+    // it, so the run's records end with it).
+    // SAFETY: kill(2) on the cleaner's process group (diskgc made it its
+    // own group); no memory is shared.
+    unsafe { libc::kill(-child, libc::SIGKILL) };
+    let run = spawned.wait()?;
+    let verdict = oracle.judge(&run)?;
+    ensure!(left_running, "the child was not left running");
+    ensure!(
+        lock_held?,
+        "the host lock was free while the child that inherited it ran"
+    );
+    run.expect_code(0)?;
+    ensure!(
+        run.stderr.contains("second signal"),
+        "stderr does not name the second signal: {}",
+        run.stderr
+    );
+    ensure!(!snapshot_written(), "a snapshot was written in {STATE_DIR}");
+    let records: Vec<&str> = run.stdout.lines().collect();
+    ensure!(records.len() == 1, "one record: {}", run.stdout);
+    let record: serde_json::Value =
+        serde_json::from_str(records[0]).map_err(|e| format!("record {records:?}: {e}"))?;
+    ensure!(record["status"] == "interrupted", "record: {record}");
+    ensure!(kept.exists(), "the cleaner's second file is gone");
+    verdict.assert_clean()
+}

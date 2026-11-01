@@ -488,6 +488,10 @@ impl<H: Host> Host for Controlled<H> {
         self.host.interrupted()
     }
 
+    fn second_signal(&self) -> bool {
+        self.host.second_signal()
+    }
+
     fn wall_clock(&self) -> Timestamp {
         self.before("wall_clock");
         self.host.wall_clock()
@@ -691,7 +695,7 @@ impl<H: Host> Host for Controlled<H> {
         lock: &diskgc_core::host::Locked<Self::Fd>,
         key: &diskgc_core::host::FsKey,
         bytes: &[u8],
-    ) -> Result<(), HostError> {
+    ) -> Result<diskgc_core::host::StateWritten, HostError> {
         self.before("state_write");
         self.host.state_write(lock, key, bytes)
     }

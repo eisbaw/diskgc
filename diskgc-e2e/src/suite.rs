@@ -410,6 +410,12 @@ pub static TESTS: &[Test] = &[
         run: watch_suite::watch_process_reclaims_to_target_then_stays_quiet_and_stops_on_sigterm,
     },
     Test {
+        name: "watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: watch_suite::watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock,
+    },
+    Test {
         name: "watch_tally_only_never_deletes_and_a_second_watch_exits_2",
         tier: Tier::Fast,
         expect: Expect::Pass,

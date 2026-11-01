@@ -27,8 +27,7 @@
 //! [`run_inline`] build it, and only for a reclaiming `watch`; the loop
 //! itself holds no [`Delete`] and cannot delete.
 //!
-//! Known gaps against the contract: a second signal during the stop does
-//! not skip the snapshot write (TASK-257); the report's `index` block stays
+//! Known gap against the contract: the report's `index` block stays
 //! `null` (TASK-244 defines it for `ensure` and `watch` alike).
 
 pub mod backoff;
@@ -722,7 +721,17 @@ pub fn run<H: Host, L: LiveIndex>(
             .to_owned(),
         other => format!("stopping on {}", other.name()),
     });
-    write_snapshot(host, live, writer, log);
+    // A second signal skips the stop's snapshot write (docs/reference.md,
+    // Watch signals); one during the write cancels it before the link
+    // ([`Writer::write`]).
+    if host.second_signal() {
+        log(&format!(
+            "index: snapshot {} not written: a second signal arrived: watch stops at once",
+            writer.key().snapshot_name()
+        ));
+    } else {
+        write_snapshot(host, live, writer, log);
+    }
     Ended::Stopped(signal)
 }
 
