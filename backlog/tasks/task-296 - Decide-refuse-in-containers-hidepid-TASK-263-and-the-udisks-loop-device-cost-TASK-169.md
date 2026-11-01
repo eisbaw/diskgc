@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-01T13:30:00Z'
-updated_date: '2026-11-01T19:49:00Z'
+updated_date: '2026-11-01T19:50:00Z'
 labels:
   - needs-mark
   - safety
@@ -25,4 +25,6 @@ Merged 2026-11-01 as the implementer's/orchestrator's choice, marked 'pending Ma
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-01 (TASK-298 merged): under hidepid / outside the initial PID namespace, a reclaiming ensure with the goal already met exits 0 (stderr warning that a reclaim would be refused); only a run below --min-free, the dry run and a reclaiming watch are refused. CI pre-job hooks in containers pass while space is there.
+
+Follow-up from TASK-298: the model cannot flip hidepid mid-run, so the watch-cycle usage_error/safety (hold) path for facts that changed since start is untested (only the unreadable-facts error/host path is); add a model fact-change event when this policy is confirmed. Also add a met-goal case to the e2e build's ensure_is_refused_under_hidepid.
 <!-- SECTION:NOTES:END -->
