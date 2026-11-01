@@ -47,7 +47,9 @@ mod preflight;
 mod tier;
 mod tier_policy;
 
-pub use entry::{ensure, ensure_grouped, ensure_grouped_with_index, ensure_with_index};
+pub use entry::{
+    ensure, ensure_grouped, ensure_grouped_with_index, ensure_with_index, reclaimable,
+};
 pub use indexed::tally_sources;
 pub use plan::{dry_run, dry_run_grouped};
 pub use preflight::{

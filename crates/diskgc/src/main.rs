@@ -705,7 +705,8 @@ fn set<T>(slot: &mut Option<T>, name: &str, value: Result<T, String>) -> Result<
 
 /// Startup checks for every invocation that may touch the machine:
 /// `--version` and `--help` are exempt (they only print), and so must be
-/// `check`, which is machine-independent (docs/reference.md, check).
+/// `check`, which is machine-independent (docs/reference.md, check), and a
+/// command line that is not understood (a usage error, TASK-291).
 enum StartupFailure {
     Host(String),
     UnsupportedKernel(String),
@@ -743,11 +744,8 @@ fn env_state_dir() -> Option<PathBuf> {
     )
 }
 
-fn startup() -> Result<LinuxHost, StartupFailure> {
-    startup_in(env_state_dir())
-}
-
-/// [`startup`] with the state directory already found.
+/// The host's startup checks and the host, with the state directory
+/// already found ([`env_state_dir`]).
 fn startup_in(state_dir: Option<PathBuf>) -> Result<LinuxHost, StartupFailure> {
     // The in-use scan holds about one descriptor per visible process; a
     // stock soft limit of 1024 is too low on a busy host (TASK-166,
@@ -1361,23 +1359,12 @@ fn main() -> ExitCode {
         ),
         Invocation::NotInBuild(command) => not_yet(&not_in_build(command, &build), json),
         Invocation::UsageError(reason) => {
-            // The kernel check comes first, as for every command that may
-            // touch the machine: an old kernel is the reason to report.
-            let (reason, cause, status) = if args
-                .first()
-                .is_some_and(|a| a == "check" || a == "profiles")
-            {
-                (reason, ErrorCause::Parse, Status::UsageError)
-            } else {
-                match startup() {
-                    Err(failure) => {
-                        let status = failure.status();
-                        let cause = failure.cause();
-                        (failure.message(), cause, status)
-                    }
-                    Ok(_) => (reason, ErrorCause::Parse, Status::UsageError),
-                }
-            };
+            // Reported before anything on the machine is read, as a bad
+            // configuration is (docs/reference.md, Exit codes): a broken
+            // `/proc` or an old kernel does not hide what was mistyped, nor
+            // make it exit 3 (TASK-291). The command, once typed right,
+            // meets the startup check.
+            let (cause, status) = (ErrorCause::Parse, Status::UsageError);
             match (json, report) {
                 (true, true) => {
                     eprintln!("diskgc: error: {reason}");

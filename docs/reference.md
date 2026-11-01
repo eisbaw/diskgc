@@ -32,7 +32,10 @@ the usage lines of the command given (of every command when there is
 none) and one line pointing to `diskgc --help`; it does not print the
 whole help. A mistyped command, flag or `profiles` subcommand names the
 closest one (`unknown flag --min-fre; did you mean --min-free?`). With
-`--json`, the one JSON object carries the same message.
+`--json`, the one JSON object carries the same message (`cause:
+parse`). It is reported before anything on the machine is read, so it is
+exit 2 even where the startup check (an unsupported kernel, `/proc`
+unavailable: Exit codes) would fail.
 
 `--select EXPR` replaces the config's groups with one tier selecting `EXPR`
 (the config's user profiles and `protect` list still apply); the JSON
@@ -333,7 +336,9 @@ In this order; the first failure exits with its code and deletes nothing:
    or without `CAP_SYS_PTRACE` ([safety.md](safety.md#privileges)): exit 2
    (`safety`); a capability set that cannot be read: exit 3 (`host`). The
    configuration's checks that depend on the user diskgc runs as
-   (`owners:` names, `protect` and tier roots with `{uid}`): exit 2. In a
+   (`owners:` names, `protect` and tier roots with `{uid}`): exit 2. A
+   tier whose kind this build does not reclaim: exit 2 (`usage`), as
+   `ensure` refuses it before its gate (TASK-291). In a
    development build, the pre-release sandbox gate: exit 2 outside a test
    container ([safety.md](safety.md#pre-release-sandbox-gate)); not with
    `--tally-only`, which deletes nothing.
@@ -1001,8 +1006,9 @@ sample (in the sandbox gate or before it) ends the run with 124
 or 0 instead; the lock's provisioning refusal is asked when the lock is
 taken, after the tally. An I/O failure in the first
 sample or startup host check is exit 3; an invalid `PATH` or unsupported
-kernel remains exit 2. The configuration (what `check` reports) and the
-`--select` expression are checked before that startup check, reading
+kernel remains exit 2. The command line, the configuration (what
+`check` reports) and the `--select` expression are checked before that
+startup check, reading
 nothing on the machine beyond the configuration file, so a bad one is
 exit 2 even where the startup check would fail; a configuration file the
 host fails to read (`/proc` unavailable, an I/O error) is exit 3
@@ -2605,6 +2611,13 @@ line says it was reproduced.
   item 5) for `watch --tally-only` instances, and `--help` shows only the
   commands this package runs. 0.1.0: not affected; it ran no `watch` and
   shipped no templates.
+- TASK-291: a command line that is not understood (a mistyped flag) is
+  exit 2 naming it before anything on the machine is read, as TASK-272
+  made a bad configuration. 0.1.0: yes; it ran the host's startup first,
+  so with an unreadable `/proc` a typo exited 3 (`cause: host`), and with
+  a kernel older than 5.8 it named the kernel instead of the typo (exit 2
+  either way) (static reading; reproduced on master before this change
+  with a tmpfs over `/proc`).
 
 **What it does.** One command frees space, a service keeps its index
 warm, two read-only ones explain it:

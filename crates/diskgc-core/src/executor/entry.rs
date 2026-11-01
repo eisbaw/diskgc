@@ -158,9 +158,11 @@ fn timed<H: Delete>(
 /// allowlist: kind cargo-target through its lock protocol, kind fs through
 /// its own deletion or checked command protocol, the Docker kinds through
 /// their prune of the bound backend. Anything else is refused before the
-/// gate, the first sample or the host lock, never approximated by a
-/// different kind's protocol.
-fn reclaimable(tier: &Tier) -> Result<(), String> {
+/// gate, the first sample or the host lock (by a reclaiming `ensure` here,
+/// by a reclaiming `watch` at its start: [`crate::watch::start`]), never
+/// approximated by a different kind's protocol. The error names the tier
+/// and what this build does not run; the caller says what refuses it.
+pub fn reclaimable(tier: &Tier) -> Result<(), String> {
     match (&tier.source, &tier.action) {
         (SourceKind::CargoTarget, Action::CargoLockProtocol)
         | (SourceKind::Fs(_), Action::Delete { .. } | Action::Command { .. })
@@ -168,7 +170,7 @@ fn reclaimable(tier: &Tier) -> Result<(), String> {
         | (SourceKind::DockerImages, Action::DockerImagePrune { .. }) => Ok(()),
         (_, action) => Err(format!(
             "tier `{}` (`{}`): profile `{}` removes with `{action}`, which this build does not \
-             run: a reclaiming ensure refuses it; use --dry-run for a read-only plan",
+             run",
             tier.name, tier.select, tier.profile
         )),
     }
@@ -222,7 +224,13 @@ fn run<H: Delete>(
     }
     // Before anything else (the gate, the first sample, the host lock).
     if let Some(refused) = tiers.iter().find_map(|(tier, _)| reclaimable(tier).err()) {
-        return usage(report, log, refused);
+        return usage(
+            report,
+            log,
+            format!(
+                "{refused}: a reclaiming ensure refuses it; use --dry-run for a read-only plan"
+            ),
+        );
     }
     let started = host.now();
     let gate = host.may_delete();

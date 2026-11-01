@@ -128,6 +128,20 @@ Immediately before acting, diskgc walks the candidate's whole tree
   by a user in `owners:`). One entry owned by someone else makes the whole
   candidate `not_owner`: unlink permission is a property of the containing
   directory, so a user-owned directory can hold another user's files.
+  The owner is the one `statx` shows. Through an idmapped mount (Linux
+  5.12 on) that is the mount's mapped owner, not the stored one: the
+  kernel lets the user delete what the mount shows as theirs, and the
+  walk admits it. A non-root run does not see the processes of the stored
+  owner, another user, that use those files by another path, as it sees
+  no other user's processes ([In use](#in-use)). Root made the mapping;
+  systemd-homed's home is such a mount, whose files the user's own,
+  visible processes use. Not refused (TASK-291): the mount table says
+  that a mount is idmapped, not what it maps, so a refusal could not tell
+  homed's home from an idmapped bind of another user's tree, and would
+  keep every homed user from reclaiming in their home. (Loop images seen
+  through an idmapped mount are in doubt: [In use](#in-use), Loop
+  devices; a run outside the initial PID namespace, as in most
+  containers that idmap their volumes, is refused there.)
 - **Idle:** for an `fs` candidate, its newest mtime/ctime is older than the
   tier's `idle_for` (if any). Cargo targets use their own measure (below).
 - **No keep marker** (`.diskgc-keep`) in the candidate, anywhere inside

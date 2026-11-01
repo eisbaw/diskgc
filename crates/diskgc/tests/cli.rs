@@ -303,6 +303,86 @@ fn a_usage_error_shows_the_error_then_only_the_command_usage() {
     }
 }
 
+/// `diskgc ARGS` with a tmpfs over `/proc` (a user and a mount namespace
+/// of its own, made between fork and exec; no privilege needed), so the
+/// host's startup check, which needs procfs, fails.
+fn diskgc_without_proc(args: &[&str]) -> std::process::Output {
+    use rustix::fs::{Mode, OFlags};
+    use rustix::mount::{MountFlags, MountPropagationFlags, mount, mount_change};
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_diskgc"));
+    command
+        .args(args)
+        .env_remove("DISKGC_CONFIG")
+        .env("XDG_CONFIG_HOME", "/nonexistent-diskgc-test");
+    // Made before the fork: the closure below must not allocate.
+    let uid_map = format!("0 {} 1", rustix::process::getuid().as_raw()).into_bytes();
+    // SAFETY: between fork and exec the closure makes only syscalls
+    // (`unshare`, `open`, `write`, `mount`) on memory made before the fork.
+    unsafe {
+        command.pre_exec(move || {
+            rustix::thread::unshare_unsafe(rustix::thread::UnshareFlags::NEWUSER)?;
+            let map = rustix::fs::open(c"/proc/self/uid_map", OFlags::WRONLY, Mode::empty())?;
+            rustix::io::write(&map, &uid_map)?;
+            rustix::thread::unshare_unsafe(rustix::thread::UnshareFlags::NEWNS)?;
+            mount_change(
+                c"/",
+                MountPropagationFlags::PRIVATE | MountPropagationFlags::REC,
+            )?;
+            mount(c"none", c"/proc", c"tmpfs", MountFlags::empty(), None)?;
+            Ok(())
+        });
+    }
+    command.output().unwrap_or_else(|e| {
+        panic!(
+            "start diskgc in a user and mount namespace of its own: {e}; this test needs \
+             unprivileged user namespaces (user.max_user_namespaces > 0, no AppArmor \
+             restrict_unprivileged_userns)"
+        )
+    })
+}
+
+/// TASK-291: a command line that is not understood is a usage error (exit
+/// 2, the parse error named) before anything on the machine is read, as a
+/// bad configuration is (docs/reference.md, Exit codes): a broken `/proc`
+/// does not turn a mistyped flag into exit 3. The same arguments with
+/// `/proc` intact, and a valid dry run without it, show the namespace is
+/// what breaks the host's startup.
+#[test]
+fn a_usage_error_is_exit_2_where_proc_is_broken() {
+    let typo = ["ensure", "--dry-run", "--min-fre", "1G", "/nonexistent"];
+    let out = diskgc_without_proc(&typo);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.starts_with("diskgc: error: ensure: unknown flag --min-fre"),
+        "{stderr}"
+    );
+    let json_typo = ["ensure", "--json", "--dry-run", "--min-fre", "1G", "/tmp"];
+    let out = diskgc_without_proc(&json_typo);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    let report = json(&out);
+    assert_eq!(report["status"], "usage_error", "{report}");
+    assert_eq!(report["errors"][0]["cause"], "parse", "{report}");
+    let watch_typo = ["watch", "--tally-only", "--intervl", "1m", "/tmp"];
+    let out = diskgc_without_proc(&watch_typo);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    // A command line that is understood still meets the startup check.
+    let valid = [
+        "ensure",
+        "--dry-run",
+        "--select",
+        "profile:pytest-tmp",
+        "--min-free",
+        "1G",
+        "/tmp",
+    ];
+    let out = diskgc_without_proc(&valid);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("/proc"), "{stderr}");
+}
+
 /// AC #4 (syntax half): a bare number and a month duration are usage
 /// errors, exit 2, before anything on the machine is measured; with
 /// `--json`, exactly one JSON object says so.

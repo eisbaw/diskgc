@@ -23,3 +23,6 @@ release-catalog = []
 [dev-dependencies]
 # Test-only: reads the binary's --json output back.
 serde_json.workspace = true
+# Test-only: runs the binary with a tmpfs over /proc, in a user and a mount
+# namespace of its own (TASK-291).
+rustix = { workspace = true, features = ["mount", "thread"] }

@@ -526,3 +526,54 @@ fn a_report_before_any_sample_carries_the_goal_as_given() {
     options.target_free = None;
     assert_eq!(options.report(Status::Error).target_free_bytes, None);
 }
+
+/// TASK-291: a reclaiming `watch` asks at start whether every tier's kind
+/// is one this build reclaims ([`executor::reclaimable`]), the `--select`
+/// tier and each configured one, instead of meeting the refusal at every
+/// cycle. No configuration can name such a kind yet (kind `nix-store` is
+/// refused when its profile loads), so the tier is made by hand: kind `fs`
+/// with the Cargo lock protocol.
+#[test]
+fn a_tier_this_build_cannot_reclaim_is_refused_by_the_prepared_run() {
+    let library = Library::builtin().expect("built-ins");
+    let roots = ["/home/mark".to_owned()];
+    let good = Tier::select("profile:go-mod-cache", &library, Some(&roots), 1000).expect("fs");
+    let mut bad = good.clone();
+    bad.name = "odd".to_owned();
+    bad.action = crate::profile::Action::CargoLockProtocol;
+    let prepared = |tier: Tier, configured: Option<Vec<Tier>>| Prepared {
+        selection: Selection {
+            path: "/home/mark".into(),
+            select: None,
+            roots: Vec::new(),
+            allow_root: false,
+            test_entry_budget: None,
+        },
+        tier,
+        configured: configured.map(|tiers| {
+            let timeouts = vec![std::time::Duration::ZERO; tiers.len()];
+            (tiers, timeouts, None)
+        }),
+        owners: vec![1000],
+        uid: 1000,
+        config: None,
+        protections: Vec::new(),
+        max_entries: 1,
+    };
+    assert_eq!(prepared(good.clone(), None).refuse_unreclaimable(), Ok(()));
+    let why = prepared(bad.clone(), None)
+        .refuse_unreclaimable()
+        .unwrap_err();
+    assert!(
+        why.contains("tier `odd`") && why.contains("which this build does not run"),
+        "{why}"
+    );
+    let why = prepared(good.clone(), Some(vec![good.clone(), bad]))
+        .refuse_unreclaimable()
+        .unwrap_err();
+    assert!(why.contains("tier `odd`"), "a later configured tier: {why}");
+    assert_eq!(
+        prepared(good.clone(), Some(vec![good])).refuse_unreclaimable(),
+        Ok(())
+    );
+}

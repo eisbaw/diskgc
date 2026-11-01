@@ -449,6 +449,16 @@ impl Prepared {
             .any(|tier| tier.relies_on_in_use_check())
     }
 
+    /// The first tier whose kind this build cannot reclaim
+    /// ([`executor::reclaimable`]), refused: a reclaiming `watch` asks at
+    /// start, so it never runs a cycle that could only refuse.
+    pub fn refuse_unreclaimable(&self) -> Result<(), String> {
+        self.tiers()
+            .0
+            .into_iter()
+            .try_for_each(executor::reclaimable)
+    }
+
     /// The tiers a run takes, in policy order, with their own timeouts
     /// (zero: none).
     pub fn tiers(&self) -> (Vec<&Tier>, Vec<Duration>) {
