@@ -975,6 +975,29 @@ fn a_percentage_guard_with_space_above_it_writes_after_a_failed_first_sample() {
     assert_eq!(deletions(&host), 0);
 }
 
+/// TASK-287 review: with the guard resolved at each write, the start
+/// still refuses a `--tally-only` `--min-free` larger than the watched
+/// filesystem (exit 2, `usage`), when its first sample works, rather than
+/// skipping every write.
+#[test]
+fn a_tally_only_min_free_above_the_filesystem_s_size_exits_2_at_start() {
+    let host = host(&yaml(
+        "1G",
+        "",
+        "events:\n  - {at: {elapsed: 1m}, signal: term}\n",
+    ));
+    let run = watch(
+        &host,
+        &Mode::TallyOnly {
+            min_free: Some(parse_size("20G").unwrap()),
+        },
+    );
+    assert_eq!(run.ended, Err(2), "{:?}", run.lines);
+    assert!(run.has("\"cause\":\"usage\""), "{:?}", run.lines);
+    assert!(run.has("--min-free 20G"), "{:?}", run.lines);
+    assert_eq!(host.trace_count(Op::StateWrite), 0);
+}
+
 /// `watch --tally-only --min-free 1G` of `path` on `host` with the state
 /// directory `state`, run until its SIGTERM event; its log lines.
 fn tally_only_lines(host: &ModelHost, path: &str, state: &str) -> Vec<String> {
