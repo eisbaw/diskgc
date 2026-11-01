@@ -243,8 +243,9 @@ pub fn start<H: Delete>(
         }),
         Mode::TallyOnly { .. } => None,
     };
-    // 3. A tier whose kind this build cannot reclaim: refused before the
-    //    gate, as ensure refuses it (TASK-291); every cycle would.
+    // 3, still: a tier whose kind this build cannot reclaim, refused
+    //    before the gate, as ensure refuses it (TASK-291); every cycle
+    //    would.
     if goal.is_some()
         && let Err(why) = prepared.refuse_unreclaimable()
     {
@@ -257,7 +258,7 @@ pub fn start<H: Delete>(
             ),
         ));
     }
-    // 3. The pre-release sandbox gate, unless nothing can be deleted
+    // 3, last: the pre-release sandbox gate, unless nothing can be deleted
     //    (before the in-use check's visibility, 4b: outside a test
     //    container a development build names the gate wherever it runs,
     //    its own PID namespace included).

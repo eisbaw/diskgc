@@ -131,17 +131,22 @@ Immediately before acting, diskgc walks the candidate's whole tree
   The owner is the one `statx` shows. Through an idmapped mount (Linux
   5.12 on) that is the mount's mapped owner, not the stored one: the
   kernel lets the user delete what the mount shows as theirs, and the
-  walk admits it. A non-root run does not see the processes of the stored
-  owner, another user, that use those files by another path, as it sees
-  no other user's processes ([In use](#in-use)). Root made the mapping;
-  systemd-homed's home is such a mount, whose files the user's own,
-  visible processes use. Not refused (TASK-291): the mount table says
-  that a mount is idmapped, not what it maps, so a refusal could not tell
-  homed's home from an idmapped bind of another user's tree, and would
-  keep every homed user from reclaiming in their home. (Loop images seen
-  through an idmapped mount are in doubt: [In use](#in-use), Loop
-  devices; a run outside the initial PID namespace, as in most
-  containers that idmap their volumes, is refused there.)
+  walk admits it. So an idmapped bind that root makes, mapping another
+  account's uid to the user's, admits that account's files as the
+  user's, and a non-root run does not see that account's processes
+  using them by another path, as it sees no other user's processes
+  ([In use](#in-use)). systemd-homed's home is such a mount whose files
+  the user's own, visible processes use. Not refused (TASK-291; the
+  policy is Mark's decision, TASK-308): the mount table says that a
+  mount is idmapped, not what it maps, and not every supported kernel
+  can say more (`statmount`'s `STATMOUNT_MNT_UIDMAP` and
+  `STATMOUNT_MNT_GIDMAP` arrived in Linux 6.15: `include/uapi/linux/
+  mount.h`, `statmount_mnt_uidmap` in `fs/namespace.c`), so a refusal
+  could not tell homed's home from such a bind, and would keep every
+  homed user from reclaiming in their home. (Loop images seen through an
+  idmapped mount are in doubt: [In use](#in-use), Loop devices; a run
+  outside the initial PID namespace, as in most containers that idmap
+  their volumes, is refused there.)
 - **Idle:** for an `fs` candidate, its newest mtime/ctime is older than the
   tier's `idle_for` (if any). Cargo targets use their own measure (below).
 - **No keep marker** (`.diskgc-keep`) in the candidate, anywhere inside
