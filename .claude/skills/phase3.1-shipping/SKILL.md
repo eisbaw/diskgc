@@ -422,7 +422,9 @@ they never override the Invariants.
   blockers before merge. -> The one review round for deletion-path code
   is mped AND Codex in parallel on a frozen snapshot worktree, before
   merge; neither builds. Judged by: blockers found after merge in
-  deletion-path code (target 0). Status: new.
+  deletion-path code (target 0). Status: kept (TASK-284: target missed,
+  2 static-config holes escaped both reviewers and were caught by the
+  periodic Codex full review; rigour-adding, keep with the entry below).
 - 2026-10-31, Retro TASK-266: disk fell 34 -> 7.1 GiB free; container
   tests, QA and the watch walk were blocked ~5 h. Switching branches in a
   warm worktree saved a 5-10 GB target per task. -> Reuse warm worktrees
@@ -430,16 +432,42 @@ they never override the Invariants.
   job below 15 GiB; when a merge lands and disk >= 15 GiB, run the fast
   suite plus that merge's container tests before the next implementer
   starts. Judged by: irreversible shas without a container run at the next
-  retro (target 0). Status: new.
+  retro (target 0). Status: kept (TASK-284: 8/8 irreversible merges had
+  a container run).
 - 2026-10-31, Retro TASK-266: TASK-252's extended index_authority
   generator found a third bug the review missed. -> Index and
   deletion-path tasks extend the relevant property generator with the new
   mechanism before fixing. Judged by: review blockers per deletion-path
-  round (this window 1-2). Status: new.
+  round (this window 1-2). Status: extend (TASK-284: 1-4 per round).
+
+- 2026-11-01, Retro TASK-284: Mark found that a non-root user could
+  not reclaim at all without root provisioning (TASK-277) by dogfooding
+  0.1.0; every walk ran in images that provision /run/diskgc/lock. ->
+  Each user-facing release walk runs the real (non-dry) start path once
+  as a non-root user with nothing provisioned. Judged by: found_by user
+  at the next retro (target 0). Status: new.
+- 2026-11-01, Retro TASK-284: both escaped holes (TASK-267, 268) were
+  alias/mount-type classes. -> Review briefs for protect, mount or
+  storage changes ask explicitly about other mount types and aliases
+  (overlay, FUSE, ecryptfs/aufs/shiftfs, loop images, binds, private
+  propagation, other namespaces). Judged by: post-merge findings of that
+  class (target 0). Status: new.
+- 2026-11-01, Retro TASK-284: two agents were stopped by a session end;
+  their WIP commits saved the work and the worktrees were re-created at
+  the same paths so the agents resumed with context. -> Before a long
+  wait, record each running agent's worktree path and branch in its task
+  notes. Judged by: tasks restarted from scratch after a session end
+  (target 0). Status: new.
 
 ### Gotchas
 
 <!-- - YYYY-MM-DD: fact (evidence). -->
+- 2026-11-01: dogfood reclaims on Mark's laptop are allowed when he asks,
+  always dry run first, with a gate-lifted release-candidate build (see
+  memory diskgc-host-dogfood). The host /tmp has ~208k entries (140k
+  nix-shell-rc); a dry run over it takes 7-8.5 min (TASK-251).
+- 2026-11-01: Cargo-suite tests need an @<toolchain> suffix with
+  e2e-one (e.g. name@1.99.1); `bc` is not on the host.
 - 2026-10-31: Nix's own min-free GC fired at ~7 GiB free and freed ~10
   GiB (store paths only; repo untouched) - free space can jump; GC'd
   outputs (VM images, runners) rebuild on the next QA.
