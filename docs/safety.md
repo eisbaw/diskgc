@@ -547,7 +547,9 @@ Immediately before acting, diskgc walks the candidate's whole tree
   loop device (a LUKS container file) is not related to its file. The
   backing path is the one the kernel prints for diskgc's own root and
   mount namespace. Btrfs subvolumes are reasoned (mountinfo names the
-  subvolume in the root field), not tested on one.
+  subvolume in the root field); the `vm-real-kernel` VM check tests a
+  btrfs mounted by subvolume, whose second member's image lies in a
+  protected Cargo target ([testing.md](testing.md)).
 
   `protect` matches are enumerated
   before the first deletion of the run and again before each later tier;
@@ -1457,8 +1459,9 @@ attach a loop device or open one, so these rules are tested in the model
 generated property
 `the_in_use_check_never_clears_what_it_cannot_see_or_a_loop_device_holds`)
 and the listing and the device query by read-only tests of `LinuxHost` on
-the development host, which can open no loop device (not in `disk`), so
-`LOOP_GET_STATUS64` itself has not run against a bound device.
+the development host, which can open no loop device (not in `disk`). The
+`vm-real-kernel` VM check ([testing.md](testing.md), TASK-304) runs them
+on a real kernel, `LOOP_GET_STATUS64` against bound devices included.
 
 ### Producer liveness
 

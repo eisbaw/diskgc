@@ -1866,6 +1866,75 @@ the kept sessions' reasons and evidence (`owner_pid` with the live pid,
 exit code, human summary, JSON report and stderr is kept in the check's
 output under `evidence/`.
 
+The `vm-real-kernel` flake check (`just e2e-vm-real-kernel`, also in
+`just e2e-full`; `diskgc-e2e/vm-real-kernel.{nix,py}`, TASK-304) runs the
+rules no rootless container can reach on a real kernel: loop devices,
+btrfs, idmapped mounts, a `hidepid` `/proc`, udisks and overlays. The
+NixOS guest runs the pinned default kernel (Linux 6.18 at the time of
+writing) with bcachefs from NixOS's out-of-tree module. The development
+package runs inside one privileged rootful Podman container of the VM
+image (`localhost/diskgc-e2e-vm`), so both sandbox markers are present.
+The container shares the guest's PID namespace (`--pid=host`), so the
+in-use check sees every guest process (kernel threads included), and
+shares the guest's `/dev`, so it can attach loop devices and see their
+partitions. Fixtures and mounts are made in the container's own mount
+namespace on a guest ext4 directory bound at `/work`, so the backing
+names the kernel prints are the container's paths. The users are
+`tester` (uid 1000, not in `disk`), root (`--allow-root`, `owners:
+[{uid: 1000}]`, the host lock provisioned) and, for udisks, `alice`.
+Each scenario starts with no loop device configured and is cleaned up
+whether it passes or not. Each reclaim ends with the deletion oracle:
+every path below the fixture roots is listed by type and device:inode
+before and after the run, and exactly the trees of the report's
+`actions` must be gone, with nothing added. Then come the expected
+verdicts (safety.md, In use, Loop devices and Visibility;
+architecture.md, Filesystem matching):
+
+1. btrfs on two loop members, mounted by subvolume. A root on a sibling
+   subvolume reclaims. A candidate that holds a nested subvolume or a
+   snapshot, or is a subvolume itself, is `contains_mount`. `watch
+   --tally-only` writes `index-uuid-<FSID>`, where FSID is the btrfs
+   UUID (`BTRFS_IOC_FS_INFO`, no `EBADF`), and a second watch on the
+   sibling subvolume exits 2. The second member's image lies in a
+   protected Cargo target and is named only by `BTRFS_IOC_DEV_INFO`
+   (mountinfo names the first): every candidate is `protected`.
+2. Loop backing files. An image inside a candidate leaves `tester`'s
+   candidates `in_use_unknown`/`loop_device`, while root
+   (`LOOP_GET_STATUS64`, seen in strace) keeps that candidate `in_use`
+   and reclaims the other. When the backing name was deleted and a hard
+   link survives, `tester`'s doubt covers only the surviving parent's
+   filesystem (a tmpfs candidate reclaims) and root keeps the link
+   `in_use`. For a `losetup -P` partition (major 259), a protected
+   image makes its filesystem's candidates `protected`; without the
+   protect entry they reclaim.
+3. A root-owned image under an idmapped bind (`mount --map-users
+   0:1000:1`): `tester` finds it `in_use_unknown`/`loop_device` on the
+   bind, while a candidate on a plain mount of the same ext4 reclaims;
+   root keeps it `in_use`.
+4. `hidepid=invisible` on the container's `/proc`: below the goal,
+   exit 2 (`safety`); met, exit 0 with one stderr line; the dry run,
+   exit 2.
+5. `udisksctl loop-setup` of an ISO by `alice`, through a polkit rule
+   that stands in for an active seat session. The device stays
+   `root:disk 0660`, every one of her candidates is
+   `in_use_unknown`/`loop_device`, and after `udisksctl loop-delete` the
+   candidate reclaims. This measures TASK-296's cost; it does not decide
+   it.
+6. An approximation of a casper live root, not the guest's root: an
+   ISO on a QEMU CD-ROM (`/dev/sr0`, `/cdrom`) with its squashfs
+   loop-mounted at `/rofs`, an overlay at `/live` over it, and a
+   root-owned snap squashfs on the overlay loop-mounted under it.
+   `tester`'s overlay candidates reclaim. As root, the snap's overlay
+   identity matches exactly on the overlay, while a candidate off it is
+   `in_use_unknown`.
+7. bcachefs on a loop device: a candidate holding a nested subvolume is
+   expected to be `contains_mount`, as on btrfs.
+
+Root cases are dry-run first (the plan's verdicts), then reclaimed.
+Every command, exit code, JSON report, stderr and ioctl strace is kept
+under `evidence/` and printed in the build log; one run takes about
+five minutes.
+
 ## 5. End-to-end tests in containers
 
 The real binary in **rootless Podman containers**, built from images Nix

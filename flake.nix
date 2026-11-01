@@ -1077,6 +1077,13 @@
         image = e2eVmImage;
         underTest = e2eUnderTest;
       };
+      # TASK-304: loop devices, btrfs on two loop members, an idmapped bind,
+      # hidepid, udisks and a live overlay root on a real kernel.
+      vmRealKernel = import ./diskgc-e2e/vm-real-kernel.nix {
+        inherit pkgs;
+        image = e2eVmImage;
+        underTest = e2eUnderTest;
+      };
       mkVmPidfd = vmPkgs: kernelPackages: expectedKernel: expectPollHup: cores: extra:
         import ./diskgc-e2e/vm-old-kernel-pidfd.nix ({
           pkgs = vmPkgs;
@@ -1119,6 +1126,7 @@
         vm-historical-ctime = vmHistoricalCtime;
         vm-cold-scale = vmColdScale;
         vm-tally-pressure = vmTallyPressure;
+        vm-real-kernel = vmRealKernel;
         vm-release-tmp-reclaim = vmReleaseTmpReclaim;
         vm-old-kernel-pidfd = vmOldKernelPidfd;
         vm-pidfd-linux-6-1 = vmPidfdLinux61;

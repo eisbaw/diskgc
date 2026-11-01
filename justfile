@@ -101,6 +101,10 @@ e2e-vm-tally-pressure: _gcroot-dev
 e2e-vm-cold-scale: _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-cold-scale
 
+# Loop devices, btrfs, idmapped, hidepid, udisks and overlay rules on a real guest kernel.
+e2e-vm-real-kernel: _gcroot-dev
+    nix build -L --no-link .#checks.x86_64-linux.vm-real-kernel
+
 # Every container test: Nix, Debian and native Docker; budgets guard hangs.
 e2e-full: _gcroot-dev
     python3 tools/deadline.py 3600 just check
@@ -132,6 +136,7 @@ e2e-full: _gcroot-dev
     nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-8
     nix build -L --no-link .#checks.x86_64-linux.vm-nixos-module
     just e2e-vm-cold-scale
+    just e2e-vm-real-kernel
 
 # The static binary, no Nix inside (docs/testing.md, Images).
 # Every test but the Nix-only ones, on the Debian image.

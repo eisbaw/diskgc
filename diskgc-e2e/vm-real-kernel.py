@@ -1,0 +1,771 @@
+# vm-real-kernel (TASK-304) test script, appended to the prelude in
+# vm-real-kernel.nix that defines IMAGE, IMAGE_REF, UNDER_TEST, TOOLS,
+# LIVE_ISO and BCACHEFS_TOOLS_VERSION. Runs in the NixOS test driver.
+#
+# Every diskgc run is the development package inside the guest's one
+# privileged Podman container (see the .nix file for why). Each scenario
+# makes its own mounts and loop devices, starts with no loop device
+# configured (a loop device is seen by every scan, so one left behind would
+# change the next scenario's verdicts), and ends with the deletion oracle:
+# the fixture trees listed before and after each reclaim, by path, type and
+# inode, and exactly the expected candidates' trees gone.
+#
+# Every diskgc command, exit code, stdout (the JSON report), stderr and, where
+# taken, its ioctl strace are saved under $out/evidence and printed to the
+# build log. The expectations cite docs/safety.md and docs/architecture.md
+# by section (rule names, not line numbers).
+import json
+import shlex
+import time
+from typing import Any
+
+CTR = "diskgc-real-kernel"
+BIN = "/opt/diskgc-e2e/bin"
+DISKGC = f"{BIN}/diskgc-development"
+ROOT = "0:0"
+TESTER = "1000:1000"
+ALICE = "1002:100"  # alice, group users: like tester, not in disk
+HOMES = {ROOT: "/root", TESTER: "/home/tester", ALICE: "/home/alice"}
+UNREACHABLE = "100%"  # never met: reclaim every eligible candidate (exit 1)
+PATH_ENV = f"{TOOLS}/bin:{TOOLS}/sbin:/bin"
+EV = "/work/ev"  # container scratch for stderr and strace files
+PROFILE = "scratch-probe"
+
+evidence_dir = machine.out_dir / "evidence"
+evidence_dir.mkdir(parents=True, exist_ok=True)
+started_monotonic = time.monotonic()
+summary: list[str] = []
+
+
+def save(name: str, text: str) -> None:
+    (evidence_dir / name).write_text(text)
+    print(f"===== {name} =====\n{text}")
+
+
+def cx(command: str, user: str = ROOT, timeout: int = 300, detach: bool = False) -> tuple[int, str]:
+    """COMMAND by /bin/sh in the container as USER (uid:gid)."""
+    env = {"PATH": PATH_ENV, "HOME": HOMES[user]}
+    flags = " ".join(f"-e {k}={shlex.quote(v)}" for k, v in env.items())
+    detached = "--detach " if detach else ""
+    return machine.execute(
+        f"podman exec {detached}--user {user} {flags} {CTR} /bin/sh -c {shlex.quote(command)}",
+        timeout=timeout,
+    )
+
+
+def run(command: str, user: str = ROOT, timeout: int = 300) -> str:
+    code, out = cx(f"exec 2>&1\nset -e\n{command}", user, timeout)
+    assert code == 0, f"as {user} in the container, exit {code}:\n{command}\n--- output ---\n{out}"
+    return out
+
+
+def diskgc(tag: str, user: str, args: str, strace: bool = False) -> tuple[int, str, str]:
+    """diskgc ARGS as USER in the container; returns exit code, stdout, stderr."""
+    err = f"{EV}/{tag}.stderr"
+    trace = f"{EV}/{tag}.strace"
+    # --seccomp-bpf stops only at ioctl; plain -f stops at every syscall and
+    # slows the in-use scan past its freshness bound (in_use_unknown: busy).
+    prefix = f"strace --seccomp-bpf -f -qq -e trace=ioctl -o {trace} " if strace else ""
+    command = f"{prefix}{DISKGC} {args}"
+    began = time.monotonic()
+    code, out = cx(f"{command} 2>{err}", user)
+    elapsed = time.monotonic() - began
+    save(f"{tag}.cmd", f"user: {user}\ncommand: {command}\nexit: {code}\nseconds: {elapsed:.1f}\n")
+    save(f"{tag}.stdout", out)
+    stderr = run(f"cat {err}")
+    save(f"{tag}.stderr", stderr)
+    if strace:
+        save(f"{tag}.strace", run(f"cat {trace}"))
+    return code, out, stderr
+
+
+def report(out: str, code: int, status: str) -> dict[str, Any]:
+    result: dict[str, Any] = json.loads(out)
+    assert result["exit_code"] == code, (result["exit_code"], code, result["errors"])
+    assert result["status"] == status, (result["status"], status, result["errors"])
+    return result
+
+
+def ensure(tag: str, user: str, config: str, path: str, extra: str = "",
+           min_free: str = UNREACHABLE, strace: bool = False) -> tuple[int, str, str]:
+    allow_root = "--allow-root " if user == ROOT else ""
+    return diskgc(
+        tag, user,
+        f"ensure {allow_root}--json --config {config} --select profile:{PROFILE} "
+        f"--min-free {min_free} {extra} {path}",
+        strace,
+    )
+
+
+def outcomes(result: dict[str, Any]) -> dict[str, tuple[str, str | None]]:
+    """Each skipped candidate's reason and unknown_cause (one row each)."""
+    rows: dict[str, tuple[str, str | None]] = {}
+    for row in result["skipped"]:
+        assert row["count"] == 1 and row["candidate"] is not None, row
+        assert row["candidate"] not in rows, row
+        rows[row["candidate"]] = (row["reason"], row["unknown_cause"])
+    return rows
+
+
+def row_of(result: dict[str, Any], candidate: str) -> dict[str, Any]:
+    rows = [r for r in result["skipped"] if r["candidate"] == candidate]
+    assert len(rows) == 1, (candidate, result["skipped"])
+    return rows[0]
+
+
+def plan_of(result: dict[str, Any]) -> dict[str, str | None]:
+    return {r["candidate"]: r["reason"] for r in result["plan"]}
+
+
+def acted(result: dict[str, Any]) -> set[str]:
+    return {a["candidate"] for a in result["actions"]}
+
+
+def tree(*roots: str) -> dict[str, str]:
+    """Every entry below ROOTS, crossing subvolumes and mounts: path -> type and inode."""
+    out = run("find " + " ".join(roots) + " -printf '%y %D:%i %p\\n'")
+    entries: dict[str, str] = {}
+    for line in out.splitlines():
+        kind, ident, path = line.split(" ", 2)
+        entries[path] = f"{kind} {ident}"
+    return entries
+
+
+def require_removed(before: dict[str, str], after: dict[str, str], candidates: set[str], tag: str) -> None:
+    """The deletion oracle: exactly the candidates' trees are gone, nothing else changed."""
+    for candidate in candidates:
+        assert candidate in before, (tag, candidate)
+    expected = {p for p in before if any(p == c or p.startswith(c + "/") for c in candidates)}
+    removed = {p for p in before if after.get(p) != before[p]}
+    added = sorted(set(after) - set(before))
+    save(
+        f"{tag}.oracle",
+        f"removed ({len(removed)}):\n" + "\n".join(sorted(removed))
+        + f"\nexpected ({len(expected)}):\n" + "\n".join(sorted(expected))
+        + f"\nadded ({len(added)}):\n" + "\n".join(added) + "\n",
+    )
+    assert removed == expected, (tag, sorted(removed - expected), sorted(expected - removed))
+    assert not added, (tag, added)
+
+
+def config(name: str, roots: list[str], extra: str = "", owners: bool = False) -> str:
+    """A root-owned configuration with the scratch probe over ROOTS."""
+    path = f"/work/cfg/{name}.yaml"
+    text = (
+        "version: 1\n"
+        + ("owners: [{uid: 1000}]\n" if owners else "")
+        + "profiles:\n"
+        + f"  - name: {PROFILE}\n"
+        + f"    find: {{roots: [{', '.join(roots)}], paths: ['scratch-*'], type: dir}}\n"
+        + "    action: delete\n"
+        + f"    examples: {{match: [{roots[0]}/scratch-a]}}\n"
+        + extra
+    )
+    run(f"cat > {path} <<'EOF'\n{text}EOF\nchmod 0644 {path}")
+    save(f"config-{name}.yaml", text)
+    return path
+
+
+def no_loop_devices(tag: str) -> None:
+    listing = run("losetup -a -l -n")
+    assert listing.strip() == "", (tag, listing)
+
+
+def loop_backing(device: str) -> str:
+    name = device.removeprefix("/dev/")
+    return run(f"cat /sys/block/{name}/loop/backing_file").rstrip("\n")
+
+
+def strace_calls(tag: str, request: str) -> list[str]:
+    text = (evidence_dir / f"{tag}.strace").read_text()
+    return [line for line in text.splitlines() if "ioctl(" in line and request in line]
+
+
+def passed(scenario: str, detail: str) -> None:
+    line = f"PASS {scenario}: {detail}"
+    summary.append(line)
+    print(line)
+
+
+def cleanup(scenario: str) -> None:
+    """Undo what a scenario mounted and attached, whether it passed or not."""
+    run("mount -o remount,hidepid=off /proc")
+    cx("awk '{print $5}' /proc/self/mountinfo | grep -E '^/(mnt/|live|rofs|cdrom)' | sort -r "
+       "| while read -r m; do umount -l \"$m\"; done; losetup -D")
+    try:
+        machine.wait_until_succeeds(
+            f"podman exec {CTR} /bin/sh -c 'test -z \"$({TOOLS}/bin/losetup -a)\"'", timeout=30
+        )
+    except Exception:
+        save(f"cleanup-{scenario}.txt", run("losetup -a -l; cat /proc/self/mountinfo"))
+        raise
+
+
+def kernel_threads() -> int:
+    """Processes with PF_KTHREAD in their stat flags (field 9)."""
+    count = 0
+    for line in run("cat /proc/[0-9]*/stat 2>/dev/null || true").splitlines():
+        fields = line.rsplit(")", 1)[-1].split()
+        if len(fields) > 6 and int(fields[6]) & 0x0020_0000:
+            count += 1
+    return count
+
+
+# ---- The guest and its one container ----
+machine.start()
+machine.wait_for_unit("multi-user.target")
+assert "diskgc.e2e.real_kernel=1" in machine.succeed("cat /proc/cmdline").split()
+# Outside a container the interlock refuses (docs/testing.md, Safety interlock).
+assert machine.execute(f"{UNDER_TEST}/bin/diskgc-e2e-canary")[0] == 86
+machine.succeed(f"{IMAGE} | podman load")
+machine.succeed("install -d -m 0755 /var/lib/diskgc-real-kernel")
+machine.succeed(
+    "podman run --detach --rm --pull=never --network=none --privileged --pid=host "
+    f"--name {CTR} --volume /nix/store:/nix/store:ro --volume {UNDER_TEST}/bin:{BIN}:ro "
+    "--volume /dev:/dev --volume /var/lib/diskgc-real-kernel:/work "
+    "--volume /home/alice:/home/alice "
+    f"--entrypoint /bin/sh {IMAGE_REF} -c 'exec sleep 86400'"
+)
+# Both markers (safety.md, Pre-release sandbox gate) and the real canary.
+run(f"{BIN}/diskgc-e2e-canary")
+# The guest's PID namespace (safety.md, In use, Visibility: a process list
+# that cannot be complete): the development package's rule passes here.
+guest_pidns = machine.succeed("readlink /proc/self/ns/pid").strip()
+assert run("readlink /proc/self/ns/pid").strip() == guest_pidns, guest_pidns
+assert "hidepid" not in run("findmnt -n -o OPTIONS /proc")
+# /run/diskgc/lock as the package's tmpfiles drop-in makes it (--allow-root
+# needs it: safety.md, Host lock); tester's home is a tmpfs of its own, as
+# the e2e harness mounts there.
+run(f"mkdir -p /run/diskgc && : > /run/diskgc/lock && chmod 0644 /run/diskgc/lock && "
+    f"install -d -m 1777 {EV} && install -d -m 0755 /work/cfg && "
+    "mount -t tmpfs -o size=64m,mode=0700,uid=1000,gid=1000 tmpfs /home/tester")
+save("environment.txt", run(
+    "uname -r; mount --version; btrfs --version; "
+    "grep -E 'btrfs|bcachefs|overlay|squashfs|iso9660' /proc/filesystems | tr '\\n' ' '; echo; "
+    f"{DISKGC} --version"
+))
+
+
+# ---- 0. Root's in-use scan on a real kernel, no loop device ----
+def scenario_root_scan() -> None:
+    # A container's own PID namespace shows no kernel thread; the guest's
+    # does. Root's scan must still be young enough to clear a candidate
+    # (safety.md, In use, Freshness: a deletion starts on a scan younger
+    # than one second). On Linux 6.18 a kernel thread's environ says ESRCH,
+    # which the scan reads as a vanished task and retries for 16 rounds
+    # (TASK-304 finding): every root reclaim here ends in_use_unknown, busy.
+    probe = run(
+        "for f in environ maps cmdline; do if cat /proc/2/$f >/dev/null 2>/work/ev/kt.err; "
+        "then rc=0; else rc=$?; fi; echo \"/proc/2/$f exit $rc $(cat /work/ev/kt.err)\"; done"
+    )
+    save("s0-kthread-proc.txt", probe + f"kernel threads: {kernel_threads()}\n")
+    run("install -d -m 0755 -o 1000 -g 1000 /work/s0")
+    run("mkdir /work/s0/scratch-a && echo a > /work/s0/scratch-a/f", TESTER)
+    cfg = config("s0-root", ["/work/s0"], owners=True)
+    before = tree("/work/s0")
+    code, out, _ = ensure("s0-root", ROOT, cfg, "/work/s0")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/work/s0"), acted(result), "s0-root")
+    assert acted(result) == {"/work/s0/scratch-a"}, result["skipped"]
+    passed("0 root scan", "an unheld candidate reclaimed by root with every guest process visible")
+
+
+# ---- 1. btrfs: two loop members, subvolumes, snapshot key, membership ----
+def scenario_btrfs() -> None:
+    devices = run("""
+mkdir -p /work/s1/images /work/proj/target/debug/deps /mnt/btrfs-top /mnt/home /mnt/scratch
+printf 'Signature: 8a477f597d28d172789f06886806bc55\\n# This file is a cache directory tag created by cargo.\\n' > /work/proj/target/CACHEDIR.TAG
+: > /work/proj/target/debug/.cargo-lock
+echo dep > /work/proj/target/debug/deps/libdep.rlib
+chown -R 1000:1000 /work/proj
+# Both member images are root's, as an administrator makes them; the second
+# lies inside tester's Cargo target.
+truncate -s 300M /work/s1/images/a.img /work/proj/target/b.img
+A=$(losetup -f --show /work/s1/images/a.img)
+B=$(losetup -f --show /work/proj/target/b.img)
+mkfs.btrfs -q -f -L diskgc-rk -d single -m raid1 "$A" "$B" >/dev/null
+mount "$A" /mnt/btrfs-top
+btrfs -q subvolume create /mnt/btrfs-top/@home
+btrfs -q subvolume create /mnt/btrfs-top/@scratch
+chown 1000:1000 /mnt/btrfs-top/@home /mnt/btrfs-top/@scratch
+mount -o subvol=@home "$A" /mnt/home
+mount -o subvol=@scratch "$A" /mnt/scratch
+echo "$A $B"
+""").split()
+    member_a, member_b = devices
+    fsid = run("btrfs filesystem show /mnt/btrfs-top | sed -n 's/.*uuid: //p'").strip()
+    # mountinfo names only the first member; the second is found by
+    # BTRFS_IOC_DEV_INFO alone (safety.md, Not protected, not excluded:
+    # Btrfs membership).
+    sources = run("for m in /mnt/home /mnt/scratch /mnt/btrfs-top; do findmnt -n -o SOURCE \"$m\"; done")
+    save("s1-mounts.txt", run("btrfs filesystem show /mnt/btrfs-top; grep ' /mnt/' /proc/self/mountinfo") + f"fsid={fsid}\n")
+    assert member_b not in sources and member_a in sources, (member_a, member_b, sources)
+    run("""
+cd /mnt/scratch
+mkdir -p scratch-a/sub && head -c 65536 /dev/urandom > scratch-a/sub/data
+mkdir scratch-nested && btrfs -q subvolume create scratch-nested/inner && echo x > scratch-nested/inner/f
+btrfs -q subvolume create scratch-subvol && echo y > scratch-subvol/f
+""", TESTER)
+    run("mkdir /mnt/scratch/scratch-snap && btrfs -q subvolume snapshot /mnt/btrfs-top/@home /mnt/scratch/scratch-snap/home-snap "
+        "&& chown 1000:1000 /mnt/scratch/scratch-snap")
+    cfg = config("s1", ["/mnt/scratch"])
+
+    # Roots on a sibling subvolume are on PATH's filesystem (architecture.md,
+    # Filesystem matching: every btrfs subvolume of one btrfs); a candidate
+    # holding a nested subvolume or snapshot, or being one, is contains_mount
+    # (Filesystem matching, Subvolume boundaries).
+    before = tree("/mnt/scratch", "/mnt/home")
+    code, out, stderr = ensure("s1-reclaim", TESTER, cfg, "/mnt/home", strace=True)
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/mnt/scratch", "/mnt/home"), acted(result), "s1-reclaim")
+    assert result["mount"] == "/mnt/home", result["mount"]
+    assert acted(result) == {"/mnt/scratch/scratch-a"}, result["actions"]
+    kept = outcomes(result)
+    for name in ("scratch-nested", "scratch-subvol", "scratch-snap"):
+        assert kept.get(f"/mnt/scratch/{name}", ("",))[0] == "contains_mount", (name, kept)
+    passed("1a btrfs sibling subvolume", "scratch-a reclaimed from PATH /mnt/home; nested subvolume, "
+           "subvolume and snapshot kept contains_mount")
+
+    # One snapshot key for every subvolume (architecture.md, The tally,
+    # Snapshot: uuid-<FSID> by BTRFS_IOC_FS_INFO); a second watch on a
+    # sibling subvolume exits 2 (reference.md, watch: one process per
+    # filesystem and state directory).
+    state = "/home/tester/.local/state/diskgc"
+    watch = f"{DISKGC} watch --tally-only --config {cfg} --select profile:{PROFILE}"
+    code, _ = cx(
+        f"{watch} /mnt/home >{EV}/s1-watch1.stdout 2>{EV}/s1-watch1.stderr & "
+        f"echo $! > {EV}/s1-watch1.pid; wait $!; echo $? > {EV}/s1-watch1.code",
+        TESTER, detach=True,
+    )
+    assert code == 0, code
+    try:
+        machine.wait_until_succeeds(
+            f"podman exec {CTR} /bin/sh -c 'ls {state} | grep -q \"^index-.*\\.lock$\"'", timeout=60
+        )
+    finally:
+        save("s1-watch1.stderr", run(f"cat {EV}/s1-watch1.stderr"))
+    time.sleep(2)
+    began = time.monotonic()
+    code, out, stderr = diskgc(
+        "s1-watch2", TESTER,
+        f"watch --tally-only --config {cfg} --select profile:{PROFILE} /mnt/scratch", strace=True,
+    )
+    waited = time.monotonic() - began
+    assert code == 2, (code, stderr)
+    run(f"kill -TERM $(cat {EV}/s1-watch1.pid)")
+    machine.wait_until_succeeds(f"podman exec {CTR} test -s {EV}/s1-watch1.code", timeout=60)
+    first_code = run(f"cat {EV}/s1-watch1.code").strip()
+    save("s1-watch1.stderr", run(f"cat {EV}/s1-watch1.stderr"))
+    listing = run(f"ls -1 {state}")
+    save("s1-state-dir.txt", listing)
+    assert first_code == "0", first_code
+    assert f"index-uuid-{fsid}" in listing.split(), (fsid, listing)
+    fs_info = strace_calls("s1-watch2", "BTRFS_IOC_FS_INFO")
+    assert fs_info and all("EBADF" not in c for c in fs_info), fs_info
+    passed("1b btrfs snapshot key", f"index-uuid-{fsid} written by watch --tally-only on /mnt/home; "
+           f"second watch on /mnt/scratch exit 2 after {waited:.1f}s; FS_INFO without EBADF ({len(fs_info)} calls)")
+
+    # A member's image inside a protected Cargo target protects every
+    # candidate on the btrfs (safety.md, Not protected, not excluded: a
+    # filesystem on a loop device; Btrfs membership).
+    run("mkdir -p /mnt/scratch/scratch-b && echo b > /mnt/scratch/scratch-b/f", TESTER)
+    protected_cfg = config("s1-protect", ["/mnt/scratch"],
+                           "protect:\n  - {profile: cargo-target, roots: [/work/proj]}\n")
+    code, out, _ = ensure("s1-protect-dry", TESTER, protected_cfg, "/mnt/home", "--dry-run", strace=True)
+    plan = plan_of(report(out, 0, "dry_run"))
+    assert plan.get("/mnt/scratch/scratch-b") == "protected", plan
+    dev_info = strace_calls("s1-protect-dry", "BTRFS_IOC_DEV_INFO")
+    assert dev_info and all("EBADF" not in c for c in dev_info), dev_info
+    before = tree("/mnt/scratch", "/mnt/home", "/work/proj")
+    code, out, _ = ensure("s1-protect", TESTER, protected_cfg, "/mnt/home")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/mnt/scratch", "/mnt/home", "/work/proj"), acted(result), "s1-protect")
+    assert acted(result) == set(), result["actions"]
+    assert outcomes(result)["/mnt/scratch/scratch-b"][0] == "protected", result["skipped"]
+    passed("1c btrfs membership", f"second member {member_b} (image in protected target) found by "
+           f"DEV_INFO ({len(dev_info)} calls); scratch-b protected, nothing deleted")
+
+
+# ---- 2. Loop backing files: a user outside disk, and root ----
+def scenario_loop_in_candidate() -> None:
+    run("install -d -m 0755 -o 1000 -g 1000 /work/s2")
+    make = "mkdir -p /work/s2/scratch-free && echo free > /work/s2/scratch-free/data"
+    run(f"mkdir -p /work/s2/scratch-img/vm && truncate -s 8M /work/s2/scratch-img/vm/disk.img && {make}", TESTER)
+    loop = run("losetup -f --show /work/s2/scratch-img/vm/disk.img").strip()
+    save("s2-loop.txt", run(f"stat -c '%n %u:%g %a' {loop}; losetup -l {loop}"))
+    cfg_user = config("s2", ["/work/s2"])
+    cfg_root = config("s2-root", ["/work/s2"], owners=True)
+
+    # A user outside disk cannot open the device: the name reaches a file of
+    # the user's own, which proves nothing, so every candidate is in doubt
+    # (safety.md, In use, Loop devices, 2: anything else).
+    before = tree("/work/s2")
+    code, out, _ = ensure("s2-user", TESTER, cfg_user, "/work/s2", strace=True)
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/work/s2"), acted(result), "s2-user")
+    assert acted(result) == set(), result["actions"]
+    assert outcomes(result) == {
+        "/work/s2/scratch-img": ("in_use_unknown", "loop_device"),
+        "/work/s2/scratch-free": ("in_use_unknown", "loop_device"),
+    }, result["skipped"]
+    detail = row_of(result, "/work/s2/scratch-img")["detail"]
+    passed("2a loop as tester", f"both candidates in_use_unknown/loop_device ({detail})")
+
+    # Root opens the device: LOOP_GET_STATUS64's exact (device, inode) is a
+    # use, the candidate holding the image in_use (Loop devices, 1); the
+    # other candidate is judged.
+    code, out, _ = ensure("s2-root-dry", ROOT, cfg_root, "/work/s2", "--dry-run", strace=True)
+    plan = plan_of(report(out, 0, "dry_run"))
+    assert plan == {"/work/s2/scratch-img": "in_use", "/work/s2/scratch-free": None}, plan
+    status = strace_calls("s2-root-dry", "LOOP_GET_STATUS64")
+    assert status and all(c.rstrip().endswith("= 0") for c in status), status
+    passed("2b loop as root (plan)", f"scratch-img in_use, scratch-free eligible; LOOP_GET_STATUS64 "
+           f"answered ({len(status)} calls)")
+    before = tree("/work/s2")
+    code, out, _ = ensure("s2-root", ROOT, cfg_root, "/work/s2")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/work/s2"), acted(result), "s2-root")
+    row = row_of(result, "/work/s2/scratch-img")
+    assert row["reason"] == "in_use", row
+    assert acted(result) == {"/work/s2/scratch-free"}, result["skipped"]
+    passed("2b loop as root (reclaim)", f"scratch-img in_use ({row['detail']}); scratch-free reclaimed")
+
+
+def scenario_loop_deleted_name() -> None:
+    # A deleted backing name whose hard link survives in a candidate: for
+    # the user the doubt is scoped to the surviving parent's filesystem, and
+    # a candidate elsewhere is judged; root's exact identity finds the link
+    # (safety.md, In use, Loop devices, 2: ` (deleted)`; 1).
+    run("install -d -m 0755 -o 1000 -g 1000 /work/s2d && install -d -m 0755 /mnt/s2tmp")
+    make_plain = "mkdir -p /work/s2d/scratch-plain && echo plain > /work/s2d/scratch-plain/data"
+    run(f"""
+mkdir -p /work/s2d/a /work/s2d/scratch-link
+truncate -s 8M /work/s2d/a/img
+ln /work/s2d/a/img /work/s2d/scratch-link/img-link
+{make_plain}
+""", TESTER)
+    # tester's own tmpfs, with root's filler so 100% stays out of reach.
+    run("mount -t tmpfs -o size=16m,mode=0755,uid=1000,gid=1000 tmpfs /mnt/s2tmp && "
+        "head -c 1048576 /dev/zero > /mnt/s2tmp/filler && install -d -o 1000 -g 1000 /mnt/s2tmp/scratch-other")
+    run("echo other > /mnt/s2tmp/scratch-other/data", TESTER)
+    loop = run("losetup -f --show /work/s2d/a/img").strip()
+    run("rm /work/s2d/a/img")
+    backing = loop_backing(loop)
+    assert backing == "/work/s2d/a/img (deleted)", backing
+    cfg_d = config("s2d", ["/work/s2d"])
+    cfg_d_root = config("s2d-root", ["/work/s2d"], owners=True)
+    cfg_t = config("s2t", ["/mnt/s2tmp"])
+    before = tree("/work/s2d")
+    code, out, _ = ensure("s2d-user", TESTER, cfg_d, "/work/s2d")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/work/s2d"), acted(result), "s2d-user")
+    assert acted(result) == set(), result["actions"]
+    assert outcomes(result) == {
+        "/work/s2d/scratch-link": ("in_use_unknown", "loop_device"),
+        "/work/s2d/scratch-plain": ("in_use_unknown", "loop_device"),
+    }, result["skipped"]
+    before = tree("/mnt/s2tmp")
+    code, out, _ = ensure("s2d-user-other-fs", TESTER, cfg_t, "/mnt/s2tmp")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/mnt/s2tmp"), acted(result), "s2d-user-other-fs")
+    assert acted(result) == {"/mnt/s2tmp/scratch-other"}, (result["actions"], result["skipped"])
+    passed("2c deleted backing name (tester)", f"'{backing}': both /work/s2d candidates in doubt; "
+           "the tmpfs candidate reclaimed")
+    code, out, _ = ensure("s2d-root-dry", ROOT, cfg_d_root, "/work/s2d", "--dry-run")
+    plan = plan_of(report(out, 0, "dry_run"))
+    assert plan == {"/work/s2d/scratch-link": "in_use", "/work/s2d/scratch-plain": None}, plan
+    passed("2c deleted backing name (root plan)", "the surviving hard link in_use, scratch-plain eligible")
+    before = tree("/work/s2d")
+    code, out, _ = ensure("s2d-root", ROOT, cfg_d_root, "/work/s2d")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/work/s2d"), acted(result), "s2d-root")
+    row = row_of(result, "/work/s2d/scratch-link")
+    assert row["reason"] == "in_use", row
+    assert acted(result) == {"/work/s2d/scratch-plain"}, result["skipped"]
+    passed("2c deleted backing name (root reclaim)", f"hard link kept in_use ({row['detail']}); scratch-plain reclaimed")
+
+
+def scenario_loop_partition() -> None:
+    # losetup -P: a partition of a loop device (extended major 259) belongs
+    # to its loop device by its sysfs parent, so a candidate on the
+    # partition's filesystem is judged as the image, here inside a protect
+    # match (safety.md, Not protected, not excluded: a filesystem on a loop
+    # device, the loop device a partition of one belongs to).
+    loop = run("""
+install -d -m 0755 /work/s2p /mnt/part
+truncate -s 64M /work/s2p/disk.img
+printf 'label: dos\\n,,L\\n' | sfdisk -q /work/s2p/disk.img
+P=$(losetup -P -f --show /work/s2p/disk.img)
+test -b "${P}p1"
+mkfs.ext4 -q "${P}p1"
+mount "${P}p1" /mnt/part
+chown 1000:1000 /mnt/part
+echo "$P"
+""").strip()
+    save("s2p-partition.txt", run(f"lsblk -o NAME,MAJ:MIN,TYPE,MOUNTPOINTS {loop}; findmnt -n -o SOURCE,MAJ:MIN /mnt/part"))
+    assert run("findmnt -n -o MAJ:MIN /mnt/part").strip().startswith("259:"), "partition not on major 259"
+    run("mkdir -p /mnt/part/scratch-a /mnt/part/scratch-b && echo a > /mnt/part/scratch-a/f && echo b > /mnt/part/scratch-b/f", TESTER)
+    images_profile = (
+        "  - name: precious-images\n"
+        "    find: {roots: [/work/s2p], paths: ['disk.img'], type: file}\n"
+        "    action: delete\n"
+        "    examples: {match: [/work/s2p/disk.img]}\n"
+        "protect: [precious-images]\n"
+    )
+    cfg_p = config("s2p-protect", ["/mnt/part"], images_profile)
+    before = tree("/mnt/part", "/work/s2p")
+    code, out, _ = ensure("s2p-protected", TESTER, cfg_p, "/mnt/part")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/mnt/part", "/work/s2p"), acted(result), "s2p-protected")
+    assert acted(result) == set(), result["actions"]
+    assert outcomes(result) == {
+        "/mnt/part/scratch-a": ("protected", None),
+        "/mnt/part/scratch-b": ("protected", None),
+    }, result["skipped"]
+    cfg_open = config("s2p", ["/mnt/part"])
+    before = tree("/mnt/part", "/work/s2p")
+    code, out, _ = ensure("s2p-open", TESTER, cfg_open, "/mnt/part")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/mnt/part", "/work/s2p"), acted(result), "s2p-open")
+    assert acted(result) == {"/mnt/part/scratch-a", "/mnt/part/scratch-b"}, (result["actions"], result["skipped"])
+    passed("2d losetup -P partition", f"{loop}p1's candidates protected by the protected image; "
+           "reclaimed without the protect entry")
+
+
+# ---- 3. idmapped bind over a root-owned image ----
+def scenario_idmapped() -> None:
+    run("""
+install -d -m 0755 /work/s3 /work/s3/srv /work/s3/srv/build /work/s3/srv/build/scratch-c /mnt/u
+install -d -m 0755 -o 1000 -g 1000 /work/s3/plain
+truncate -s 8M /work/s3/srv/build/scratch-c/disk.img
+echo f > /work/s3/srv/build/scratch-c/f
+""")
+    make_plain = "mkdir /work/s3/plain/scratch-p && echo p > /work/s3/plain/scratch-p/data"
+    run(make_plain, TESTER)
+    run("losetup -f --show /work/s3/srv/build/scratch-c/disk.img")
+    run("mount --bind --map-users 0:1000:1 --map-groups 0:1000:1 /work/s3/srv/build /mnt/u")
+    shown = run("stat -c '%u:%g' /mnt/u/scratch-c /mnt/u/scratch-c/disk.img /work/s3/srv/build/scratch-c/disk.img")
+    line = run("grep ' /mnt/u ' /proc/self/mountinfo")
+    save("s3-idmap.txt", shown + line)
+    assert shown.split() == ["1000:1000", "1000:1000", "0:0"], shown
+    assert "idmapped" in line, line
+    cfg = config("s3", ["/mnt/u", "/work/s3/plain"])
+    cfg_root = config("s3-root", ["/mnt/u", "/work/s3/plain"], owners=True)
+    # For the user, root's image shown as the user's by the idmapped bind is
+    # in doubt on that mount, while the same filesystem's plain mount is
+    # judged (safety.md, In use, Loop devices, 2: an idmapped mount).
+    before = tree("/work/s3")
+    code, out, _ = ensure("s3-user", TESTER, cfg, "/mnt/u")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/work/s3"), acted(result), "s3-user")
+    assert acted(result) == {"/work/s3/plain/scratch-p"}, (result["actions"], result["skipped"])
+    row = row_of(result, "/mnt/u/scratch-c")
+    assert (row["reason"], row["unknown_cause"]) == ("in_use_unknown", "loop_device"), row
+    assert "/mnt/u" in (row["detail"] or ""), row
+    passed("3 idmapped bind (tester)", f"/mnt/u/scratch-c in_use_unknown/loop_device ({row['detail']}); "
+           "the plain-mount candidate of the same ext4 reclaimed")
+    # Root reads the device: idmapped mounts keep the exact match (Loop
+    # devices, 1).
+    run(make_plain, TESTER)
+    code, out, _ = ensure("s3-root-dry", ROOT, cfg_root, "/mnt/u", "--dry-run")
+    plan = plan_of(report(out, 0, "dry_run"))
+    assert plan == {"/mnt/u/scratch-c": "in_use", "/work/s3/plain/scratch-p": None}, plan
+    passed("3 idmapped bind (root plan)", "/mnt/u/scratch-c in_use by the device's exact identity, plain eligible")
+    before = tree("/work/s3")
+    code, out, _ = ensure("s3-root", ROOT, cfg_root, "/mnt/u")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/work/s3"), acted(result), "s3-root")
+    root_row = row_of(result, "/mnt/u/scratch-c")
+    assert root_row["reason"] == "in_use", root_row
+    assert acted(result) == {"/work/s3/plain/scratch-p"}, (result["actions"], result["skipped"])
+    passed("3 idmapped bind (root reclaim)", f"in_use ({root_row['detail']}); plain reclaimed")
+
+
+# ---- 6. A live overlay root with a snap-like root-owned squashfs ----
+def scenario_live_overlay() -> None:
+    run("""
+test -b /dev/sr0
+mkdir -p /cdrom /rofs /live /work/s6/cow/upper /work/s6/cow/work /work/s6/snapsrc/meta
+install -d -m 0755 -o 1000 -g 1000 /work/s6/elsewhere
+mount -o ro /dev/sr0 /cdrom
+mount -o ro,loop /cdrom/casper/filesystem.squashfs /rofs
+mount -t overlay overlay -o lowerdir=/rofs,upperdir=/work/s6/cow/upper,workdir=/work/s6/cow/work /live
+chown 1000:1000 /live/home/tester
+echo 'name: core' > /work/s6/snapsrc/meta/snap.yaml
+mksquashfs /work/s6/snapsrc /live/var/lib/snapd/snaps/core_1.snap -quiet -noappend -all-root >/dev/null
+mount -o ro,loop /live/var/lib/snapd/snaps/core_1.snap /live/snap/core/1
+""")
+    loops = run("losetup -a -l -n -O NAME,BACK-FILE")
+    save("s6-mounts.txt", loops + run("for m in /cdrom /rofs /live /live/snap/core/1; do findmnt -n -o TARGET,SOURCE,FSTYPE,MAJ:MIN \"$m\"; done"))
+    assert "/live/var/lib/snapd/snaps/core_1.snap" in loops and "/cdrom/casper/filesystem.squashfs" in loops, loops
+    assert run("findmnt -n -o FSTYPE /cdrom").strip() == "iso9660"
+    make = ("mkdir -p /live/home/tester/scratch-a /live/home/tester/scratch-b && "
+            "echo a > /live/home/tester/scratch-a/f && echo b > /live/home/tester/scratch-b/f")
+    both = {"/live/home/tester/scratch-a", "/live/home/tester/scratch-b"}
+    run(make, TESTER)
+    cfg = config("s6", ["/live/home/tester"])
+    # Both images are root's and a plain overlay shows owners as stored:
+    # neither keeps the user's candidates on the overlay (safety.md, In use,
+    # Loop devices, 2; vector inuse/loop-live-overlay-root-snaps-reclaims).
+    before = tree("/live/home/tester")
+    code, out, _ = ensure("s6-user", TESTER, cfg, "/live/home/tester")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/live/home/tester"), acted(result), "s6-user")
+    assert acted(result) == both, (result["actions"], result["skipped"])
+    passed("6 live overlay root (tester)", "both overlay candidates reclaimed with the snap and the casper squashfs attached")
+    # Root reads the snap's device: opened through the overlay, its identity
+    # is the overlay's, matched exactly on the overlay's own mounts; every
+    # other candidate is in doubt while it is attached (Loop devices, 1).
+    run(make, TESTER)
+    run("mkdir -p /work/s6/elsewhere/scratch-a && echo e > /work/s6/elsewhere/scratch-a/f", TESTER)
+    cfg_root = config("s6-root", ["/live/home/tester"], owners=True)
+    cfg_elsewhere = config("s6-root-elsewhere", ["/work/s6/elsewhere"], owners=True)
+    code, out, _ = ensure("s6-root-dry", ROOT, cfg_root, "/live/home/tester", "--dry-run", strace=True)
+    plan = plan_of(report(out, 0, "dry_run"))
+    assert plan == {c: None for c in both}, plan
+    code, out, _ = ensure("s6-root-elsewhere-dry", ROOT, cfg_elsewhere, "/work/s6/elsewhere", "--dry-run")
+    plan = plan_of(report(out, 0, "dry_run"))
+    assert plan == {"/work/s6/elsewhere/scratch-a": "in_use_unknown"}, plan
+    passed("6 live overlay root (root plan)", "overlay candidates eligible; a candidate off the overlay in_use_unknown")
+    before = tree("/live/home/tester")
+    code, out, _ = ensure("s6-root", ROOT, cfg_root, "/live/home/tester")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/live/home/tester"), acted(result), "s6-root")
+    assert acted(result) == both, (result["actions"], result["skipped"])
+    passed("6 live overlay root (root reclaim)", "both overlay candidates reclaimed")
+
+
+# ---- 7. bcachefs (the out-of-tree module), one subvolume case ----
+# architecture.md, Filesystem matching, Subvolume boundaries: diskgc never
+# removes a nested subvolume, told by a directory on another st_dev with no
+# mount between. The section names btrfs; this holds bcachefs, whose
+# subvolumes Filesystem matching also covers, to the same rule. On the
+# measured module a nested subvolume shows its parent's st_dev, so the rule
+# does not see it (TASK-304 finding; STATX_SUBVOL would).
+def scenario_bcachefs() -> None:
+    if "bcachefs" not in run("cat /proc/filesystems"):
+        summary.append("UNAVAILABLE 7 bcachefs: not in the guest kernel's /proc/filesystems")
+        return
+    loop = run("""
+install -d -m 0755 /work/s7 /mnt/bcfs
+truncate -s 512M /work/s7/bc.img
+L=$(losetup -f --show /work/s7/bc.img)
+bcachefs format "$L" >/dev/null
+mount -t bcachefs "$L" /mnt/bcfs
+chown 1000:1000 /mnt/bcfs
+echo "$L"
+""").strip()
+    run("mkdir -p /mnt/bcfs/scratch-a /mnt/bcfs/scratch-nested && echo a > /mnt/bcfs/scratch-a/f", TESTER)
+    made = cx("bcachefs subvolume create /mnt/bcfs/scratch-nested/inner 2>&1 && echo i > /mnt/bcfs/scratch-nested/inner/f", TESTER)
+    if made[0] != 0:
+        run("bcachefs subvolume create /mnt/bcfs/scratch-nested/inner && echo i > /mnt/bcfs/scratch-nested/inner/f "
+            "&& chown -R 1000:1000 /mnt/bcfs/scratch-nested/inner")
+    devs = run("stat -c '%d %n' /mnt/bcfs/scratch-nested /mnt/bcfs/scratch-nested/inner")
+    save("s7-bcachefs.txt", f"{loop}\nsubvolume create as tester: exit {made[0]} {made[1]}\n{devs}"
+         + run("bcachefs version; findmnt -n -o TARGET,SOURCE,FSTYPE,MAJ:MIN /mnt/bcfs"))
+    cfg = config("s7", ["/mnt/bcfs"])
+    before = tree("/mnt/bcfs")
+    code, out, _ = ensure("s7-user", TESTER, cfg, "/mnt/bcfs")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/mnt/bcfs"), acted(result), "s7-user")
+    nested = outcomes(result).get("/mnt/bcfs/scratch-nested")
+    assert acted(result) == {"/mnt/bcfs/scratch-a"}, (result["actions"], result["skipped"])
+    assert nested is not None and nested[0] == "contains_mount", (nested, devs)
+    passed("7 bcachefs", f"scratch-a reclaimed, scratch-nested (a subvolume inside) kept contains_mount; "
+           f"st_dev {' vs '.join(devs.split()[0::2])}")
+
+
+# ---- 5. udisksctl loop-setup by a user outside disk ----
+def scenario_udisks() -> None:
+    # D-Bus activated; started here as the first udisksctl call would.
+    machine.succeed("systemctl start udisks2.service")
+    machine.succeed(
+        "install -d -o alice -g users /home/alice/Downloads && "
+        f"install -m 0644 -o alice -g users {LIVE_ISO} /home/alice/Downloads/live.iso"
+    )
+    run("mkdir -p /home/alice/scratch-a && echo a > /home/alice/scratch-a/f", ALICE)
+    attached = machine.succeed(
+        "su - alice -c 'udisksctl loop-setup --no-user-interaction -r -f /home/alice/Downloads/live.iso'"
+    )
+    loop = attached.strip().rsplit(" ", 1)[-1].rstrip(".")
+    assert loop.startswith("/dev/loop"), attached
+    device = run(f"stat -c '%u:%g %a' {loop}").strip()
+    backing = loop_backing(loop)
+    save("s5-udisks.txt", f"{attached}device {loop}: {device}\nbacking: {backing}\n"
+         + machine.succeed(f"udisksctl info -b {loop} | grep -E 'SetupByUID|BackingFile' || true"))
+    cfg = config("s5", ["/home/alice"])
+    code, out, _ = ensure("s5-dry", ALICE, cfg, "/home/alice", "--dry-run")
+    dry = plan_of(report(out, 0, "dry_run"))
+    before = tree("/home/alice/scratch-a", "/home/alice/Downloads")
+    code, out, _ = ensure("s5-user", ALICE, cfg, "/home/alice")
+    result = report(out, 1, "exhausted")
+    require_removed(before, tree("/home/alice/scratch-a", "/home/alice/Downloads"), acted(result), "s5-user")
+    assert acted(result) == set(), result["actions"]
+    row = row_of(result, "/home/alice/scratch-a")
+    machine.succeed(f"su - alice -c 'udisksctl loop-delete --no-user-interaction -b {loop}'")
+    machine.wait_until_succeeds(f"podman exec {CTR} /bin/sh -c 'test -z \"$({TOOLS}/bin/losetup -a)\"'", timeout=30)
+    before = tree("/home/alice/scratch-a", "/home/alice/Downloads")
+    code, out, _ = ensure("s5-after-detach", ALICE, cfg, "/home/alice")
+    after = report(out, 1, "exhausted")
+    require_removed(before, tree("/home/alice/Downloads"), acted(after), "s5-after-detach")
+    assert acted(after) == {"/home/alice/scratch-a"}, (after["actions"], after["skipped"])
+    passed("5 udisks loop-setup (measured cost)", f"{loop} mode {device}, backing {backing}; dry run {dry}; "
+           f"reclaim kept scratch-a {row['reason']}/{row['unknown_cause']}: {row['detail']}; "
+           "after udisksctl loop-delete it is reclaimed")
+
+
+# ---- 4. hidepid=invisible on the held /proc ----
+def scenario_hidepid() -> None:
+    run("install -d -m 0755 -o 1000 -g 1000 /work/s4")
+    run("mkdir -p /work/s4/scratch-h && echo h > /work/s4/scratch-h/f", TESTER)
+    cfg = config("s4", ["/work/s4"])
+    guest_proc = machine.succeed("findmnt -n -o OPTIONS /proc")
+    run("mount -o remount,hidepid=invisible /proc")
+    options = run("findmnt -n -o OPTIONS /proc")
+    assert "hidepid=invisible" in options, options
+    # The guest's own /proc is another procfs instance, unchanged.
+    assert machine.succeed("findmnt -n -o OPTIONS /proc") == guest_proc
+    before = tree("/work/s4")
+    # safety.md, In use, Visibility: a process list that cannot be complete.
+    # Below --min-free: exit 2, cause safety.
+    code, out, _ = ensure("s4-below", TESTER, cfg, "/work/s4")
+    below = report(out, 2, "usage_error")
+    assert [e["cause"] for e in below["errors"]] == ["safety"], below["errors"]
+    assert "hidepid" in below["errors"][0]["message"], below["errors"]
+    # Met: the usual no-op, exit 0, one stderr line that a reclaim here
+    # would be refused (TASK-298); the JSON report is unchanged.
+    code, out, met_err = ensure("s4-met", TESTER, cfg, "/work/s4", min_free="1M")
+    report(out, 0, "met")
+    warning = [line for line in met_err.splitlines() if "hidepid" in line]
+    assert len(warning) == 1, met_err
+    # The dry run: exit 2 whatever the space, naming where to run instead.
+    code, out, _ = ensure("s4-dry", TESTER, cfg, "/work/s4", "--dry-run", min_free="1M")
+    dry = report(out, 2, "usage_error")
+    assert [e["cause"] for e in dry["errors"]] == ["safety"], dry["errors"]
+    require_removed(before, tree("/work/s4"), set(), "s4")
+    passed("4 hidepid", f"below goal exit 2 safety ({below['errors'][0]['message']}); met exit 0, "
+           f"stderr {warning[0]!r}; dry run exit 2 ({dry['errors'][0]['message']})")
+
+
+failures: list[str] = []
+for scenario in (scenario_btrfs, scenario_loop_in_candidate, scenario_loop_deleted_name,
+                 scenario_loop_partition, scenario_idmapped, scenario_live_overlay,
+                 scenario_bcachefs, scenario_udisks, scenario_hidepid, scenario_root_scan):
+    name = scenario.__name__.removeprefix("scenario_")
+    began = time.monotonic()
+    try:
+        no_loop_devices(name)
+        scenario()
+    except Exception as error:
+        line = f"FAIL {name}: {type(error).__name__}: {error}"
+        failures.append(line[:4000])
+        summary.append(line[:4000])
+        print(line)
+    finally:
+        cleanup(name)
+    summary.append(f"  ({name} {time.monotonic() - began:.1f}s)")
+
+machine.succeed(f"podman rm -f {CTR}")
+summary.append(f"total {time.monotonic() - started_monotonic:.1f}s")
+save("summary.txt", "\n".join(summary) + "\n")
+assert not failures, "\n".join(failures)
