@@ -16,17 +16,21 @@
 //! actions run code that may touch anything in the candidate, walked or
 //! not: they keep the full recheck (`super::policy_skip`).
 //!
-//! What the cached set cannot see (docs/safety.md states it): a directory
-//! outside the candidate, on its path, that becomes a match after the
-//! enumeration (a new `CACHEDIR.TAG` making an ancestor a Cargo target), and
-//! a change inside the candidate whose times were set back past the
-//! enumeration by a wall-clock step that [`changed_since`] did not detect.
+//! A directory outside the candidate, on its path, that becomes a Cargo
+//! target after the enumeration (a new `CACHEDIR.TAG`) changes no time the
+//! walk reads: a tag on the candidate's way down that is no enumerated match
+//! makes the check enumerate again ([`tagged_ancestor`]).
+//!
+//! What the cached set cannot see (docs/safety.md states it): such a tag made
+//! after the candidate's last check, and a change inside the candidate whose
+//! times were set back past the enumeration by a wall-clock step that
+//! [`changed_since`] did not detect.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::policy::{Refresh, judge_negated, judge_protect, policy_failed};
-use super::{NegatedSource, ProtectedSource, scan_protections};
+use super::policy::{Refresh, judge_negated, judge_protect, policy_failed, tagged_ancestor};
+use super::{NegatedKind, NegatedSource, ProtectedKind, ProtectedSource, scan_protections};
 use crate::engine::{Reason, Skip};
 use crate::host::{Host, MonoTime, Timestamp};
 use crate::outcome::{PolicyAt, Stop};
@@ -115,17 +119,18 @@ impl DeletePolicy<'_> {
             self.negated_matches.len(),
             "one match list per negated source"
         );
-        let refresh = match at {
-            PolicyAt::AfterWalk { newest_change }
-                if changed_since(
-                    self.protection.enumerated,
-                    Instant::now(host),
-                    newest_change,
-                ) =>
-            {
-                Refresh::Always
-            }
-            _ => Refresh::OnError,
+        let changed = match at {
+            PolicyAt::AfterWalk { newest_change } => changed_since(
+                self.protection.enumerated,
+                Instant::now(host),
+                newest_change,
+            ),
+            _ => false,
+        };
+        let refresh = if changed || self.tag_on_the_way(host, path) {
+            Refresh::Always
+        } else {
+            Refresh::OnError
         };
         let (protected, _) = judge_protect(
             host,
@@ -159,6 +164,28 @@ impl DeletePolicy<'_> {
                 format!("overlaps !profile:{profile} at final action check"),
             )
         }))
+    }
+}
+
+impl DeletePolicy<'_> {
+    /// [`tagged_ancestor`] for the Cargo sources of `protect` and of this
+    /// term's `!profile:`s, against their enumerated matches.
+    fn tag_on_the_way<H: Host>(&self, host: &H, path: &Path) -> bool {
+        let protected = self
+            .protections
+            .iter()
+            .filter(|source| matches!(source.kind, ProtectedKind::CargoTarget))
+            .flat_map(|source| &source.roots);
+        let negated = self
+            .negated
+            .iter()
+            .filter(|source| matches!(source.source, NegatedKind::CargoTarget))
+            .flat_map(|source| &source.roots);
+        let matched = |dir: &Path| {
+            self.protection.matches.iter().any(|m| m == dir)
+                || self.negated_matches.iter().flatten().any(|m| m == dir)
+        };
+        tagged_ancestor(host, protected.chain(negated), matched, path)
     }
 }
 

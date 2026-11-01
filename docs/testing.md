@@ -575,6 +575,10 @@ Model scenarios required by [safety.md](safety.md) and
   never settles stops the run
   (`vectors/config/{protect,negated}-cargo-target-child-vanishes-during-enumeration`,
   `vectors/config/protect-cargo-target-inspection-never-settles`);
+  a valid `CACHEDIR.TAG` renamed under the candidate's lock into an
+  ancestor that already held a profile directory makes it a protected or
+  negated Cargo target, and the candidate inside is kept
+  (`vectors/config/{protect,negated}-cargo-tag-made-after-enumeration`);
   and one removal costs one enumeration again, not one per later
   candidate (`tests/index_reclaim.rs`
   `one_removed_protect_match_costs_one_enumeration_not_one_per_candidate`);

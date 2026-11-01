@@ -495,10 +495,19 @@ Immediately before acting, diskgc walks the candidate's whole tree
     immediately before its program runs: the program may act on anything
     in the candidate, walked or not.
 
-  Limits (delete actions): a directory on the candidate's path, outside
-  it, that becomes a match after the enumeration (a new `CACHEDIR.TAG`
-  making an ancestor a Cargo target) is not seen until the next tier or
-  run; a walked directory inside the candidate that becomes a match only
+  A directory on the candidate's path, outside it, can become a Cargo
+  target after the enumeration, and so a match holding the candidate,
+  without changing any time the walk reads (a `CACHEDIR.TAG` made in
+  `/p/target`, which already held `debug/.cargo-lock`). So every check of
+  a delete action also looks up a `CACHEDIR.TAG` in each directory on the
+  candidate's way down from the root of a Cargo `protect` or negated
+  source that is not an enumerated match; one found (or a lookup that
+  fails other than `ENOENT`) makes the check enumerate again, and the
+  recognition there decides (TASK-268 review). Limits (delete actions): a
+  tag made on the candidate's path after its last check, or an ancestor
+  that becomes a match of an `fs` source after the enumeration (only by a
+  rename, which changes the candidate's path, so its identity checks
+  fail), is not seen until the next tier or run; a walked directory inside the candidate that becomes a match only
   by a marker made after the walk (a `CACHEDIR.TAG` or `.cargo-lock`
   making it a Cargo target) loses its walked entries, where the per-check
   enumeration saw such a marker until the final check (the window grew

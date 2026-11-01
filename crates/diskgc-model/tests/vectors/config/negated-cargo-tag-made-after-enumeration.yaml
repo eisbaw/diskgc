@@ -1,0 +1,41 @@
+# TASK-268 review (Codex 4), `!profile:` instead of `protect`: the
+# tier's negated Cargo source enumerated no target at /p/target (no tag);
+# a valid tag renamed in under the candidate's lock makes it one, holding
+# the old candidate. The tag on the candidate's way down makes the check
+# enumerate again, and the candidate is `excluded`.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: deps-cruft
+      find: {roots: required, paths: [cruft], type: dir}
+      action: delete
+      examples: {root: /p/target/debug/deps, match: [/p/target/debug/deps/cruft]}
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: "profile:deps-cruft && !profile:cargo-target", roots: [/p/target/debug/deps, /p]}
+path: /p
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /p, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /p/Cargo.toml: {}
+    /p/stash/CACHEDIR.TAG: {cachedir_tag: true, mtime: 2026-10-01T00:00:00Z}
+    /p/target/debug/.cargo-lock: {mtime: 2026-10-01T00:00:00Z}
+    /p/target/debug/deps/cruft: {.: {mtime: 2026-10-01T00:00:00Z}, blob: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+  events:
+    - {at: {op: flock, path: /p/target/debug/deps/cruft, when: after}, rename: {from: /p/stash/CACHEDIR.TAG, to: /p/target/CACHEDIR.TAG}}
+expect:
+  # The plan runs before the rename (the dry run takes no lock).
+  plan: [{candidate: /p/target/debug/deps/cruft}]
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: [{candidate: /p/target/debug/deps/cruft, reason: excluded}]
+  preserved: [/p/target/debug/deps/cruft/blob, /p/target/CACHEDIR.TAG]

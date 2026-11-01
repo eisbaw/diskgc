@@ -5,11 +5,12 @@
 //! actions.
 
 use crate::cargo_target::{self, Stop};
-use crate::engine::{Reason, Skip, may_be_networked};
+use crate::engine::{CACHEDIR_TAG, Reason, Skip, may_be_networked};
 use crate::fs_kind;
 use crate::host::{Dev, DevIno, Host, HostError, MonoTime, MountEntry};
 use crate::resolve::{
-    MountScreenError, Want, mount_for, place_in_filesystem, resolve_in, screen_mount_chain,
+    MountScreenError, ResolveError, Want, mount_for, place_in_filesystem, resolve, resolve_in,
+    screen_mount_chain,
 };
 use crate::select;
 use std::collections::HashMap;
@@ -443,6 +444,41 @@ pub(super) fn ancestor_identities(
     path.ancestors()
         .map(|ancestor| Ok((ancestor.to_owned(), identity(ancestor)?)))
         .collect()
+}
+
+/// Whether a directory on `path`'s way down from the root of a Cargo
+/// `protect` or `!profile:` source (`roots`) holds a `CACHEDIR.TAG` while it
+/// is not one of the enumerated `matches` (TASK-268 review, Codex 4): a tag
+/// made after the enumeration can make such a directory a Cargo target, and
+/// so a match holding the candidate, without changing any time of the
+/// candidate. The check then enumerates again ([`Refresh::Always`]), and the
+/// recognition there decides. Only the tag's presence is looked up (one
+/// lookup per directory, from the root down); any doubt answers yes.
+pub(super) fn tagged_ancestor<'r, H: Host>(
+    host: &H,
+    roots: impl IntoIterator<Item = &'r PathBuf>,
+    matches: impl Fn(&Path) -> bool,
+    path: &Path,
+) -> bool {
+    for root in roots {
+        let Ok(below) = path.strip_prefix(root) else {
+            continue;
+        };
+        let mut dir = root.clone();
+        // Every directory above the candidate, from the root down; a tag in
+        // the candidate itself makes it a target, not a match holding it,
+        // and its own walk lists that.
+        for name in below.iter() {
+            if !matches(&dir) {
+                match resolve(host, &dir.join(CACHEDIR_TAG), Want::Any) {
+                    Err(ResolveError::Missing { .. }) => {}
+                    Ok(_) | Err(_) => return true,
+                }
+            }
+            dir.push(name);
+        }
+    }
+    false
 }
 
 /// When a judgement enumerates the matches again (docs/safety.md, Not
