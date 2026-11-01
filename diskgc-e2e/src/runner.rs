@@ -1213,7 +1213,7 @@ mod tests {
             .collect();
         assert_eq!(
             selected.len(),
-            7,
+            8,
             "candidate suite lost a probe: {selected:?}"
         );
         assert!(

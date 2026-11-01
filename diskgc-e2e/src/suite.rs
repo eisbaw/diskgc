@@ -914,10 +914,10 @@ pub static TESTS: &[Test] = &[
         run: cache_suite::named_checkout_policy_for_command_caches,
     },
     Test {
-        name: "named_checkout_policy_cannot_expand_proposed_catalog",
+        name: "named_checkout_policy_cannot_expand_the_release_catalog",
         tier: Tier::Fast,
         expect: Expect::Pass,
-        run: cache_suite::named_checkout_policy_cannot_expand_proposed_catalog,
+        run: cache_suite::named_checkout_policy_cannot_expand_the_release_catalog,
     },
     Test {
         name: "release_candidate_catalog_refuses_every_excluded_builtin",
@@ -936,6 +936,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: release_suite::candidate_refuses_a_reclaiming_watch,
+    },
+    Test {
+        name: "release_candidate_runs_watch_tally_only",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: release_suite::candidate_runs_watch_tally_only,
     },
     Test {
         name: "development_package_refuses_in_its_own_pid_namespace",

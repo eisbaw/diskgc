@@ -1,0 +1,57 @@
+{
+  "about": "The release descriptor: per build, the commands it runs, the built-in catalog it narrows to, and the files its package ships. The one home of those facts; crates/diskgc-core/src/release.rs says who reads it and checks it.",
+  "files": {
+    "lib/tmpfiles.d/diskgc.conf": { "copy": "packaging/diskgc.conf" },
+    "share/doc/diskgc/examples/example.yaml": { "copy": "docs/example.yaml" },
+    "lib/systemd/user/diskgc-watch@.service": { "copy": "packaging/systemd/user/diskgc-watch@.service" },
+    "lib/systemd/system/diskgc-watch@.service": { "copy": "packaging/systemd/system/diskgc-watch@.service" },
+    "share/doc/diskgc/README.md": { "copy": "packaging/README.md" },
+    "share/doc/diskgc/reference.md": { "copy": "docs/reference.md" },
+    "share/doc/diskgc/safety.md": { "copy": "docs/safety.md" },
+    "share/doc/diskgc/RELEASE-NOTES.md": { "release-notes": "docs/reference.md" }
+  },
+  "watch_units": [
+    "lib/systemd/user/diskgc-watch@.service",
+    "lib/systemd/system/diskgc-watch@.service"
+  ],
+  "development": {
+    "commands": ["ensure", "watch", "watch --tally-only", "check", "profiles"],
+    "catalog": null,
+    "ships": [
+      "lib/tmpfiles.d/diskgc.conf",
+      "share/doc/diskgc/examples/example.yaml",
+      "lib/systemd/user/diskgc-watch@.service",
+      "lib/systemd/system/diskgc-watch@.service"
+    ]
+  },
+  "releases": {
+    "0.1": {
+      "tag": "v0.1.0",
+      "commands": ["ensure", "check", "profiles"],
+      "catalog": "0.1",
+      "ships": [
+        "lib/tmpfiles.d/diskgc.conf",
+        "share/doc/diskgc/examples/example.yaml",
+        "share/doc/diskgc/README.md",
+        "share/doc/diskgc/reference.md",
+        "share/doc/diskgc/safety.md",
+        "share/doc/diskgc/RELEASE-NOTES.md"
+      ]
+    },
+    "0.2": {
+      "tag": null,
+      "commands": ["ensure", "watch --tally-only", "check", "profiles"],
+      "catalog": "0.1",
+      "ships": [
+        "lib/tmpfiles.d/diskgc.conf",
+        "share/doc/diskgc/examples/example.yaml",
+        "lib/systemd/user/diskgc-watch@.service",
+        "lib/systemd/system/diskgc-watch@.service",
+        "share/doc/diskgc/README.md",
+        "share/doc/diskgc/reference.md",
+        "share/doc/diskgc/safety.md",
+        "share/doc/diskgc/RELEASE-NOTES.md"
+      ]
+    }
+  }
+}

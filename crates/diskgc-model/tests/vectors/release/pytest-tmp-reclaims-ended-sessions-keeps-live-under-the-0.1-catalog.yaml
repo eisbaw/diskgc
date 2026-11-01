@@ -1,4 +1,4 @@
-# The proposed 0.1 catalog admits pytest-tmp (TASK-65, Mark 2026-10-24):
+# The 0.1 catalog admits pytest-tmp (TASK-65, Mark 2026-10-24):
 # `--select profile:pytest-tmp` under it judges sessions by the pytest
 # contract as the development catalog does. Sessions under a finished
 # nix-shell TMPDIR that no process names go (unused root, row 11,
@@ -6,7 +6,7 @@
 # running pytest, whose .lock holds its pid and whose TMPDIR names the
 # root, is kept (liveness/pytest-tmp-live-lock-refused.yaml).
 profile_vector: 1
-catalog: proposed-release-01
+catalog: release-0.1
 profile: pytest-tmp
 path: /tmp
 min_free: 100%

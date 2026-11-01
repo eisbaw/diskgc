@@ -15,9 +15,10 @@ diskgc-linux.workspace = true
 getrandom.workspace = true
 
 [features]
-# Narrows the catalog. On its own this retains diskgc-linux's sandbox gate;
-# the test-only release-candidate derivation enables both required features.
-proposed-release-01-catalog = []
+# Builds this version's release row of crates/diskgc-core/src/releases.json:
+# its commands and its narrowed catalog. On its own this retains
+# diskgc-linux's sandbox gate; the release-candidate derivation enables both.
+release-catalog = []
 
 [dev-dependencies]
 # Test-only: reads the binary's --json output back.

@@ -1,8 +1,8 @@
 # An operator override of an admitted name (`cargo-target` with
 # `override: true`) cannot impersonate the reviewed built-in under the
-# proposed 0.1 catalog: refused at load, exit 2, the target untouched.
+# 0.1 catalog: refused at load, exit 2, the target untouched.
 profile_vector: 1
-catalog: proposed-release-01
+catalog: release-0.1
 config: |
   version: 1
   profiles:

@@ -121,6 +121,8 @@
         # diskgc-model test compares with the generated one.
         (lib.fileset.fileFilter (f: f.hasExt "yaml") ./crates)
         ./crates/diskgc-model/host-model.schema.json
+        # The release descriptor, compiled into the binary (include_str!).
+        ./crates/diskgc-core/src/releases.json
       ];
       workspaceSrc = lib.fileset.toSource {
         root = ./.;
@@ -185,22 +187,68 @@
         inherit version;
       };
       workspaceDeps = craneLib.buildDepsOnly workspaceArgs;
-      installShippedFiles = ''
-        install -Dm0644 ${./packaging/diskgc.conf} $out/lib/tmpfiles.d/diskgc.conf
-        install -Dm0644 ${./docs/example.yaml} $out/share/doc/diskgc/examples/example.yaml
-      '';
-      # The `watch` unit templates (docs/architecture.md, Deployment), for
-      # the user and the system manager. Only the development package ships
-      # them: 0.1 is the `ensure` MVP (PRD, Scope), and the release
-      # candidate's contents are TASK-67's. The directory, not each file, is
-      # the Nix input: `@` is not allowed in a store path name. stdenv's
-      # fixup moves lib/systemd/user to share/systemd/user and links the
-      # old path to it, so both paths reach the file.
-      watchUnits = ./packaging/systemd;
-      installWatchUnits = ''
-        install -Dm0644 ${watchUnits}/user/diskgc-watch@.service $out/lib/systemd/user/diskgc-watch@.service
-        install -Dm0644 ${watchUnits}/system/diskgc-watch@.service $out/lib/systemd/system/diskgc-watch@.service
-      '';
+      # The release descriptor (crates/diskgc-core/src/releases.json, the one
+      # home of these facts; crates/diskgc-core/src/release.rs checks its
+      # rules): per build, the commands it runs and the files its package
+      # ships. The development package ships its `development` row; the
+      # release candidate the row of this version's release, picked by
+      # major.minor as the binary picks it (release_of_version).
+      releaseDescriptor = lib.importJSON ./crates/diskgc-core/src/releases.json;
+      releaseName = lib.versions.majorMinor version;
+      developmentBuild = releaseDescriptor.development;
+      releaseBuild =
+        releaseDescriptor.releases.${releaseName}
+          or (throw "crates/diskgc-core/src/releases.json has no release ${releaseName} (version ${version})");
+      # A shipped file's source as a store path of its own, named after its
+      # place in the tree: `@` is not allowed in a store path name.
+      shippedSource =
+        source:
+        builtins.path {
+          path = ./. + "/${source}";
+          name = lib.strings.sanitizeDerivationName (lib.replaceStrings [ "/" ] [ "-" ] source);
+        };
+      # Install BUILD's copied files into $out. stdenv's fixup (in the
+      # crane-built development package) moves lib/systemd/user to
+      # share/systemd/user and links the old path to it, so both paths
+      # reach the user template there.
+      # A file that is not a copy (the release notes) is installed only
+      # where the caller cuts it (mkReleasePackage, `cut`); anywhere else it
+      # is an evaluation error, never a silently missing file (the
+      # descriptor's rules also keep the development row to copies).
+      installCopies =
+        {
+          build,
+          cut ? false,
+        }:
+        lib.concatMapStrings (
+          path:
+          let
+            file = releaseDescriptor.files.${path};
+          in
+          if file ? copy then
+            ''
+              install -Dm0644 ${shippedSource file.copy} $out/${lib.escapeShellArg path}
+            ''
+          else if cut && file ? release-notes then
+            ""
+          else
+            throw "releases.json: ${path} is not a copied file; only a release package cuts it"
+        ) build.ships;
+      # What a package says about itself to the NixOS module
+      # (packaging/nixos/module.nix asserts on it): its row's commands and
+      # files. release-candidate-package checks that the files are there.
+      buildPassthru = build: {
+        diskgcBuild = {
+          inherit (build) commands ships;
+        };
+      };
+      # "a, b and c"
+      andList =
+        items:
+        if lib.length items < 2 then
+          lib.concatStrings items
+        else
+          "${lib.concatStringsSep ", " (lib.init items)} and ${lib.last items}";
       # Capture complete readelf output before looking for dynamic-linker
       # records. A readelf | grep -q pipeline can make grep stop early and
       # report a misleading result when readelf receives SIGPIPE.
@@ -277,6 +325,7 @@
           pname,
           cargoExtraArgs,
           postInstall,
+          passthru ? { },
         }:
         let
           args = workspaceArgs // {
@@ -292,7 +341,7 @@
               // lib.optionalAttrs stamp stampArgs
               // {
                 cargoArtifacts = compiled;
-                inherit postInstall;
+                inherit postInstall passthru;
                 meta.mainProgram = "diskgc";
               }
             );
@@ -302,11 +351,13 @@
           shipped = build true;
         };
 
-      # The development package: gated, the development catalog.
+      # The development package: gated, the development row (every command
+      # and built-in; the tmpfiles rule, the example and both watch units).
       diskgcBuilds = mkDiskgc {
         pname = "diskgc";
         cargoExtraArgs = "--locked --package diskgc";
-        postInstall = installShippedFiles + installWatchUnits;
+        postInstall = installCopies { build = developmentBuild; };
+        passthru = buildPassthru developmentBuild;
       };
       diskgcTested = diskgcBuilds.tested;
       diskgc = diskgcBuilds.shipped;
@@ -323,69 +374,108 @@
         postInstall = "";
       };
 
-      # The release candidate built from this source: the 0.1 catalog with
-      # the gate lifted. Keep the default development package gated; this is
-      # the sole build that removes the gate, and it also narrows the
-      # embedded catalog. A release only when built from its tag
+      # The release candidate built from this source: this version's release
+      # row (its commands and catalog) with the gate lifted. Keep the default
+      # development package gated; this is the sole build that removes the
+      # gate, and it also narrows the embedded catalog. A release only when built from its tag
       # (docs/architecture.md, Release procedure); from any other commit a
       # development version for disposable test containers
       # (docs/reference.md, Built-in profile library).
       diskgcReleaseBuilds = mkDiskgc {
         pname = "diskgc-release-candidate";
-        cargoExtraArgs = "--locked --package diskgc --features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate";
-        postInstall = installShippedFiles;
+        cargoExtraArgs = "--locked --package diskgc --features release-catalog,diskgc-linux/release-without-sandbox-gate";
+        # mkReleasePackage installs every file the release row ships.
+        postInstall = "";
       };
-      # The release package: a build above plus its documentation
-      # (TASK-214: a user with only the package had --help and nothing
-      # else). Assembled apart from the compile so that a docs edit copies
-      # files instead of rebuilding the static binary. The release notes
-      # are cut from docs/reference.md (their one home) at build time, and
-      # reference.md and safety.md ship beside them so that their links
-      # resolve; links into architecture.md and testing.md do not.
+      # The release package: a build above plus the files its release row
+      # ships (TASK-214: a user with only the package had --help and nothing
+      # else; TASK-289: the row, not this derivation, says which).
+      # Assembled apart from the compile so that a docs edit copies files
+      # instead of rebuilding the static binary. The release notes are cut
+      # from their one home at build time, behind a header the row writes
+      # (what the package runs and installs), and reference.md and safety.md
+      # ship beside them so that their links resolve; links into
+      # architecture.md and testing.md do not.
       mkReleasePackage =
         build:
         pkgs.runCommand "diskgc-release-candidate-${version}"
           {
             inherit version;
             meta.mainProgram = "diskgc";
+            passthru = buildPassthru releaseBuild;
           }
           ''
             cp -R ${build}/. $out
             chmod -R u+w $out
-            doc=$out/share/doc/diskgc
-            install -Dm0644 ${./packaging/README.md} $doc/README.md
-            install -Dm0644 ${./docs/reference.md} $doc/reference.md
-            install -Dm0644 ${./docs/safety.md} $doc/safety.md
-            # From the section's heading to the next heading of its level;
-            # its in-page links (#x) point into reference.md.
-            awk -v title=${lib.escapeShellArg releaseNotesTitle} \
-              '/^### Release notes \(next release, draft\)$/ { on = 1; print title; next }
-                 on && /^#{1,3} / { exit }
-                 on' ${./docs/reference.md} \
-              | sed 's/](#/](reference.md#/g' > $doc/RELEASE-NOTES.md
-            # Fail closed on a renamed heading or a cut that lost the body.
-            grep -qF '**Known limits.**' $doc/RELEASE-NOTES.md
-            grep -qF '**JSON contract.**' $doc/RELEASE-NOTES.md
-            if grep -q '^### User profiles' $doc/RELEASE-NOTES.md; then
-              echo "release notes ran into the next section" >&2
-              exit 1
-            fi
+            ${installCopies {
+              build = releaseBuild;
+              cut = true;
+            }}
+            ${lib.concatMapStrings (
+              path:
+              let
+                file = releaseDescriptor.files.${path};
+              in
+              lib.optionalString (file ? release-notes) (cutReleaseNotes path file.release-notes)
+            ) releaseBuild.ships}
           '';
       # The packaged notes' title names the build's version.
       releaseNotesTitle = "# diskgc ${version} release notes";
+      # The header under it, from the release row.
+      releaseNotesHeader =
+        "This package runs ${andList (map (c: "`${c}`") releaseBuild.commands)}, and installs "
+        + "${andList (map (p: "`${p}`") ([ "bin/diskgc" ] ++ releaseBuild.ships))}.";
+      # Cut the draft section of SOURCE into $out/PATH, behind the title and
+      # the header. Every shipped file outside the documentation directory
+      # must be named in the cut body (its Install list), so the notes
+      # cannot leave out a file the row ships.
+      cutReleaseNotes = path: source: ''
+        notes=$out/${path}
+        mkdir -p "$(dirname "$notes")"
+        # From the section's heading to the next heading of its level; its
+        # in-page links (#x) point into reference.md.
+        awk '/^### Release notes \(next release, draft\)$/ { on = 1; next }
+               on && /^#{1,3} / { exit }
+               on' ${shippedSource source} \
+          | sed 's/](#/](reference.md#/g' > body.md
+        # Fail closed on a renamed heading or a cut that lost the body.
+        grep -qF '**Known limits.**' body.md
+        grep -qF '**JSON contract.**' body.md
+        if grep -q '^### User profiles' body.md; then
+          echo "release notes ran into the next section" >&2
+          exit 1
+        fi
+        for shipped in ${
+          lib.escapeShellArgs (
+            lib.filter (
+              p: !(lib.hasPrefix "share/doc/diskgc/" p) || lib.hasPrefix "share/doc/diskgc/examples/" p
+            ) releaseBuild.ships
+          )
+        }; do
+          if ! grep -qF "$shipped" body.md; then
+            echo "error: the release notes do not name $shipped, which release ${releaseName} ships" >&2
+            exit 1
+          fi
+        done
+        {
+          printf '%s\n' ${lib.escapeShellArg releaseNotesTitle}
+          printf '\n%s\n' ${lib.escapeShellArg releaseNotesHeader}
+          cat body.md
+        } > "$notes"
+      '';
       diskgcReleaseTested = mkReleasePackage diskgcReleaseBuilds.tested;
       diskgcRelease = mkReleasePackage diskgcReleaseBuilds.shipped;
 
-      # A separate feature-built binary for catalog-policy container tests.
-      # This is not the default package and retains the pre-release gate;
-      # like the e2e `diskgc` it plans in a test container's own PID
-      # namespace (TASK-263).
-      diskgcProposed01 = craneLib.buildPackage (
+      # A separate feature-built binary for catalog-policy container tests:
+      # the release row's commands and catalog, gated. This is not the
+      # default package and retains the pre-release gate; like the e2e
+      # `diskgc` it plans in a test container's own PID namespace (TASK-263).
+      diskgcReleaseCatalogGated = craneLib.buildPackage (
         workspaceArgs
         // {
-          pname = "diskgc-proposed-01";
+          pname = "diskgc-release-catalog";
           cargoArtifacts = workspaceDeps;
-          cargoExtraArgs = "--locked --package diskgc --features proposed-release-01-catalog,diskgc-linux/e2e-test-container-pid-namespace";
+          cargoExtraArgs = "--locked --package diskgc --features release-catalog,diskgc-linux/e2e-test-container-pid-namespace";
           doCheck = false;
         }
       );
@@ -464,7 +554,7 @@
         # The development package itself, without the e2e build's PID
         # namespace assumption: it refuses to plan or reclaim in a container.
         cp ${lib.getExe diskgcTested} $out/bin/diskgc-development
-        cp ${diskgcProposed01}/bin/diskgc $out/bin/diskgc-proposed-01
+        cp ${diskgcReleaseCatalogGated}/bin/diskgc $out/bin/diskgc-release-catalog
         cp ${lib.getExe diskgcReleaseTested} $out/bin/diskgc-release
         cp ${e2eBins}/bin/diskgc-e2e ${e2eBins}/bin/diskgc-e2e-canary \
           ${e2eBins}/bin/diskgc-e2e-driver $out/bin/
@@ -536,7 +626,7 @@
           doInstallCargoArtifacts = false;
           buildPhaseCargoCommand = ''
             cargo tree --locked --offline --package diskgc \
-              --features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate \
+              --features release-catalog,diskgc-linux/release-without-sandbox-gate \
               --edges normal,build \
               --prefix none --format '{p}' > dep-tree.txt
           '';
@@ -561,13 +651,13 @@
               echo "error: the gate-lift feature compiled without the release catalog" >&2
               exit 1
             fi
-            if ! grep -F "needs diskgc's proposed-release-01-catalog" refused.log; then
+            if ! grep -F "needs diskgc's release-catalog" refused.log; then
               cat refused.log >&2
               echo "error: the build failed, but not on the gate/catalog assert" >&2
               exit 1
             fi
             cargoWithProfile check --locked --offline --package diskgc \
-              --features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate \
+              --features release-catalog,diskgc-linux/release-without-sandbox-gate \
               --quiet
           '';
           installPhaseCommand = "touch $out";
@@ -1055,6 +1145,7 @@
         module = nixosModule;
         package = diskgcTested;
         defaultPackage = diskgc;
+        releasePackage = diskgcReleaseTested;
       };
       vmNixosModule = import ./packaging/nixos/vm-test.nix {
         inherit pkgs;
@@ -1119,10 +1210,27 @@
             export HOME=$TMPDIR/home XDG_RUNTIME_DIR=$TMPDIR/run
             mkdir -p $HOME $XDG_RUNTIME_DIR $TMPDIR/root
             bin=${lib.getExe diskgcTested}
-            for manager in user system; do
-              cmp ${diskgcTested}/lib/systemd/$manager/diskgc-watch@.service \
-                ${watchUnits}/$manager/diskgc-watch@.service
-            done
+            # The development package holds exactly its row's files (the
+            # release descriptor), each copy byte for byte. stdenv's fixup
+            # moves lib/systemd/user to share/systemd/user and links the old
+            # path to it, so the user template is listed at both (find -L).
+            pkg=${diskgcTested}
+            (cd $pkg && find -L . -type f | sed 's|^\./||' | sort) > actual
+            printf '%s\n' bin/diskgc ${
+              lib.escapeShellArgs (
+                developmentBuild.ships
+                ++ map (p: "share/systemd/user/${lib.removePrefix "lib/systemd/user/" p}") (
+                  lib.filter (lib.hasPrefix "lib/systemd/user/") developmentBuild.ships
+                )
+              )
+            } | sort > expected
+            if ! diff -u expected actual; then
+              echo "error: the development package's files are not its row's (crates/diskgc-core/src/releases.json)" >&2
+              exit 1
+            fi
+            ${lib.concatMapStrings (path: ''
+              cmp $pkg/${lib.escapeShellArg path} ${shippedSource releaseDescriptor.files.${path}.copy}
+            '') developmentBuild.ships}
             # stage MANAGER DIR BIN [EXTRA-LINE]: the template in DIR, pointed
             # at BIN, with both instance names linked to it.
             stage() {
@@ -1240,12 +1348,53 @@
               echo "development control binary lacks the sandbox marker" >&2
               exit 1
             fi
-            cmp $pkg/lib/tmpfiles.d/diskgc.conf ${./packaging/diskgc.conf}
-            cmp $pkg/share/doc/diskgc/examples/example.yaml ${./docs/example.yaml}
-            cmp $pkg/share/doc/diskgc/README.md ${./packaging/README.md}
-            cmp $pkg/share/doc/diskgc/reference.md ${./docs/reference.md}
-            head -n 1 $pkg/share/doc/diskgc/RELEASE-NOTES.md \
-              | grep -qxF ${lib.escapeShellArg releaseNotesTitle}
+            # Exactly the files the release row ships (TASK-289: the
+            # candidate shipped no watch units while it ran `watch
+            # --tally-only`), each copy byte for byte.
+            (cd $pkg && find . \( -type f -o -type l \) | sed 's|^\./||' | sort) > actual
+            printf '%s\n' bin/diskgc ${lib.escapeShellArgs releaseBuild.ships} | sort > expected
+            if ! diff -u expected actual; then
+              echo "error: the package's files are not release ${releaseName}'s (crates/diskgc-core/src/releases.json)" >&2
+              exit 1
+            fi
+            ${lib.concatMapStrings (
+              path:
+              let
+                file = releaseDescriptor.files.${path};
+              in
+              lib.optionalString (file ? copy) ''
+                cmp $pkg/${lib.escapeShellArg path} ${shippedSource file.copy}
+              ''
+            ) releaseBuild.ships}
+            notes=$pkg/share/doc/diskgc/RELEASE-NOTES.md
+            head -n 1 $notes | grep -qxF ${lib.escapeShellArg releaseNotesTitle}
+            grep -qxF ${lib.escapeShellArg releaseNotesHeader} $notes
+            # The binary's help shows the row's watch commands, and only
+            # those (the binary reads the same row by its own version).
+            "$bin" --help > help.txt
+            ${lib.concatMapStrings (
+              { command, line }:
+              if lib.elem command releaseBuild.commands then
+                ''
+                  grep -qF ${lib.escapeShellArg line} help.txt
+                ''
+              else
+                ''
+                  if grep -qF ${lib.escapeShellArg line} help.txt; then
+                    echo "error: --help shows '${command}', which release ${releaseName} does not run" >&2
+                    exit 1
+                  fi
+                ''
+            ) [
+              {
+                command = "watch";
+                line = "diskgc watch --min-free SIZE --target-free SIZE";
+              }
+              {
+                command = "watch --tally-only";
+                line = "diskgc watch --tally-only [--min-free SIZE]";
+              }
+            ]}
             cmp "$bin" ${lib.getExe diskgcReleaseBuilds.tested}
             got=$("$bin" --version)
             if [ "$got" != ${lib.escapeShellArg testedVersionLine} ]; then

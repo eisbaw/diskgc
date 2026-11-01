@@ -10,8 +10,9 @@
 # `liveness_class` (every source) is the admission class of docs/safety.md,
 # Producer liveness; its evidence, residuals and verdict are the source's row
 # in docs/reference.md, Liveness contracts, which a test keeps in sync.
-# `releases: ["0.1"]` puts a built-in in the proposed 0.1 catalog
-# (Library::proposed_release_01): explicit membership per catalog, not a
+# `releases: ["0.1"]` puts a built-in in the 0.1 catalog, which a release
+# row of crates/diskgc-core/src/releases.json names (Library::release_catalog):
+# explicit membership per catalog, not a
 # "since"; the loader refuses it on class none.
 
 - name: docker-build-cache

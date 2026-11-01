@@ -1,9 +1,9 @@
-# The proposed 0.1 catalog (the release-01 build's) keeps cargo-target:
+# The 0.1 catalog keeps cargo-target:
 # `--select profile:cargo-target` under it plans and reclaims as the
 # development catalog does (builtins/cargo-target-in-use.yaml): the target
 # a running program uses is kept, the idle one's contents go.
 profile_vector: 1
-catalog: proposed-release-01
+catalog: release-0.1
 profile: cargo-target
 roots: [/home/tester/src]
 path: /home

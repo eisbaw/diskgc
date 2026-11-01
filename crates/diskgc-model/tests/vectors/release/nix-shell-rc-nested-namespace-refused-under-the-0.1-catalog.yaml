@@ -1,9 +1,9 @@
-# Under the proposed 0.1 catalog: diskgc outside the initial PID namespace
+# Under the 0.1 catalog: diskgc outside the initial PID namespace
 # (most containers) cannot see the processes outside it, so ensure refuses
 # at start, its dry run too (TASK-263). The release-candidate build has no
 # test-container exception (diskgc-e2e release_suite runs it in one).
 profile_vector: 1
-catalog: proposed-release-01
+catalog: release-0.1
 profile: nix-shell-rc
 path: /tmp
 min_free: 100%

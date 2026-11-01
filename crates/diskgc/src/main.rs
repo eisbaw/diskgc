@@ -38,6 +38,7 @@ use diskgc_core::host::Errno;
 use diskgc_core::invocation::{self, Catalog, ConfigFile, ConfigUse, EnsureOptions, Platform};
 use diskgc_core::kernel::KernelError;
 use diskgc_core::profile::{Library, describe};
+use diskgc_core::release::{self, Build, Command};
 use diskgc_core::report::json::Json;
 use diskgc_core::report::{self, ErrorCause, ErrorEntry, Report, Status};
 use diskgc_core::units::{parse_duration, parse_size};
@@ -93,32 +94,50 @@ const INFO_SYNOPSIS: &str = "\
 diskgc --version
        diskgc --help";
 
-/// The usage lines: of `command` when it is one of ours, else of all.
-fn usage(command: Option<&str>) -> String {
-    let synopses: &[&str] = match command {
-        Some("ensure") => &[ENSURE_SYNOPSIS],
-        Some("watch") => &[watch::WATCH_SYNOPSIS],
-        Some("profiles") => &[PROFILES_SYNOPSIS],
-        Some("check") => &[CHECK_SYNOPSIS],
-        _ => &[
-            ENSURE_SYNOPSIS,
-            watch::WATCH_SYNOPSIS,
-            PROFILES_SYNOPSIS,
-            CHECK_SYNOPSIS,
-            INFO_SYNOPSIS,
-        ],
+/// Every synopsis with the command it belongs to (`None`: every build's).
+fn synopses() -> [(Option<Command>, &'static str, &'static str); 6] {
+    [
+        (Some(Command::Ensure), "ensure", ENSURE_SYNOPSIS),
+        (Some(Command::Watch), "watch", watch::WATCH_RECLAIM_SYNOPSIS),
+        (
+            Some(Command::WatchTallyOnly),
+            "watch",
+            watch::WATCH_TALLY_SYNOPSIS,
+        ),
+        (Some(Command::Profiles), "profiles", PROFILES_SYNOPSIS),
+        (Some(Command::Check), "check", CHECK_SYNOPSIS),
+        (None, "", INFO_SYNOPSIS),
+    ]
+}
+
+/// The usage lines `build` shows: of `command` when it runs it, else of
+/// everything it runs.
+fn usage(build: &Build, command: Option<&str>) -> String {
+    let runs: Vec<(&str, &str)> = synopses()
+        .into_iter()
+        .filter(|(needs, ..)| needs.is_none_or(|c| build.allows(c)))
+        .map(|(_, word, synopsis)| (word, synopsis))
+        .collect();
+    let of_command: Vec<&str> = runs
+        .iter()
+        .filter(|(word, _)| !word.is_empty() && Some(*word) == command)
+        .map(|(_, synopsis)| *synopsis)
+        .collect();
+    let shown = if of_command.is_empty() {
+        runs.iter().map(|(_, synopsis)| *synopsis).collect()
+    } else {
+        of_command
     };
-    format!("usage: {}\n", synopses.join("\n       "))
+    format!("usage: {}\n", shown.join("\n       "))
 }
 
 /// What follows a usage error's usage lines: one line, so the error stays
 /// on screen (the full help is ~40 lines).
 const SEE_HELP: &str = "Run `diskgc --help` for examples, sizes, durations and exit codes.\n";
 
-/// The help after the usage lines. The Profiles section that ends it is
-/// rendered from the build's library ([`describe::help_section`]). No
-/// task numbers or source-tree paths: the release package ships neither.
-const HELP: &str = "
+/// The help's first part, about `ensure`, which every build runs (a rule
+/// of the release descriptor: `release::EVERY_ROW_RUNS`).
+const HELP_ENSURE: &str = "
 Start here, with a dry run (it reads only and deletes nothing):
   diskgc ensure --dry-run --json --min-free 50G \\
       --select 'profile:cargo-target && filter:idle-3d' --roots DIR PATH
@@ -132,25 +151,121 @@ Without --dry-run, ensure DELETES what the selection finds and the safety
 Exit codes (ensure): 0 met (--dry-run: 0 with status dry_run; read
   target_met), 1 exhausted, 2 usage/config, 3 error, 75 another reclaim
   holds the lock (retry later), 124 deadline, 130/143 signal.
+";
 
+/// The configuration paragraph, up to what the package installs.
+const HELP_CONFIG: &str = "
 Configuration: --config FILE, else $DISKGC_CONFIG, else the first of
   $XDG_CONFIG_HOME/diskgc/config.yaml (default ~/.config/diskgc/config.yaml)
   and /etc/diskgc/config.yaml that exists. `ensure --select` needs none;
-  configured groups do. `diskgc check` validates a configuration. The
-  package installs an example (share/doc/diskgc/examples/example.yaml), a
-  README and the release notes with the known limits (share/doc/diskgc/).
+  configured groups do. `diskgc check` validates a configuration.
+";
 
+/// `watch` in a build that runs a reclaiming one.
+const HELP_WATCH: &str = "
 watch runs as a service: it reclaims as ensure does whenever available
   space falls below --min-free, up to --target-free, and deletes nothing
   in between; --tally-only only keeps the index snapshot warm. It stops on
   SIGTERM, SIGINT or SIGHUP with exit 0 (no reload: restart it to apply an
   edited configuration); 2 refused at start, 3 stdout or the host failed.
-
-This version runs `ensure --select` or configured groups with ordered or
-random tier ranking and oldest or best-fit candidate order, and `watch`;
-`survey` is not in it yet. PATH and every DIR are absolute.
-SIZE: 50G, 80GiB, 500MB, 10%. DUR: 30s, 10m, 2h, 7d, 1w (m is minutes).
 ";
+
+/// `watch` in a build that runs only `watch --tally-only`.
+const HELP_WATCH_TALLY_ONLY: &str = "
+watch --tally-only runs as a service that keeps the index snapshot warm
+  and never deletes. It stops on SIGTERM, SIGINT or SIGHUP with exit 0 (no
+  reload: restart it to apply an edited configuration); 2 refused at start,
+  3 stdout or the host failed.
+";
+
+/// The help after the usage lines, for `build`: what it runs, from the
+/// release descriptor. The Profiles section that ends `--help` is
+/// rendered from the build's library ([`describe::help_section`]) and
+/// appended by the caller. No task numbers or source-tree paths: the
+/// release package ships neither.
+fn help(build: &Build) -> String {
+    let mut out = String::from(HELP_ENSURE);
+    out.push_str(HELP_CONFIG);
+    out.push_str(&wrap(&package_sentence(build)));
+    if build.allows(Command::Watch) {
+        out.push_str(HELP_WATCH);
+    } else if build.allows(Command::WatchTallyOnly) {
+        out.push_str(HELP_WATCH_TALLY_ONLY);
+    }
+    out.push('\n');
+    out.push_str(&wrap(&commands_sentence(build)));
+    out.push_str("SIZE: 50G, 80GiB, 500MB, 10%. DUR: 30s, 10m, 2h, 7d, 1w (m is minutes).\n");
+    out
+}
+
+/// What the build's package installs that a user reads (the example, and
+/// the README and release notes where it ships them), as the end of the
+/// configuration paragraph.
+fn package_sentence(build: &Build) -> String {
+    let ships = |path: &str| build.ships.iter().any(|s| s == path);
+    let mut sentence = String::from(" The package installs an example");
+    if ships("share/doc/diskgc/examples/example.yaml") {
+        sentence.push_str(" (share/doc/diskgc/examples/example.yaml)");
+    }
+    if ships("share/doc/diskgc/RELEASE-NOTES.md") {
+        sentence
+            .push_str(", a README and the release notes with the known limits (share/doc/diskgc/)");
+    }
+    sentence.push('.');
+    sentence
+}
+
+/// The build's commands, and what of the documented ones it leaves out.
+fn commands_sentence(build: &Build) -> String {
+    let missing = if build.allows(Command::Watch) {
+        "`survey` is"
+    } else if build.allows(Command::WatchTallyOnly) {
+        "a reclaiming `watch` and `survey` are"
+    } else {
+        "`watch` and `survey` are"
+    };
+    format!(
+        "Commands in this version: {} ({missing} not in it yet). ensure runs \
+         `--select` or configured groups with ordered or random tier ranking and \
+         oldest or best-fit candidate order. PATH and every DIR are absolute.",
+        build.commands_phrase()
+    )
+}
+
+/// `text` as help lines of at most 76 columns, continuation lines indented
+/// by two. A `text` that starts with a space continues a paragraph already
+/// begun above it, so its first line is indented too (the package sentence
+/// after HELP_CONFIG); otherwise its first line starts at column 0.
+fn wrap(text: &str) -> String {
+    let (mut out, mut line) = (String::new(), String::new());
+    let continues = text.starts_with(' ');
+    for word in text.split_whitespace() {
+        let indent = if out.is_empty() && !continues {
+            ""
+        } else {
+            "  "
+        };
+        if !line.is_empty() && indent.len() + line.len() + 1 + word.len() > 76 {
+            out.push_str(indent);
+            out.push_str(&line);
+            out.push('\n');
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    let indent = if out.is_empty() && !continues {
+        ""
+    } else {
+        "  "
+    };
+    out.push_str(indent);
+    out.push_str(&line);
+    out.push('\n');
+    out
+}
 
 /// The flags each command takes, for "did you mean" (the parsers below
 /// are the authority; a test holds each list to its parser and usage).
@@ -189,8 +304,9 @@ fn unknown_flag(written: &str, known: &[&str]) -> String {
     }
 }
 
-/// The refusal of a command line whose first word is no command.
-fn unknown_command(first: &str) -> String {
+/// The refusal of a command line whose first word is no command, naming
+/// the commands `build` runs.
+fn unknown_command(first: &str, build: &Build) -> String {
     let what = if first.starts_with('-') {
         "unknown flag before a command"
     } else {
@@ -198,7 +314,10 @@ fn unknown_command(first: &str) -> String {
     };
     match diskgc_core::suggest::closest(first, &FIRST_WORDS) {
         Some(near) => format!("{what} `{first}`; did you mean `{near}`?"),
-        None => format!("{what} `{first}`; the commands are ensure, watch, check and profiles"),
+        None => format!(
+            "{what} `{first}`; the commands are {}",
+            build.commands_phrase()
+        ),
     }
 }
 
@@ -212,11 +331,11 @@ enum Invocation {
     Watch(watch::WatchArgs),
     Profiles(ProfilesArgs),
     Check(Option<OsString>),
-    /// A command of the contract that this version does not have yet.
+    /// A command of the contract that no build has yet.
     NotYet(&'static str),
-    /// A reclaiming `watch` in a build whose catalog has none
-    /// ([`RECLAIMING_WATCH`]).
-    ReclaimingWatchNotInCatalog,
+    /// A command this build does not run (the release descriptor's row,
+    /// [`admit`]).
+    NotInBuild(Command),
     UsageError(String),
 }
 
@@ -262,28 +381,44 @@ fn dry_run_requested(args: &[OsString]) -> bool {
     args.iter().any(|a| a == "--dry-run")
 }
 
-fn parse(args: &[OsString]) -> Invocation {
-    // Help wins wherever it is asked for (`profiles list --help`).
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+/// Whether `args` ask for help, which wins wherever it is asked for
+/// (`profiles list --help`).
+fn help_asked(args: &[OsString]) -> bool {
+    args.iter().any(|a| a == "--help" || a == "-h")
+}
+
+/// Whether `args` are `--version` (or `-V`), alone or with `--json`, and
+/// no help: answered before the build's row is read, so it works in any
+/// build ([`begin`]).
+fn version_asked(args: &[OsString]) -> bool {
+    let version = |a: &OsString| a == "--version" || a == "-V";
+    !help_asked(args)
+        && match args {
+            [flag] => version(flag),
+            [first, second] => {
+                version(first) && second == "--json" || first == "--json" && version(second)
+            }
+            _ => false,
+        }
+}
+
+/// The command line's syntax, in `build` (whose commands a usage error
+/// names): a pure function of both. What `build` does not run is
+/// [`admit`]'s.
+fn parse(args: &[OsString], build: &Build) -> Invocation {
+    if help_asked(args) {
         return Invocation::Help;
     }
+    if version_asked(args) {
+        return Invocation::Version;
+    }
     match args {
-        [flag] if flag == "--version" || flag == "-V" => Invocation::Version,
-        [first, second]
-            if (first == "--version" || first == "-V") && second == "--json"
-                || first == "--json" && (second == "--version" || second == "-V") =>
-        {
-            Invocation::Version
-        }
         [] => Invocation::UsageError("no command given".to_owned()),
         [command, rest @ ..] if command == "ensure" => match parse_ensure(rest) {
             Ok(args) => Invocation::Ensure(args),
             Err(why) => Invocation::UsageError(format!("ensure: {why}")),
         },
         [command, rest @ ..] if command == "watch" => match watch::parse_watch(rest) {
-            Ok(args) if !RECLAIMING_WATCH && matches!(args.mode, Mode::Reclaim { .. }) => {
-                Invocation::ReclaimingWatchNotInCatalog
-            }
             Ok(args) => Invocation::Watch(args),
             Err(why) => Invocation::UsageError(format!("watch: {why}")),
         },
@@ -297,8 +432,42 @@ fn parse(args: &[OsString]) -> Invocation {
         }
         [command, ..] => match NOT_YET.iter().find(|name| command == *name) {
             Some(name) => Invocation::NotYet(name),
-            None => Invocation::UsageError(unknown_command(&command.to_string_lossy())),
+            None => Invocation::UsageError(unknown_command(&command.to_string_lossy(), build)),
         },
+    }
+}
+
+/// `invocation` held to what `build` runs: a command it does not run is
+/// refused (exit 2) however it is written; a syntax error of one it runs
+/// stays a usage error. `args` are the command line `invocation` was
+/// parsed from.
+fn admit(args: &[OsString], invocation: Invocation, build: &Build) -> Invocation {
+    let first = args.first().and_then(|a| a.to_str());
+    let needs = match &invocation {
+        Invocation::Ensure(_) => Command::Ensure,
+        Invocation::Watch(args) => match args.mode {
+            Mode::Reclaim { .. } => Command::Watch,
+            Mode::TallyOnly { .. } => Command::WatchTallyOnly,
+        },
+        Invocation::Profiles(_) => Command::Profiles,
+        Invocation::Check(_) => Command::Check,
+        Invocation::UsageError(_) => match first {
+            Some("ensure") => Command::Ensure,
+            Some("watch") if !build.allows(Command::Watch) => Command::WatchTallyOnly,
+            Some("watch") => Command::Watch,
+            Some("profiles") => Command::Profiles,
+            Some("check") => Command::Check,
+            _ => return invocation,
+        },
+        _ => return invocation,
+    };
+    if build.allows(needs) {
+        invocation
+    } else if needs == Command::WatchTallyOnly && !build.allows(Command::Watch) {
+        // No `watch` at all: the word is refused, whatever its flags.
+        Invocation::NotInBuild(Command::Watch)
+    } else {
+        Invocation::NotInBuild(needs)
     }
 }
 
@@ -618,21 +787,30 @@ fn kernel_failure(error: KernelError) -> StartupFailure {
     }
 }
 
-/// The catalog this build ships ([`Catalog`]): the opt-in feature builds
-/// the proposed 0.1 release's.
-const CATALOG: Catalog = if cfg!(feature = "proposed-release-01-catalog") {
-    Catalog::ProposedRelease01
-} else {
-    Catalog::Development
-};
+/// This build's row of the release descriptor (`diskgc_core::release`):
+/// the development build's, or with the `release-catalog` feature the
+/// release this version belongs to (master's `0.2.0-dev`: 0.2). What it
+/// runs, its help, its catalog and what its package ships follow from it.
+fn this_build() -> Result<release::Entry, String> {
+    if cfg!(feature = "release-catalog") {
+        release::release_of_version(env!("CARGO_PKG_VERSION"))
+    } else {
+        release::development()
+    }
+    .map_err(|e| format!("the release descriptor does not load (a bug): {e}"))
+}
 
-/// Whether this build runs a reclaiming `watch`. The release catalog, the
-/// one the gate-lifted `release-candidate` package carries, does not while
-/// no release decision covers it (TASK-276): it runs `watch --tally-only`
-/// only and refuses the rest with exit 2, as 0.1.0 refused every `watch`
-/// (docs/reference.md, Built-in profile library). The development build
-/// keeps it, behind the sandbox gate.
-const RECLAIMING_WATCH: bool = matches!(CATALOG, Catalog::Development);
+/// [`this_build`], which [`begin`] checks before anything else reads it;
+/// used only after that (and every test that asks for a build reads the
+/// embedded descriptor).
+fn build() -> release::Entry {
+    this_build().expect("main checked the release descriptor first")
+}
+
+/// The catalog this build ships ([`Catalog`]), from [`build`].
+fn catalog() -> Catalog {
+    Catalog::from(build())
+}
 
 // TASK-195: removing the sandbox gate (diskgc-linux's
 // `release-without-sandbox-gate`) is only for the release package, which
@@ -640,8 +818,8 @@ const RECLAIMING_WATCH: bool = matches!(CATALOG, Catalog::Development);
 // every development profile, so that build does not compile. The flake's
 // release-gate-needs-catalog check proves the refusal.
 const _: () = assert!(
-    diskgc_linux::sandbox::SANDBOX_GATE || cfg!(feature = "proposed-release-01-catalog"),
-    "diskgc-linux/release-without-sandbox-gate needs diskgc's proposed-release-01-catalog: \
+    diskgc_linux::sandbox::SANDBOX_GATE || cfg!(feature = "release-catalog"),
+    "diskgc-linux/release-without-sandbox-gate needs diskgc's release-catalog: \
      an ungated binary must ship the release catalog"
 );
 
@@ -649,7 +827,7 @@ const _: () = assert!(
 /// by `flag` (`--config`), `$DISKGC_CONFIG` or found by the search: its
 /// bytes, or the paths tried when the search found none (a given file that
 /// is missing is an error, never a fallback). Parsing it, under
-/// [`CATALOG`], and whether a missing one is an error, are the command's.
+/// [`catalog`], and whether a missing one is an error, are the command's.
 /// The error's cause: `config` for the file (exit 2), `host` for a read
 /// the host failed (`/proc`, I/O: exit 3, [`ConfigReadError`]).
 fn read_config(flag: Option<&OsStr>, strict_modes: bool) -> ConfigRead {
@@ -706,14 +884,14 @@ fn read_config_with(flag: Option<&OsStr>, read: ConfigReader<'_>) -> ConfigRead 
     })
 }
 
-/// [`read_config`], parsed under [`CATALOG`] for `profiles` and `check`:
+/// [`read_config`], parsed under [`catalog`] for `profiles` and `check`:
 /// the configuration, or the paths tried when none was found.
 fn load_config(
     flag: Option<&OsStr>,
     use_: ConfigUse,
 ) -> Result<Result<Config, Vec<PathBuf>>, String> {
     match read_config(flag, false).map_err(|(_, why)| why)? {
-        ConfigFile::Read { path, bytes } => CATALOG.config(&path, &bytes, use_).map(Ok),
+        ConfigFile::Read { path, bytes } => catalog().config(&path, &bytes, use_).map(Ok),
         ConfigFile::NotFound { tried } => Ok(Err(tried)),
     }
 }
@@ -800,7 +978,7 @@ fn ensure_with(args: &EnsureArgs, start: &Start<'_>) -> Report {
         Err((cause, why)) => return fail(invocation::refusal_status(cause), cause, why),
     };
     let platform = Platform {
-        catalog: CATALOG,
+        catalog: catalog(),
         draw_seed: &draw_seed,
         builtins: &builtins,
     };
@@ -815,15 +993,15 @@ fn ensure_with(args: &EnsureArgs, start: &Start<'_>) -> Report {
     invocation::ensure(&host, &args.options, loaded, &platform, &mut log, &mut log)
 }
 
-/// The embedded built-in profiles, before [`CATALOG`] narrows them; an
+/// The embedded built-in profiles, before [`catalog`] narrows them; an
 /// error is a bug in the shipped YAML (the tests load it).
 fn builtins() -> Result<Library, String> {
     Library::builtin().map_err(|e| format!("the built-in profiles do not load (a bug): {e}"))
 }
 
-/// The built-in profiles of [`CATALOG`] alone.
+/// The built-in profiles of [`catalog`] alone.
 fn builtin_library() -> Result<Library, String> {
-    CATALOG.library(builtins()?)
+    catalog().library(builtins()?)
 }
 
 /// `profiles list | show NAME | test`: the text or JSON for stdout, or why not
@@ -1055,13 +1233,18 @@ fn finish(report: &Report, json: bool) -> ExitCode {
     }
 }
 
-/// What the release catalog says to a reclaiming `watch` (TASK-276), which
-/// it refuses at the command line.
-fn reclaiming_watch_refusal() -> String {
+/// What `build` says to `command`, which it does not run: a reclaiming
+/// `watch` where only `watch --tally-only` runs (TASK-276), or any other.
+fn not_in_build(command: Command, build: &Build) -> String {
+    let what = if command == Command::Watch && build.allows(Command::WatchTallyOnly) {
+        "a reclaiming `watch`".to_owned()
+    } else {
+        format!("`{}`", command.words())
+    };
     format!(
-        "a reclaiming `watch` is not in diskgc {} yet; its commands are ensure, watch \
-         --tally-only, check and profiles",
-        env!("CARGO_PKG_VERSION")
+        "{what} is not in diskgc {} yet; its commands are {}",
+        env!("CARGO_PKG_VERSION"),
+        build.commands_phrase()
     )
 }
 
@@ -1082,6 +1265,28 @@ fn not_yet(why: &str, json: bool) -> ExitCode {
     }
 }
 
+/// How a run starts: `--version` answers in every build; otherwise the
+/// build's row is read first (TASK-289 review: a release-catalog build of a
+/// version without a row must exit 2, never panic in the parser), then the
+/// command line is parsed and held to it.
+#[derive(Debug, PartialEq, Eq)]
+enum Begin {
+    Version,
+    /// The release descriptor has no row for this build: exit 2.
+    NoRow(String),
+    Run(Invocation, release::Entry),
+}
+
+fn begin(args: &[OsString], row: Result<release::Entry, String>) -> Begin {
+    if version_asked(args) {
+        return Begin::Version;
+    }
+    match row {
+        Err(why) => Begin::NoRow(why),
+        Ok(row) => Begin::Run(admit(args, parse(args, &row), &row), row),
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     // `--json` holds for every exit code when stdout works, usage errors
@@ -1089,18 +1294,25 @@ fn main() -> ExitCode {
     // prints its report; every other command prints `error_json`.
     let json = json_requested(&args);
     let report = args.first().is_some_and(|c| c == "ensure");
-    match parse(&args) {
-        Invocation::Version => output(&version_line(env!("CARGO_PKG_VERSION"), GIT_REV), 0),
-        Invocation::Help => match builtin_library() {
-            Ok(library) => output(
-                &format!("{}{HELP}{}", usage(None), describe::help_section(&library)),
-                0,
-            ),
-            Err(why) => {
-                log(&format!("error: {why}"));
-                output(&format!("{}{HELP}", usage(None)), EXIT_USAGE)
+    // Every later step reads the build's row ([`build`]), which `begin`
+    // has checked.
+    let (invocation, build) = match begin(&args, this_build()) {
+        Begin::Version => return output(&version_line(env!("CARGO_PKG_VERSION"), GIT_REV), 0),
+        Begin::NoRow(why) => return not_yet(&why, json),
+        Begin::Run(invocation, build) => (invocation, build),
+    };
+    match invocation {
+        Invocation::Version => unreachable!("answered by begin"),
+        Invocation::Help => {
+            let text = format!("{}{}", usage(&build, None), help(&build));
+            match builtin_library() {
+                Ok(library) => output(&format!("{text}{}", describe::help_section(&library)), 0),
+                Err(why) => {
+                    log(&format!("error: {why}"));
+                    output(&text, EXIT_USAGE)
+                }
             }
-        },
+        }
         Invocation::Ensure(args) => finish(&ensure(&args), json),
         Invocation::Watch(args) => watch::watch(&args, json),
         Invocation::Check(config) => match check(config.as_deref()) {
@@ -1141,13 +1353,13 @@ fn main() -> ExitCode {
         },
         Invocation::NotYet(command) => not_yet(
             &format!(
-                "`{command}` is not in diskgc {} yet; its commands are ensure, watch, check and \
-                 profiles",
-                env!("CARGO_PKG_VERSION")
+                "`{command}` is not in diskgc {} yet; its commands are {}",
+                env!("CARGO_PKG_VERSION"),
+                build.commands_phrase()
             ),
             json,
         ),
-        Invocation::ReclaimingWatchNotInCatalog => not_yet(&reclaiming_watch_refusal(), json),
+        Invocation::NotInBuild(command) => not_yet(&not_in_build(command, &build), json),
         Invocation::UsageError(reason) => {
             // The kernel check comes first, as for every command that may
             // touch the machine: an old kernel is the reason to report.
@@ -1189,7 +1401,7 @@ fn main() -> ExitCode {
                     log(&format!("error: {reason}"));
                     if status == Status::UsageError {
                         let command = args.first().and_then(|a| a.to_str());
-                        eprint!("{}{SEE_HELP}", usage(command));
+                        eprint!("{}{SEE_HELP}", usage(&build, command));
                     }
                     ExitCode::from(status.exit_code())
                 }
@@ -1201,6 +1413,11 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`super::parse`] in this test build's row.
+    fn parse(args: &[OsString]) -> Invocation {
+        super::parse(args, &build())
+    }
     use diskgc_core::executor::Tier;
     use diskgc_core::units::Size;
 
@@ -1453,15 +1670,16 @@ mod tests {
     }
 
     /// The literal names are deliberate: the catalog is derived from
-    /// builtin.yaml's `releases:` (Library::proposed_release_01), and this
+    /// builtin.yaml's `releases:` (Library::release_catalog) through this
+    /// version's row of the release descriptor, and this
     /// list is the second key a widening of the 0.1 catalog must turn
     /// (with TASK-65's sign-off), not a stale copy to derive away.
     #[test]
-    fn proposed_catalog_keeps_only_cargo_tmp_contracts_and_idle_filters_on_every_listing_surface() {
-        let library = Library::builtin()
-            .expect("built-ins")
-            .proposed_release_01()
-            .expect("proposed catalog");
+    fn release_catalog_keeps_only_cargo_tmp_contracts_and_idle_filters_on_every_listing_surface() {
+        let row = release::release_of_version(env!("CARGO_PKG_VERSION")).expect("this release");
+        let library = Catalog::from(row)
+            .library(Library::builtin().expect("built-ins"))
+            .expect("release catalog");
         let names: Vec<_> = library
             .profiles()
             .map(|profile| profile.name.as_str())
@@ -1498,9 +1716,12 @@ mod tests {
     }
 
     #[test]
-    fn proposed_catalog_refuses_excluded_select_before_a_tier_can_reach_a_backend() {
+    fn release_catalog_refuses_excluded_select_before_a_tier_can_reach_a_backend() {
         let all = Library::builtin().expect("built-ins");
-        let library = all.clone().proposed_release_01().expect("proposed catalog");
+        let row = release::release_of_version(env!("CARGO_PKG_VERSION")).expect("this release");
+        let library = Catalog::from(row)
+            .library(all.clone())
+            .expect("release catalog");
         let roots = ["/tmp".to_owned()];
         for profile in all
             .profiles()
@@ -1529,7 +1750,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "proposed-release-01-catalog")]
+    #[cfg(feature = "release-catalog")]
     #[test]
     fn opt_in_binary_uses_the_narrowed_library_for_help_and_select() {
         let library = builtin_library().expect("binary catalog");
@@ -1562,42 +1783,229 @@ mod tests {
         assert_eq!(version_line("0.1.0", None), "diskgc 0.1.0\n");
     }
 
-    /// TASK-276 open: the release catalog runs `watch --tally-only` only;
-    /// the development catalog keeps a reclaiming `watch`.
+    fn rows() -> [release::Entry; 3] {
+        [
+            release::development().expect("development"),
+            release::release("0.1").expect("0.1"),
+            release::release_of_version(env!("CARGO_PKG_VERSION")).expect("this release"),
+        ]
+    }
+
+    /// TASK-289 review (Codex 1): a release-catalog build of a version with
+    /// no row answers `--version` and refuses everything else with the
+    /// descriptor's error (exit 2, a JSON object under `--json`), before
+    /// the parser could ask for the row: `prune --json` panicked.
     #[test]
-    fn only_the_development_catalog_parses_a_reclaiming_watch() {
-        let reclaim = parse(&args(&[
-            "watch",
-            "--min-free",
-            "1G",
-            "--target-free",
-            "2G",
-            "/p",
-        ]));
-        match CATALOG {
-            Catalog::Development => assert!(matches!(reclaim, Invocation::Watch(_))),
-            Catalog::ProposedRelease01 => {
-                assert_eq!(reclaim, Invocation::ReclaimingWatchNotInCatalog)
+    fn a_build_without_a_row_refuses_before_parsing() {
+        let missing = release::release_of_version("9.9.0-dev");
+        assert!(missing.is_err(), "no row 9.9 in the descriptor");
+        for line in [
+            &["prune", "--json"][..],
+            &["prune"],
+            &[],
+            &["ensure", "--min-free", "1G", "/p"],
+            &["--help"],
+            &["--version", "extra"],
+        ] {
+            match begin(&args(line), missing.clone()) {
+                Begin::NoRow(why) => assert_eq!(Err(why), missing, "{line:?}"),
+                other => panic!("{line:?}: {other:?}"),
             }
         }
-        // Its words, which the binary prints (the release suite's
-        // `release_candidate_refuses_a_reclaiming_watch` runs it, in a
-        // container: TASK-282 keeps reclaiming argv off the host).
+        for line in [
+            &["--version"][..],
+            &["-V", "--json"],
+            &["--json", "--version"],
+        ] {
+            assert_eq!(
+                begin(&args(line), missing.clone()),
+                Begin::Version,
+                "{line:?}"
+            );
+        }
+        // With a row, the same lines parse and are admitted.
+        let row = build();
         assert_eq!(
-            reclaiming_watch_refusal(),
+            begin(&args(&["prune"]), Ok(row)),
+            Begin::Run(super::parse(&args(&["prune"]), &row), row)
+        );
+        assert_eq!(
+            begin(&args(&["--version", "--help"]), Ok(row)),
+            Begin::Run(Invocation::Help, row)
+        );
+    }
+
+    /// Each row runs what it lists and refuses the rest (exit 2), however
+    /// it is written; a syntax error of a command it runs stays one.
+    #[test]
+    fn a_build_runs_only_its_rows_commands() {
+        let reclaim = args(&["watch", "--min-free", "1G", "--target-free", "2G", "/p"]);
+        let tally = args(&["watch", "--tally-only", "/p"]);
+        let bad_watch = args(&["watch", "--min-free", "1G", "/p"]);
+        for row in rows() {
+            let admitted = |line: &[OsString]| admit(line, super::parse(line, &row), &row);
+            match admitted(&reclaim) {
+                Invocation::Watch(_) => assert!(row.allows(Command::Watch), "{row:?}"),
+                Invocation::NotInBuild(Command::Watch) => {
+                    assert!(!row.allows(Command::Watch), "{row:?}")
+                }
+                other => panic!("{row:?}: {other:?}"),
+            }
+            match admitted(&tally) {
+                Invocation::Watch(_) => assert!(row.allows(Command::WatchTallyOnly)),
+                Invocation::NotInBuild(Command::Watch) => {
+                    assert!(!row.allows(Command::WatchTallyOnly))
+                }
+                other => panic!("{row:?}: {other:?}"),
+            }
+            let runs_a_watch = row.allows(Command::Watch) || row.allows(Command::WatchTallyOnly);
+            match admitted(&bad_watch) {
+                Invocation::UsageError(_) => assert!(runs_a_watch, "{row:?}"),
+                Invocation::NotInBuild(Command::Watch) => assert!(!runs_a_watch, "{row:?}"),
+                other => panic!("{row:?}: {other:?}"),
+            }
+            // Every row runs these.
+            for line in [
+                &["check"][..],
+                &["profiles", "list"],
+                &["ensure", "--min-free", "1G", "/p"],
+            ] {
+                let line = args(line);
+                let parsed = || super::parse(&line, &row);
+                assert_eq!(admit(&line, parsed(), &row), parsed(), "{line:?}");
+            }
+        }
+    }
+
+    /// What the binary prints for a refused command (the release suite's
+    /// `release_candidate_refuses_a_reclaiming_watch` runs this build's, in
+    /// a container: TASK-282 keeps reclaiming argv off the host).
+    #[test]
+    fn a_refusal_names_the_rows_commands() {
+        let [development, v01, _] = rows();
+        let mut tally_only = (*release::release("0.1").expect("0.1").build).clone();
+        tally_only.commands = vec![
+            Command::Ensure,
+            Command::WatchTallyOnly,
+            Command::Check,
+            Command::Profiles,
+        ];
+        assert_eq!(
+            not_in_build(Command::Watch, &tally_only),
             concat!(
                 "a reclaiming `watch` is not in diskgc ",
                 env!("CARGO_PKG_VERSION"),
                 " yet; its commands are ensure, watch --tally-only, check and profiles"
             )
         );
-        let tally = parse(&args(&["watch", "--tally-only", "/p"]));
-        assert!(matches!(tally, Invocation::Watch(_)), "{tally:?}");
-        // A syntax error is reported as such in either build.
-        assert!(matches!(
-            parse(&args(&["watch", "--min-free", "1G", "/p"])),
-            Invocation::UsageError(_)
-        ));
+        assert_eq!(
+            not_in_build(Command::Watch, &v01),
+            concat!(
+                "`watch` is not in diskgc ",
+                env!("CARGO_PKG_VERSION"),
+                " yet; its commands are ensure, check and profiles"
+            )
+        );
+        assert_eq!(
+            development.commands_phrase(),
+            "ensure, watch, check and profiles"
+        );
+    }
+
+    /// The help shows what its build runs (TASK-289: it advertised a
+    /// reclaiming `watch` in every build): the usage lines, the `watch`
+    /// paragraph, the commands sentence and what the package installs.
+    #[test]
+    fn the_help_follows_the_rows_commands_and_files() {
+        let [development, v01, this_release] = rows();
+        // Sentences are compared with their line breaks as spaces.
+        let help_of = |row: &release::Entry| {
+            let text = format!("{}{}", usage(row, None), help(row));
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            (text, flat)
+        };
+        let reclaim_line = "diskgc watch --min-free SIZE --target-free SIZE";
+        let tally_line = "diskgc watch --tally-only [--min-free SIZE]";
+
+        let (_, dev) = help_of(&development);
+        assert!(
+            dev.contains(reclaim_line) && dev.contains(tally_line),
+            "{dev}"
+        );
+        assert!(
+            dev.contains("watch runs as a service: it reclaims"),
+            "{dev}"
+        );
+        assert!(dev.contains("(`survey` is not in it yet)"), "{dev}");
+        assert!(
+            dev.contains("Commands in this version: ensure, watch, check and profiles"),
+            "{dev}"
+        );
+        assert!(
+            !dev.contains("release notes"),
+            "the development package has none:\n{dev}"
+        );
+
+        let (_, v01) = help_of(&v01);
+        assert!(!v01.contains("diskgc watch"), "{v01}");
+        assert!(!v01.contains("watch --tally-only runs"), "{v01}");
+        assert!(
+            v01.contains("(`watch` and `survey` are not in it yet)"),
+            "{v01}"
+        );
+        assert!(v01.contains("a README and the release notes"), "{v01}");
+
+        // This version's release: its watch lines are exactly what its row
+        // allows (TASK-276 decides whether a reclaiming one is added).
+        let (_, rel) = help_of(&this_release);
+        assert_eq!(
+            rel.contains(reclaim_line),
+            this_release.allows(Command::Watch),
+            "{rel}"
+        );
+        assert_eq!(
+            rel.contains(tally_line),
+            this_release.allows(Command::WatchTallyOnly),
+            "{rel}"
+        );
+        assert_eq!(
+            rel.contains("watch runs as a service: it reclaims"),
+            this_release.allows(Command::Watch),
+            "{rel}"
+        );
+        assert!(
+            rel.contains(&format!(
+                "Commands in this version: {}",
+                this_release.commands_phrase()
+            )),
+            "{rel}"
+        );
+        for row in rows() {
+            let (text, _) = help_of(&row);
+            // The prose; the usage lines are as wide as the synopses.
+            for line in help(&row).lines() {
+                assert!(line.len() <= 78, "{line:?} is wider than 78 columns");
+            }
+            assert!(
+                text.contains("share/doc/diskgc/examples/example.yaml"),
+                "{text}"
+            );
+        }
+        // A usage error of `watch` shows only the lines its build runs.
+        let usage_tally_only = {
+            let mut row = (*this_release.build).clone();
+            row.commands.retain(|c| *c != Command::Watch);
+            if !row.commands.contains(&Command::WatchTallyOnly) {
+                row.commands.push(Command::WatchTallyOnly);
+            }
+            usage(&row, Some("watch"))
+        };
+        assert!(usage_tally_only.contains(tally_line), "{usage_tally_only}");
+        assert!(
+            !usage_tally_only.contains(reclaim_line),
+            "{usage_tally_only}"
+        );
+        assert!(!usage_tally_only.contains("ensure"), "{usage_tally_only}");
     }
 
     #[test]
@@ -1773,7 +2181,7 @@ mod tests {
             ),
             (
                 &["prune"],
-                "unknown command `prune`; the commands are ensure, watch, check and profiles",
+                "unknown command `prune`; the commands are ensure, ",
             ),
             (&["--version", "ensure"], "--version takes no arguments"),
         ] {
@@ -1783,6 +2191,16 @@ mod tests {
                 }
                 other => panic!("{list:?}: {other:?}"),
             }
+        }
+        // The row's own commands (the release descriptor's).
+        for row in rows() {
+            assert_eq!(
+                super::parse(&args(&["prune"]), &row),
+                Invocation::UsageError(format!(
+                    "unknown command `prune`; the commands are {}",
+                    row.commands_phrase()
+                ))
+            );
         }
     }
 
@@ -1807,7 +2225,11 @@ mod tests {
             }
         }
         for flag in watch::WATCH_FLAGS {
-            assert!(watch::WATCH_SYNOPSIS.contains(flag), "{flag}");
+            assert!(
+                watch::WATCH_RECLAIM_SYNOPSIS.contains(flag)
+                    || watch::WATCH_TALLY_SYNOPSIS.contains(flag),
+                "{flag}"
+            );
             let error = watch::parse_watch(&args(&[flag, "1G", "/p"])).err();
             assert!(!error.is_some_and(|e| e.contains("unknown flag")), "{flag}");
         }
@@ -1825,7 +2247,12 @@ mod tests {
     #[test]
     fn help_and_refusals_name_no_internal_tasks_or_source_paths() {
         let library = builtin_library().expect("the build's catalog");
-        let help = format!("{}{HELP}{}", usage(None), describe::help_section(&library));
+        let help = format!(
+            "{}{}{}",
+            usage(&build(), None),
+            help(&build()),
+            describe::help_section(&library)
+        );
         for leak in ["task", "TASK", "docs/", "source tree", "later tasks"] {
             assert!(!help.contains(leak), "{leak:?} in --help:\n{help}");
         }

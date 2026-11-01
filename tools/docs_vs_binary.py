@@ -115,7 +115,9 @@ def backticked(cell):
 def parse_usage(lines):
     """{command: (frozenset((flag, optional)), positionals)} from usage lines,
     each `diskgc COMMAND ...` with indented continuations. `diskgc --help |
-    --version` and separate `diskgc --help` lines both land on command ''."""
+    --version` and separate `diskgc --help` lines both land on command ''.
+    A mode flag right after the command words names a usage of its own
+    (`watch --tally-only`): a build may run one mode and not the other."""
     commands = {}
     entries = []
     for raw in lines:
@@ -130,6 +132,8 @@ def parse_usage(lines):
         tokens = entry.split()
         words = []
         while tokens and re.fullmatch(r"[a-z]+", tokens[0]):
+            words.append(tokens.pop(0))
+        if words and tokens and tokens[0] in MODE_FLAGS:
             words.append(tokens.pop(0))
         name = " ".join(words)
         flags, positionals = set(), []
@@ -150,6 +154,41 @@ def parse_usage(lines):
         old_flags, old_pos = commands.get(name, (frozenset(), ()))
         commands[name] = (old_flags | frozenset(flags), old_pos + tuple(positionals))
     return commands
+
+
+# Flags that select a command's mode, each its own usage line and build
+# decision (the release descriptor lists `watch` and `watch --tally-only`).
+MODE_FLAGS = ("--tally-only",)
+
+# The release descriptor: per build, the commands it runs (its one home).
+DESCRIPTOR = Path(__file__).resolve().parent.parent / "crates/diskgc-core/src/releases.json"
+
+
+def build_row(descriptor, version_out, listed):
+    """The binary's row of the release descriptor: its release (MAJOR.MINOR
+    of `diskgc --version`) when its catalog is narrowed, i.e. every built-in
+    `profiles list --json` shows is in a release catalog; else the
+    development row. Returns (name, row)."""
+    match = re.match(r"diskgc (\d+)\.(\d+)\.", version_out or "")
+    profiles = (listed or {}).get("profiles") or []
+    narrowed = bool(profiles) and all(p.get("releases") for p in profiles)
+    if not narrowed:
+        return "development", descriptor["development"]
+    if not match:
+        raise ValueError(f"--version is not `diskgc MAJOR.MINOR.PATCH`: {version_out!r}")
+    name = f"{match.group(1)}.{match.group(2)}"
+    if name not in descriptor["releases"]:
+        raise ValueError(f"releases.json has no release {name}")
+    return name, descriptor["releases"][name]
+
+
+def not_in_build(row, usages):
+    """The documented usages (parse_usage keys) whose command `row` does not
+    run: `watch` and `watch --tally-only` by their own words, the others by
+    their first word. `''` (--help, --version) is in every build."""
+    def command(usage):
+        return usage if usage.startswith("watch") else usage.split(" ")[0]
+    return {u for u in usages if u and command(u) not in row["commands"]}
 
 
 def help_usage_lines(help_text):
@@ -261,7 +300,7 @@ def documented_catalog(reference):
     release = set()
     for cells in table_rows(liveness, "| Profile |"):
         verdict = cells[-1].lower()
-        if "in the proposed 0.1 catalog" in verdict and "not in 0.1" not in verdict:
+        if "in the 0.1 catalog" in verdict and "not in 0.1" not in verdict:
             release |= set(backticked(cells[0]))
     return release, sources, filters, inactive
 
@@ -460,10 +499,21 @@ def probe_usage(reference, run, report):
     help_text = run.diskgc("--help")
     report.expect(help_text.code == 0, "help", "`diskgc --help` exit", 0, help_text.code)
     actual = parse_usage(help_usage_lines(help_text.out))
+    row_name, row = build_row(json.loads(DESCRIPTOR.read_text()), run.diskgc("--version").out,
+                              run.diskgc("profiles", "list", "--json").json())
+    print(f"build: release descriptor row {row_name}: {', '.join(row['commands'])}")
+    excused = not_in_build(row, documented)
     for name in sorted(set(documented) | set(actual)):
         doc_flags, doc_pos = documented.get(name, (frozenset(), ()))
         bin_flags, bin_pos = actual.get(name, (frozenset(), ()))
         label = f"`diskgc {name}`".replace(" `", "`")
+        if name in excused:
+            # Its release row does not run it: its usage must then be
+            # absent, not merely different.
+            report.expect(name not in actual, "usage",
+                          f"{label} in --help usage of a build that says it does not run it",
+                          "absent", "present")
+            continue
         report.expect(name in actual, "usage", f"{label} in --help usage", "present", "absent")
         report.expect(name in documented, "usage", f"{label} in reference Commands", "absent", "present")
         if name in actual and name in documented:

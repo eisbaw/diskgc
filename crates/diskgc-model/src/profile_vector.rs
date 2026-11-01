@@ -72,8 +72,8 @@ pub struct ProfileVector {
     #[serde(default)]
     pub allow_root: bool,
     /// The built-in catalog of the build under test (`development`, the
-    /// default, or `proposed-release-01`): what the binary's
-    /// `proposed-release-01-catalog` feature selects.
+    /// default, or `release-0.1`, release 0.1's row of the release
+    /// descriptor): what the binary's `release-catalog` feature selects.
     #[serde(default)]
     pub catalog: VectorCatalog,
     /// `DISKGC_SEED` for `ranking: random`; absent: drawing one fails.
@@ -94,15 +94,17 @@ pub enum VectorCatalog {
     #[default]
     #[serde(rename = "development")]
     Development,
-    #[serde(rename = "proposed-release-01")]
-    ProposedRelease01,
+    #[serde(rename = "release-0.1")]
+    Release01,
 }
 
 impl From<VectorCatalog> for Catalog {
     fn from(catalog: VectorCatalog) -> Self {
         match catalog {
             VectorCatalog::Development => Catalog::Development,
-            VectorCatalog::ProposedRelease01 => Catalog::ProposedRelease01,
+            VectorCatalog::Release01 => Catalog::from(
+                diskgc_core::release::release("0.1").expect("release 0.1 in the descriptor"),
+            ),
         }
     }
 }

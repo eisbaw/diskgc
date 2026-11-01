@@ -225,8 +225,22 @@ pub fn named_checkout_policy_for_command_caches(ctx: &Ctx) -> TestResult {
 
 /// A genuinely feature-built binary is needed here: the standard developer
 /// binary has the full built-in library and cannot prove release exclusions.
-pub fn named_checkout_policy_cannot_expand_proposed_catalog(ctx: &Ctx) -> TestResult {
-    let binary = ctx.bin_dir.join("diskgc-proposed-01");
+pub fn named_checkout_policy_cannot_expand_the_release_catalog(ctx: &Ctx) -> TestResult {
+    let binary = ctx.bin_dir.join("diskgc-release-catalog");
+    // Its refusals name its release, MAJOR.MINOR of its version
+    // (`diskgc 0.2.0-dev (COMMIT)`: 0.2).
+    let oracle = Oracle::arm(Fixture::new())?;
+    let version = ctx.run_as_tester(&binary, &["--version"])?;
+    oracle.judge(&version)?.assert_clean()?;
+    version.expect_code(0)?;
+    let release = version
+        .stdout
+        .strip_prefix("diskgc ")
+        .and_then(|v| {
+            let mut parts = v.split(['.', '-', ' ', '\n']);
+            Some(format!("{}.{}", parts.next()?, parts.next()?))
+        })
+        .ok_or_else(|| format!("--version: {:?}", version.stdout))?;
     for excluded in ["npm-cache", "uv-cache"] {
         let source = format!(
             "version: 1\nprofile_policies:\n  - profile: {excluded}\n    checkouts: allow\n"
@@ -241,7 +255,7 @@ pub fn named_checkout_policy_cannot_expand_proposed_catalog(ctx: &Ctx) -> TestRe
         run.expect_code(2)?;
         ensure!(
             run.stderr.contains(&format!(
-                "`{excluded}` is a built-in that diskgc 0.1 does not ship"
+                "`{excluded}` is a built-in that diskgc {release} does not ship"
             )),
             "{excluded}: expected catalog refusal, got {}",
             run.stderr

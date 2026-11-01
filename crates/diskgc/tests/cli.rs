@@ -18,7 +18,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 use diskgc_core::config;
 use diskgc_core::profile::Library;
 use serde_json::Value;
@@ -246,6 +246,19 @@ fn no_arguments_is_a_usage_error_with_exit_2() {
 /// scroll the error away) is not printed.
 #[test]
 fn a_usage_error_shows_the_error_then_only_the_command_usage() {
+    // The usage lines are the build's (its release descriptor row): two
+    // per `watch` mode it runs.
+    use diskgc_core::release::{self, Command as Run};
+    let row = if cfg!(feature = "release-catalog") {
+        release::release_of_version(env!("CARGO_PKG_VERSION"))
+    } else {
+        release::development()
+    }
+    .expect("this build's row");
+    let watch_lines = 2 * [Run::Watch, Run::WatchTallyOnly]
+        .iter()
+        .filter(|c| row.allows(**c))
+        .count();
     for (args, error, usage_lines) in [
         (
             &["ensure", "--dry-run", "--min-fre", "1G", "/nonexistent"][..],
@@ -265,9 +278,13 @@ fn a_usage_error_shows_the_error_then_only_the_command_usage() {
         (
             &["watch", "--tally-only", "--interval", "1m", "/nonexistent"],
             "diskgc: error: watch: --interval is not valid with --tally-only",
-            4,
+            watch_lines,
         ),
-        (&[], "diskgc: error: no command given", 13),
+        (
+            &[],
+            "diskgc: error: no command given",
+            3 + watch_lines + 3 + 1 + 2,
+        ),
     ] {
         let out = diskgc(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
@@ -420,7 +437,7 @@ fn a_missing_given_config_is_exit_2() {
     );
 }
 
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 #[test]
 fn check_prints_normalized_tiers_and_needs_no_deployment_roots() {
     let tmp = TempDir::new("check-valid");
@@ -445,7 +462,7 @@ fn check_prints_normalized_tiers_and_needs_no_deployment_roots() {
 /// exist, and only that one: an existing root, and one reached through a
 /// symlink (never followed, so never looked up beyond the screened mount
 /// chain), get no warning. Exit 0 either way.
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 #[test]
 fn check_warns_only_about_an_absent_supplied_root() {
     let tmp = TempDir::new("check-missing-root");
@@ -482,7 +499,7 @@ fn check_warns_only_about_an_absent_supplied_root() {
     );
 }
 
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 #[test]
 fn check_warns_about_broad_non_tmp_patterns_and_checkout_permission() {
     let tmp = TempDir::new("check-warning");
@@ -508,7 +525,7 @@ fn check_warns_about_broad_non_tmp_patterns_and_checkout_permission() {
     );
 }
 
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 #[test]
 fn check_warns_once_for_explicit_builtin_checkout_allowance() {
     let tmp = TempDir::new("check-builtin-allow-warning");
@@ -646,7 +663,7 @@ fn inventory(root: &Path) -> Vec<(PathBuf, u64)> {
 /// same inode, afterwards. The same for a kind `fs` reclaim (task-18): a
 /// user profile of the config, `roots: required`, given the same temp
 /// directory, which holds an old plain directory it finds.
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 #[test]
 fn a_reclaiming_ensure_outside_a_container_exits_2_naming_the_sandbox_gate() {
     let tmp = TempDir::new("gate");
@@ -909,7 +926,7 @@ fn json_anywhere_gives_one_object() {
 }
 
 /// The built-in profiles, as the binary's library has them.
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 fn builtin() -> Library {
     Library::builtin().expect("the built-in profiles load")
 }
@@ -919,7 +936,7 @@ fn builtin() -> Library {
 /// here; a machine with `/etc/diskgc/config.yaml` installed (which the
 /// search reaches, whatever `$XDG_CONFIG_HOME` says) is compared with
 /// that file instead.
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 fn expected_library(config: &Value) -> Library {
     match config.as_str() {
         None => builtin(),
@@ -932,7 +949,7 @@ fn expected_library(config: &Value) -> Library {
     }
 }
 
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 fn names(library: &Library) -> BTreeSet<String> {
     library.profiles().map(|p| p.name.clone()).collect()
 }
@@ -949,7 +966,7 @@ fn listed(list: &Value) -> BTreeSet<String> {
 }
 
 /// A config file holding user profiles, in a fresh temp dir.
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 const USER_PROFILES: &str = "\
 version: 1
 profiles:
@@ -965,7 +982,7 @@ profiles:
     examples: {match: [/home/u/go-build]}
 ";
 
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 fn user_config(tmp: &TempDir) -> (PathBuf, Library) {
     let path = tmp.0.join("config.yaml");
     std::fs::write(&path, USER_PROFILES).expect("write");
@@ -979,7 +996,7 @@ fn user_config(tmp: &TempDir) -> (PathBuf, Library) {
 /// every built-in profile. The test iterates the library, so a new
 /// built-in is checked without editing the help text or this test; a
 /// help text that names profiles by hand fails as soon as one is added.
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 #[test]
 fn help_names_every_built_in_profile() {
     let out = diskgc(&["--help"]);
@@ -1010,27 +1027,41 @@ fn help_names_every_built_in_profile() {
     }
 }
 
-/// Exercise the built binary with the proposed catalog feature, including
+/// Exercise the built binary with the release-catalog feature, including
 /// the command paths that do not construct a Tier.
-#[cfg(feature = "proposed-release-01-catalog")]
+#[cfg(feature = "release-catalog")]
 #[test]
-fn proposed_catalog_is_consistent_across_cli_surfaces() {
+fn release_catalog_is_consistent_across_cli_surfaces() {
+    let row = diskgc_core::release::release_of_version(env!("CARGO_PKG_VERSION"))
+        .expect("this version's release row");
     let help = diskgc(&["--help"]);
     assert_eq!(help.status.code(), Some(0));
     let help = text(&help.stdout);
     assert!(help.contains("cargo-target"));
     assert!(!help.contains("docker-build-cache"));
+    // The help shows what the row runs (TASK-289).
+    assert!(
+        help.contains(&format!(
+            "Commands in this version: {}",
+            row.commands_phrase()
+        )),
+        "{help}"
+    );
+    assert_eq!(
+        help.contains("diskgc watch --min-free SIZE --target-free SIZE"),
+        row.allows(diskgc_core::release::Command::Watch),
+        "{help}"
+    );
 
     let list = diskgc(&["profiles", "list", "--json"]);
     assert_eq!(list.status.code(), Some(0), "{}", text(&list.stderr));
     let names = listed(&json(&list));
-    // The expected catalog is derived from builtin.yaml's `releases:`, the
-    // one place it is decided: a hard-coded count went stale silently when
-    // TASK-65 added nix-shell-rc and pytest-tmp.
-    let catalog: BTreeSet<String> = Library::builtin()
-        .expect("the built-in profiles load")
-        .proposed_release_01()
-        .expect("the 0.1 catalog")
+    // The expected catalog is derived from builtin.yaml's `releases:` and
+    // the release row's label, the places it is decided: a hard-coded count
+    // went stale silently when TASK-65 added nix-shell-rc and pytest-tmp.
+    let catalog: BTreeSet<String> = diskgc_core::invocation::Catalog::from(row)
+        .library(Library::builtin().expect("the built-in profiles load"))
+        .expect("the release catalog")
         .profiles()
         .map(|p| p.name.clone())
         .collect();
@@ -1042,7 +1073,7 @@ fn proposed_catalog_is_consistent_across_cli_surfaces() {
     assert_eq!(show.status.code(), Some(2));
     assert!(error_of(&show).contains("docker-build-cache"));
 
-    let tmp = TempDir::new("proposed-catalog");
+    let tmp = TempDir::new("release-catalog");
     let config = tmp.0.join("config.yaml");
     std::fs::write(
         &config,
@@ -1077,7 +1108,7 @@ fn proposed_catalog_is_consistent_across_cli_surfaces() {
 /// task-92 AC #2 and #3: `profiles list --json` is one object listing the
 /// library's profiles, each once: the built-ins without a config file (no
 /// error), plus the config's user profiles with one.
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 #[test]
 fn profiles_list_json_lists_the_library() {
     let out = diskgc(&["profiles", "list", "--json"]);
@@ -1104,7 +1135,7 @@ fn profiles_list_json_lists_the_library() {
 
 /// The human listing: one header and one row per profile, each row
 /// starting with its name.
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 #[test]
 fn profiles_list_is_one_table_row_per_profile() {
     let tmp = TempDir::new("table");
@@ -1148,7 +1179,7 @@ fn profiles_list_is_one_table_row_per_profile() {
 /// `checkouts: allow`, roots required, the kind's fixed action, the tool
 /// versions; it takes no examples (`null`). A user fs profile's examples
 /// are shown, `match` and `no_match`.
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 #[test]
 fn profiles_show_json_is_the_full_definition() {
     let out = diskgc(&["profiles", "show", "cargo-target", "--json"]);
@@ -1297,7 +1328,7 @@ fn profiles_usage_errors_are_exit_2() {
     }
 }
 
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 #[test]
 fn profiles_test_exits_one_on_failing_examples_in_human_and_json_modes() {
     let tmp = TempDir::new("profile-test");
@@ -1323,7 +1354,7 @@ fn profiles_test_exits_one_on_failing_examples_in_human_and_json_modes() {
     assert_eq!(data["failures"].as_array().unwrap().len(), 2);
 }
 
-#[cfg(not(feature = "proposed-release-01-catalog"))]
+#[cfg(not(feature = "release-catalog"))]
 #[test]
 fn profiles_test_passes_and_an_override_is_visible() {
     let tmp = TempDir::new("profile-override");

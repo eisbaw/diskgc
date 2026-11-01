@@ -26,15 +26,35 @@ use crate::select;
 use crate::snapshot::RunIndex;
 use crate::units::Size;
 
-/// The built-in catalog a build ships: every built-in (development
-/// builds), or the proposed 0.1 release's, derived from builtin.yaml's
-/// `releases:` ([`Library::proposed_release_01`]). A build-time fact of
-/// the binary (its `proposed-release-01-catalog` feature), never an
+/// The built-in catalog a build ships: every built-in (the development
+/// build), or a release's, narrowed to the builtin.yaml `releases:` label
+/// its row in the release descriptor names ([`crate::release`]). A
+/// build-time fact of the binary (its `release-catalog` feature), never an
 /// operator's choice; explicit here so a model vector can run either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Catalog {
     Development,
-    ProposedRelease01,
+    /// `release` (`0.2`), what refusals name; `builtins`, the label its
+    /// catalog is narrowed to ([`Library::release_catalog`]).
+    Release {
+        release: &'static str,
+        builtins: Release,
+    },
+}
+
+impl From<crate::release::Entry> for Catalog {
+    fn from(entry: crate::release::Entry) -> Self {
+        match (entry.release, entry.catalog) {
+            (None, _) => Self::Development,
+            (Some(release), Some(builtins)) => Self::Release { release, builtins },
+            // Never the development catalog for a release: a release build
+            // may be the ungated one (TASK-195). release::Descriptor::parse
+            // refuses such a row, so this is a bug, and it fails closed.
+            (Some(release), None) => {
+                panic!("release {release} has no catalog in the release descriptor")
+            }
+        }
+    }
 }
 
 /// What a configuration is parsed for: `profiles test` reports example
@@ -50,7 +70,10 @@ impl Catalog {
     pub fn library(self, builtins: Library) -> Result<Library, String> {
         match self {
             Self::Development => Ok(builtins),
-            Self::ProposedRelease01 => builtins.proposed_release_01(),
+            Self::Release {
+                release,
+                builtins: label,
+            } => builtins.release_catalog(release, label),
         }
     }
 
@@ -63,8 +86,8 @@ impl Catalog {
             ConfigUse::ProfileTest => config::parse_for_profile_test(path, bytes),
         }
         .map_err(|e| e.to_string())?;
-        if self == Self::ProposedRelease01 {
-            enforce_proposed_release_01_config(&mut config).map_err(|e| e.to_string())?;
+        if let Self::Release { release, builtins } = self {
+            enforce_release_config(&mut config, release, builtins).map_err(|e| e.to_string())?;
         }
         Ok(config)
     }
@@ -76,7 +99,7 @@ impl Catalog {
 /// or command selection in a later tier. `--select` is checked separately
 /// against the same narrowed library by `Tier::select`.
 ///
-/// A checkout policy may only narrow under the 0.1 catalog: `allow` on a
+/// A checkout policy may only narrow under a release catalog: `allow` on a
 /// built-in that refuses checkouts (nix-shell-rc: a legacy shell's rc
 /// directory is its TMPDIR, so a clone made there is what the guard
 /// protects) would widen what the reviewed built-in deletes.
@@ -84,9 +107,13 @@ impl Catalog {
 /// Every refusal at once (TASK-146, TASK-164), each at its line: an
 /// operator adapting a development example should not learn them one run
 /// at a time. User profiles are refused here too, and the tiers are checked
-/// against the 0.1 built-ins alone, so a tier that names a user profile is
+/// against the release's built-ins alone, so a tier that names a user profile is
 /// reported in the same run as the profile.
-fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), ConfigError> {
+fn enforce_release_config(
+    config: &mut Config,
+    release: &'static str,
+    catalog: Release,
+) -> Result<(), ConfigError> {
     let builtins =
         Library::builtin().map_err(|e| ConfigError::whole_file(&config.path, e.to_string()))?;
     let user = config.library.user_profile_names();
@@ -100,16 +127,15 @@ fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), ConfigE
     } else {
         builtins.clone()
     }
-    .release_01_built_ins()
+    .release_built_ins(release, catalog)
     .map_err(|why| ConfigError::whole_file(&config.path, why))?;
     let mut refused = Problems::default();
     for name in &user {
         refused.push(
             config.user_profile_lines.get(name).copied(),
             format!(
-                "profiles: `{name}` is a user profile; diskgc {} runs only its built-ins \
-                 (an `override: true` of a built-in counts too): remove it",
-                Release::V0_1.name()
+                "profiles: `{name}` is a user profile; diskgc {release} runs only its \
+                 built-ins (an `override: true` of a built-in counts too): remove it"
             ),
         );
     }
@@ -118,6 +144,7 @@ fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), ConfigE
     let short = ShortRefusals {
         library: &library,
         user: &user,
+        release,
     };
     let not_shipped = |name: &str| {
         select::Catalog::withheld(&short, name)
@@ -171,6 +198,7 @@ fn enforce_proposed_release_01_config(config: &mut Config) -> Result<(), ConfigE
 struct ShortRefusals<'a> {
     library: &'a Library,
     user: &'a [String],
+    release: &'a str,
 }
 
 impl select::Catalog for ShortRefusals<'_> {
@@ -188,7 +216,7 @@ impl select::Catalog for ShortRefusals<'_> {
         if self.user.iter().any(|u| u == name) {
             return Some(format!(
                 "`{name}` is a user profile, which diskgc {} refuses",
-                Release::V0_1.name()
+                self.release
             ));
         }
         // Said inside a selection's list of problems: no full stop.

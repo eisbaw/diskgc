@@ -3962,9 +3962,10 @@ be dropped
 by accident during development, and developers and AI agents cannot
 delete real data on their own machines with a work-in-progress build.
 The binary does not compile with the gate removed unless it also has the
-release catalog (`proposed-release-01-catalog`; a const assert in its
-`main.rs` on `diskgc_linux::sandbox::SANDBOX_GATE`), so an ad-hoc
-`cargo build` cannot make an ungated binary with every development profile.
+release catalog (`release-catalog`, which builds its version's release
+row: that row's commands and catalog; a const assert in its `main.rs` on
+`diskgc_linux::sandbox::SANDBOX_GATE`), so an ad-hoc `cargo build` cannot
+make an ungated binary with every development profile and command.
 The `release-gate-needs-catalog` flake check proves both halves: the
 gate-lift alone fails on that assert, and with the catalog it compiles. The
 assert guards what ships, the `diskgc` binary; it does not stop test

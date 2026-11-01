@@ -1020,7 +1020,7 @@ fn verdict_problem(name: &str, row: &LivenessRow) -> Option<String> {
 }
 
 /// The sync rule between the liveness table, the built-in library and the
-/// proposed 0.1 catalog (TASK-112, TASK-122): every built-in source is
+/// 0.1 catalog (TASK-112, TASK-122): every built-in source is
 /// named by exactly one row whose verdict names a built-in (Shipped,
 /// Decision pending, Proposed withdrawal), with builtin.yaml's
 /// `liveness_class`, non-empty residuals, and exactly the row's guard (the
@@ -1168,15 +1168,15 @@ fn liveness_table_and_builtin_library_agree() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
-/// The proposed 0.1 catalog is exactly the built-ins whose `release` names
-/// it (derived, not listed), and every source in it is Shipped in the
+/// The 0.1 catalog is exactly the built-ins whose `releases:` names it
+/// (derived, not listed), and every source in it is Shipped in the
 /// liveness table (the sync rule above).
 #[test]
-fn the_proposed_release_catalog_is_the_release_data() {
+fn the_release_catalog_is_the_release_data() {
     let catalog = Library::builtin()
         .expect("built-ins")
-        .proposed_release_01()
-        .expect("proposed catalog");
+        .release_catalog("0.1", Release::V0_1)
+        .expect("0.1 catalog");
     let derived: Vec<&str> = catalog.profiles().map(|p| p.name.as_str()).collect();
     let released: Vec<String> = builtin_facts()
         .into_iter()
@@ -1192,17 +1192,24 @@ fn the_proposed_release_catalog_is_the_release_data() {
     );
 }
 
-/// A `release` on a source outside the 0.1 scope (a command action, a
+/// A `releases:` label on a source outside the release scope (a command action, a
 /// Docker kind) is refused when the catalog is built, not trusted.
 #[test]
-fn the_proposed_release_catalog_refuses_an_out_of_scope_source() {
+fn the_release_catalog_refuses_an_out_of_scope_source() {
     let yaml = "- name: c\n  category: c\n  description: d\n  find: {roots: required, paths: [.cache/c], type: dir}\n  action: {command: [tool, clean, \"{path}\"]}\n  examples: {match: [/home/m/.cache/c]}\n  verified_with: v\n  liveness_class: delegated\n  releases: [\"0.1\"]\n";
     let library = Library::load(yaml, &[]).unwrap_or_else(|e| panic!("{e}"));
-    let error = library.proposed_release_01().expect_err("a command action");
-    assert!(error.contains("`c` is outside the 0.1 scope"), "{error}");
+    let error = library
+        .release_catalog("0.1", Release::V0_1)
+        .expect_err("a command action");
+    assert!(
+        error.contains("diskgc 0.1's catalog (0.1) built-in `c` is outside the release scope"),
+        "{error}"
+    );
     let filters_only = "- name: idle-9d\n  category: c\n  description: d\n  where: {idle_for: 9d}\n  releases: [\"0.1\"]\n";
     let library = Library::load(filters_only, &[]).unwrap_or_else(|e| panic!("{e}"));
-    let error = library.proposed_release_01().expect_err("no source");
+    let error = library
+        .release_catalog("0.1", Release::V0_1)
+        .expect_err("no source");
     assert!(error.contains("has no source"), "{error}");
 }
 

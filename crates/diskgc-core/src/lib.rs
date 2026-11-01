@@ -54,6 +54,7 @@ pub mod liveness;
 pub mod outcome;
 pub mod places;
 pub mod profile;
+pub mod release;
 pub mod report;
 pub mod resolve;
 pub mod select;

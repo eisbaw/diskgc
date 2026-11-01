@@ -1,10 +1,10 @@
-# A configuration that uses only what the proposed 0.1 catalog admits
+# A configuration that uses only what the 0.1 catalog admits
 # (cargo-target and the idle filters, a checkout policy for cargo-target)
 # loads under it, and its groups run in order: the idle target goes in the
 # stale group, the fresh one is not idle enough for it (a `not_idle` skip)
 # and is taken by the pressure group.
 profile_vector: 1
-catalog: proposed-release-01
+catalog: release-0.1
 config: |
   version: 1
   profile_policies:

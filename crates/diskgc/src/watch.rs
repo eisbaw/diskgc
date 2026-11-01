@@ -20,7 +20,7 @@ use diskgc_core::watch::{self, Ended, Mode};
 use diskgc_linux::LinuxHost;
 
 use super::{
-    CATALOG, EXIT_OUTPUT_ERROR, Start, builtins, draw_seed, env_state_dir, set, text, unknown_flag,
+    EXIT_OUTPUT_ERROR, Start, builtins, catalog, draw_seed, env_state_dir, set, text, unknown_flag,
 };
 
 /// `--interval`'s default and bounds (docs/reference.md, Watch flags).
@@ -32,10 +32,13 @@ const TIMEOUT_DEFAULT: Duration = Duration::from_secs(10 * 60);
 const TIMEOUT_MIN: Duration = Duration::from_secs(60);
 const TIMEOUT_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 
-pub(super) const WATCH_SYNOPSIS: &str = "\
+/// `watch`'s synopses, one per mode: a build shows those it runs (main.rs,
+/// `usage`).
+pub(super) const WATCH_RECLAIM_SYNOPSIS: &str = "\
 diskgc watch --min-free SIZE --target-free SIZE [--interval DUR] [--timeout DUR]
-                    [--select EXPR] [--roots DIR]... [--json] [--config FILE] [--allow-root] PATH
-       diskgc watch --tally-only [--min-free SIZE]
+                    [--select EXPR] [--roots DIR]... [--json] [--config FILE] [--allow-root] PATH";
+pub(super) const WATCH_TALLY_SYNOPSIS: &str = "\
+diskgc watch --tally-only [--min-free SIZE]
                     [--select EXPR] [--roots DIR]... [--json] [--config FILE] [--allow-root] PATH";
 
 /// The flags `watch` takes, for "did you mean" (the parser is the
@@ -280,7 +283,7 @@ fn watch_with(args: &WatchArgs, json: bool, start: &Start<'_>, out: &mut dyn Wri
         Err((cause, why)) => return fail(invocation::refusal_status(cause), cause, why),
     };
     let platform = Platform {
-        catalog: CATALOG,
+        catalog: catalog(),
         draw_seed: &draw_seed,
         builtins: &builtins,
     };

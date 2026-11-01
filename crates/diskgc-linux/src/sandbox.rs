@@ -442,7 +442,7 @@ mod tests {
             ),
             (
                 "flake.nix",
-                "cargoExtraArgs = \"--locked --package diskgc --features proposed-release-01-catalog,diskgc-linux/e2e-test-container-pid-namespace\";",
+                "cargoExtraArgs = \"--locked --package diskgc --features release-catalog,diskgc-linux/e2e-test-container-pid-namespace\";",
             ),
             (
                 "diskgc-e2e/Cargo.toml",
@@ -480,16 +480,16 @@ mod tests {
                 e2e_build.contains(allowed[0].1),
                 "the e2e build lost its flag"
             );
-            let proposed = flake
-                .split_once("diskgcProposed01 = craneLib.buildPackage (")
-                .expect("the proposed-catalog e2e build")
+            let release_catalog = flake
+                .split_once("diskgcReleaseCatalogGated = craneLib.buildPackage (")
+                .expect("the release-catalog e2e build")
                 .1
                 .split_once("      );")
                 .expect("its end")
                 .0;
             assert!(
-                proposed.contains(allowed[1].1),
-                "the proposed build lost its flag"
+                release_catalog.contains(allowed[1].1),
+                "the release-catalog e2e build lost its flag"
             );
             let under_test = flake
                 .split_once("e2eUnderTest = pkgs.runCommand")
@@ -580,9 +580,9 @@ mod tests {
         scanned.extend(cargo_configs_under(&repo));
 
         let found = gate_enablers(&repo, &scanned);
-        let allowed_release = "cargoExtraArgs = \"--locked --package diskgc --features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate\";";
+        let allowed_release = "cargoExtraArgs = \"--locked --package diskgc --features release-catalog,diskgc-linux/release-without-sandbox-gate\";";
         let allowed_dep_tree =
-            "--features proposed-release-01-catalog,diskgc-linux/release-without-sandbox-gate \\";
+            "--features release-catalog,diskgc-linux/release-without-sandbox-gate \\";
         // TASK-195's check: the gate-lift alone must fail to compile, and
         // with the catalog (the dependency tree's features) compile; it
         // builds no artifact.

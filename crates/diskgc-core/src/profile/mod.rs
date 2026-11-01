@@ -339,7 +339,7 @@ pub struct Library {
     /// it left out (empty for the development library), so a refusal of
     /// one says "not in this release" instead of "no such profile"
     /// (TASK-146): the name is documented and ships in development builds.
-    withheld: Option<(Release, BTreeSet<String>)>,
+    withheld: Option<(String, BTreeSet<String>)>,
 }
 
 impl Library {
@@ -356,32 +356,34 @@ impl Library {
         Self::load(BUILTIN_YAML, user)
     }
 
-    /// The proposed 0.1 catalog: the built-ins whose `releases:` lists 0.1
-    /// (builtin.yaml is the one place the catalog is decided; TASK-65 signs
-    /// off its `/tmp` part). A release package must opt into this policy
-    /// explicitly; the development library still exposes the full catalog.
+    /// Release `release`'s catalog: the built-ins whose `releases:` lists
+    /// `catalog` (builtin.yaml is the one place a catalog's members are
+    /// decided; TASK-65 signs off its `/tmp` part). Which label a release
+    /// uses is the release descriptor's (`crate::release`); a release
+    /// package must opt into it explicitly (`invocation::Catalog`), the
+    /// development library still exposes the full catalog.
     ///
     /// Reject all operator-authored profiles, including overrides of an
     /// allowed name. A name-only allowlist would otherwise admit a command
     /// action or an arbitrary filesystem delete under `cargo-target`.
     ///
-    /// The 0.1 scope (PRD.md, Scope) is checked against the data rather than
-    /// trusted: a released source is of kind `fs` with the `delete` action or
-    /// `cargo-target` with its lock protocol, and of an admissible class (the
-    /// loader already refuses `releases` on class none). A violation is a bug
-    /// in builtin.yaml, which the tests load.
-    pub fn proposed_release_01(self) -> Result<Self, String> {
+    /// The release scope (PRD.md, Scope: 0.1's, which no later release has
+    /// widened yet) is checked against the data rather than trusted: a
+    /// released source is of kind `fs` with the `delete` action or
+    /// `cargo-target` with its lock protocol, and of an admissible class
+    /// (the loader already refuses `releases` on class none). A violation
+    /// is a bug in builtin.yaml, which the tests load.
+    pub fn release_catalog(self, release: &str, catalog: Release) -> Result<Self, String> {
         let user = self.user_profile_names();
-        let library = self.release_01_built_ins()?;
+        let library = self.release_built_ins(release, catalog)?;
         if !user.is_empty() {
             // Overrides too: a name-only allowlist would admit a command
             // action or an arbitrary delete under `cargo-target`.
             let quoted: Vec<String> = user.iter().map(|name| format!("`{name}`")).collect();
             return Err(format!(
-                "user profiles are not available in diskgc {}: the configuration's \
+                "user profiles are not available in diskgc {release}: the configuration's \
                  `profiles:` defines {} (an `override: true` of a built-in counts too); \
                  remove them. {}",
-                Release::V0_1.name(),
                 quoted.join(", "),
                 library.release_scope()
             ));
@@ -398,22 +400,21 @@ impl Library {
             .collect()
     }
 
-    /// [`Self::proposed_release_01`] without refusing user profiles: the
-    /// 0.1 built-ins alone, every user profile (and override) dropped. For
-    /// a caller that reports the user profiles itself, together with the
-    /// other parts the release refuses (TASK-164), instead of one refusal
-    /// per run.
-    pub fn release_01_built_ins(mut self) -> Result<Self, String> {
-        let release = Release::V0_1;
+    /// [`Self::release_catalog`] without refusing user profiles: the
+    /// catalog's built-ins alone, every user profile (and override)
+    /// dropped. For a caller that reports the user profiles itself,
+    /// together with the other parts the release refuses (TASK-164),
+    /// instead of one refusal per run.
+    pub fn release_built_ins(mut self, release: &str, catalog: Release) -> Result<Self, String> {
         let mut withheld = BTreeSet::new();
         self.profiles.retain(|name, profile| {
             let built_in = profile.origin == Origin::BuiltIn;
-            if built_in && !profile.releases.contains(&release) {
+            if built_in && !profile.releases.contains(&catalog) {
                 withheld.insert(name.clone());
             }
-            built_in && profile.releases.contains(&release)
+            built_in && profile.releases.contains(&catalog)
         });
-        self.withheld = Some((release, withheld));
+        self.withheld = Some((release.to_owned(), withheld));
         for profile in self.profiles.values() {
             let in_scope = match &profile.body {
                 Body::Filter(_) => true,
@@ -428,8 +429,9 @@ impl Library {
             };
             if !in_scope {
                 return Err(format!(
-                    "proposed 0.1 catalog built-in `{}` is outside the 0.1 scope (kind, action \
-                     or liveness class)",
+                    "diskgc {release}'s catalog ({}) built-in `{}` is outside the release scope \
+                     (kind, action or liveness class)",
+                    catalog.name(),
                     profile.name
                 ));
             }
@@ -439,7 +441,10 @@ impl Library {
             .values()
             .any(|p| matches!(&p.body, Body::Source(_)))
         {
-            return Err("proposed 0.1 catalog has no source".to_owned());
+            return Err(format!(
+                "diskgc {release}'s catalog ({}) has no source",
+                catalog.name()
+            ));
         }
         Ok(self)
     }
@@ -451,18 +456,15 @@ impl Library {
     /// [`Self::release_scope`] says what the release ships instead.
     pub fn not_shipped(&self, name: &str) -> Option<String> {
         let (release, names) = self.withheld.as_ref()?;
-        names.contains(name).then(|| {
-            format!(
-                "`{name}` is a built-in that diskgc {} does not ship.",
-                release.name()
-            )
-        })
+        names
+            .contains(name)
+            .then(|| format!("`{name}` is a built-in that diskgc {release} does not ship."))
     }
 
-    /// The release whose catalog this library is (`0.1`); `None` for the
+    /// The release whose catalog this library is (`0.2`); `None` for the
     /// development library, which has every built-in and user profiles.
-    pub fn release_name(&self) -> Option<&'static str> {
-        self.withheld.as_ref().map(|(release, _)| release.name())
+    pub fn release_name(&self) -> Option<&str> {
+        self.withheld.as_ref().map(|(release, _)| release.as_str())
     }
 
     /// What this library offers, in a user's words: its sources and
@@ -481,7 +483,7 @@ impl Library {
         let release = self
             .withheld
             .as_ref()
-            .map_or("this build", |(release, _)| release.name());
+            .map_or("this build", |(release, _)| release.as_str());
         format!(
             "diskgc {release} ships the sources {} and the filters {} (`diskgc profiles \
              list` describes them)",

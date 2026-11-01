@@ -65,7 +65,13 @@ fn fill(watched: &Scratch, name: &str, bytes: u64) -> Result<PathBuf, String> {
 }
 
 /// The traced `diskgc` below strace.
-fn diskgc_pid(spawned: &Spawned) -> Result<i32, String> {
+pub(crate) fn diskgc_pid(spawned: &Spawned) -> Result<i32, String> {
+    pid_below_strace(spawned, "diskgc")
+}
+
+/// The traced process below strace whose `comm` is `comm` (the binary's
+/// file name, at most 15 bytes: `diskgc-release` in the standard runner).
+pub(crate) fn pid_below_strace(spawned: &Spawned, comm_name: &str) -> Result<i32, String> {
     let tracer = spawned.strace_pid();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -73,16 +79,19 @@ fn diskgc_pid(spawned: &Spawned) -> Result<i32, String> {
             .unwrap_or_default();
         for pid in children.split_whitespace() {
             let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-            if comm.trim() == "diskgc" {
+            if comm.trim() == comm_name {
                 return pid.parse().map_err(|e| format!("pid {pid}: {e}"));
             }
         }
-        ensure!(Instant::now() < deadline, "no diskgc below strace {tracer}");
+        ensure!(
+            Instant::now() < deadline,
+            "no {comm_name} below strace {tracer}"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }
 
-fn signal(pid: i32, sig: i32) -> TestResult {
+pub(crate) fn signal(pid: i32, sig: i32) -> TestResult {
     // SAFETY: kill(2) on the traced diskgc's pid; no memory is shared.
     let sent = unsafe { libc::kill(pid, sig) };
     ensure!(
@@ -114,7 +123,7 @@ fn nice_by_thread(pid: i32) -> Result<Vec<(String, i64)>, String> {
 }
 
 /// A snapshot file in tester's state directory.
-fn snapshot_written() -> bool {
+pub(crate) fn snapshot_written() -> bool {
     fs::read_dir(STATE_DIR).is_ok_and(|dir| {
         dir.flatten().any(|e| {
             let name = e.file_name();

@@ -282,15 +282,16 @@ names every failing file:
   `config` (protect, groups, owners and `--allow-root`, static errors),
   `exit` (exit codes and tier order), `races` (events between checks and
   deletion), `backend` (Docker bindings and prunes), `builtins` (each
-  built-in source in each role below) and `release` (the proposed 0.1
-  catalog: what it admits and what it refuses).
+  built-in source in each role below) and `release` (the 0.1 catalog:
+  what it admits and what it refuses).
 
 The invocation keys: `profile` (shorthand for `select: profile:NAME`) or
 `select` (`--select`; neither: the configured groups run), `config` (the
 configuration file's text; absent: none was found), `catalog` (the
-build's built-in catalog: `development`, the default, or
-`proposed-release-01`, what the `release-candidate` build's
-`proposed-release-01-catalog` feature selects), `user_profiles`
+build's built-in catalog: `development`, the default, or `release-0.1`,
+release 0.1's row of the release descriptor, which a
+`release-catalog` build of a 0.1 version selects; refusals name `diskgc
+0.1`), `user_profiles`
 (without a `config`: added to the built-ins), `roots` (`--roots`), `path`
 (PATH), `min_free`, `target_free`, `timeout` (default 600s, `0` none),
 `tally_budget`, `allow_root`, `seed` (`DISKGC_SEED`) and `entry_budget`
@@ -2259,7 +2260,10 @@ more than the flake already builds.
    block's additions, so the doc and the files cannot drift. The test
    also bites each rule on edited copies.
 2. **`systemd-analyze verify`** (flake check `deployment-units`, built by
-   `just e2e`). Each template, as the development package installs it
+   `just e2e`). The development package holds exactly its release
+   descriptor row's files, each copy byte for byte (stdenv's move of
+   `lib/systemd/user` to `share/systemd/user` accounted for). Each
+   template, as the development package installs it
    (compared with its source), is linked under the instance names
    `diskgc-watch@srv-ci\x2dbuilds.service` and `diskgc-watch@-.service`
    (for `/`), its `ExecStart` pointed at the packaged binary, and verified
@@ -2277,8 +2281,13 @@ more than the flake already builds.
    shared, `systemdVerify` in flake.nix).
 3. **tmpfiles create**: `shipped_tmpfiles_and_example_work_in_container`
    (Shipped files above); `diskgc check` on `docs/example.yaml` is the
-   flake check `config-check-sandbox`. The release candidate does not
-   ship the units: 0.1 is the `ensure` MVP (PRD, Scope).
+   flake check `config-check-sandbox`. Which package ships the units is
+   its release row's (the release descriptor,
+   [reference.md](reference.md#built-in-profile-library)): the release
+   candidate's file list is exactly its row's, each copy byte for byte
+   (flake check `release-candidate-package`; TASK-289: it shipped none
+   while it ran `watch --tally-only`), and its `--help` shows the row's
+   `watch` lines and only those.
 4. **Module evaluation and build-time check** (flake checks
    `nixos-module-eval` and `nixos-module-bad-config`, built by `just e2e`;
    no VM). NixOS evaluations of the user story (user instances, one with
@@ -2297,6 +2306,13 @@ more than the flake already builds.
    with a newline in `user` fails the evaluation. Each assertion fires
    alone on its own example, with its message (a system-scope user
    typo and a system instance with no checked configuration included).
+   With `packages.release-candidate`'s unstamped build as the package, a
+   system and a user `tallyOnly` instance evaluate with no failed
+   assertion, its templates present; a reclaiming instance fails the
+   evaluation while its release row does not run a reclaiming `watch`, as
+   do a package whose `passthru.diskgcBuild` lacks the templates and one
+   without it, and a mode flag in `extraArgs` (hidden as `--config`'s
+   value, and in `--flag=value` form) (TASK-289).
    The drop-ins, staged on the packaged templates, pass
    `systemd-analyze verify` (2) with no output, and the checked
    configurations build. An invalid `settings` fails the derivation
@@ -2627,7 +2643,7 @@ on `$XDG_RUNTIME_DIR/diskgc-e2e-host-pid.lock` while it runs, so other
 runners and worktrees wait too. The development build in an ordinary container (its own PID
 namespace) reclaims through the test-container exception of that rule,
 which only the e2e build has (the bundle's `diskgc` and
-`diskgc-proposed-01`; `diskgc-development` is the development package
+`diskgc-release-catalog`; `diskgc-development` is the development package
 itself, and `development_package_refuses_in_its_own_pid_namespace` shows
 that it refuses there);
 `release_candidate_refuses_in_its_own_pid_namespace` shows that the
@@ -2840,12 +2856,16 @@ kernel ctime remain unchanged. The feature
 out the offset path and reader. The `release-excludes-clock-offset` flake
 check compares the `release-candidate` binary with a positive development
 control. The default package remains gated. The separate
-`release-candidate` output combines the proposed 0.1 catalog (Cargo,
-`nix-shell-rc`, `pytest-tmp`, the idle filters) and
+`release-candidate` output combines this version's release row (its
+commands and its catalog: Cargo, `nix-shell-rc`, `pytest-tmp`, the idle
+filters) and
 lifted gate solely for testing in disposable containers. It is unapproved
 for deployment (docs/reference.md, Built-in profile library). The `just e2e` gate runs candidate negatives
 and the real Cargo reclaim, busy-lock, rebuild and dry-run CLI cases on Nix
-and Debian images through their candidate under-test runners.
+and Debian images through their candidate under-test runners, and
+`release_candidate_runs_watch_tally_only`: the gate-lifted candidate's
+`watch --tally-only` starts, tallies a Cargo target, stops on SIGTERM with
+exit 0, writes its snapshot and no record, and deletes nothing (TASK-289).
 
 Every check, container and VM test runs the **unstamped tested build** of
 each package (flake.nix, `mkDiskgc`): the same source, features and

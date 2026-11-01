@@ -1245,6 +1245,17 @@ and `diskgc --version` follows it
 - **The next commit** on that release branch bumps to `X.Y.(Z+1)-dev`, so
   a later build from the branch (a backport) is never mistaken for the
   tag.
+- **What a release runs and ships** is its row of the release descriptor,
+  `crates/diskgc-core/src/releases.json` (its commands, the builtin.yaml
+  `releases:` label its catalog narrows to, its package's files); a
+  version picks its row by `MAJOR.MINOR`, in the binary and in the flake.
+  Moving master to a new minor adds that row: the flake does not evaluate
+  a release candidate of a version without one, and a plain `cargo build
+  --features release-catalog` of such a version builds but exits 2 on
+  every command but `--version`, naming the missing row. The tagging
+  commit sets the row's
+  `tag`, and a tagged row is never edited again (a test pins 0.1's to
+  what v0.1.0 shipped).
 
 ### The `watch` units
 
@@ -1503,7 +1514,7 @@ TASK-263).
 | Option | Type | Default | Meaning |
 |---|---|---|---|
 | `enable` | bool | `false` | the package on `PATH` (agents and hooks call `ensure`), its tmpfiles rule for the host lock (`systemd.tmpfiles.packages`) and both templates (`systemd.packages`) |
-| `package` | package | the flake's `packages.default` | a reclaiming instance needs a release package: a development package refuses to delete outside test containers, so the instance exits 2 naming the sandbox gate and stays failed. `tallyOnly` instances work with either. |
+| `package` | package | the flake's `packages.default` | a reclaiming instance needs a release package whose release runs a reclaiming `watch` (none does yet; asserted, below): a development package refuses to delete outside test containers, so the instance exits 2 naming the sandbox gate and stays failed. `tallyOnly` instances work with the development package, and the module accepts `packages.release-candidate` too; a candidate built from master is a development version for disposable test environments only, not for deployment (PRD, Safety boundaries). |
 | `settings` | null or YAML value | `null` | rendered to `/etc/diskgc/config.yaml` and checked at build time |
 | `instances` | attribute set of instances | `{}` | one `watch` each |
 
@@ -1517,7 +1528,7 @@ TASK-263).
 | `minFree` | null or string | `null` | `--min-free` when set |
 | `targetFree` | null or string | `null` | `--target-free` when set |
 | `tallyOnly` | bool | `false` | `--tally-only` |
-| `extraArgs` | list of strings | `[]` | every other flag (`--interval`, `--timeout`, `--select`, `--roots`, `--json`), passed as given; diskgc validates them |
+| `extraArgs` | list of strings | `[]` | every other flag (`--interval`, `--timeout`, `--select`, `--roots`, `--json`), passed as given; diskgc validates them. No mode flag (`--tally-only`, `--min-free`, `--target-free`, `--dry-run`): asserted, below |
 | `allowRoot` | bool | `false` | `--allow-root` and root's capability set; requires `scope = "system"` and `user = "root"` |
 | `settings` | null or YAML value | `null` | this instance's own configuration (an `allowRoot` instance needs `owners:`), rendered to `/etc/diskgc/watch-<name>.yaml` and checked at build time |
 | `configFile` | null or absolute path, as a string | `null` | a file the module does not manage or check; a string, so it is never copied into the store |
@@ -1562,8 +1573,23 @@ TASK-263).
   failure is a race (`Type=exec`, and the switch's short wait for units
   to settle).
 - **Assertions** (evaluation fails, naming the instance), only where
-  the module shapes the unit; flag combinations are diskgc's to refuse
-  (exit 2, and the unit stays failed): one instance per unit name in each
+  the module shapes the unit or the package cannot run it; other flag
+  combinations are diskgc's to refuse (exit 2, and the unit stays
+  failed). With any instance, the package says (its
+  `passthru.diskgcBuild`, its row of the release descriptor, which the
+  flake's packages carry; [reference.md](reference.md#built-in-profile-library))
+  that it ships both templates, which the drop-ins extend (TASK-289: the
+  release candidate shipped none); each instance's command (`watch
+  --tally-only` for a `tallyOnly` instance, else `watch`) is among the
+  package's commands; and `extraArgs` holds no mode flag (`--tally-only`,
+  `--min-free`, `--target-free`, `--dry-run`, also as `--flag=value`), so
+  the mode comes only from the typed options (in `extraArgs` one could
+  hide as another flag's value, `--config --tally-only`, and diskgc would
+  read a reclaiming `watch`). The package's claim is not a proof: an
+  `overrideAttrs` that swaps the source keeps the old
+  `passthru.diskgcBuild`, and the binary then refuses what its own row
+  does not run (exit 2, the unit stays failed). Then:
+  one instance per unit name in each
   scope (user units live in `/etc/systemd/user` for every user, so two
   users cannot both have a user instance of one `path`); `allowRoot`
   only with `scope = "system"` and `user = "root"`; at most one of

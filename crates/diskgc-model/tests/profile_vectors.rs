@@ -56,22 +56,21 @@ fn corpus() -> &'static [(PathBuf, Result<Checked, String>)] {
     })
 }
 
-/// The `release` area is exactly the vectors that run the proposed 0.1
-/// catalog: one put there without `catalog:` would silently run the
+/// The `release` area is exactly the vectors that run the 0.1 catalog: one put there without `catalog:` would silently run the
 /// development catalog and still pass.
 #[test]
-fn release_vectors_are_exactly_the_proposed_catalog_ones() {
+fn release_vectors_are_exactly_the_release_catalog_ones() {
     let release = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/release");
     let files = corpus_files(&corpus_roots()).expect("corpus layout");
     let mut in_area = 0;
     for path in &files {
         let under = path.starts_with(&release);
         in_area += usize::from(under);
-        let proposed = read(path).catalog == VectorCatalog::ProposedRelease01;
+        let release_catalog = read(path).catalog == VectorCatalog::Release01;
         assert_eq!(
             under,
-            proposed,
-            "{}: below tests/vectors/release iff `catalog: proposed-release-01`",
+            release_catalog,
+            "{}: below tests/vectors/release iff `catalog: release-0.1`",
             path.display()
         );
     }

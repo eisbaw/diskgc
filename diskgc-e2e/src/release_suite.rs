@@ -29,7 +29,7 @@ const ADMITTED: &[&str] = &[
     "idle-30d",
 ];
 
-// Every built-in source currently excluded by the proposed 0.1 catalog.
+// Every built-in source currently excluded by the release catalog.
 // The list assertion below also fails if a newly added source leaks in.
 const EXCLUDED: &[&str] = &[
     "docker-build-cache",
@@ -348,6 +348,79 @@ pub fn candidate_refuses_a_reclaiming_watch(ctx: &Ctx) -> TestResult {
     );
     ensure!(keep.exists(), "a refused watch mutated the fixture");
     Ok(())
+}
+
+/// TASK-289: the gate-lifted candidate runs `watch --tally-only` (its
+/// release row's command, which its package ships unit templates for): it
+/// starts, tallies a Cargo target, stops on SIGTERM with exit 0, writes
+/// its snapshot, writes no record and deletes nothing (the oracle judges
+/// the run with no eligible path). Backs the release notes' claim on the
+/// artifact itself.
+pub fn candidate_runs_watch_tally_only(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdirs("release-tally/proj/target/debug/deps", 0o755, TESTER)?;
+    s.write_file("release-tally/proj/Cargo.toml", b"", 0o644, TESTER)?;
+    s.write_file(
+        "release-tally/proj/target/CACHEDIR.TAG",
+        b"Signature: 8a477f597d28d172789f06886806bc55\n",
+        0o644,
+        TESTER,
+    )?;
+    s.write_file(
+        "release-tally/proj/target/debug/.cargo-lock",
+        b"",
+        0o644,
+        TESTER,
+    )?;
+    let keep = s.write_file(
+        "release-tally/proj/target/debug/deps/old",
+        &[7; 8192],
+        0o644,
+        TESTER,
+    )?;
+    let roots = s.path("release-tally");
+    let roots = roots
+        .to_str()
+        .ok_or_else(|| format!("non-UTF-8 path {}", roots.display()))?;
+    let binary = binary_path(ctx, "diskgc-release");
+    let oracle = Oracle::arm(Fixture::new())?;
+    let spawned = ctx.spawn_as_tester(
+        &binary,
+        &[
+            "watch",
+            "--tally-only",
+            "--json",
+            "--select",
+            "profile:cargo-target",
+            "--roots",
+            roots,
+            roots,
+        ],
+    )?;
+    // `diskgc` in the release runner, `diskgc-release` in the standard one.
+    let comm = binary
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("binary name of {}", binary.display()))?;
+    let pid = crate::watch_suite::pid_below_strace(&spawned, comm)?;
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    crate::watch_suite::signal(pid, libc::SIGTERM)?;
+    let run = spawned.wait()?;
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    ensure!(run.stdout.is_empty(), "tally-only wrote: {}", run.stdout);
+    ensure!(
+        crate::watch_suite::snapshot_written(),
+        "no snapshot written: {}",
+        run.stderr
+    );
+    ensure!(
+        run.stderr.contains("written: ") && !run.stderr.contains("not written"),
+        "the stop did not write the snapshot: {}",
+        run.stderr
+    );
+    ensure!(keep.exists(), "tally-only mutated the fixture");
+    verdict.assert_clean()
 }
 
 /// TASK-263: the release-candidate build has no test-container exception

@@ -14,6 +14,9 @@
   # The module's own default (packages.default, stamped with the commit);
   # only compared by evaluation, never built here.
   defaultPackage,
+  # packages.release-candidate's unstamped build (flake.nix,
+  # mkReleasePackage): its release row's commands and files.
+  releasePackage,
   # verify MANAGER DIR FILE...: systemd-analyze verify of FILEs with only DIR
   # and systemd's own units on the unit path; output to DIR.log (flake.nix).
   systemdVerify,
@@ -156,6 +159,39 @@ let
     };
   };
 
+  # The release candidate as the package (TASK-289): it ships both
+  # templates and runs `watch --tally-only`, so a tally-only instance of
+  # each scope evaluates; a reclaiming one is refused at evaluation.
+  release = evalSystem {
+    users.users.gitlab-runner = {
+      isSystemUser = true;
+      group = "gitlab-runner";
+    };
+    users.groups.gitlab-runner = { };
+    users.users.mark = {
+      isNormalUser = true;
+      linger = true;
+    };
+    services.diskgc = {
+      enable = true;
+      package = releasePackage;
+      settings = policy [ "/home/gitlab-runner/builds" ];
+      instances.runner = {
+        scope = "system";
+        user = "gitlab-runner";
+        path = "/srv/ci-builds";
+        tallyOnly = true;
+        minFree = "50G";
+      };
+      instances.home = {
+        path = "/home/mark";
+        user = "mark";
+        tallyOnly = true;
+      };
+    };
+  };
+  releaseFailures = lib.filter (a: !a.assertion) release.assertions;
+
   # One evaluation per assertion, each wrong in exactly one way.
   failedAssertions =
     extra:
@@ -210,6 +246,124 @@ let
   };
 
   cases = {
+    # The release candidate: no failed assertion, its templates are the
+    # units, its binary is in ExecStart.
+    release-candidate-assertions = {
+      got = map (a: a.message) releaseFailures;
+      want = [ ];
+    };
+    release-candidate-units = {
+      got = lib.elem releasePackage release.systemd.packages;
+      want = true;
+    };
+    release-candidate-exec = {
+      got = linesWith "ExecStart=" (systemUnit release "diskgc-watch@srv-ci\\x2dbuilds");
+      want = [
+        "ExecStart="
+        (
+          "ExecStart="
+          + lib.concatMapStringsSep " " q [
+            (lib.getExe releasePackage)
+            "watch"
+            "--config"
+            "/etc/diskgc/config.yaml"
+            "--min-free"
+            "50G"
+            "--tally-only"
+            "/srv/ci-builds"
+          ]
+        )
+      ];
+    };
+    # Its release refuses a reclaiming watch while TASK-276 is open: a
+    # reclaiming instance fails evaluation instead of a unit that stays
+    # failed (exit 2). Derived from its row, so the decision is the row's.
+    release-candidate-reclaiming = {
+      got = failedAssertions {
+        services.diskgc.package = releasePackage;
+        services.diskgc.instances.home = {
+          path = "/home";
+          user = "mark";
+          minFree = "30G";
+          targetFree = "60G";
+        };
+      };
+      want = lib.optional (!lib.elem "watch" releasePackage.diskgcBuild.commands) "services.diskgc.instances.home: ${releasePackage.name} does not run `watch` (its commands: ${lib.concatStringsSep ", " releasePackage.diskgcBuild.commands}); set tallyOnly = true, or use a package whose release runs a reclaiming watch.";
+    };
+    # TASK-289 review (Codex 2): a mode flag in extraArgs, here hidden as
+    # --config's value so diskgc would parse a reclaiming watch, is refused
+    # at evaluation; the mode comes only from the typed options. With the
+    # release candidate this instance is reclaiming, so its command
+    # assertion fires too (unless its row runs a reclaiming watch).
+    assert-mode-flag-in-extra-args = {
+      got = failedAssertions {
+        services.diskgc.package = releasePackage;
+        services.diskgc.instances.home = {
+          path = "/home";
+          user = "mark";
+          minFree = "30G";
+          targetFree = "60G";
+          extraArgs = [
+            "--config"
+            "--tally-only"
+          ];
+        };
+      };
+      want =
+        lib.optional (!lib.elem "watch" releasePackage.diskgcBuild.commands) "services.diskgc.instances.home: ${releasePackage.name} does not run `watch` (its commands: ${lib.concatStringsSep ", " releasePackage.diskgcBuild.commands}); set tallyOnly = true, or use a package whose release runs a reclaiming watch."
+        ++ [
+          "services.diskgc.instances.home: extraArgs holds --tally-only; set the mode with tallyOnly, minFree and targetFree instead."
+        ];
+    };
+    assert-mode-flag-forms = {
+      got = failedAssertions {
+        services.diskgc.instances.home = {
+          path = "/home";
+          user = "mark";
+          tallyOnly = true;
+          extraArgs = [
+            "--min-free=1G"
+            "--target-free"
+            "2G"
+            "--dry-run"
+          ];
+        };
+      };
+      want = [
+        "services.diskgc.instances.home: extraArgs holds --min-free=1G, --target-free, --dry-run; set the mode with tallyOnly, minFree and targetFree instead."
+      ];
+    };
+    # A package without the templates, and one that does not say.
+    assert-package-without-templates = {
+      got = failedAssertions {
+        services.diskgc.package = releasePackage // {
+          diskgcBuild = releasePackage.diskgcBuild // {
+            ships = [ "lib/tmpfiles.d/diskgc.conf" ];
+          };
+        };
+        services.diskgc.instances.home = {
+          path = "/home";
+          user = "mark";
+          tallyOnly = true;
+        };
+      };
+      want = [
+        "services.diskgc.package (${releasePackage.name}) does not ship the diskgc-watch@.service templates (lib/systemd/user/diskgc-watch@.service, lib/systemd/system/diskgc-watch@.service) that the instances' drop-ins extend."
+      ];
+    };
+    assert-package-unknown = {
+      got = failedAssertions {
+        services.diskgc.package = pkgs.hello;
+        services.diskgc.instances.home = {
+          path = "/home";
+          user = "mark";
+          tallyOnly = true;
+        };
+      };
+      want = [
+        "services.diskgc.package (${pkgs.hello.name}) does not say which files it ships (passthru.diskgcBuild, as the diskgc flake's packages do); the instances need its diskgc-watch@.service templates."
+      ];
+    };
     # The user story: no --config (the usual lookup finds the module's
     # /etc/diskgc/config.yaml), the stale .env reset, ConditionUser=.
     home-exec = {
@@ -586,6 +740,9 @@ in
         fi
         echo "${toString (lib.length (lib.attrNames cases))} evaluation cases passed"
         grep -qxF 'f /run/diskgc/lock 0644 root root -' ${package}/lib/tmpfiles.d/diskgc.conf
+        # The release candidate's templates, which its instances extend.
+        test -f '${releasePackage}/lib/systemd/user/diskgc-watch@.service'
+        test -f '${releasePackage}/lib/systemd/system/diskgc-watch@.service'
         export HOME=$TMPDIR/home XDG_RUNTIME_DIR=$TMPDIR/run
         mkdir -p $HOME $XDG_RUNTIME_DIR $TMPDIR/root
         ${systemdVerify}

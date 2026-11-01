@@ -635,15 +635,19 @@ snapshot instead of a cold synchronous tally.
 
 #### Watch as a systemd service
 
-The development package (not the `release-candidate` package, which ships
-0.1's contents) ships the two templates of
+The development package and the `release-candidate` package (a package
+ships them when its release runs a `watch`: the release descriptor, [Built-in
+profile library](#built-in-profile-library)) ship the two templates of
 [architecture.md](architecture.md#the-watch-units):
 `lib/systemd/user/diskgc-watch@.service` and
 `lib/systemd/system/diskgc-watch@.service`, whose `ExecStart` runs
 `/usr/local/bin/diskgc`.
 
 **Which package.** A reclaiming instance needs a release package that
-includes `watch`; none is released yet. The development package refuses
+runs a reclaiming `watch`; none does yet. The `release-candidate`
+package runs only `watch --tally-only` while TASK-276 is open: a
+reclaiming instance exits 2 at start and stays failed. The development
+package refuses
 to delete outside test containers
 ([safety.md](safety.md#pre-release-sandbox-gate)): its reclaiming
 `watch` exits 2 at start naming the sandbox gate, and the unit stays
@@ -854,8 +858,8 @@ under `profile`:
   YAML (`sound`, `producer-equivalent`, `verified-heuristic`, `tolerant`,
   `delegated`, `none`; [Liveness contracts](#liveness-contracts)), `null`
   for a filter and for every user profile. `releases` lists the release
-  catalogs that include a built-in (`["0.1"]` for the proposed 0.1
-  catalog), and is empty otherwise.
+  catalogs that include a built-in (`["0.1"]` for the 0.1 catalog), and
+  is empty otherwise.
 - `find.roots` is always a list: the fixed roots, or empty when
   `find.roots_required` is `true` (`roots: required`: a tier or `--roots`
   supplies them) or when `find.backend` names where the kind's storage
@@ -1745,7 +1749,7 @@ part of the contract.
 | `checkouts` | sources, any kind | `refuse` (the default, also when absent) or `allow`; any other value is a load-time error. Whether a candidate may hold a version-control checkout (`.git`, `.hg`, `.svn`) or lie inside a checkout's metadata; refused ones are `contains_checkout`. `allow` can delete a repository with uncommitted work: see [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate) (No source checkout) before writing it. |
 | `verified_with` | built-in sources, required | The tool version the profile was checked against. |
 | `liveness_class` | built-in sources, required | The source's liveness contract class under the admission rule ([safety.md](safety.md#producer-liveness)): `sound`, `producer-equivalent`, `verified-heuristic`, `tolerant`, `delegated` or `none`. Its evidence, residuals and verdict are its row in [Liveness contracts](#liveness-contracts). Recorded data: diskgc does not act on it at run time. |
-| `releases` | built-ins, optional | The release catalogs that include the built-in, listed explicitly: `["0.1"]` (quoted strings) puts it in the proposed 0.1 catalog. Membership, not "since": a later catalog lists its own members. No duplicates; refused with `liveness_class: none` unless empty. Absent, null or empty: the development library only. |
+| `releases` | built-ins, optional | The release catalogs that include the built-in, listed explicitly: `["0.1"]` (quoted strings) puts it in the 0.1 catalog, which a release row of the release descriptor names ([Built-in profile library](#built-in-profile-library)). Membership, not "since": a later catalog lists its own members. No duplicates; refused with `liveness_class: none` unless empty. Absent, null or empty: the development library only. |
 | `override` | user profiles | See User profiles. |
 
 `cargo-target` recognises Cargo target directories by their structure
@@ -2142,20 +2146,38 @@ A built-in profile must satisfy the profile-specific
 Every row below is a v1 *target*; until verified it is
 listed as planned, not shipped.
 
-The optional `proposed-release-01-catalog` build feature narrows the catalog.
-On its own it retains the development sandbox gate. The separate
-`release-candidate` package combines that feature with
-`diskgc-linux/release-without-sandbox-gate` for disposable-container testing;
-it is not approved for deployment. It is a release only when built from
-that release's tag; built from master it is a development version
-(`diskgc 0.2.0-dev (COMMIT)`), for disposable test containers only. While
-no release decision covers a reclaiming `watch` (TASK-276), this catalog
-runs `watch --tally-only` only: a reclaiming `watch` exits 2 before it
-looks at the machine ("a reclaiming `watch` is not in diskgc VERSION yet;
-its commands are ensure, watch --tally-only, check and profiles"), as
-every `watch` did in 0.1.0. The development build keeps a reclaiming
-`watch`, behind the sandbox gate. The candidate keeps `cargo-target`, the
-two `/tmp` built-ins with a liveness contract (`nix-shell-rc`, `pytest-tmp`;
+What a release runs, which built-ins its catalog holds and which files
+its package ships is one row per release of the release descriptor,
+`crates/diskgc-core/src/releases.json` (the binary, the flake's packages,
+the NixOS module and the release notes' header read it; its rules are
+checked when it is read). The optional `release-catalog` build feature
+builds the row of the binary's version (`X.Y` of `X.Y.Z-dev`); rows of
+tagged releases stay as they shipped (0.1: `ensure`, `check` and
+`profiles`, no unit templates). On its own the feature retains the
+development sandbox gate. The separate `release-candidate` package
+combines it with `diskgc-linux/release-without-sandbox-gate` for
+disposable-container testing; it is not approved for deployment. It is a
+release only when built from that release's tag; built from master it is a
+development version of release 0.2's row (`diskgc 0.2.0-dev (COMMIT)`),
+for disposable test containers only. The 0.2 row is provisional: while no
+release decision covers a reclaiming `watch` (TASK-276), it runs `watch
+--tally-only` only, and a reclaiming `watch` exits 2 before it looks at
+the machine ("a reclaiming `watch` is not in diskgc VERSION yet; its
+commands are ensure, watch --tally-only, check and profiles"), as every
+`watch` did in 0.1.0; its `--help` shows only the commands it runs, and
+its package ships the two `watch` unit templates for `--tally-only`
+instances. Adding `watch` to the row's commands is the code switch (the
+binary, the packages, the NixOS module and the tests follow the row);
+the prose that names TASK-276 or says no package runs a reclaiming
+`watch` follows by hand: `rg 'TASK-276|none does yet' docs packaging
+diskgc-e2e crates` lists it (this paragraph, Watch as a systemd service,
+the release notes' status and Not in the release catalog,
+architecture.md's NixOS module `package` row, the release suite's
+refusal test, the module checks' reclaiming case). The development build
+keeps a
+reclaiming `watch`, behind the sandbox gate. The 0.2 row's catalog is
+still 0.1's (`catalog: "0.1"`, builtin.yaml's label), so the candidate
+keeps `cargo-target`, the two `/tmp` built-ins with a liveness contract (`nix-shell-rc`, `pytest-tmp`;
 TASK-65, Mark 2026-10-24) and the seven idle filters, and rejects every
 operator-authored profile, including
 overrides. It also refuses configured tiers and `--select` expressions that
@@ -2361,7 +2383,7 @@ contract is not admissible. The rule applies to every built-in, shipped
 ones included (Mark, 2026-10-23); TASK-122 classified those that predate
 it. This table is the single home for these decisions (TASK-112). Each
 built-in's class is also data, its `liveness_class` in builtin.yaml, and
-`releases: ["0.1"]` there puts a built-in in the proposed 0.1 catalog; a
+`releases: ["0.1"]` there puts a built-in in the 0.1 catalog; a
 test keeps the table, the library and the catalog in sync (every built-in
 source in exactly one row, the same class, a release only for a Shipped
 row). Rows marked *planned* name a contract that is designed but not
@@ -2381,10 +2403,10 @@ its task notes.
 
 | Profile | Producer (verified) | Contract (evidence) | Class | Residuals | Verdict |
 |---|---|---|---|---|---|
-| `nix-shell-rc` | legacy `nix-shell` and `nix develop` (Nix 2.34.8 on the host, 2.34.9 pinned by `nix_shell_rc_lifecycle_is_pinned`): the directory's pid is the shell's own for both, interactive and `-c`; `nix develop`'s directory is referenced by nothing after start; legacy `nix-shell`'s is the `TMPDIR` of the shell and its children and its rc trap removes it except after `SIGKILL` (safety.md) | `liveness_contract: nix-shell`, `min_idle_for: 1h` | sound, under Owner PID's preconditions | A consumer that outlives the shell and keeps only a path string (Owner PID's scope). `min_idle_for: 1h` narrows it and is not part of the contract's soundness: a detached child that wrote in the directory within the hour keeps it `not_idle`. | Shipped (TASK-112 step 4) after the lifecycle verification (both commands, interactive and `-c`, normal exit, `SIGHUP` and `SIGKILL`, a detached child outliving the shell, a shell in a private PID namespace sharing `/tmp`), with its vectors and container tests. Matching set as in the library row. Small in bytes, large in count. In the proposed 0.1 catalog (TASK-65). |
-| `pytest-tmp` | pytest 9.1.1 (sources read; lifecycle pinned by `pytest_lifecycle_is_pinned`; the contract by `pytest_live_policy_none_session_in_shell_root_is_kept` and `pytest_live_basetemp_session_is_kept`), pytest-xdist 3.8.0 with execnet 2.1.2 (`pytest_orphan_xdist_worker_keeps_session`: a worker outlives its killed controller by about 15 s, then execnet ends it) | `liveness_contract: pytest`, `min_idle_for: 1h`, `checkouts: allow`; one candidate per session | verified heuristic: lock rows sound; the rank row producer-equivalent or stricter (it never permits a session pytest's own next cleanup, with the default retention, would keep; while a pytest of the same user runs it needs a session older than pytest's dead-lock age, Mark 2026-10-23); the unused-root row heuristic, and it does remove sessions above the rank that pytest keeps | Those of safety.md (pytest sessions), each with its vector. `min_idle_for: 1h` covers pytest's startup window between the session's `mkdir` and its `.lock` (microseconds), with a wide margin for a stalled start; it is not part of the contract's soundness. | Shipped (TASK-112 step 5), admitted by Mark, 2026-10-23. Matching set as in the library row. Every verdict of the decision table names its row in the detail; the checks before the table (safety.md) name none. Container tests: `pytest_lifecycle_is_pinned`, `pytest_live_policy_none_session_in_shell_root_is_kept`, `pytest_live_basetemp_session_is_kept`, `pytest_orphan_xdist_worker_keeps_session`. In the proposed 0.1 catalog (TASK-65, Mark 2026-10-24). |
+| `nix-shell-rc` | legacy `nix-shell` and `nix develop` (Nix 2.34.8 on the host, 2.34.9 pinned by `nix_shell_rc_lifecycle_is_pinned`): the directory's pid is the shell's own for both, interactive and `-c`; `nix develop`'s directory is referenced by nothing after start; legacy `nix-shell`'s is the `TMPDIR` of the shell and its children and its rc trap removes it except after `SIGKILL` (safety.md) | `liveness_contract: nix-shell`, `min_idle_for: 1h` | sound, under Owner PID's preconditions | A consumer that outlives the shell and keeps only a path string (Owner PID's scope). `min_idle_for: 1h` narrows it and is not part of the contract's soundness: a detached child that wrote in the directory within the hour keeps it `not_idle`. | Shipped (TASK-112 step 4) after the lifecycle verification (both commands, interactive and `-c`, normal exit, `SIGHUP` and `SIGKILL`, a detached child outliving the shell, a shell in a private PID namespace sharing `/tmp`), with its vectors and container tests. Matching set as in the library row. Small in bytes, large in count. In the 0.1 catalog (TASK-65). |
+| `pytest-tmp` | pytest 9.1.1 (sources read; lifecycle pinned by `pytest_lifecycle_is_pinned`; the contract by `pytest_live_policy_none_session_in_shell_root_is_kept` and `pytest_live_basetemp_session_is_kept`), pytest-xdist 3.8.0 with execnet 2.1.2 (`pytest_orphan_xdist_worker_keeps_session`: a worker outlives its killed controller by about 15 s, then execnet ends it) | `liveness_contract: pytest`, `min_idle_for: 1h`, `checkouts: allow`; one candidate per session | verified heuristic: lock rows sound; the rank row producer-equivalent or stricter (it never permits a session pytest's own next cleanup, with the default retention, would keep; while a pytest of the same user runs it needs a session older than pytest's dead-lock age, Mark 2026-10-23); the unused-root row heuristic, and it does remove sessions above the rank that pytest keeps | Those of safety.md (pytest sessions), each with its vector. `min_idle_for: 1h` covers pytest's startup window between the session's `mkdir` and its `.lock` (microseconds), with a wide margin for a stalled start; it is not part of the contract's soundness. | Shipped (TASK-112 step 5), admitted by Mark, 2026-10-23. Matching set as in the library row. Every verdict of the decision table names its row in the detail; the checks before the table (safety.md) name none. Container tests: `pytest_lifecycle_is_pinned`, `pytest_live_policy_none_session_in_shell_root_is_kept`, `pytest_live_basetemp_session_is_kept`, `pytest_orphan_xdist_worker_keeps_session`. In the 0.1 catalog (TASK-65, Mark 2026-10-24). |
 | `brave-browser-cache`, `chrome-browser-cache`, `chromium-browser-cache`, `edge-browser-cache` | Chromium-family browsers, default user-data directory | `app_not_running` | sound (presence marker) | A browser that starts between the last lock check and the unlink finds its `Cache` or `Code Cache` missing, which Chromium treats as an empty cache. | Shipped (TASK-74). |
-| `cargo-target` | Cargo (1.90.0, 1.99.1, nightly-2026-10-16) | the kind's lock protocol, `checkouts: allow` | delegated (producer lock) | A program built in the target and running from it is protected by process heuristics only: Cargo holds no lock while it runs (PRD, Limits). | Shipped; in the proposed 0.1 catalog. |
+| `cargo-target` | Cargo (1.90.0, 1.99.1, nightly-2026-10-16) | the kind's lock protocol, `checkouts: allow` | delegated (producer lock) | A program built in the target and running from it is protected by process heuristics only: Cargo holds no lock while it runs (PRD, Limits). | Shipped; in the 0.1 catalog. |
 | `docker-build-cache`, `docker-dangling`, `docker-unreferenced` | Docker Engine 29.8.2 and Buildx 0.37.2 in digest-pinned dind | the bound engine's own prune (`docker builder prune --all`, `docker image prune`, `docker image prune --all`); the daemon keeps what a build or container references | delegated | `docker-unreferenced` also removes tagged images that no container references; a later `docker run` pulls them again, or they are rebuilt when they were built locally and never pushed. | Shipped; not in 0.1 (Docker actions are outside its scope). |
 | `pip-cache`, `uv-cache`, `go-build-cache`, `npm-cache`, `pnpm-store`, `yarn-cache`, `ccache`, `platformio-cache`, `jest-cache` | pip 26.1.2, uv 0.13.0, Go 1.26.8, npm 11.19.0, pnpm 12.9.0, Yarn 1.22.22, ccache 4.14.1, PlatformIO 6.1.19, Jest 30.2.0, each cleaner run in a Nix container on the exact measured directory | the tool's own cleaner (Built-in profile library); in use, `checkouts: refuse` | delegated | No worse than the user running that cleaner: what it does to a run in flight is the tool's (Jest's `--clearCache` and `ccache --clear` remove the directory's contents outright; `pnpm store prune` removes only packages no project references). A uv environment installed with the non-default `link-mode = "symlink"` points into the cache and breaks until reinstalled. Rebuilding needs the network. | Shipped; not in 0.1 (command actions are outside its scope). |
 | `pytest-cache` | pytest 9.0.3 (cacheprovider source read, TASK-122) | consumer tolerance: `Cache.get` returns the caller's default for a missing or unreadable key, `Cache.set` creates the directory and only warns when it cannot write | tolerant | The next `--lf`, `--ff` or `--sw` run has no record of earlier failures and runs every test. | Shipped. |
@@ -2414,83 +2436,140 @@ its task notes.
 ### Release notes (next release, draft)
 
 **Status: draft** for the release after 0.1.0, whose scope is not decided
-(TASK-276). This describes the release catalog as master builds it, the
-`release-candidate` package ([Built-in profile
-library](#built-in-profile-library)), which ships this section as
-`RELEASE-NOTES.md`. 0.1.0's own notes are frozen at its tag (v0.1.0 on
-`release-0.1`, af3d503): `git show v0.1.0:docs/reference.md`. The default
-development package stays sandbox gated.
+(TASK-276). This describes the `release-candidate` package as master
+builds it ([Built-in profile library](#built-in-profile-library)): the
+package ships this section as `RELEASE-NOTES.md`, under a header that
+lists what it runs and installs. 0.1.0's own notes are frozen at its tag
+(v0.1.0 on `release-0.1`, af3d503): `git show v0.1.0:docs/reference.md`.
+The default development package stays sandbox gated.
 
-**Changes since 0.1.0** (on master, in no release yet):
+**Changes since 0.1.0** (on master, in no release yet). Each ends with
+whether 0.1.0 has the flaw or the old behaviour, and why, from reading
+0.1.0's code (`git show v0.1.0:FILE`), not from running it, unless a
+line says it was reproduced.
 
 - TASK-242: `cargo-target` discovery no longer descends into rootless
-  Podman or Docker image layers (in 0.1.0 only their permission bits kept
-  a Cargo target inside a layer from being planned for deletion).
+  Podman or Docker image layers. 0.1.0: yes; it has no container-storage
+  check, only the layers' permission bits kept a Cargo target inside one
+  from being planned for deletion (static reading).
 - TASK-260: `protect` and `!profile` also cover a candidate reached
   through a bind mount of a subdirectory of the protected or negated tree.
+  0.1.0: yes for a bind of a subdirectory of the match. It compared a
+  candidate with a match by path, then by the identities of their
+  ancestors, so a bind of a directory both lie under was seen; the bind's
+  source, a directory below the match, was never compared (static
+  reading).
 - TASK-44: `--allow-root` is refused unless diskgc runs as root, and with
   `CAP_SYS_PTRACE` a process the kernel refused to show (an LSM) keeps its
-  candidate instead of being excused.
+  candidate instead of being excused. 0.1.0: yes; it accepted
+  `--allow-root` without root and without `CAP_SYS_PTRACE`, and excused
+  such a refused process whatever its capabilities (static reading).
 - TASK-277: without the provisioned host lock `/run/diskgc/lock`, a
-  non-root reclaim takes a per-user lock (Install, item 2); 0.1.0 exits 2
-  (`cause: provisioning`).
+  non-root reclaim takes a per-user lock (Install, item 2). 0.1.0: exits 2
+  (`cause: provisioning`); it has no per-user lock (static reading).
 - TASK-268: an overlay, an `ecryptfs`, `aufs` or `shiftfs` mount, or a
   FUSE, network or `autofs` mount inside a `protect` or `!profile` match
   (a Cargo target, or through a bind) stops the run while it is mounted:
   the directories it stores its data in may hold the candidate
   ([safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)).
-  In 0.1.0 such an overlay escaped the overlay refusal (reproduced in the
-  model and in a container).
+  On master before this change such an overlay escaped the overlay
+  refusal (reproduced in the model and in a container). 0.1.0: yes, more
+  broadly; it refused no overlay with a `protect` or `!profile` match at
+  all, which came with TASK-260's review (static reading).
 - TASK-268 review: a candidate on a loop-mounted image is kept when the
   image file is protected or negated (and the reverse), read from the
   loop device's `backing_file`; while any match exists, an unreadable one
-  is an error.
+  is an error. 0.1.0: yes; it read no loop device (static reading).
+- TASK-268 review (8edb9f5): a Cargo target in a `protect` or `!profile`
+  match whose entries vanish while it is inspected is inspected again
+  (three times in all) and, if it never settles, stops the run; before,
+  it dropped out of the cached matches and an old candidate inside it
+  could be deleted (reproduced on master before the fix, in the model).
+  0.1.0: yes; it has the
+  same cached enumeration and dropped such a target the same way (static
+  reading).
+- TASK-268 review (63c49aa): a `CACHEDIR.TAG` made after the enumeration
+  in a directory on a candidate's way down from a Cargo `protect` or
+  `!profile` root makes the candidate's check enumerate the matches again;
+  before, that new Cargo target's old entries could be deleted
+  (reproduced on master before the fix, in the model). 0.1.0: yes; its
+  cached matches had the same
+  blind spot, which its own documentation named (static reading).
 - TASK-263 (pending Mark's confirmation): `ensure` (its dry run too) and
   a reclaiming `watch` whose tiers rely on the in-use check (`fs`,
   `cargo-target`) refuse to start (exit 2, `cause: safety`) under
   `hidepid` or in a PID namespace other than the initial one, so in a
-  container: the in-use check cannot see every process there. 0.1.0 ran there and judged candidates by the
-  processes it could see, so a Cargo target whose program ran outside
-  the container (Cargo holds no lock while it runs) could be deleted
-  (static reading). A CI hook that ran 0.1.0 inside its job
-  container must run diskgc on the runner host instead.
+  container: the in-use check cannot see every process there. A CI hook
+  that ran 0.1.0 inside its job container must run diskgc on the runner
+  host instead. 0.1.0: yes; it ran there and judged candidates by the
+  processes it could see, so a Cargo target whose program ran outside the
+  container (Cargo holds no lock while it runs) could be deleted (static
+  reading).
 - TASK-169: a candidate holding the backing file of a configured loop
   device (`udisksctl loop-setup`, `losetup`, mounted or not) is `in_use`
   where diskgc can ask the device (root, the `disk` group); where it
   cannot, a device whose file may be the user's keeps every candidate
   `in_use_unknown` (a deleted one: those on its filesystem) until it is
-  detached ([safety.md](safety.md#in-use), Loop devices). 0.1.0 deleted
-  such an image; its data was gone once the device detached.
+  detached ([safety.md](safety.md#in-use), Loop devices). 0.1.0: yes; it
+  read no loop device, so it deleted such an image, whose data was gone
+  once the device detached (static reading).
 - TASK-263 review: `skipped[].unknown_cause` says why an
-  `in_use_unknown` could not be judged (Output).
+  `in_use_unknown` could not be judged (Output). 0.1.0: no such field
+  (static reading).
 - TASK-269: a `protect` or `!profile` match removed after the tier
   enumerated it (a `cargo clean` of a protected target) no longer stops
   the run or the dry run (exit 3) at a candidate's first check: the
-  matches are enumerated again, then the candidate is judged.
+  matches are enumerated again, then the candidate is judged. 0.1.0:
+  partly. Its later checks under the candidate's lock already enumerated
+  again on such an error (`DeletePolicy::skip`), but its first check of a
+  candidate against the `!profile` matches (Cargo and `fs` tiers) stopped
+  the run with exit 3, deleting nothing more (static reading).
 - TASK-267: a root that is a bind mount of a directory inside container
   storage (or lies below one) is refused like a root named inside it: the
   directories above its place in its filesystem are asked too, where the
-  mount table shows them. In 0.1.0 and before this change only its path's
-  ancestors were asked (reproduced in the model and in a container). The
-  places above are asked only up to the namespace's root, never where a
-  mount is attached (a snapper `/.snapshots` is not looked at).
+  mount table shows them (only up to the namespace's root, never where a
+  mount is attached: a snapper `/.snapshots` is not looked at). Reproduced
+  in the model and in a container. 0.1.0: yes, more broadly; it has no
+  container-storage check at all (TASK-242), bound or not (static
+  reading).
 - TASK-290: a candidate holding a mount point only by place (reached
   through a non-recursive or private bind of its parent) is
   `contains_mount`; before, its other entries were deleted and the mount
   point's directory failed with `EBUSY`; a Cargo profile directory that
   is a mount point by place is `contains_mount` too, where its covered
   entries were deleted (both reproduced in the model and in a container).
+  0.1.0: yes; it has the same path-only mount test (static reading).
 - TASK-285: a delete action's cached `protect` and `!profile` matches are
   enumerated again when the mount table differs in anything from the one
   read before the enumeration (a rename above a bind's source, a bind
   mounted at a protected root), and a `CACHEDIR.TAG` above a Cargo
   source's root is looked up by place as well as by path. Before, a
-  candidate could be
-  deleted after such a change made it protected (reproduced in the model
-  only).
+  candidate could be deleted after such a change made it protected
+  (reproduced in the model only). 0.1.0: yes. Its cached matches
+  (TASK-200) were enumerated again only after a change inside the
+  candidate, never on a mount-table change, and its overlap test missed a
+  bind of a subdirectory of the match anyway (TASK-260) (static reading).
+- TASK-270: an `ensure` that tallied writes its snapshot on every exit
+  after the tally (not after a host lock held to the deadline, exit 75),
+  and one whose `protect` could not be enumerated exits 0 when the final
+  sample meets `--min-free` (the error stays in `errors`). 0.1.0: the
+  snapshot part does not apply (it has no tally or snapshot); it exited 3
+  in that `protect` case (exit code only; nothing is deleted either way)
+  (static reading).
+- TASK-272: `ensure` and `watch` check the configuration before they
+  start the host (`/proc`, the kernel), so a bad configuration exits 2
+  however broken `/proc` is. 0.1.0: yes; it exited 3 (`cause: host`) for
+  a bad configuration with an unreadable `/proc` (static reading).
+- TASK-280: `diskgc --version` names the commit of every build that is
+  not a tagged release (`diskgc 0.2.0-dev (COMMIT)`). 0.1.0: not
+  affected; it is the tag and prints `diskgc 0.1.0`.
+- TASK-289: the package ships the two `watch` unit templates (Install,
+  item 5) for `watch --tally-only` instances, and `--help` shows only the
+  commands this package runs. 0.1.0: not affected; it ran no `watch` and
+  shipped no templates.
 
-**What it does.** One command frees space, two read-only ones explain
-it:
+**What it does.** One command frees space, a service keeps its index
+warm, two read-only ones explain it:
 
 - `diskgc ensure --min-free SIZE PATH` brings the filesystem of `PATH` up
   to a free-space goal, once, and exits with a code a CI pre-job hook or
@@ -2498,6 +2577,12 @@ it:
   `--dry-run` it only plans, with `--json` it prints one report object.
   It runs a configuration's tier groups, or one `--select` expression
   with `--roots`, under the host lock, with a cooperative `--timeout`.
+- `ensure` below `--min-free` first tallies what its tiers find (a
+  synchronous tally, bounded by `--tally-budget`) and saves that index as
+  a snapshot in the user's state directory, which its next run starts
+  from; `--no-index` neither reads nor writes it ([`ensure`](#ensure)).
+  `diskgc watch --tally-only PATH` keeps the snapshot warm as a service
+  and never deletes ([Tally only](#tally-only); Install, item 5).
 - `diskgc check` validates a configuration without touching the machine;
   `diskgc profiles list|show|test` shows the built-in catalog.
 - The catalog is three sources and the seven idle filters (`idle-1h` to
@@ -2534,6 +2619,13 @@ it:
    notes (`RELEASE-NOTES.md`, cut from `reference.md` at build time),
    `reference.md` and [safety.md](safety.md), so that the notes' links
    resolve (links into the design documents do not).
+5. `lib/systemd/user/diskgc-watch@.service` and
+   `lib/systemd/system/diskgc-watch@.service`, the `watch` unit
+   templates, one instance per filesystem
+   ([Watch as a systemd service](#watch-as-a-systemd-service)). Where this
+   package runs no reclaiming `watch` (its header says), an instance's
+   environment file needs `--tally-only` (`DISKGC_WATCH_ARGS=--tally-only
+   --min-free 50G`); a reclaiming one exits 2 at start and stays failed.
 
 Start with a dry run (`diskgc ensure --dry-run --min-free 50G PATH`); it
 reads only and lists what a reclaim would take and why the rest is kept.
@@ -2650,15 +2742,15 @@ and the 0.1 JSON pass (TASK-192): not applicable is `null`, never an empty
 string; `--select` runs are named `select`; `find.roots` is always a
 list, with `find.backend` beside it. Scripts match `status`, `cause`,
 `reason` and the exit code; message text and human output may change.
-`index` is always `null` in 0.1 (there is no index). The command-action,
+`index` is still always `null` (0.1.0 had no index; this package has
+one, and the report's `index` block is still to come, TASK-244). The
+command-action,
 Docker and Nix parts of the profile schema stay provisional until the v1
 release review (task-49). `just docs-vs-binary BIN` runs what this
 reference documents against a build and reports any drift.
 
 **Not in the release catalog.** A reclaiming `watch` and `survey` (both
-exit 2; `watch --tally-only` runs), the index (so
-`--no-index` changes nothing and `--tally-budget` bounds only the
-synchronous tally), the Docker kinds, the Nix store kind, command actions,
+exit 2; `watch --tally-only` runs), the Docker kinds, the Nix store kind, command actions,
 user profiles and overrides, `ipc: live-only` in `ensure`, and every other
 built-in in the [library](#built-in-profile-library), including the other
 `/tmp` entries (`nix-shell.*` TMPDIRs themselves, `tmp.*`, anything
@@ -2669,7 +2761,7 @@ Evidence for the candidate package, and what it does not cover:
 
 | Candidate deployment question | Evidence and current limit |
 |---|---|
-| Package contents | The actual `release-candidate` derivation passes the static ELF and installed-file check (the binary is byte-identical to its compile, the README, reference and release notes are installed); its tmpfiles rule and example config are exercised in disposable Nix and Debian containers. |
+| Package contents | The actual `release-candidate` derivation passes the static ELF and installed-file check (the binary is byte-identical to its compile; the file list is exactly its release row's, each copy byte for byte; the notes' header and `--help`'s `watch` lines follow the row); its tmpfiles rule and example config are exercised in disposable Nix and Debian containers, and its `watch --tally-only` starts, writes its snapshot, stops on SIGTERM with exit 0 and deletes nothing there. Its unit templates are checked by `systemd-analyze verify` only as the development package's (byte-identical sources) and in the module's drop-in verification; no live `systemd` runs them from this package. |
 | Cargo operator journey | Those containers run the packaged, gate-lifted binary against real Cargo targets: dry run, busy-lock preservation, eligible deletion judged by the filesystem oracle, and a successful rebuild. Default and explicit `checkouts: allow`, and explicit `checkouts: refuse`, are checked on vendored checkout content. |
 | Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp` and the seven idle filters. Excluded built-ins and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
 | Host and filesystem deployment | The candidate has no approval for an operator host or its filesystem, mount, permissions and running-work mix. Container results establish behavior only in those disposable fixtures. |

@@ -1,11 +1,11 @@
 # pytest-cache is a development-catalog built-in (no `releases: ["0.1"]` in
-# builtin.yaml): under the proposed 0.1 catalog `--select
+# builtin.yaml): under the 0.1 catalog `--select
 # profile:pytest-cache` is refused (exit 2) before anything is read, as a
 # built-in this release does not ship, not as an unknown name (TASK-139). The same scenario under the development catalog
 # reclaims the cache (select/roots-required-without-roots.yaml shows the
 # profile is otherwise selectable).
 profile_vector: 1
-catalog: proposed-release-01
+catalog: release-0.1
 profile: pytest-cache
 roots: [/home/tester]
 path: /home

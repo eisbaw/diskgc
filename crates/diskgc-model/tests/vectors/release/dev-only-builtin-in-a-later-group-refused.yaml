@@ -1,10 +1,10 @@
 # A configuration whose later group selects a development-only built-in
 # (pytest-cache) loads under the development catalog but not under the
-# proposed 0.1 catalog: exit 2 at load, so the first group's eligible
+# 0.1 catalog: exit 2 at load, so the first group's eligible
 # Cargo target is untouched (no tier runs before the whole configuration
 # is held to the catalog).
 profile_vector: 1
-catalog: proposed-release-01
+catalog: release-0.1
 config: |
   version: 1
   groups:

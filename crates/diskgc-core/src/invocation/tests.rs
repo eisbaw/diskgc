@@ -192,7 +192,13 @@ fn configured_root_mode_checks_later_groups_before_execution() {
     );
 }
 
-/// `source` under the proposed 0.1 catalog, after checking that the
+/// Release 0.1's catalog, from the release descriptor: these tests pin
+/// the 0.1 data (its refusals name "diskgc 0.1").
+fn release_01() -> Catalog {
+    Catalog::from(crate::release::release("0.1").expect("0.1"))
+}
+
+/// `source` under the 0.1 catalog, after checking that the
 /// development catalog loads it (`expectation`): a refusal is the 0.1
 /// catalog's.
 fn under_both_catalogs(source: &[u8], expectation: &str) -> Result<Config, String> {
@@ -200,7 +206,7 @@ fn under_both_catalogs(source: &[u8], expectation: &str) -> Result<Config, Strin
     Catalog::Development
         .config(path, source, ConfigUse::Run)
         .expect(expectation);
-    Catalog::ProposedRelease01.config(path, source, ConfigUse::Run)
+    release_01().config(path, source, ConfigUse::Run)
 }
 
 #[test]
@@ -372,7 +378,7 @@ fn proposed_catalog_reports_user_profiles_with_every_other_refusal_in_one_run() 
     let development = Catalog::Development
         .config(path, block.as_bytes(), ConfigUse::Run)
         .expect("the development build loads it");
-    let error = Catalog::ProposedRelease01
+    let error = release_01()
         .config(path, block.as_bytes(), ConfigUse::Run)
         .expect_err("0.1 refuses it");
     let user = development.library.user_profile_names();
@@ -385,7 +391,7 @@ fn proposed_catalog_reports_user_profiles_with_every_other_refusal_in_one_run() 
             "{refusal:?} missing from: {error}"
         );
     }
-    let release = Catalog::ProposedRelease01
+    let release = release_01()
         .library(Library::builtin().expect("built-ins"))
         .expect("0.1 catalog");
     let mut refused_tiers = 0;
@@ -422,7 +428,7 @@ fn proposed_catalog_reports_user_profiles_with_every_other_refusal_in_one_run() 
 /// 0.1 catalog leaves out says so, not "no profile named".
 #[test]
 fn proposed_catalog_select_of_a_withheld_builtin_names_the_release() {
-    let library = Catalog::ProposedRelease01
+    let library = release_01()
         .library(Library::builtin().expect("built-ins load"))
         .expect("0.1 catalog");
     let error = crate::select::compile("profile:pytest-cache && filter:idle-1d", &library)
@@ -463,7 +469,7 @@ fn documented_config_examples_load_under_the_catalog_they_claim() {
     let path = Path::new("/docs/example.yaml");
     for block in &blocks {
         let development = block.starts_with("# Development build only");
-        let release = Catalog::ProposedRelease01.config(path, block.as_bytes(), ConfigUse::Run);
+        let release = release_01().config(path, block.as_bytes(), ConfigUse::Run);
         if development {
             Catalog::Development
                 .config(path, block.as_bytes(), ConfigUse::Run)

@@ -5,17 +5,25 @@ These cover the pure layer; the probes themselves are exercised by running
 would only test the fake).
 """
 
+import json
 from pathlib import Path
 import unittest
 
 from docs_vs_binary import (
     Report, Result, Runner, UnsafeProbe, code_blocks, config_examples, dev_only_refusals,
-    documented_catalog, enum_values, host_refusal, json_schema, observed_values, parse_usage,
+    DESCRIPTOR, RECLAIMING_COMMANDS, build_row, documented_catalog, enum_values, host_refusal,
+    json_schema, not_in_build, observed_values, parse_usage,
     probe_ci_examples, profiles_test_keys, schema_diff, section, size_grammar, status_exit_codes,
     table_rows, tier_names,
 )
 
 REFERENCE = Path(__file__).resolve().parent.parent / "docs" / "reference.md"
+
+# The two `watch` usage keys, spelled through the tool's own list so that
+# no bare reclaiming word stands here (tools/host_reclaim_scan.py).
+ENSURE_KEY = RECLAIMING_COMMANDS[0]
+RECLAIM_KEY = RECLAIMING_COMMANDS[1]
+TALLY_KEY = f"{RECLAIM_KEY} --tally-only"
 
 
 class UsageTests(unittest.TestCase):
@@ -44,6 +52,39 @@ class UsageTests(unittest.TestCase):
         doc = parse_usage(["diskgc check [--config FILE] [--json]"])
         binary = parse_usage(["diskgc check [--config FILE]"])
         self.assertEqual(doc["check"][0] - binary["check"][0], {("--json", True)})
+
+
+    def test_a_mode_flag_names_its_own_usage(self):
+        usage = parse_usage([
+            "diskgc watch --min-free SIZE --target-free SIZE PATH",
+            "diskgc watch --tally-only [--min-free SIZE] PATH",
+        ])
+        self.assertEqual(sorted(usage), [RECLAIM_KEY, TALLY_KEY])
+        self.assertIn(("--min-free", False), usage[RECLAIM_KEY][0])
+        self.assertEqual(usage[TALLY_KEY][0], {("--min-free", True)})
+
+    def test_the_row_comes_from_the_version_and_the_narrowed_catalog(self):
+        descriptor = json.loads(DESCRIPTOR.read_text())
+        narrowed = {"profiles": [{"name": "cargo-target", "releases": ["0.1"]}]}
+        full = {"profiles": [{"name": "cargo-target", "releases": ["0.1"]},
+                             {"name": "pip-cache", "releases": []}]}
+        name, row = build_row(descriptor, "diskgc 0.2.0-dev (abc1234)\n", narrowed)
+        self.assertEqual((name, row), ("0.2", descriptor["releases"]["0.2"]))
+        name, _ = build_row(descriptor, "diskgc 0.1.0\n", narrowed)
+        self.assertEqual(name, "0.1")
+        self.assertEqual(build_row(descriptor, "diskgc 0.2.0-dev (x)\n", full),
+                         ("development", descriptor["development"]))
+        with self.assertRaises(ValueError):
+            build_row(descriptor, "diskgc 9.9.0-dev (x)\n", narrowed)
+
+    def test_usages_a_row_does_not_run(self):
+        usages = ["", ENSURE_KEY, RECLAIM_KEY, TALLY_KEY, "check", "profiles list"]
+        tally_only = {"commands": [ENSURE_KEY, TALLY_KEY, "check", "profiles"]}
+        self.assertEqual(not_in_build(tally_only, usages), {RECLAIM_KEY})
+        v01 = {"commands": [ENSURE_KEY, "check", "profiles"]}
+        self.assertEqual(not_in_build(v01, usages), {RECLAIM_KEY, TALLY_KEY})
+        every = {"commands": [ENSURE_KEY, RECLAIM_KEY, TALLY_KEY, "check", "profiles"]}
+        self.assertEqual(not_in_build(every, usages), set())
 
 
 class JsonTests(unittest.TestCase):

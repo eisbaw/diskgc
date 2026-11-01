@@ -101,7 +101,7 @@ let
             "--select"
             "profile:cargo-target && filter:idle-7d"
           ];
-          description = "Every other `watch` flag, one argument per element, passed as given (docs/architecture.md, NixOS module).";
+          description = "Every other `watch` flag, one argument per element, passed as given; no mode flag (--tally-only, --min-free, --target-free, --dry-run: use the typed options) (docs/architecture.md, NixOS module).";
         };
         allowRoot = mkOption {
           type = types.bool;
@@ -122,6 +122,31 @@ let
     };
 
   instances = lib.mapAttrsToList (name: inst: inst // { inherit name; }) cfg.instances;
+
+  # What the package says it runs and ships: its row of the release
+  # descriptor (crates/diskgc-core/src/releases.json), which the diskgc
+  # flake's packages carry as passthru.diskgcBuild (flake.nix,
+  # buildPassthru; release-candidate-package and deployment-units check
+  # the files are there). null for a package that does not say. A claim,
+  # not a proof: an overrideAttrs that swaps the source keeps the old
+  # passthru (the binary still refuses what its own row does not run).
+  packageBuild = cfg.package.diskgcBuild or null;
+  packageName = cfg.package.name or "the package";
+  # The templates every instance's drop-in extends (systemd.packages), as
+  # the descriptor names them.
+  watchTemplates = (lib.importJSON ../../crates/diskgc-core/src/releases.json).watch_units;
+  # Flags that choose what `watch` does: only the typed options set them
+  # (tallyOnly, minFree, targetFree), so the module knows the mode it
+  # asserts on. In extraArgs one could also hide as another flag's value
+  # (`--config --tally-only`), which diskgc reads differently (TASK-289
+  # review). `--dry-run` is not a `watch` flag; refused here too.
+  modeFlags = [
+    "--tally-only"
+    "--min-free"
+    "--target-free"
+    "--dry-run"
+  ];
+  isModeFlag = arg: lib.any (f: arg == f || lib.hasPrefix "${f}=" arg) modeFlags;
   unitName = inst: "diskgc-watch@${utils.escapeSystemdPath inst.path}";
 
   # --config: configFile, else the instance's settings file; otherwise a
@@ -233,7 +258,42 @@ let
       } all map to the ${scope} unit ${unit}.service; one instance per watched path and scope (user units are shared by every user).";
     }) byUnit;
 
-  instanceAssertions = inst: [
+  # The package must ship both templates (TASK-289: the release candidate
+  # shipped none, so the drop-ins sat on a missing unit). Only with
+  # instances: without one, nothing extends them.
+  packageAssertions = lib.optional (instances != [ ]) {
+    assertion = packageBuild != null && lib.all (t: lib.elem t packageBuild.ships) watchTemplates;
+    message =
+      if packageBuild == null then
+        "services.diskgc.package (${packageName}) does not say which files it ships (passthru.diskgcBuild, as the diskgc flake's packages do); the instances need its diskgc-watch@.service templates."
+      else
+        "services.diskgc.package (${packageName}) does not ship the diskgc-watch@.service templates (${lib.concatStringsSep ", " watchTemplates}) that the instances' drop-ins extend.";
+  };
+
+  # An instance runs only what the package's build runs: a reclaiming
+  # instance of a package whose release refuses a reclaiming `watch`
+  # (exit 2) would stay failed.
+  commandAssertions =
+    inst:
+    let
+      needs = if inst.tallyOnly then "watch --tally-only" else "watch";
+      runs = packageBuild.commands;
+    in
+    lib.optional (packageBuild != null) {
+      assertion = lib.elem needs runs || (needs == "watch --tally-only" && lib.elem "watch" runs);
+      message = "services.diskgc.instances.${inst.name}: ${packageName} does not run `${needs}` (its commands: ${lib.concatStringsSep ", " runs})${lib.optionalString (needs == "watch") "; set tallyOnly = true, or use a package whose release runs a reclaiming watch"}.";
+    };
+
+  instanceAssertions =
+    inst:
+    commandAssertions inst
+    ++ [
+      {
+        assertion = !lib.any isModeFlag inst.extraArgs;
+        message = "services.diskgc.instances.${inst.name}: extraArgs holds ${
+          lib.concatStringsSep ", " (lib.filter isModeFlag inst.extraArgs)
+        }; set the mode with tallyOnly, minFree and targetFree instead.";
+      }
     {
       assertion = !inst.allowRoot || (inst.scope == "system" && inst.user == "root");
       message = "services.diskgc.instances.${inst.name}: allowRoot needs scope = \"system\" and user = \"root\" (it has scope = \"${inst.scope}\", user = \"${inst.user}\").";
@@ -272,7 +332,7 @@ in
       type = types.package;
       default = defaultPackage pkgs;
       defaultText = lib.literalExpression "diskgc.packages.\${system}.default";
-      description = "The diskgc package; the default development package refuses to delete, so a reclaiming instance needs a release package.";
+      description = "The diskgc package; the default development package refuses to delete, so a reclaiming instance needs a release package whose release runs a reclaiming `watch` (asserted from its passthru.diskgcBuild, as are the `watch` templates).";
     };
     settings = mkOption {
       type = types.nullOr yaml.type;
@@ -314,7 +374,8 @@ in
     systemd.user.services = unitsOf "user" userDropIn;
 
     assertions =
-      duplicateUnitAssertions "system"
+      packageAssertions
+      ++ duplicateUnitAssertions "system"
       ++ duplicateUnitAssertions "user"
       ++ lib.concatMap instanceAssertions instances;
     warnings = lingerWarnings;

@@ -1,9 +1,9 @@
-# Under the proposed 0.1 catalog, the TASK-65 counterexample's row: a live
+# Under the 0.1 catalog, the TASK-65 counterexample's row: a live
 # process names the session root in TMPDIR and holds no lock or fd there; its
 # sessions within pytest's retention rank are kept (row 10), as in
 # liveness/pytest-tmp-live-shell-root-refused.yaml under the development catalog.
 profile_vector: 1
-catalog: proposed-release-01
+catalog: release-0.1
 profile: pytest-tmp
 path: /tmp
 min_free: 100%

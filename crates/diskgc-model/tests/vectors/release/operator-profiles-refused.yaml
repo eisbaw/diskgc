@@ -1,9 +1,9 @@
-# The proposed 0.1 catalog admits no operator-authored profile: a user
+# The 0.1 catalog admits no operator-authored profile: a user
 # profile in the configuration (the zephyr-tmp-probe the config/ vectors
 # run under the development catalog) is refused at load, exit 2, nothing
 # touched.
 profile_vector: 1
-catalog: proposed-release-01
+catalog: release-0.1
 config: |
   version: 1
   profiles:

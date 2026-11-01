@@ -1,4 +1,4 @@
-# The proposed 0.1 catalog admits nix-shell-rc (TASK-65, Mark 2026-10-24):
+# The 0.1 catalog admits nix-shell-rc (TASK-65, Mark 2026-10-24):
 # `--select profile:nix-shell-rc` under it judges rc directories by the
 # Owner PID contract as the development catalog does. The rc directories
 # of ended shells (no process carries the pid in the name; a SIGKILLed
@@ -7,7 +7,7 @@
 # (pid 4242) still runs, holding nothing in it, is kept
 # (liveness/nix-shell-rc-live-owner-no-fd-refused.yaml).
 profile_vector: 1
-catalog: proposed-release-01
+catalog: release-0.1
 profile: nix-shell-rc
 path: /tmp
 min_free: 100%
