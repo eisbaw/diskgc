@@ -445,19 +445,35 @@ they never override the Invariants.
   0.1.0; every walk ran in images that provision /run/diskgc/lock. ->
   Each user-facing release walk runs the real (non-dry) start path once
   as a non-root user with nothing provisioned. Judged by: found_by user
-  at the next retro (target 0). Status: new.
+  at the next retro (target 0). Status: carried (TASK-297 window had no
+  release walk).
 - 2026-11-01, Retro TASK-284: both escaped holes (TASK-267, 268) were
   alias/mount-type classes. -> Review briefs for protect, mount or
   storage changes ask explicitly about other mount types and aliases
   (overlay, FUSE, ecryptfs/aufs/shiftfs, loop images, binds, private
   propagation, other namespaces). Judged by: post-merge findings of that
-  class (target 0). Status: new.
+  class (target 0). Status: kept (all in-window catches of that class
+  were pre-merge).
 - 2026-11-01, Retro TASK-284: two agents were stopped by a session end;
   their WIP commits saved the work and the worktrees were re-created at
   the same paths so the agents resumed with context. -> Before a long
   wait, record each running agent's worktree path and branch in its task
   notes. Judged by: tasks restarted from scratch after a session end
-  (target 0). Status: new.
+  (target 0). Status: kept (two network-error stops resumed, no loss).
+
+- 2026-11-01, Retro (fifth window): a brief named the wrong task number
+  (TASK-291 for TASK-290). -> Briefs quote the task title from
+  `backlog task view N --plain`. Judged by: wrong-task briefs (target 0).
+  Status: new.
+- 2026-11-01, Retro (fifth window): an orchestrator-designed loop fix
+  rested on a false premise (udisks chowns loop devices); the implementer
+  disproved it from source. -> Designs in briefs list their premises as
+  checks the implementer verifies and reports. Judged by: merged designs
+  on an unverified premise (target 0). Status: new.
+- 2026-11-01, Retro (fifth window): a fast-forward failed because a
+  backlog commit landed after the branch's rebase. -> Rebase and
+  merge --ff-only in one command after the last backlog commit. Judged
+  by: failed fast-forwards (target 0). Status: new.
 
 ### Gotchas
 
