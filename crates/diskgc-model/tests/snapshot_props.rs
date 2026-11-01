@@ -15,7 +15,7 @@ use diskgc_core::snapshot::format::{
     self, BlockRec, FinderRec, Header, SingleRec, Snapshot, TallyRec,
 };
 use diskgc_core::snapshot::restore::{self, Clocks};
-use diskgc_core::snapshot::{DISKGC_VERSION, fits};
+use diskgc_core::snapshot::{self, DISKGC_VERSION, fits};
 use diskgc_model::ModelHost;
 use proptest::prelude::*;
 
@@ -320,6 +320,11 @@ fn snapshot(host: &ModelHost, g: &Gen) -> Snapshot {
 }
 
 /// Seeds from `s` as a run would and collapses to one lump: never panics.
+/// The writer ([`snapshot::encode`]) then writes what the reader loads,
+/// or skips the write: a collapse adds a single's counters to a block, so
+/// sums at the reader's cap (2^62) can grow past it, and the writer
+/// refuses those rather than write a file every later run ignores
+/// (TASK-279).
 fn seed_and_collapse(host: &ModelHost, s: &Snapshot, budget: usize) {
     let Ok(decoded) = format::decode(&format::encode(s)) else {
         return; // refused: the run starts from nothing
@@ -334,8 +339,17 @@ fn seed_and_collapse(host: &ModelHost, s: &Snapshot, budget: usize) {
     let _ = state.index.stats();
     let _ = state.index.collapse_to(host, 0);
     let _ = state.index.stats();
-    let again = restore::capture(&state, Clocks::now(host), valid.header.clone());
-    assert!(format::decode(&format::encode(&again)).is_ok());
+    match snapshot::encode(host, &state, &FsKey::dev(TMP)) {
+        Ok(bytes) => {
+            if let Err(why) = format::decode(&bytes) {
+                panic!("the writer wrote what the reader refuses: {why}");
+            }
+        }
+        Err(why) => assert!(
+            why.contains("every later run would refuse it"),
+            "the write was skipped for another reason: {why}"
+        ),
+    }
 }
 
 /// The stack bound (Codex review of TASK-30): a snapshot path tens of
@@ -365,10 +379,66 @@ fn a_path_far_deeper_than_the_bound_is_refused_before_the_index() {
     seed_and_collapse(&host, &s, 1 << 26);
 }
 
+/// TASK-279, the case the property found (its seed is in
+/// snapshot_props.proptest-regressions): a single below a block of 2^62
+/// members, the reader's cap. The collapse to one lump adds the single to
+/// the block, 2^62 + 1 members: the writer skips the write, naming why,
+/// where it used to write a file every later run would ignore.
+#[test]
+fn a_collapse_past_the_reader_cap_skips_the_write() {
+    let host = host();
+    let wrong = Identity {
+        dev: TMP,
+        ino: 1000,
+        birth: Birth::ParentIno(1),
+    };
+    let at = || At::Real {
+        path: 0,
+        right: true,
+    };
+    let when = Timestamp {
+        secs: 1_700_000_000,
+        nanos: 0,
+    };
+    let g = Gen {
+        singles: vec![GenSingle {
+            at: at(),
+            wrong,
+            finders: vec![0],
+            newest: when,
+            tally: None,
+            checked: when,
+            refusal: None,
+        }],
+        blocks: vec![GenBlock {
+            site: Some(at()),
+            wrong,
+            finders: vec![0],
+            family: false,
+            counters: (1 << 62, 0, 1 << 62),
+            t: when,
+            tallied: None,
+        }],
+        discovered: None,
+    };
+    let decoded = format::decode(&format::encode(&snapshot(&host, &g))).expect("at the cap: loads");
+    let valid = fits(&host, &FsKey::dev(TMP), decoded).expect("fits");
+    let (mut state, _) =
+        restore::restore(&host, &valid, Clocks::now(&host), 1 << 26, |_| true).expect("restores");
+    state.index.collapse_to(&host, 0).expect("collapses");
+    let why = snapshot::encode(&host, &state, &FsKey::dev(TMP)).expect_err("the write is skipped");
+    assert!(
+        why.contains("every later run would refuse it") && why.contains("members"),
+        "{why}"
+    );
+}
+
 proptest! {
+    // Failures persist to snapshot_props.proptest-regressions beside this
+    // file (proptest's default), which is committed so a found seed
+    // reruns first (TASK-279).
     #![proptest_config(ProptestConfig {
         cases: cases(),
-        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 

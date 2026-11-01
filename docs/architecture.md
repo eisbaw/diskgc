@@ -542,8 +542,11 @@ the order of work.
     deadline and not after a terminating signal: a run that waited for
     the host lock until its deadline, or was interrupted, writes none and
     says so in one line (TASK-270). An index whose
-    encoding is larger than a snapshot may be (twice the budget) is
-    not written, with one log line. A run that exits 0 at once because space is
+    encoding is larger than a snapshot may be (twice the budget), or
+    past another limit the reader holds a file to (a path or a sum,
+    Validity: a collapse adds a single's counters to a block, so sums
+    at the cap can grow past it), is not written, with one log line:
+    every later run would ignore it (TASK-279). A run that exits 0 at once because space is
     already there stays an instant no-op (Mark, 2026-10-25): no tally,
     no snapshot write. Warmth on a machine that is rarely short of
     space comes from `watch` or `watch --tally-only`, not from

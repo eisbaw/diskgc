@@ -739,8 +739,14 @@ Model scenarios required by [safety.md](safety.md) and
   `no_snapshot_content_panics_the_seed_or_a_later_collapse`
   (`tests/snapshot_props.rs`: counters near `u64::MAX` and paths up to
   300 components through decode, validity, restore, statistics and a
-  collapse to one lump; `a_path_far_deeper_than_the_bound_is_refused_before_the_index`
-  for 60,000 components). Still open: `source: snapshot` / `source: sync` in the report
+  collapse to one lump, then the writer: it writes what the reader
+  loads or skips the write; its found seeds are kept in
+  `tests/snapshot_props.proptest-regressions` and rerun first;
+  `a_path_far_deeper_than_the_bound_is_refused_before_the_index`
+  for 60,000 components; `a_collapse_past_the_reader_cap_skips_the_write`
+  and diskgc-core's
+  `the_writer_refuses_exactly_what_the_reader_refuses_for_a_limit`,
+  TASK-279). Still open: `source: snapshot` / `source: sync` in the report
   (TASK-244), and comparing an ignored snapshot's run with a
   `--no-index` run's deletions (the scenarios delete nothing in either
   run);

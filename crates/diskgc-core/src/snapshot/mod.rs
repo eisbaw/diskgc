@@ -444,9 +444,11 @@ pub struct Guard {
     pub min_free: Option<u64>,
 }
 
-/// The snapshot of `state` for `key`, encoded, or why it is not written
-/// (the boot id cannot be read, or it is larger than any snapshot may be,
-/// [`MAX_SNAPSHOT_BYTES`]: every later run would refuse it).
+/// The snapshot of `state` for `key`, encoded, or why it is not written:
+/// the boot id cannot be read, or every later run would refuse it, being
+/// larger than any snapshot may be ([`MAX_SNAPSHOT_BYTES`]) or past the
+/// reader's other limits ([`format::check_limits`]: a path too long or
+/// deep, sums over 2^62).
 pub fn encode<H: Host>(host: &H, state: &TallyState, key: &FsKey) -> Result<Vec<u8>, String> {
     let boot_id = host.boot_id().map_err(|e| format!("the boot id: {e}"))?;
     let clocks = Clocks::now(host);
@@ -457,7 +459,10 @@ pub fn encode<H: Host>(host: &H, state: &TallyState, key: &FsKey) -> Result<Vec<
         boot_id,
         written: clocks.wall,
     };
-    let bytes = format::encode(&restore::capture(state, clocks, header));
+    let snapshot = restore::capture(state, clocks, header);
+    format::check_limits(&snapshot)
+        .map_err(|why| format!("every later run would refuse it: {why}"))?;
+    let bytes = format::encode(&snapshot);
     let size = u64::try_from(bytes.len()).expect("fits u64");
     if size > MAX_SNAPSHOT_BYTES {
         return Err(format!(

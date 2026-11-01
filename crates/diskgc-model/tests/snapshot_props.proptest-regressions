@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc abb1ecd4a9c6a2641b4d0ab9dee0899c076a76b8b08411801aff58fd5e7ed925 # shrinks to g = Gen { singles: [GenSingle { at: Real { path: 0, right: true }, wrong: Identity { dev: Dev { major: 0, minor: 42 }, ino: 1000, birth: Time(Timestamp { secs: 1700000000, nanos: 0 }) }, finders: [0], newest: Timestamp { secs: 1700000000, nanos: 0 }, tally: None, checked: Timestamp { secs: 1700000000, nanos: 0 }, refusal: None }], blocks: [GenBlock { site: Some(Real { path: 0, right: true }), wrong: Identity { dev: Dev { major: 0, minor: 42 }, ino: 1000, birth: Time(Timestamp { secs: 1700000000, nanos: 0 }) }, finders: [0], family: false, counters: (4611686018427387904, 0, 4611686018427387904), t: Timestamp { secs: 1700000000, nanos: 0 }, tallied: None }], discovered: None }, budget = 67108864

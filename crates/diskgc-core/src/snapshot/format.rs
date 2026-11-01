@@ -296,6 +296,36 @@ pub fn encode(s: &Snapshot) -> Vec<u8> {
     w.0
 }
 
+/// The limits of [`decode`] that a writer could exceed with an index that
+/// is valid in memory: every path's length and depth ([`MAX_PATH_BYTES`],
+/// [`MAX_PATH_DEPTH`]) and the sums of members, `est_bytes` and `files`
+/// ([`MAX_TOTAL`]; a collapse adds a single's counters to a block, so
+/// sums at the cap grow past it). The writer refuses a snapshot that
+/// fails them, as one larger than any snapshot may be, rather than write
+/// one every later run would ignore (TASK-279). The rest of `decode`'s
+/// checks are of structure, which [`super::restore::capture`] holds by
+/// construction.
+pub fn check_limits(s: &Snapshot) -> Result<(), String> {
+    for f in &s.finders {
+        check_path(&f.finder.root, "finder root")?;
+    }
+    for m in &s.mounts {
+        check_path(&m.mount_point, "mount point")?;
+    }
+    let mut totals = Totals::default();
+    for u in &s.singles {
+        check_path(&u.path, "single path")?;
+        if let Some(t) = &u.tally {
+            totals.add(0, t.est_bytes, t.files)?;
+        }
+    }
+    for b in &s.blocks {
+        check_path(&b.site, "block site")?;
+        totals.add(b.members, b.est_bytes, b.files)?;
+    }
+    Ok(())
+}
+
 // ---- Reading ----
 
 struct Reader<'a> {
@@ -804,6 +834,99 @@ mod tests {
         ] {
             let got = refused(bend);
             assert!(got.contains(why), "{why}: {got}");
+        }
+    }
+
+    /// TASK-279: the writer's limits are the reader's. Each bent sample
+    /// is refused by [`check_limits`] exactly when [`decode`] refuses it
+    /// for a limit (the sums at the cap and one past it, a path at and
+    /// past each bound), so the writer never writes what the reader
+    /// ignores, nor skips what it would load.
+    #[test]
+    fn the_writer_refuses_exactly_what_the_reader_refuses_for_a_limit() {
+        let at_depth = |depth: usize| format!("/tmp{}", "/d".repeat(depth - 1));
+        type Bend = Box<dyn Fn(&mut Snapshot)>;
+        // Each bend, and whether the reader loads the result.
+        let cases: Vec<(Bend, bool)> = vec![
+            (Box::new(|_| {}), true),
+            // The sums: the sample holds est_bytes 4096 + 9 and members 3.
+            (Box::new(|s| s.blocks[0].est_bytes = MAX_TOTAL - 4096), true),
+            (
+                Box::new(|s| s.blocks[0].est_bytes = MAX_TOTAL - 4095),
+                false,
+            ),
+            (Box::new(|s| s.blocks[0].members = MAX_TOTAL), true),
+            (Box::new(|s| s.blocks[0].members = MAX_TOTAL + 1), false),
+            (Box::new(|s| s.blocks[0].files = u64::MAX), false),
+            (
+                // files: the single's 2, the block's 3, the twin's.
+                Box::new(|s| {
+                    let mut twin = s.blocks[0].clone();
+                    twin.files = MAX_TOTAL - 5;
+                    s.blocks.push(twin);
+                }),
+                true,
+            ),
+            (
+                Box::new(|s| {
+                    let mut twin = s.blocks[0].clone();
+                    twin.files = MAX_TOTAL - 5;
+                    s.blocks[0].files = 3 + 1;
+                    s.blocks.push(twin);
+                }),
+                false,
+            ),
+            // The paths, of a single, a block, a finder's root.
+            (
+                Box::new(move |s| s.singles[0].path = PathBuf::from(at_depth(MAX_PATH_DEPTH))),
+                true,
+            ),
+            (
+                Box::new(move |s| {
+                    s.singles[0].path = PathBuf::from(at_depth(MAX_PATH_DEPTH + 1));
+                }),
+                false,
+            ),
+            (
+                Box::new(|s| {
+                    s.singles[0].path = PathBuf::from(format!("/tmp/{}", "x".repeat(4091)));
+                }),
+                true,
+            ),
+            (
+                Box::new(|s| {
+                    s.singles[0].path = PathBuf::from(format!("/tmp/{}", "x".repeat(4092)));
+                }),
+                false,
+            ),
+            (
+                Box::new(move |s| s.blocks[0].site = PathBuf::from(at_depth(MAX_PATH_DEPTH + 1))),
+                false,
+            ),
+            (
+                Box::new(move |s| {
+                    let root = at_depth(MAX_PATH_DEPTH + 1);
+                    s.finders[0].finder.root = Path::new(&root).into();
+                }),
+                false,
+            ),
+        ];
+        for (i, (bend, loads)) in cases.iter().enumerate() {
+            let mut s = sample();
+            bend(&mut s);
+            let written = check_limits(&s);
+            let read = decode(&encode(&s));
+            assert_eq!(written.is_ok(), *loads, "case {i}: writer {written:?}");
+            if *loads {
+                assert_eq!(read, Ok(s), "case {i}");
+            } else {
+                // Any refusal here must be the limit's.
+                let why = read.expect_err("the reader refuses it");
+                assert!(
+                    why.contains("2^62") || why.contains("deeper") || why.contains("longer"),
+                    "case {i}: the reader refused for another reason: {why}"
+                );
+            }
         }
     }
 }

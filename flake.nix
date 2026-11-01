@@ -135,10 +135,13 @@
       # the catalog they claim, and the composition examples from PRD.md
       # (diskgc-core's tests), so the docs and the code cannot drift. Only
       # this check sees them; the package and clippy do not.
+      # The committed proptest seeds (*.proptest-regressions beside a test)
+      # rerun first here as under `just check` (TASK-279).
       workspaceTestSrc = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.unions [
           workspaceFiles
+          (lib.fileset.fileFilter (f: f.hasExt "proptest-regressions") ./crates)
           ./docs/reference.md
           ./docs/safety.md
           ./docs/example.yaml
