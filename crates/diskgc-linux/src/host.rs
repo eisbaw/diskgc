@@ -5459,6 +5459,56 @@ mod tests {
         eprintln!("bound loop devices here: {listed:?}");
     }
 
+    /// `LOOP_GET_STATUS64`'s `lo_device` is `huge_encode_dev`'s encoding:
+    /// minor bits 0-7, major bits 8-19, minor bits 8-19 at 20-31
+    /// (include/linux/kdev_t.h, `new_encode_dev`).
+    #[test]
+    fn a_loop_status_device_number_decodes_as_the_kernel_encodes_it() {
+        let encode =
+            |major: u64, minor: u64| (minor & 0xff) | (major << 8) | ((minor & !0xff) << 12);
+        for (major, minor) in [(254, 1), (8, 0), (0, 42), (259, 300), (4095, 0xf_ffff)] {
+            assert_eq!(
+                decode_huge_dev(encode(major, minor)),
+                Dev {
+                    major: u32::try_from(major).expect("fits"),
+                    minor: u32::try_from(minor).expect("fits")
+                },
+                "{major}:{minor}"
+            );
+        }
+    }
+
+    /// Read-only on whatever host runs the tests: every configured loop
+    /// device answers `loop_backing_identity` without an error (a user
+    /// outside the `disk` group gets `Unavailable`, `EACCES`), and a loop
+    /// node that exists but is not bound answers `Detached` or
+    /// `Unavailable`, never an identity.
+    #[test]
+    fn loop_backing_identity_answers_for_every_loop_device_here() {
+        let host = LinuxHost::new().expect("host setup");
+        let Ok(entries) = std::fs::read_dir("/sys/block") else {
+            eprintln!("no sysfs here");
+            return;
+        };
+        for entry in entries {
+            let name = entry.expect("entry").file_name();
+            let Some(name) = name.to_str().filter(|n| n.starts_with("loop")) else {
+                continue;
+            };
+            let text = std::fs::read_to_string(format!("/sys/block/{name}/dev")).expect("dev");
+            let dev = parse_dev(text.as_bytes()).expect("MAJOR:MINOR");
+            let bound = Path::new(&format!("/sys/block/{name}/loop")).exists();
+            let identity = host.loop_backing_identity(dev).expect("an answer");
+            eprintln!("{name} ({dev}, bound {bound}): {identity:?}");
+            if !bound {
+                assert!(
+                    !matches!(identity, LoopIdentity::Known(_)),
+                    "{name}: an unbound device has no file"
+                );
+            }
+        }
+    }
+
     /// A sysfs `dev` file is `MAJOR:MINOR` and one newline, nothing else.
     #[test]
     fn a_sysfs_dev_file_parses_strictly() {
