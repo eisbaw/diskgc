@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: 2026-10-25 22:15
-updated_date: '2026-10-30T22:29:00Z'
+updated_date: '2026-11-01T01:02:00Z'
 labels:
   - test
   - flaky
@@ -35,6 +35,8 @@ RC QA on a11e77b: pytest_orphan_xdist_worker_keeps_session - the in_use verdict 
 Orchestrator 2026-10-25: widened to the class. Also pytest_live_basetemp_session_is_kept failed the same way on release-0.1 af3d503 (load 17-22). Product fails closed (no deletion), but on a host with sustained process churn reclaim may do nothing: investigate both the test (wait for quiescence or isolate the suite's process churn) and the product (settling rule under churn).
 
 2026-10-30: AC1 done in ab891e2 (test-only; just check exit 0, 1245 passed). AC2: the deterministic blocked-branch coverage already exists (diskgc-model tests/inuse.rs only_listings_with_new_pids_count_against_the_bound); the broader suite-churn investigation (container tests under full-suite load) remains open.
+
+2026-11-01 host measurement (read-only dry runs, master 25c8f8c dev build, uid 1000): 424 processes, load 3.7-4.7, 3 runs of ensure --dry-run --json --min-free 100% --select 'profile:pytest-tmp || profile:nix-shell-rc' /tmp: 0 in_use_unknown in all three (plan 146,769-146,796; in_use 6-8, producer_unknown 68-69, not_idle 18-41). Not reproduced on the laptop at this load; peak agent load (5-18, ~600-660 processes) not measured. The product risk stays open until measured under peak load.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
