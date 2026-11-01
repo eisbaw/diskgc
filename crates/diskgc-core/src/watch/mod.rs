@@ -43,7 +43,7 @@ use crate::executor::{
 };
 use crate::host::{Delete, Dev, Host, MonoTime, Timestamp};
 use crate::hostlock::{self, LockError, Readiness, ReclaimLock};
-use crate::invocation::{ConfigFile, Platform, Prepared, Selection, prepare};
+use crate::invocation::{Loaded, Platform, Prepared, Selection, prepare};
 use crate::report::json::Json;
 use crate::report::{ErrorCause, ErrorEntry, Report, Signal, Status};
 use crate::snapshot::writer::{StartLock, Writer};
@@ -209,14 +209,15 @@ pub struct Started<F> {
     pub sources: Vec<TallySource>,
 }
 
-/// The start sequence (docs/reference.md, Watch start), in its order; the
-/// first failure is the refusal. `state_dir` names the state directory for
-/// the log.
+/// The start sequence (docs/reference.md, Watch start), in its order, from
+/// step 1's [`Loaded`] ([`crate::invocation::load`], which the binary runs
+/// before its host startup); the first failure is the refusal. `state_dir`
+/// names the state directory for the log.
 pub fn start<H: Delete>(
     host: &H,
     mode: &Mode,
     selection: &Selection,
-    config: &ConfigFile,
+    loaded: &Loaded,
     platform: &Platform<'_>,
     state_dir: Option<&Path>,
     log: &mut dyn FnMut(&str),
@@ -225,8 +226,10 @@ pub fn start<H: Delete>(
     let refuse = |(cause, why): (ErrorCause, String)| {
         Refused::with(crate::invocation::refusal_status(cause), cause, path, why)
     };
-    // 1, and privileges: the configuration, the selection, root.
-    let prepared = prepare(host, selection, config, platform, log).map_err(refuse)?;
+    // 1 (the configuration and --select) is `load`'s and 2 (kernel,
+    // /proc) the host's startup, both before this. 3: privileges, and what
+    // depends on the user.
+    let prepared = prepare(host, selection, loaded, platform).map_err(refuse)?;
     let mut goal = match mode {
         Mode::Reclaim {
             min_free,
@@ -242,7 +245,7 @@ pub fn start<H: Delete>(
         }),
         Mode::TallyOnly { .. } => None,
     };
-    // 2. The pre-release sandbox gate, unless nothing can be deleted.
+    // 3. The pre-release sandbox gate, unless nothing can be deleted.
     if goal.is_some()
         && let Err(gate) = host.may_delete()
     {
@@ -255,7 +258,7 @@ pub fn start<H: Delete>(
             ),
         ));
     }
-    // 3. PATH, reached safely and held. The first sample is not a start
+    // 4. PATH, reached safely and held. The first sample is not a start
     //    check: a goal whose percentage needs it waits for one that works.
     let at = reach_path(host, path).map_err(|e| Refused::measure(path, e))?;
     let first = host.statvfs(&at.fd);
@@ -301,7 +304,7 @@ pub fn start<H: Delete>(
         },
         (Mode::Reclaim { .. }, None) => unreachable!("a reclaiming watch has a goal"),
     };
-    // 4. The lock reclaims take (docs/safety.md, Host lock): the host lock,
+    // 5. The lock reclaims take (docs/safety.md, Host lock): the host lock,
     // or for a non-root watch without it the per-user lock, made now in
     // reclaim mode; --tally-only makes nothing, it only names what it polls.
     let host_lock = hostlock::host_lock_path();
@@ -355,7 +358,7 @@ pub fn start<H: Delete>(
             )),
         }
     }
-    // 5. Supplied roots.
+    // 6. Supplied roots.
     prepared
         .refuse_missing_roots(host, selection)
         .map_err(refuse)?;
@@ -374,7 +377,7 @@ pub fn start<H: Delete>(
         }
     }
     let sources = executor::tally_sources(tiers.iter().copied());
-    // 6. The single-writer lock.
+    // 7. The single-writer lock.
     let (key, fallback) = snapshot::fs_key(host, at.stat.dev);
     if let Some(why) = fallback {
         log(&format!(
@@ -391,7 +394,7 @@ pub fn start<H: Delete>(
             StartLock::Held(why) => Refused::usage(ErrorCause::Usage, path, why),
             StartLock::Interrupted => Refused::stopped(),
         })?;
-    // 7. The seed.
+    // 8. The seed.
     let mut state = TallyState::new(crate::index::Index::new(crate::index::BUDGET_BYTES));
     if writer.has_lock() {
         let bound = sources

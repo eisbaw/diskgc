@@ -9,19 +9,19 @@
 
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use diskgc_core::invocation::{Platform, Selection};
+use diskgc_core::invocation::{self, Platform, Selection};
 use diskgc_core::report::{ErrorCause, ErrorEntry, Report, Status};
 use diskgc_core::units::{parse_duration, parse_size};
 use diskgc_core::watch::{self, Ended, Mode};
 use diskgc_linux::LinuxHost;
 
 use super::{
-    CATALOG, EXIT_OUTPUT_ERROR, builtins, draw_seed, env_state_dir, read_config, set, startup_in,
-    text, unknown_flag,
+    CATALOG, EXIT_OUTPUT_ERROR, StartupFailure, builtins, draw_seed, env_state_dir, read_config,
+    set, startup_in, text, unknown_flag,
 };
 
 /// `--interval`'s default and bounds (docs/reference.md, Watch flags).
@@ -220,31 +220,56 @@ fn log(line: &str) {
     let _ = writeln!(io::stderr().lock(), "diskgc: {line}");
 }
 
-/// A start failure: one JSON object under `--json`, and the exit code.
-fn refused(report: Option<Report>, exit_code: u8, json: bool) -> ExitCode {
-    if let (true, Some(report)) = (json, report) {
-        let mut out = io::stdout().lock();
-        if writeln!(out, "{}", report.to_json())
+/// A refusal (at start, or [`Ended::Refused`] after it): one JSON object
+/// under `--json` on `out`, and the exit code.
+fn refused(report: Option<Report>, exit_code: u8, json: bool, out: &mut dyn Write) -> ExitCode {
+    if let (true, Some(report)) = (json, report)
+        && writeln!(out, "{}", report.to_json())
             .and_then(|()| out.flush())
             .is_err()
-        {
-            return ExitCode::from(EXIT_OUTPUT_ERROR);
-        }
+    {
+        return ExitCode::from(EXIT_OUTPUT_ERROR);
     }
     ExitCode::from(exit_code)
 }
 
-/// Runs `watch` until a signal (exit 0), a start refusal (2 or 3) or a
-/// failed stdout write (3).
+/// A refusal of `watch` for `path` with no report of its own: logged, its
+/// report made ([`refused`]), exit 2 or 3 by `status`.
+fn fail(
+    path: &Path,
+    status: Status,
+    cause: ErrorCause,
+    why: String,
+    json: bool,
+    out: &mut dyn Write,
+) -> ExitCode {
+    log(&format!("error: {why}"));
+    let mut report = Report::new(status, Some(path), false);
+    report.errors.push(ErrorEntry::run(cause, why));
+    let code = report.exit_code();
+    refused(Some(report), code, json, out)
+}
+
+/// Runs `watch` until a signal (exit 0), a refusal (2, or 3 for a host
+/// failure at start) or a failed stdout write (3). The configuration and
+/// `--select` are checked ([`invocation::load`]) before the host starts:
+/// step 1 of docs/reference.md, Watch start, so a bad configuration is
+/// exit 2 even where the kernel or `/proc` checks would fail.
 pub(super) fn watch(args: &WatchArgs, json: bool) -> ExitCode {
+    watch_with(args, json, &startup_in, &mut io::stdout())
+}
+
+/// [`watch`] with its host startup and its stdout given (a test seam: the
+/// order of the start is what the tests hold).
+fn watch_with(
+    args: &WatchArgs,
+    json: bool,
+    startup_in: &dyn Fn(Option<PathBuf>) -> Result<LinuxHost, StartupFailure>,
+    out: &mut dyn Write,
+) -> ExitCode {
     let path = args.selection.path.as_path();
-    let fail = |status: Status, cause: ErrorCause, why: String| {
-        log(&format!("error: {why}"));
-        let mut report = Report::new(status, Some(path), false);
-        report.errors.push(ErrorEntry::run(cause, why));
-        let code = report.exit_code();
-        refused(Some(report), code, json)
-    };
+    let mut fail =
+        |status: Status, cause: ErrorCause, why: String| fail(path, status, cause, why, json, out);
     match LinuxHost::install_watch_handlers() {
         Ok(true) => {}
         Ok(false) => log("SIGHUP was ignored at start (nohup): it stays ignored"),
@@ -256,13 +281,6 @@ pub(super) fn watch(args: &WatchArgs, json: bool) -> ExitCode {
             );
         }
     }
-    let state_dir = env_state_dir();
-    // `'static`: the background tally's thread may outlive the loop if it
-    // is blocked in the kernel at the end (it is then left to the exit).
-    let host: &'static LinuxHost = match startup_in(state_dir.clone()) {
-        Ok(host) => Box::leak(Box::new(host)),
-        Err(failure) => return fail(failure.status(), failure.cause(), failure.message()),
-    };
     let config = match read_config(args.config.as_deref(), args.selection.allow_root) {
         Ok(config) => config,
         Err(why) => return fail(Status::UsageError, ErrorCause::Config, why),
@@ -273,11 +291,22 @@ pub(super) fn watch(args: &WatchArgs, json: bool) -> ExitCode {
         builtins: &builtins,
     };
     let mut log_mut = log;
+    let loaded = match invocation::load(&args.selection, &config, &platform, &mut log_mut) {
+        Ok(loaded) => loaded,
+        Err((cause, why)) => return fail(invocation::refusal_status(cause), cause, why),
+    };
+    let state_dir = env_state_dir();
+    // `'static`: the background tally's thread may outlive the loop if it
+    // is blocked in the kernel at the end (it is then left to the exit).
+    let host: &'static LinuxHost = match startup_in(state_dir.clone()) {
+        Ok(host) => Box::leak(Box::new(host)),
+        Err(failure) => return fail(failure.status(), failure.cause(), failure.message()),
+    };
     let started = match watch::start(
         host,
         &args.mode,
         &args.selection,
-        &config,
+        &loaded,
         &platform,
         state_dir.as_deref(),
         &mut log_mut,
@@ -289,25 +318,33 @@ pub(super) fn watch(args: &WatchArgs, json: bool) -> ExitCode {
                     log(&format!("error: {}", error.message));
                 }
             }
-            return refused(refusal.report.map(|r| *r), refusal.exit_code, json);
+            return refused(refusal.report.map(|r| *r), refusal.exit_code, json, out);
         }
     };
-    let mut write_record = |line: &str| -> Result<(), String> {
-        let mut out = io::stdout().lock();
-        writeln!(out, "{line}")
-            .and_then(|()| out.flush())
-            .map_err(|e| e.to_string())
+    let ended = {
+        let mut write_record = |line: &str| -> Result<(), String> {
+            writeln!(out, "{line}")
+                .and_then(|()| out.flush())
+                .map_err(|e| e.to_string())
+        };
+        let record: Option<watch::Record<'_>> = if json { Some(&mut write_record) } else { None };
+        watch::run_threaded(host, started, &draw_seed, record, &log)
     };
-    let record: Option<watch::Record<'_>> = if json { Some(&mut write_record) } else { None };
-    match watch::run_threaded(host, started, &draw_seed, record, &log) {
+    exit_of(ended, path, json, out)
+}
+
+/// How a started `watch` exits (docs/reference.md, Exit codes (`watch`)).
+/// A refusal after start ([`Ended::Refused`]: a percentage goal whose
+/// target, resolved at the first sample that worked, is below its
+/// minimum) is exit 2 with the usage-error object under `--json`, after
+/// the cycle records before it, as at start.
+fn exit_of(ended: Ended, path: &Path, json: bool, out: &mut dyn Write) -> ExitCode {
+    match ended {
         Ended::Stopped(_) => {
             log("stopped");
             ExitCode::SUCCESS
         }
-        Ended::Refused(why) => {
-            log(&format!("error: {why}"));
-            ExitCode::from(super::EXIT_USAGE)
-        }
+        Ended::Refused(why) => fail(path, Status::UsageError, ErrorCause::Usage, why, json, out),
         Ended::OutputFailed(why) => {
             log(&format!(
                 "error: could not write a record to stdout: {why}; exiting (the stream's \
@@ -328,6 +365,89 @@ mod tests {
 
     fn parse(list: &[&str]) -> Result<WatchArgs, String> {
         parse_watch(&args(list))
+    }
+
+    /// TASK-272: the configuration is step 1 of the start (docs/reference.md,
+    /// Watch start), before the host starts: a bad one is exit 2 with the
+    /// usage-error object (`config`) even where the host would fail (exit
+    /// 3), and the host is not started.
+    #[test]
+    fn watch_checks_the_configuration_before_the_host_starts() {
+        let bad = crate::tests::ConfigFixture::new("watch", crate::tests::BAD_CONFIG);
+        let w = parse(&["--tally-only", "--config", &bad.path(), "/tmp"]).expect("parses");
+        let started = std::cell::Cell::new(0);
+        let broken = |_: Option<PathBuf>| {
+            started.set(started.get() + 1);
+            Err(StartupFailure::Host(
+                "open /proc: EACCES (a test)".to_owned(),
+            ))
+        };
+        let mut out = Vec::new();
+        let code = watch_with(&w, true, &broken, &mut out);
+        assert_eq!(code, ExitCode::from(2));
+        assert_eq!(
+            started.get(),
+            0,
+            "the host started before the configuration"
+        );
+        let object: serde_json::Value = serde_json::from_slice(&out).expect("one JSON object");
+        assert_eq!(object["status"], "usage_error", "{object}");
+        assert_eq!(object["exit_code"], 2, "{object}");
+        assert_eq!(object["errors"][0]["cause"], "config", "{object}");
+        // A configuration that loads: the host's failure is exit 3.
+        let good = crate::tests::ConfigFixture::new("watch-good", "version: 1\n");
+        let w = parse(&[
+            "--tally-only",
+            "--config",
+            &good.path(),
+            "--select",
+            "profile:cargo-target",
+            "--roots",
+            "/tmp",
+            "/tmp",
+        ])
+        .expect("parses");
+        let mut out = Vec::new();
+        assert_eq!(watch_with(&w, true, &broken, &mut out), ExitCode::from(3));
+        assert_eq!(started.get(), 1);
+        let object: serde_json::Value = serde_json::from_slice(&out).expect("one JSON object");
+        assert_eq!(object["errors"][0]["cause"], "host", "{object}");
+    }
+
+    /// TASK-272: a refusal after start ([`Ended::Refused`]) is exit 2 and,
+    /// under `--json`, the usage-error object every refusal prints; without
+    /// `--json`, nothing on stdout.
+    #[test]
+    fn a_late_refusal_prints_the_usage_error_object_and_exits_2() {
+        let why = "--target-free (100 bytes) is below --min-free (200 bytes)";
+        let mut out = Vec::new();
+        let code = exit_of(
+            Ended::Refused(why.to_owned()),
+            Path::new("/tmp"),
+            true,
+            &mut out,
+        );
+        assert_eq!(code, ExitCode::from(2));
+        let text = String::from_utf8(out).expect("UTF-8");
+        assert_eq!(text.lines().count(), 1, "{text}");
+        let object: serde_json::Value = serde_json::from_str(&text).expect("a JSON object");
+        assert_eq!(object["status"], "usage_error", "{object}");
+        assert_eq!(object["exit_code"], 2, "{object}");
+        assert_eq!(object["errors"][0]["cause"], "usage", "{object}");
+        assert_eq!(object["errors"][0]["message"], why, "{object}");
+        assert!(
+            object.get("watch").is_none(),
+            "not a cycle record: {object}"
+        );
+        let mut out = Vec::new();
+        let code = exit_of(
+            Ended::Refused(why.to_owned()),
+            Path::new("/tmp"),
+            false,
+            &mut out,
+        );
+        assert_eq!(code, ExitCode::from(2));
+        assert!(out.is_empty());
     }
 
     #[test]

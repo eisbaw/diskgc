@@ -334,10 +334,23 @@ impl ProfileVector {
             draw_seed: &draw_seed,
             builtins: &offered,
         };
+        // The binary's order: the configuration and `--select` first,
+        // then the run on the host.
+        let loaded = match invocation::load(
+            &options.selection(),
+            &self.config_file(),
+            &platform,
+            &mut |_| {},
+        ) {
+            Ok(loaded) => loaded,
+            Err((cause, why)) => {
+                return Ok(invocation::refused(&options, cause, why, &mut |_| {}));
+            }
+        };
         Ok(invocation::ensure(
             host,
             &options,
-            &self.config_file(),
+            &loaded,
             &platform,
             &mut |_| {},
             &mut |_| {},

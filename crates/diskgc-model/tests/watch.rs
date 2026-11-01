@@ -16,9 +16,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::host;
-use diskgc_core::invocation::{Catalog, ConfigFile, Platform, Selection};
+use diskgc_core::host::Host;
+use diskgc_core::invocation::{self, Catalog, ConfigFile, Platform, Selection};
 use diskgc_core::profile::{Library, parse_profiles};
 use diskgc_core::report::Signal;
+use diskgc_core::report::{ErrorEntry, Report};
 use diskgc_core::units::parse_size;
 use diskgc_core::watch::{self, Ended, Mode};
 use diskgc_model::ModelHost;
@@ -151,7 +153,7 @@ fn watch_with(
     };
     let mut lines: Vec<String> = Vec::new();
     let mut records: Vec<(Duration, Value)> = Vec::new();
-    let started = watch::start(
+    let started = start(
         host,
         mode,
         selection,
@@ -187,6 +189,30 @@ fn watch_with(
         records,
         ended,
     }
+}
+
+/// The binary's start: step 1 ([`invocation::load`]: the configuration
+/// and `--select`, before the host), then [`watch::start`]. A refusal of
+/// step 1 is the object and exit code the binary prints for it.
+fn start(
+    host: &ModelHost,
+    mode: &Mode,
+    selection: &Selection,
+    config: &ConfigFile,
+    platform: &Platform<'_>,
+    state_dir: Option<&Path>,
+    log: &mut dyn FnMut(&str),
+) -> Result<watch::Started<<ModelHost as Host>::Fd>, watch::Refused> {
+    let loaded = invocation::load(selection, config, platform, log).map_err(|(cause, why)| {
+        let status = invocation::refusal_status(cause);
+        let mut report = Report::new(status, Some(&selection.path), false);
+        report.errors.push(ErrorEntry::run(cause, why));
+        watch::Refused {
+            exit_code: report.exit_code(),
+            report: Some(Box::new(report)),
+        }
+    })?;
+    watch::start(host, mode, selection, &loaded, platform, state_dir, log)
 }
 
 fn deletions(host: &ModelHost) -> usize {
@@ -658,7 +684,7 @@ fn watch_tally_only_min_free_guards_the_write_on_the_watched_filesystem() {
         builtins: &builtins,
     };
     let mut lines = Vec::new();
-    let started = watch::start(
+    let started = start(
         &host,
         &Mode::TallyOnly {
             min_free: Some(parse_size("1G").unwrap()),
@@ -846,7 +872,7 @@ fn a_failed_record_write_ends_watch_at_once() {
         builtins: &builtins,
     };
     let mut lines = Vec::new();
-    let started = watch::start(
+    let started = start(
         &host,
         &reclaim("2G", "3G", "10s"),
         &selection(),
@@ -915,7 +941,7 @@ fn a_failed_background_listing_keeps_the_next_cycle_off_the_index() {
         ..selection()
     };
     let mut lines = Vec::new();
-    let started = watch::start(
+    let started = start(
         &host,
         &reclaim("2G", "3G", "10s"),
         &selection,
@@ -1173,6 +1199,45 @@ fn a_failing_first_sample_is_the_first_cycle_and_the_goal_resolves_later() {
     // works ends the back-off.
     assert!(run.has("space recovered"), "{:?}", run.lines);
     assert_eq!(deletions(&host), 0);
+}
+
+/// TASK-272: a percentage `--target-free` below `--min-free` can only be
+/// told at the first sample that works. When the start's failed, that is
+/// in the loop: `watch` ends refused (exit 2 and the usage-error object in
+/// the binary, `a_late_refusal_prints_the_usage_error_object_and_exits_2`)
+/// after the cycle of the failed sample, deleting nothing and writing no
+/// snapshot.
+#[test]
+fn a_percentage_target_below_its_minimum_told_after_start_is_refused() {
+    let events = "events:\n  \
+                  - {at: {op: statvfs, path: /tmp, nth: 1, when: before}, fail: EIO}\n  \
+                  - {at: {op: statvfs, path: /tmp, nth: 2, when: before}, fail: EIO}\n  \
+                  - {at: {elapsed: 5m}, signal: term}\n";
+    let host = host(&yaml("5G", &old_candidates(2, "1M"), events));
+    let mode = Mode::Reclaim {
+        min_free: parse_size("30%").unwrap(),
+        target_free: parse_size("20%").unwrap(),
+        interval: Duration::from_secs(10),
+        timeout: Duration::from_secs(60),
+    };
+    let run = watch(&host, &mode);
+    match &run.ended {
+        Ok(Ended::Refused(why)) => assert!(why.contains("below --min-free"), "{why}"),
+        other => panic!("not refused after start: {other:?}; {:?}", run.lines),
+    }
+    assert_eq!(
+        run.records.len(),
+        1,
+        "the failed sample's cycle: {:?}",
+        run.records
+    );
+    assert_eq!(run.records[0].1["status"], "error");
+    assert!(
+        host.elapsed() < Duration::from_secs(5 * 60),
+        "ended before the signal"
+    );
+    assert_eq!(deletions(&host), 0);
+    assert_eq!(host.trace_count(Op::StateWrite), 0);
 }
 
 /// docs/testing.md `watch_failed_samples_back_off`: `statvfs` of the

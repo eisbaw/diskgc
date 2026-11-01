@@ -54,8 +54,8 @@ pub use preflight::{
     CAP_SYS_PTRACE, MeasureFailure, PrivilegeError, goal_bytes, privileges, reach_path,
 };
 pub use tier::{
-    FsUnionSource, NegatedKind, NegatedSource, ProtectedKind, ProtectedSource, SELECT_TIER,
-    SelectionFailure, SourceKind, Tier, bind_protections,
+    CompiledSelection, FsUnionSource, NegatedKind, NegatedSource, ProtectedKind, ProtectedSource,
+    SELECT_TIER, SelectionFailure, SourceKind, Tier, bind_protections,
 };
 // Shared between the entry points here and the sibling modules, which
 // import them by name from here (no glob: the source scan's sandbox-gate

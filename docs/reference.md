@@ -301,20 +301,27 @@ reload (Watch signals: SIGHUP stops `watch`). Validate first with
 In this order; the first failure exits with its code and deletes nothing:
 
 1. Command line, configuration and the `--select` expression: exit 2 as
-   for `ensure` (Configuration file, Selection grammar).
-2. Running as root without `--allow-root`, or `--allow-root` not as root
+   for `ensure` (Configuration file, Selection grammar). Nothing on the
+   machine is read for this step, so a bad configuration (what `check`
+   reports) or expression is exit 2 even where the next step would fail.
+2. Kernel and `/proc` requirements ([architecture.md](architecture.md#deployment)):
+   exit 2 when unsupported (a kernel older than 5.8), 3 when one of their
+   operations fails (`/proc` cannot be opened or is not this process's
+   pid namespace's, `pidfd_open` refused). Raise `RLIMIT_NOFILE` as
+   `ensure` does (Open-file limit under `ensure`).
+3. Running as root without `--allow-root`, or `--allow-root` not as root
    or without `CAP_SYS_PTRACE` ([safety.md](safety.md#privileges)): exit 2
-   (`safety`); a capability set that cannot be read: exit 3 (`host`). In a
+   (`safety`); a capability set that cannot be read: exit 3 (`host`). The
+   configuration's checks that depend on the user diskgc runs as
+   (`owners:` names, `protect` and tier roots with `{uid}`): exit 2. In a
    development build, the pre-release sandbox gate: exit 2 outside a test
    container ([safety.md](safety.md#pre-release-sandbox-gate)); not with
    `--tally-only`, which deletes nothing.
-3. `PATH` (absolute, reached safely, [safety.md](safety.md#path-traversal)),
-   kernel and `/proc` requirements ([architecture.md](architecture.md#deployment)):
-   exit 2 when unsupported or invalid, 3 when an operation fails before
-   `PATH` is open. The first space sample is not a start check: if it
-   fails, it is the first cycle (The reclaim cycle). Raise
-   `RLIMIT_NOFILE` as `ensure` does (Open-file limit under `ensure`).
-4. The lock its cycles take ([safety.md](safety.md#host-lock)): one its
+4. `PATH` (absolute, reached safely, [safety.md](safety.md#path-traversal)):
+   exit 2 when invalid, 3 when an operation fails before `PATH` is open.
+   The first space sample is not a start check: if it fails, it is the
+   first cycle (The reclaim cycle).
+5. The lock its cycles take ([safety.md](safety.md#host-lock)): one its
    cycles could never take (the host lock not a regular file or missing
    as root, an unsafe per-user lock) exits 2 (`cause: provisioning`,
    with what to fix), since a watcher that can never reclaim must fail
@@ -324,8 +331,8 @@ In this order; the first failure exits with its code and deletes nothing:
    taken. `--tally-only` makes nothing: it names the lock it polls, or
    warns about a host lock it cannot use (a missing one reads as not
    held).
-5. Supplied roots that do not exist: exit 2, as for `ensure`.
-6. The single-writer lock: waited for at most 10 s (an `ensure` holds it
+6. Supplied roots that do not exist: exit 2, as for `ensure`.
+7. The single-writer lock: waited for at most 10 s (an `ensure` holds it
    only while writing); still held exits 2 (`cause: usage`, naming the
    other process's filesystem key and the state directory). Failing to
    create the state directory or the lock file (`ENOSPC` on a full
@@ -334,7 +341,7 @@ In this order; the first failure exits with its code and deletes nothing:
    and tries to create and take the lock again at every 5-minute
    snapshot tick (a lock then found held is one log line, never an
    exit).
-7. Load a valid snapshot as the seed of the live index
+8. Load a valid snapshot as the seed of the live index
    ([architecture.md](architecture.md#the-tally), Validity), start the
    background tally, and take the first sample at once.
 
@@ -458,13 +465,14 @@ What is not a record, and why:
 - **No heartbeat.** Whether `watch` is alive is the supervisor's
   knowledge (process state, `systemctl is-active`); a heartbeat in the
   data stream would mix liveness into the record of actions.
-- **No start or stop record.** A start failure prints the error object
+- **No start or stop record.** A refusal prints the error object
   every command prints (it has a non-null `exit_code`); a successful start
   and a stop are stderr log lines. A cycle a signal stopped is a record
   with status `interrupted`.
 
-Every line is therefore a cycle report, except a single start-failure
-object as the only line. Consumers ignore unknown fields; a future kind of
+Every line is therefore a cycle report, except a refusal object
+(Exit codes (`watch`)): a start failure's, as the only line, or the one
+after start, as the last line. Consumers ignore unknown fields; a future kind of
 record would be told apart by a new top-level field, never by reusing
 these. A failed stdout write (a closed pipe, a full disk under the
 redirect) exits 3 at once, as for every command: the machine interface
@@ -538,8 +546,12 @@ keeps protecting the disk).
 | Code | Meaning |
 |---|---|
 | 0 | Stopped by SIGTERM, SIGINT or SIGHUP. |
-| 2 | Refused at start: usage, configuration, privilege (`safety`), the sandbox gate, a lock its cycles cannot take (`provisioning`: [safety.md](safety.md#host-lock)), a supplied root missing, or another `watch` holding the filesystem's single-writer lock. Nothing was deleted. |
+| 2 | Refused at start: usage, configuration, privilege (`safety`), the sandbox gate, a lock its cycles cannot take (`provisioning`: [safety.md](safety.md#host-lock)), a supplied root missing, or another `watch` holding the filesystem's single-writer lock. Nothing was deleted. Or refused after start, once: a percentage `--target-free` that, resolved at the first sample that works (the start's failed), is below `--min-free` (`cause: usage`; the cycles before it, if any, each ended at its failed sample and deleted nothing). |
 | 3 | A host operation failed at start before `PATH` was open (`/proc`, the kernel checks), or writing stdout failed at any time. |
+
+Each refusal, at start or after it, prints with `--json` the one object
+every command prints on an error (Output: `status`, `exit_code`,
+`errors`).
 
 A cycle's outcome never ends the process: environment errors (a backend
 down, the host lock held, a sample that fails, also the first one; a
@@ -943,7 +955,10 @@ reclaiming run, available space decides 0, 75, 124, 3 and 1 by a fresh
 sample: a sample that could not be taken is a run error (3); 75 and 124
 require a fresh sample below `--min-free`. An I/O failure in the first
 sample or startup host check is exit 3; an invalid `PATH` or unsupported
-kernel remains exit 2. A dry run with a host
+kernel remains exit 2. The configuration (what `check` reports) and the
+`--select` expression are checked before that startup check, without
+reading anything on the machine, so a bad one is exit 2 even where the
+startup check would fail. A dry run with a host
 or planning error also exits 3, reports its partial plan and errors, and
 uses `avail_after_bytes: null` when its final sample failed. The JSON
 `status` of each: 2 `usage_error` (also for a refusal to

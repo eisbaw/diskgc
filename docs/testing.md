@@ -811,7 +811,13 @@ Model scenarios required by [safety.md](safety.md) and
     error;
   - `watch_start_refusals` (the gate, the host lock file, a target below
     the minimum: `watch_start_refusals`; the usage errors: the binary's
-    `watch_usage_errors_say_why`; `second_watch_exits_2` and
+    `watch_usage_errors_say_why`; an invalid configuration exit 2 before
+    the host starts, which would fail with exit 3: the binary's
+    `watch_checks_the_configuration_before_the_host_starts`, and
+    `ensure_checks_the_configuration_before_the_host_starts` for
+    `ensure`; the refusal after start and its JSON object: the binary's
+    `a_late_refusal_prints_the_usage_error_object_and_exits_2`;
+    `second_watch_exits_2` and
     `a_signal_during_the_start_wait_exits_0_writing_nothing`; the rest
     *open*; one case per row of the start sequence):
     usage (no `--target-free`; `--interval 0`; `--tally-only` with

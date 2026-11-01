@@ -723,8 +723,20 @@ fn draw_seed() -> Result<u64, String> {
 
 /// Runs `ensure`; every error is already in the report. The decisions are
 /// `diskgc_core::invocation::ensure`'s; this wires it to `LinuxHost`, the
-/// configuration file's bytes and the build's catalog.
+/// configuration file's bytes and the build's catalog. The configuration
+/// and `--select` are checked ([`invocation::load`]) before the host
+/// starts, so a bad configuration is exit 2 even where the kernel or
+/// `/proc` checks would fail (docs/reference.md, Exit codes (`ensure`)).
 fn ensure(args: &EnsureArgs) -> Report {
+    ensure_with(args, &startup)
+}
+
+/// [`ensure`] with its host startup given (a test seam: the order of the
+/// start is what the tests hold).
+fn ensure_with(
+    args: &EnsureArgs,
+    startup: &dyn Fn() -> Result<LinuxHost, StartupFailure>,
+) -> Report {
     // Every error is logged where it is recorded: here for those found
     // before the composition runs, by the composition for its own. Each
     // starts from the options' report, so it says what was asked for (the
@@ -742,10 +754,6 @@ fn ensure(args: &EnsureArgs) -> Report {
             format!("install signal handlers: {error}"),
         );
     }
-    let host = match startup() {
-        Ok(host) => host,
-        Err(failure) => return fail(failure.status(), failure.cause(), failure.message()),
-    };
     let config = match read_config(args.config.as_deref(), args.options.allow_root) {
         Ok(config) => config,
         Err(why) => return fail(Status::UsageError, ErrorCause::Config, why),
@@ -755,7 +763,15 @@ fn ensure(args: &EnsureArgs) -> Report {
         draw_seed: &draw_seed,
         builtins: &builtins,
     };
-    invocation::ensure(&host, &args.options, &config, &platform, &mut log, &mut log)
+    let loaded = match invocation::load(&args.options.selection(), &config, &platform, &mut log) {
+        Ok(loaded) => loaded,
+        Err((cause, why)) => return invocation::refused(&args.options, cause, why, &mut log),
+    };
+    let host = match startup() {
+        Ok(host) => host,
+        Err(failure) => return fail(failure.status(), failure.cause(), failure.message()),
+    };
+    invocation::ensure(&host, &args.options, &loaded, &platform, &mut log, &mut log)
 }
 
 /// The embedded built-in profiles, before [`CATALOG`] narrows them; an
@@ -1227,6 +1243,95 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
+    }
+
+    /// A configuration file of `text` in a fresh directory under the
+    /// test's temporary directory (the dev shell's `tmp/system`), removed
+    /// on drop.
+    pub(super) struct ConfigFixture(PathBuf);
+
+    impl ConfigFixture {
+        pub(super) fn new(name: &str, text: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("t272-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("temporary directory");
+            std::fs::write(dir.join("config.yaml"), text).expect("write the configuration");
+            Self(dir)
+        }
+
+        pub(super) fn path(&self) -> String {
+            self.0
+                .join("config.yaml")
+                .to_str()
+                .expect("UTF-8")
+                .to_owned()
+        }
+    }
+
+    impl Drop for ConfigFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A configuration whose tier names a profile that does not exist:
+    /// what `check` reports as invalid.
+    pub(super) const BAD_CONFIG: &str = "version: 1\ngroups:\n  - name: g\n    tiers:\n      - name: t\n        select: profile:missing\n";
+
+    /// TASK-272: the configuration is step 1, before the host starts (the
+    /// kernel and `/proc` checks): a bad one is exit 2 (`config`) even
+    /// where the host would fail (exit 3), and the host is not started.
+    #[test]
+    fn ensure_checks_the_configuration_before_the_host_starts() {
+        let bad = ConfigFixture::new("ensure", BAD_CONFIG);
+        let a = ensure_args(&[
+            "--dry-run",
+            "--config",
+            &bad.path(),
+            "--min-free",
+            "1G",
+            "/tmp",
+        ])
+        .expect("parses");
+        let started = std::cell::Cell::new(0);
+        let broken = || {
+            started.set(started.get() + 1);
+            Err(StartupFailure::Host(
+                "open /proc: EACCES (a test)".to_owned(),
+            ))
+        };
+        let report = ensure_with(&a, &broken);
+        assert_eq!(report.status, Status::UsageError, "{}", report.to_json());
+        assert_eq!(report.errors[0].cause, ErrorCause::Config);
+        assert!(
+            report.errors[0].message.contains("profile:missing")
+                || report.errors[0].message.contains("missing"),
+            "{}",
+            report.to_json()
+        );
+        assert_eq!(
+            started.get(),
+            0,
+            "the host started before the configuration"
+        );
+        // A configuration that loads: the host's failure is the run's.
+        let good = ConfigFixture::new("ensure-good", "version: 1\n");
+        let a = ensure_args(&[
+            "--dry-run",
+            "--config",
+            &good.path(),
+            "--min-free",
+            "1G",
+            "--select",
+            "profile:cargo-target",
+            "--roots",
+            "/tmp",
+            "/tmp",
+        ])
+        .expect("parses");
+        let report = ensure_with(&a, &broken);
+        assert_eq!(report.status, Status::Error, "{}", report.to_json());
+        assert_eq!(report.errors[0].cause, ErrorCause::Host);
+        assert_eq!(started.get(), 1);
     }
 
     fn ensure_args(list: &[&str]) -> Result<EnsureArgs, String> {

@@ -229,6 +229,22 @@ pub enum SourceKind {
     DockerImages,
 }
 
+/// `--select EXPR` checked against a library and its roots bound
+/// ([`Tier::compile_selection`]), before the user it runs for is known.
+#[derive(Debug, Clone)]
+pub struct CompiledSelection {
+    expr: String,
+    checked: select::Checked,
+    bound: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl CompiledSelection {
+    /// The parser's nonfatal redundancy warnings.
+    pub fn warnings(&self) -> &[String] {
+        self.checked.warnings()
+    }
+}
+
 /// An explicit caller selection failed before it became a runnable tier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectionFailure {
@@ -268,6 +284,21 @@ impl Tier {
         roots: Option<&[String]>,
         uid: u32,
     ) -> Result<(Tier, Vec<String>), SelectionFailure> {
+        let compiled = Self::compile_selection(expr, library, roots)?;
+        let tier = Self::from_selection(&compiled, library, uid)?;
+        Ok((tier, compiled.checked.warnings().to_vec()))
+    }
+
+    /// The part of [`Self::select_with_warnings`] that does not depend on
+    /// the user: `expr` parsed and checked against `library`, and its
+    /// roots bound (with `--roots`, `roots`). `ensure` and `watch` do it
+    /// before they read anything on the machine
+    /// ([`crate::invocation::load`]).
+    pub fn compile_selection(
+        expr: &str,
+        library: &Library,
+        roots: Option<&[String]>,
+    ) -> Result<CompiledSelection, SelectionFailure> {
         let checked = select::compile(expr, library)
             .map_err(|error| SelectionFailure::Parse(error.to_string()))?;
         let bound = library.bind_roots(&checked, roots).map_err(|error| {
@@ -278,9 +309,28 @@ impl Tier {
             };
             SelectionFailure::Usage(format!("--select {expr:?}: {error}{hint}"))
         })?;
-        let tier = Self::from_checked(expr, &checked, library, &bound, uid)
-            .map_err(SelectionFailure::Usage)?;
-        Ok((tier, checked.warnings().to_vec()))
+        Ok(CompiledSelection {
+            expr: expr.to_owned(),
+            checked,
+            bound,
+        })
+    }
+
+    /// The tier of a [`CompiledSelection`] for the user `uid`, against the
+    /// `library` it was compiled with.
+    pub fn from_selection(
+        compiled: &CompiledSelection,
+        library: &Library,
+        uid: u32,
+    ) -> Result<Tier, SelectionFailure> {
+        Self::from_checked(
+            &compiled.expr,
+            &compiled.checked,
+            library,
+            &compiled.bound,
+            uid,
+        )
+        .map_err(SelectionFailure::Usage)
     }
 
     /// Compile a statically checked config tier using its already-bound
