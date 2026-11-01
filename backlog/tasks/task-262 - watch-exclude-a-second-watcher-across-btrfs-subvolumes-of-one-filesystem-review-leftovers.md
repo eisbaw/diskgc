@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-10-31T01:54:00Z'
-updated_date: '2026-11-01T05:37:00Z'
+updated_date: '2026-11-01T15:39:00Z'
 labels:
   - watch
 dependencies: []
@@ -23,4 +23,6 @@ From the TASK-32 review (Codex 10, mped N1): (1) watcher exclusion and the snaps
 
 <!-- SECTION:NOTES:BEGIN -->
 Periodic full review #2 on master 794e0e1 (2026-11-01; Codex tmp/reviews/codex-full2-794e0e1.md + mped), static reading, not reproduced. superseded by the one-filesystem-identity task (btrfs subvolumes, fs_key).
+
+2026-11-01: merged with TASK-286 after one review round (verification note on the merge).
 <!-- SECTION:NOTES:END -->
