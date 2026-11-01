@@ -355,12 +355,13 @@ fn a_deleted_but_open_file_is_reported_as_held_by_deleted_files() {
         process(11, &[]),
     ]));
     let (_, scan) = check_c(&host, true);
+    let mounts = host.mountinfo().expect("mountinfo");
     let tmp = Dev {
         major: 0,
         minor: 42,
     };
     assert_eq!(
-        scan.held_by_deleted_files(tmp),
+        scan.held_by_deleted_files(tmp, tmp, &mounts),
         vec![HeldByDeleted {
             pid: Pid(10),
             command: "tool".into(),
@@ -371,7 +372,7 @@ fn a_deleted_but_open_file_is_reported_as_held_by_deleted_files() {
         major: 254,
         minor: 1,
     };
-    assert_eq!(scan.held_by_deleted_files(root), vec![]);
+    assert_eq!(scan.held_by_deleted_files(root, root, &mounts), vec![]);
 }
 
 /// Two processes can hold the same unlinked inode. Both are actionable
@@ -383,11 +384,13 @@ fn a_deleted_file_shared_by_processes_is_counted_once() {
         process(11, &["fds: [{path: /tmp/gone, deleted: true}]"]),
     ]));
     let (_, scan) = check_c(&host, true);
+    let mounts = host.mountinfo().expect("mountinfo");
+    let tmp = Dev {
+        major: 0,
+        minor: 42,
+    };
     assert_eq!(
-        scan.held_by_deleted_files(Dev {
-            major: 0,
-            minor: 42,
-        }),
+        scan.held_by_deleted_files(tmp, tmp, &mounts),
         vec![
             HeldByDeleted {
                 pid: Pid(10),

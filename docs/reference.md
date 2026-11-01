@@ -285,10 +285,12 @@ filesystem exits 2 at start. The rule protects warmth and tally load,
 not safety: a second watcher with another state directory runs, and the
 host lock (or the user's per-user lock) still serialises its reclaims.
 The start line names the state
-directory. Two `PATH`s on one filesystem, or two btrfs
-subvolumes of one filesystem, are one filesystem: they share available
-space, so one watcher serves both. Watchers of different users or
-different filesystems run side by side; their reclaims are serialised by
+directory. Two `PATH`s on one filesystem, or on two btrfs
+subvolumes of one filesystem, are one filesystem
+([architecture.md](architecture.md#filesystem-matching): by the device
+mountinfo names, never a subvolume's own): they share available space
+and one snapshot key, so one watcher serves both and a second exits 2.
+Watchers of different users or different filesystems run side by side; their reclaims are serialised by
 the host lock ([safety.md](safety.md#host-lock); without it, only each
 user's own reclaims are, by the per-user lock) and their background
 tallies' duty cycles add up.
@@ -1240,7 +1242,9 @@ is `host`.
   but lock files; nothing to reclaim, not listed in the result`), so the
   tier's `N target(s) below` count adds up. It remains discoverable and may
   appear as an ineligible `empty` plan row in `--dry-run`.
-- A source root of a tier on another filesystem than `PATH`'s is not
+- A source root of a tier on another filesystem than `PATH`'s
+  ([architecture.md](architecture.md#filesystem-matching); another
+  subvolume of `PATH`'s btrfs is the same filesystem) is not
   searched (a negated profile's root is: its matches only exclude). It
   is one row per tier that has it (in `skipped`, or in `plan` for
   `--dry-run`), however many of the tier's sources share it: `candidate`
@@ -1254,13 +1258,16 @@ is `host`.
   space returns only when the process closes them; diskgc never kills
   processes. A file held by several processes contributes its allocated bytes
   once, to the lowest listed pid; the other holders appear with zero bytes.
-  On btrfs, mounted subvolumes with the same mountinfo source are included.
+  "On the requested filesystem" is by the mount each file was opened
+  through ([architecture.md](architecture.md#filesystem-matching)), so
+  every mounted subvolume of a btrfs counts.
   `command` is `null` when the process's command could not be read.
   It comes from the run's last process scan (one is made at the
   end if the run made none). It is `null` when that scan failed (diskgc
   out of file descriptors, the process list unreadable), stopped (the
   deadline, a signal) or did not settle (a process list that kept
-  growing), and when the run made no scan: a run that reclaimed nothing
+  growing), when the mount table could not be read after it, and when
+  the run made no scan: a run that reclaimed nothing
   because the goal was met, that ended before the reclaim (a usage error,
   a lock timeout), or that stopped before its end-of-run scan.
 - `overruns` lists operations that blocked past the deadline (see

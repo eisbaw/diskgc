@@ -124,6 +124,10 @@ pub struct EnvPath {
 pub struct HeldDeleted {
     pub pid: Pid,
     pub id: DevIno,
+    /// The mount it was opened through (`stx_mnt_id` of the descriptor),
+    /// if reported: what places it in a filesystem's space
+    /// ([`crate::places::space_of`]).
+    pub mnt_id: Option<u64>,
     /// Allocated bytes (`blocks` × 512; 0 if not reported).
     pub bytes: u64,
     /// The path the process opened it by, with ` (deleted)`; for messages.
@@ -201,7 +205,8 @@ pub(crate) struct Read {
     pub seen: Seen,
     pub uses: Vec<(DevIno, How)>,
     pub environ: Vec<(OsString, PathBuf)>,
-    pub deleted: Vec<(DevIno, u64, OsString)>,
+    /// Held open with no name left: identity, mount id, bytes, link text.
+    pub deleted: Vec<(DevIno, Option<u64>, u64, OsString)>,
     /// The environment could not be read (`Failed`) while every other
     /// reader worked; the heuristic then has no evidence from it.
     pub environ_failed: Option<HostError>,
@@ -334,7 +339,7 @@ impl Read {
                 .filter_map(|(e, keep)| keep.then_some(e)),
         );
         for d in other.deleted {
-            if !self.deleted.iter().any(|(id, _, _)| *id == d.0) {
+            if !self.deleted.iter().any(|(id, ..)| *id == d.0) {
                 self.deleted.push(d);
             }
         }
@@ -1114,8 +1119,10 @@ fn uses_of(pid: Pid, view: ProcView) -> Result<Read, ProcError> {
         read.uses.push((id, How::Fd(fd.fd)));
         if fd.target.stat.nlink == Some(0) && fd.target.stat.file_type == Some(FileType::Regular) {
             let bytes = fd.target.stat.blocks.unwrap_or(0).saturating_mul(512);
-            if !read.deleted.iter().any(|(seen, _, _)| *seen == id) {
-                read.deleted.push((id, bytes, fd.target.text.clone()));
+            if !read.deleted.iter().any(|(seen, ..)| *seen == id) {
+                let mnt_id = fd.target.stat.mnt_id;
+                read.deleted
+                    .push((id, mnt_id, bytes, fd.target.text.clone()));
             }
         }
     }

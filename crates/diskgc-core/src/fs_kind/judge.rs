@@ -63,14 +63,14 @@ use crate::units::{format_age, format_duration};
 
 /// What a candidate of one tier is judged by: the source's `find` (its own
 /// `where`), the walk's rules (owners, IPC policy, entry budget, checkout
-/// setting), the term's idle requirement, and the device of `PATH`'s
-/// filesystem.
+/// setting), the term's idle requirement, and the space of `PATH`'s
+/// filesystem ([`crate::places::space_of`]).
 #[derive(Debug, Clone, Copy)]
 pub struct Judge<'r> {
     pub find: &'r Find,
     pub rules: &'r Rules<'r>,
     pub idle: IdleWindow,
-    pub dev: Dev,
+    pub space: Dev,
 }
 
 /// What a walked candidate showed: the walk's record and its newest
@@ -311,13 +311,13 @@ impl Judge<'_> {
         {
             return Err(refused);
         }
-        if found.identity.id.dev != self.dev {
+        if found.space != self.space {
             return Err(Skip::new(
                 Reason::OtherFs,
                 found.path.clone(),
                 format!(
                     "on device {}, not on PATH's filesystem (device {})",
-                    found.identity.id.dev, self.dev
+                    found.space, self.space
                 ),
             ));
         }

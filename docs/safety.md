@@ -2299,8 +2299,9 @@ filesystem as it is then, whatever the tally or a plan said:
 
 1. **Place.** The deadline; the mount table, read now; the checkout
    guard's path rule (`contains_checkout`, No source checkout), another
-   filesystem than `PATH`'s (`other_fs`), a mount at or inside the
-   candidate (`contains_mount`, never touched).
+   filesystem than `PATH`'s (`other_fs`, by the mount discovery found it
+   on: [architecture.md](architecture.md#filesystem-matching)), a mount
+   at or inside the candidate (`contains_mount`, never touched).
 2. **Reached again** from its root, one directory at a time (Path
    traversal; the root's `mountinfo` line judged first), and it must be
    the object discovery found (identity; `changed`, or `missing` when
@@ -2489,12 +2490,13 @@ Each with the number of events outside diskgc it needs:
   processes on regular files with link count 0, per process, each file's
   allocated bytes counted once across all processes. Every holder is listed;
   when several processes hold one file, its bytes are attributed to the
-  lowest pid and the other holders show 0 bytes. On btrfs, mounted
-  subvolumes with the same mountinfo source are treated as one space pool.
-  An unmounted sibling subvolume, a subvolume visible only in another mount
-  namespace, or an alias of the same device with a different source string
-  may be omitted from the report. A deleted file that is only mapped (its fd
-  closed) is not listed. diskgc never kills processes.
+  lowest pid and the other holders show 0 bytes. A file is on the
+  requested filesystem when the mount it was opened through is
+  ([architecture.md](architecture.md#filesystem-matching)): every
+  mounted subvolume of a btrfs counts. A file opened through a mount of
+  another mount namespace counts only when its `st_dev` is `PATH`'s, so
+  one there on a sibling subvolume may be omitted. A deleted file that is
+  only mapped (its fd closed) is not listed. diskgc never kills processes.
 - **tmpfs:** if `/tmp` is a tmpfs, profiles under it only help a request for
   that tmpfs (filesystem matching), which is correct: it frees memory, not
   disk.
@@ -3239,9 +3241,10 @@ first failing step decides the reason.
      `backend_unavailable`. Only root can then have bound or replaced the
      socket, which is what makes the pin below mean something.
 3. **Filesystem.** The device of `/nix/store` must be the requested
-   filesystem's, otherwise `other_fs`. Matching is by device: on NixOS
+   filesystem's, otherwise `other_fs`. Matching is by filesystem
+   ([architecture.md](architecture.md#filesystem-matching)): on NixOS
    `/nix/store` is a read-only bind mount of the root filesystem (same
-   device, its own mount).
+   device in mountinfo, its own mount).
 4. **Connection.** diskgc pins the socket (`O_PATH | O_NOFOLLOW`), checks
    on that fd that it is a socket owned by root with the device and inode
    of step 2, then connects, sends the worker protocol's opening magic

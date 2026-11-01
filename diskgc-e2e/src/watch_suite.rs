@@ -337,6 +337,80 @@ pub fn watch_tally_pauses_while_another_process_holds_the_host_lock(ctx: &Ctx) -
     verdict.assert_clean()
 }
 
+/// TASK-286: a file bind mounted over the snapshot's lock file
+/// `index-<fs>.lock` (here from the watched tmpfs onto tester's home) puts
+/// the lock file on another filesystem, while the snapshot is still written
+/// into the state directory on the filesystem `watch` watches. The space
+/// guard places the state directory by its own descriptor, so the write
+/// that would take the home below `--min-free` is skipped (with the lock
+/// file's mount, it was written). Real kernel: the model has no file binds.
+pub fn watch_tally_only_guard_is_not_defeated_by_a_file_bind_over_its_lock(
+    ctx: &Ctx,
+) -> TestResult {
+    let (watched, _junk) = fixture(ctx)?;
+    const HOME: &str = "/home/tester";
+    let home_dev = rustix::fs::stat(HOME)
+        .map_err(|e| format!("stat {HOME}: {e}"))?
+        .st_dev;
+    // tmpfs: no UUID, so the key is the device mountinfo names (its st_dev).
+    let lock_name = format!(
+        "index-dev-{}-{}.lock",
+        rustix::fs::major(home_dev),
+        rustix::fs::minor(home_dev)
+    );
+    ctx.home.mkdirs(".local/state/diskgc", 0o700, TESTER)?;
+    let lock = ctx.home.write_file(
+        &format!(".local/state/diskgc/{lock_name}"),
+        b"",
+        0o600,
+        TESTER,
+    )?;
+    let decoy = watched.write_file("decoy.lock", b"", 0o600, TESTER)?;
+    rustix::mount::mount_bind(&decoy, &lock)
+        .map_err(|e| format!("bind {} over {}: {e}", decoy.display(), lock.display()))?;
+    ensure!(
+        rustix::fs::stat(&lock).map_err(|e| e.to_string())?.st_dev != home_dev,
+        "the lock file is now on the watched tmpfs"
+    );
+    let home_avail = {
+        let s = rustix::fs::statvfs(HOME).map_err(|e| format!("statvfs {HOME}: {e}"))?;
+        s.f_bavail * s.f_frsize
+    };
+    // One block below what is available now: any snapshot takes at least
+    // two (its blocks and one for the directory entry).
+    let min_free = kib(home_avail.saturating_sub(4096));
+    let oracle = Oracle::arm(Fixture::new())?;
+    let spawned = ctx.spawn_as_tester(
+        &ctx.diskgc(),
+        &[
+            "watch",
+            "--tally-only",
+            "--min-free",
+            &min_free,
+            "--config",
+            CONFIG,
+            "--select",
+            SELECT,
+            HOME,
+        ],
+    )?;
+    let pid = diskgc_pid(&spawned)?;
+    std::thread::sleep(Duration::from_secs(2));
+    signal(pid, libc::SIGTERM)?;
+    let run = spawned.wait()?;
+    let _ = rustix::mount::unmount(&lock, rustix::mount::UnmountFlags::DETACH);
+    let verdict = oracle.judge(&run)?;
+    run.expect_code(0)?;
+    ensure!(
+        run.stderr
+            .contains("not written: the state directory is on the reclaimed filesystem"),
+        "the guard did not hold: {}",
+        run.stderr
+    );
+    ensure!(!snapshot_written(), "a snapshot was written in {STATE_DIR}");
+    verdict.assert_clean()
+}
+
 /// Whether `pid` has exited (gone, or a zombie its parent has not reaped).
 fn exited(pid: i32) -> bool {
     match fs::read_to_string(format!("/proc/{pid}/stat")) {

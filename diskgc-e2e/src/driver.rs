@@ -590,7 +590,9 @@ fn held<H: Host>(host: &H, owner: u32, dir: &Path, out: &mut Lines<'_>) -> Resul
         None,
     )
     .map_err(|e| format!("scan: {e}"))?;
-    for h in scan.held_by_deleted_files(at.stat.dev) {
+    let mounts = host.mountinfo().map_err(|e| format!("mountinfo: {e}"))?;
+    let space = diskgc_core::places::space_of(&at.mount);
+    for h in scan.held_by_deleted_files(space, at.stat.dev, &mounts) {
         out.ok(format!(
             "held pid={} command={} bytes={}",
             h.pid,

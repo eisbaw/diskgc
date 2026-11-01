@@ -57,7 +57,9 @@ use super::source_anchor::{self, SourceEvidence};
 use super::{Find, is_private_tmp};
 use crate::engine::container_storage::{Above, check_listing};
 use crate::engine::{DEFAULT_MAX_ENTRIES, Identity, Reason, Seen, Skip, Work};
-use crate::host::{Base, DevIno, DirListing, Errno, FileType, Host, MonoTime, MountEntry, Stat};
+use crate::host::{
+    Base, Dev, DevIno, DirListing, Errno, FileType, Host, MonoTime, MountEntry, Stat,
+};
 use crate::outcome::Stop;
 use crate::profile::EntryType;
 use crate::resolve::{ResolveError, Resolved, Want, is_mount_point, open_beneath};
@@ -74,6 +76,10 @@ pub struct Found {
     /// Its identity when found (`statx`, not followed). Reached again, it
     /// must be the same object (`changed` otherwise).
     pub identity: Identity,
+    /// The space of the mount discovery found it on
+    /// ([`crate::places::space_of`]; never its `st_dev`, which on btrfs is
+    /// its subvolume's): `other_fs` unless it is `PATH`'s.
+    pub space: Dev,
     /// The recorded source that proved this output rebuildable when found.
     pub source_evidence: Option<SourceEvidence>,
     /// When it was found (after its `statx`): a liveness contract's scan
@@ -981,11 +987,32 @@ impl<H: Host> Walk<'_, H> {
             self.out.candidates.push((at.to_owned(), Err(skip)));
             return Ok(true);
         }
+        // Not a mount, yet another device than its directory's: the top of
+        // a btrfs subvolume nested there (TASK-286). It is on the same
+        // filesystem, but removing a subvolume is not claimed: kept out as
+        // `other_fs`, as before the space rule. What lies inside one is
+        // taken like anything on its mount.
+        if stat.dev != dir.stat.dev {
+            self.out.candidates.push((
+                at.to_owned(),
+                Err(Skip::new(
+                    Reason::OtherFs,
+                    at.to_owned(),
+                    format!(
+                        "on device {}, in a directory on device {} without a mount between: \
+                         the top of a nested btrfs subvolume, not taken",
+                        stat.dev, dir.stat.dev
+                    ),
+                )),
+            ));
+            return Ok(true);
+        }
         if self.record_structural {
             self.out.guard_candidates.push(Found {
                 root: self.root.to_owned(),
                 path: at.to_owned(),
                 identity,
+                space: crate::places::space_of(&dir.mount),
                 source_evidence: None,
                 found_at: self.host.now(),
                 seen: Seen::of(stat, &dir.stat),
@@ -1046,6 +1073,7 @@ impl<H: Host> Walk<'_, H> {
                 root: self.root.to_owned(),
                 path: at.to_owned(),
                 identity,
+                space: crate::places::space_of(&dir.mount),
                 source_evidence,
                 found_at: self.host.now(),
                 seen: Seen::of(stat, &dir.stat),

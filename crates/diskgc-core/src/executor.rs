@@ -88,7 +88,7 @@ use crate::engine::{Checkouts, Reason, Rules, Skip, UnknownCause};
 use crate::fs_kind::{self, Find};
 use crate::host::{
     Cause, CommandExit, CommandInvocation, CommandRun, Delete, Dev, Host, HostError, MonoTime,
-    MountEntry, SecondSignal, Space, Timestamp,
+    SecondSignal, Space, Timestamp,
 };
 use crate::hostlock::{self, HeldLock, LockError, ReclaimLock};
 use crate::inuse::{Checker, REUSE_LIMIT};
@@ -212,11 +212,13 @@ pub struct Request {
 /// cycle).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WatchCycle {
-    /// The device `PATH` resolved to at start. The cycle's own resolution
-    /// of `PATH` must find it (the one the cycle measures and reclaims
-    /// on); another one is an error of the host before anything is
-    /// deleted (a mount stacked on `PATH`).
-    pub expect_dev: Dev,
+    /// The space of the filesystem `PATH` resolved to at start
+    /// ([`crate::places::space_of`]). The cycle's own resolution of `PATH`
+    /// must find it (the one the cycle measures and reclaims on); another
+    /// one is an error of the host before anything is deleted (a mount of
+    /// another filesystem stacked on `PATH`). Another subvolume of the same
+    /// btrfs stacked there is the same space, and is not.
+    pub expect_space: Dev,
     /// The sample that triggered the cycle: the cycle's deadline
     /// (`--timeout`) and its `started_at` and `duration_ms` count from it,
     /// through the lock wait and the reclaim.
@@ -603,18 +605,19 @@ fn excluded(skip: &Skip) -> String {
     )
 }
 
-/// `other_fs` for a target on another filesystem than `PATH`'s: deleting
-/// it would free nothing there (docs/architecture.md, Filesystem
-/// matching). By device: a bind mount of the same filesystem frees the
-/// same space.
-fn other_fs(target: &Target, dev: Dev) -> Option<Skip> {
-    (target.identity.id.dev != dev).then(|| {
+/// `other_fs` for a target on another filesystem than `PATH`'s, whose
+/// space is `space`: deleting it would free nothing there
+/// (docs/architecture.md, Filesystem matching). By space
+/// ([`crate::places::space_of`]): a bind mount of the same filesystem, or
+/// another subvolume of its btrfs, frees the same space.
+fn other_fs(target: &Target, space: Dev) -> Option<Skip> {
+    (target.space != space).then(|| {
         Skip::new(
             Reason::OtherFs,
             target.path.clone(),
             format!(
-                "on device {}, not on PATH's filesystem (device {dev})",
-                target.identity.id.dev
+                "on device {}, not on PATH's filesystem (device {space})",
+                target.space
             ),
         )
     })
@@ -712,8 +715,8 @@ impl<'l> NotesOncePerRun<'l> {
 fn held<H: Host>(
     host: &H,
     checker: &mut Checker<'_>,
-    dev: Dev,
-    mount: &MountEntry,
+    space: Dev,
+    path_dev: Dev,
     deadline: Option<MonoTime>,
     log: &mut dyn FnMut(&str),
 ) -> Option<Vec<HeldEntry>> {
@@ -733,21 +736,19 @@ fn held<H: Host>(
         log("held_by_deleted_files: the process scan did not settle, unknown");
         return None;
     }
-    let mut devices = vec![dev];
-    if mount.fs_type == "btrfs" {
-        match host.mountinfo() {
-            Ok(mounts) => {
-                devices.extend(mounts.into_iter().filter_map(|other| {
-                    (other.fs_type == "btrfs" && other.source == mount.source).then_some(other.dev)
-                }));
-            }
-            Err(e) => log(&format!(
-                "held_by_deleted_files: cannot identify other btrfs subvolumes: {e}"
-            )),
+    // Each held file is placed by the mount it was opened through: every
+    // btrfs subvolume of PATH's filesystem is the same space (TASK-286).
+    let mounts = match host.mountinfo() {
+        Ok(mounts) => mounts,
+        Err(e) => {
+            log(&format!(
+                "held_by_deleted_files: the mount table cannot be read, unknown: {e}"
+            ));
+            return None;
         }
-    }
+    };
     Some(
-        scan.held_by_deleted_files_on(&devices)
+        scan.held_by_deleted_files(space, path_dev, &mounts)
             .into_iter()
             .map(|h| HeldEntry {
                 pid: h.pid.0,
@@ -977,7 +978,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let started = self.host.now();
         let rebound = docker_backend::inspect_backend(
             self.host,
-            self.measured.dev,
+            self.measured.space,
             docker_storage(self.tier),
         );
         self.record_overrun("preflight", &candidate, started, self.host.now());
@@ -1280,8 +1281,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             let held_files = held(
                 self.host,
                 &mut checker,
-                self.measured.dev,
-                &self.measured.at.mount,
+                self.measured.space,
+                self.measured.at.stat.dev,
                 self.deadline,
                 self.log,
             );
@@ -1443,7 +1444,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 );
                 continue;
             }
-            if let Some(skip) = other_fs(target, self.measured.dev) {
+            if let Some(skip) = other_fs(target, self.measured.space) {
                 self.skip(&target.path, &skip);
                 continue;
             }
@@ -1611,7 +1612,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 at_least: self.tier.idle_for,
                 before: self.tier.idle_before,
             },
-            dev: self.measured.dev,
+            space: self.measured.space,
         };
         // The index's queue first, then this tier's own discovery for what
         // the queue did not hold (docs/architecture.md, The reclaim walk).
@@ -1972,7 +1973,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 candidate,
                 &sources,
                 base_rules,
-                self.measured.dev,
+                self.measured.space,
                 tally_until,
             );
             self.record_overrun("retention", path, started, self.host.now());
@@ -2044,7 +2045,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     find: source.find,
                     rules: &evaluation_rules,
                     idle: source.idle,
-                    dev: self.measured.dev,
+                    space: self.measured.space,
                 };
                 let started = self.host.now();
                 let result = fs_kind::tally_for_union(self.host, &judge, found, tally_until);
@@ -2172,7 +2173,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                             find: source.find,
                             rules: &evaluation_rules,
                             idle: source.idle,
-                            dev: self.measured.dev,
+                            space: self.measured.space,
                         },
                         found,
                         checkouts: source.checkouts,
@@ -2599,8 +2600,9 @@ mod operator_message_tests {
 #[cfg(test)]
 mod best_fit_tests {
     use super::policy::{overlaps_in_filesystem, overlaps_with, screen_overlap_mounts};
-    use super::{CandidateQueue, Dev, MountEntry, Order};
+    use super::{CandidateQueue, Dev, Order};
     use crate::host::DevIno;
+    use crate::host::MountEntry;
     use std::path::{Path, PathBuf};
 
     #[test]

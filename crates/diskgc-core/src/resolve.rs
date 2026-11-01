@@ -853,7 +853,7 @@ pub(crate) mod tests {
             unreachable!()
         }
 
-        fn fs_uuid(&self, _: crate::host::Dev) -> Result<Option<String>, HostError> {
+        fn fs_uuid(&self, _: &MountEntry) -> Result<Option<String>, HostError> {
             unreachable!()
         }
 

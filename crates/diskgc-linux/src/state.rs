@@ -24,7 +24,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use diskgc_core::host::{
-    Dev, FileType, FsKey, HostError, MakeUserLock, StateFile, StateWritten, UserLockError,
+    FileType, FsKey, HostError, MakeUserLock, MountEntry, StateFile, StateWritten, UserLockError,
 };
 use diskgc_core::hostlock::USER_LOCK_NAME;
 use rustix::fs::{AtFlags, Mode, OFlags};
@@ -37,13 +37,6 @@ const DIR_MODE: u32 = 0o700;
 /// Mode of the files diskgc creates there (the umask can only narrow it).
 const FILE_MODE: u32 = 0o600;
 
-fn dev_of(st_dev: u64) -> Dev {
-    Dev {
-        major: rustix::fs::major(st_dev),
-        minor: rustix::fs::minor(st_dev),
-    }
-}
-
 fn file_type_of(st_mode: u32) -> FileType {
     FileType::from_mode(st_mode)
 }
@@ -53,7 +46,7 @@ fn file_type_of(st_mode: u32) -> FileType {
 /// snapshot replaced under diskgc). Symlinks on the way to it are followed,
 /// as for the configuration file: it is the user's own home layout.
 /// `ENOENT`: it does not exist.
-pub(crate) fn open_state_dir(dir: &Path) -> Result<(OwnedFd, Dev), HostError> {
+pub(crate) fn open_state_dir(dir: &Path) -> Result<OwnedFd, HostError> {
     let shown = dir.display().to_string();
     let fd = rustix::fs::open(
         dir,
@@ -75,7 +68,7 @@ pub(crate) fn open_state_dir(dir: &Path) -> Result<(OwnedFd, Dev), HostError> {
             ),
         ));
     }
-    Ok((fd, dev_of(st.st_dev)))
+    Ok(fd)
 }
 
 /// Opens (creating it, and the state directory, if absent) the
@@ -83,13 +76,15 @@ pub(crate) fn open_state_dir(dir: &Path) -> Result<(OwnedFd, Dev), HostError> {
 /// is ever written to it or renamed onto it (docs/architecture.md, Single
 /// writer). The directory is created mode 0700 with its missing parents;
 /// the file mode 0600, `O_NOFOLLOW` (a symlink there is refused), and it
-/// must be a regular file of this user. Returns the fd and the device of
-/// the state directory's filesystem.
+/// must be a regular file of this user. Returns the lock file's fd and
+/// path, and the state directory's fd: what the snapshot is written into,
+/// and so what its space guard samples and places (never the lock file's
+/// mount: a file can be bind mounted over the lock file).
 pub(crate) fn open_lock_file_ungated(
     dir: &Path,
     key: &FsKey,
-) -> Result<(OwnedFd, PathBuf, Dev), HostError> {
-    let (dir_fd, dir_dev) = match open_state_dir(dir) {
+) -> Result<(OwnedFd, PathBuf, OwnedFd), HostError> {
+    let dir_fd = match open_state_dir(dir) {
         Err(e) if e.is(diskgc_core::host::Errno::ENOENT) => {
             make_dirs_ungated(dir)?;
             open_state_dir(dir)?
@@ -124,7 +119,7 @@ pub(crate) fn open_lock_file_ungated(
             ),
         ));
     }
-    Ok((fd, path, dir_dev))
+    Ok((fd, path, dir_fd))
 }
 
 /// `mkdir -p dir`: each missing directory mode 0700 (the umask can only
@@ -351,7 +346,7 @@ pub(crate) fn read_snapshot(
     proc: BorrowedFd<'_>,
 ) -> Result<Option<StateFile>, HostError> {
     let dir_fd = match open_state_dir(dir) {
-        Ok((fd, _)) => fd,
+        Ok(fd) => fd,
         Err(e) if e.is(diskgc_core::host::Errno::ENOENT) => return Ok(None),
         Err(e) => return Err(e),
     };
@@ -440,7 +435,7 @@ pub(crate) fn write_snapshot_ungated(
     proc: BorrowedFd<'_>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<StateWritten, HostError> {
-    let (dir_fd, _) = open_state_dir(dir)?;
+    let dir_fd = open_state_dir(dir)?;
     let target = key.snapshot_name();
     let shown = dir.join(&target).display().to_string();
     if !is_lock_of(&dir_fd, key, lock)? {
@@ -516,25 +511,38 @@ pub(crate) fn write_snapshot_ungated(
     promote(&dir_fd).map(|()| StateWritten::Replaced)
 }
 
-/// The UUID of the filesystem whose files report `dev`, from the udev
-/// links `/dev/disk/by-uuid/<uuid>` (the link whose block device has that
-/// number); `None` without such a link, or without the directory (a
-/// container, a system without udev). Read-only: names are listed and
-/// their targets `stat`ed, nothing is opened.
-pub(crate) fn fs_uuid(dev: Dev) -> Result<Option<String>, HostError> {
+/// The UUID of the filesystem `mount` shows: the name of the
+/// `/dev/disk/by-uuid` link whose block device is the filesystem's. That
+/// device is the mount's own (mountinfo's major:minor), or for btrfs, whose
+/// superblock has an anonymous device (major 0) shared by every subvolume,
+/// the block device mountinfo names as its source (a `/dev/` path; every
+/// member device of a btrfs carries the one filesystem UUID). A source that
+/// is gone (`ENOENT`, `ENOTDIR`) or no block device gives no UUID from it.
+/// `None`: no link names it (tmpfs, an overlay, a container or a system
+/// without udev). Read-only: names are listed and their targets `stat`ed,
+/// nothing is opened.
+pub(crate) fn fs_uuid(mount: &MountEntry) -> Result<Option<String>, HostError> {
     const BY_UUID: &str = "/dev/disk/by-uuid";
+    let mut wanted = vec![rustix::fs::makedev(mount.dev.major, mount.dev.minor)];
+    if mount.fs_type == "btrfs" && mount.dev.major == 0 && mount.source.starts_with("/dev/") {
+        match rustix::fs::stat(mount.source.as_str()) {
+            Ok(st) if file_type_of(st.st_mode) == FileType::BlockDevice => wanted.push(st.st_rdev),
+            Ok(_) => {}
+            Err(e) if e == rustix::io::Errno::NOENT || e == rustix::io::Errno::NOTDIR => {}
+            Err(e) => return Err(HostError::errno("stat", &mount.source, errno_of(e))),
+        }
+    }
     let entries = match std::fs::read_dir(BY_UUID) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(io_error("read_dir", BY_UUID, &e)),
     };
-    let want = rustix::fs::makedev(dev.major, dev.minor);
     for entry in entries {
         let entry = entry.map_err(|e| io_error("read_dir", BY_UUID, &e))?;
         let Ok(st) = rustix::fs::stat(entry.path()) else {
             continue; // a dangling link
         };
-        if file_type_of(st.st_mode) == FileType::BlockDevice && st.st_rdev == want {
+        if file_type_of(st.st_mode) == FileType::BlockDevice && wanted.contains(&st.st_rdev) {
             let name = entry.file_name();
             return Ok(std::str::from_utf8(name.as_bytes()).ok().map(str::to_owned));
         }
@@ -545,15 +553,25 @@ pub(crate) fn fs_uuid(dev: Dev) -> Result<Option<String>, HostError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use diskgc_core::host::Dev;
 
     #[test]
     fn a_missing_by_uuid_directory_or_device_is_no_uuid() {
         // The test sandbox may or may not have udev links; a device that
         // cannot exist never has one.
         assert_eq!(
-            fs_uuid(Dev {
-                major: 4095,
-                minor: 1_048_575
+            fs_uuid(&MountEntry {
+                id: 1,
+                parent_id: 1,
+                dev: Dev {
+                    major: 4095,
+                    minor: 1_048_575
+                },
+                fs_root: PathBuf::from("/"),
+                mount_point: PathBuf::from("/"),
+                fs_type: "btrfs".to_owned(),
+                source: "/dev/diskgc-no-such-device".to_owned(),
+                read_only: false,
             })
             .expect("listing"),
             None

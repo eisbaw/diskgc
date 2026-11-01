@@ -30,8 +30,11 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::host::{Dev, FileType, FsKey, Host, LockMode, Locked, MonoTime, StateWritten, WaitLock};
+use crate::host::{
+    FileType, FsKey, Host, LockMode, Locked, MonoTime, MountEntry, StateWritten, WaitLock,
+};
 use crate::index::{BUDGET_BYTES, Finder, Index};
+use crate::places;
 use crate::tally::TallyState;
 use crate::units::format_bytes;
 
@@ -63,12 +66,15 @@ pub fn state_dir(xdg_state_home: Option<&OsStr>, home: Option<&OsStr>) -> Option
         .map(|base| base.join("diskgc"))
 }
 
-/// The key of the filesystem `dev`: its UUID where the host knows one,
-/// otherwise its device number. A UUID that cannot be read or used (an
-/// `EACCES` on the udev links, an escaped name) falls back to the device
-/// number with the reason, for the log: only warmth is at stake.
-pub fn fs_key<H: Host>(host: &H, dev: Dev) -> (FsKey, Option<String>) {
-    match host.fs_uuid(dev) {
+/// The key of the filesystem `mount` shows: its UUID where the host knows
+/// one, otherwise the device mountinfo names for it ([`places::space_of`]:
+/// one key for every mount of one filesystem, every btrfs subvolume
+/// included, so one `watch` serves them all). A UUID that cannot be read or
+/// used (an `EACCES` on the udev links, an escaped name) falls back to the
+/// device number with the reason, for the log: only warmth is at stake.
+pub fn fs_key<H: Host>(host: &H, mount: &MountEntry) -> (FsKey, Option<String>) {
+    let dev = places::space_of(mount);
+    match host.fs_uuid(mount) {
         Ok(Some(uuid)) => match FsKey::uuid(&uuid) {
             Some(key) => (key, None),
             None => (
@@ -97,15 +103,12 @@ enum Persist {
 }
 
 /// The filesystem a run reclaims, as the snapshot needs it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reclaimed {
-    /// `st_dev` of `PATH`: what the key ([`fs_key`]) is made from.
-    pub dev: Dev,
-    /// The device mountinfo names for `PATH`'s mount (the superblock's:
-    /// one for every btrfs subvolume of a filesystem, where `st_dev`
-    /// differs per subvolume): what the space guard compares with the
-    /// state directory's ([`crate::host::StateLock::dir_dev`]).
-    pub fs: Dev,
+    /// `PATH`'s mount: what the key ([`fs_key`]) is made from, and what
+    /// the space guard relates the state directory's mount to
+    /// ([`places::shared_space`]).
+    pub mount: MountEntry,
     /// `--min-free` in bytes: the write never takes the filesystem below it.
     pub min_free: u64,
     pub deadline: Option<MonoTime>,
@@ -225,11 +228,11 @@ impl RunIndex {
             return; // the tally is skipped too; nothing to seed or write
         }
         let tally = self.tally;
-        let (key, fallback) = fs_key(host, run.dev);
+        let (key, fallback) = fs_key(host, &run.mount);
         if let Some(why) = fallback {
             log(&format!(
                 "index: filesystem {}: {why}; its snapshot is keyed by device number",
-                run.dev
+                places::space_of(&run.mount)
             ));
         }
         // The state directory and the lock file are made now, before the
@@ -343,8 +346,8 @@ impl RunIndex {
     /// the run's deadline, not while another writer holds the single-writer
     /// lock, not when the encoded index is larger than any snapshot may be
     /// ([`MAX_SNAPSHOT_BYTES`]: every later run would refuse it), and not
-    /// when the state directory is on the reclaimed filesystem and the
-    /// space the file takes (its size rounded up to whole blocks, and one
+    /// when the state directory is not proved independent of the reclaimed
+    /// filesystem ([`places::shared_space`]) and the space the file takes (its size rounded up to whole blocks, and one
     /// more block for the new directory entry; the state directory and the
     /// lock file were made by [`Self::seed`], before the walk) would take
     /// that filesystem
@@ -371,7 +374,6 @@ impl RunIndex {
             Ok(lock) => lock,
             Err(e) => return log(&skipped(&e.to_string())),
         };
-        let dir_fs = lock.dir_dev;
         let wait_until = host.now().checked_add(LOCK_WAIT);
         let until = match (run.deadline, wait_until) {
             (Some(d), Some(w)) => Some(d.min(w)),
@@ -391,10 +393,11 @@ impl RunIndex {
         let held = Held {
             key: &key,
             locked: &locked,
-            dir_fs,
+            dir: &lock.dir,
+            dir_mount: &lock.dir_mount,
         };
         let guard = Guard {
-            fs: run.fs,
+            watched: run.mount.clone(),
             min_free: Some(run.min_free),
         };
         let last_check = |host: &H| {
@@ -414,7 +417,7 @@ impl RunIndex {
             host,
             units,
             held,
-            guard,
+            &guard,
             &bytes,
             WriteChecks {
                 last_check: &last_check,
@@ -437,23 +440,26 @@ impl RunIndex {
     }
 }
 
-/// The single-writer lock of `key`, held exclusively, and the device of
-/// the state directory it is in.
+/// The single-writer lock of `key`, held exclusively, and the state
+/// directory it is in: its descriptor (what the guard samples) and its
+/// mount ([`crate::host::StateLock`]).
 #[derive(Debug, Clone, Copy)]
 pub struct Held<'a, F> {
     pub key: &'a FsKey,
     pub locked: &'a Locked<F>,
-    pub dir_fs: Dev,
+    pub dir: &'a F,
+    pub dir_mount: &'a MountEntry,
 }
 
-/// What a snapshot write must not take: when the state directory is on
-/// `fs` (the filesystem a run reclaims, or `watch` watches), available
-/// space must stay at or above `min_free` after the write (`None`: no
-/// guard, only a write that fails is skipped; `watch --tally-only`
-/// without `--min-free`).
-#[derive(Debug, Clone, Copy)]
+/// What a snapshot write must not take: unless the state directory's
+/// filesystem is proved independent of `watched`'s (the mount of the
+/// filesystem a run reclaims, or `watch` watches; [`places::shared_space`]),
+/// available space must stay at or above `min_free` after the write
+/// (`None`: no guard, only a write that fails is skipped; `watch
+/// --tally-only` without `--min-free`).
+#[derive(Debug, Clone)]
 pub struct Guard {
-    pub fs: Dev,
+    pub watched: MountEntry,
     pub min_free: Option<u64>,
 }
 
@@ -494,12 +500,17 @@ pub fn encode<H: Host>(host: &H, state: &TallyState, key: &FsKey) -> Result<Vec<
 /// [`WriteChecks`] stop it. Every skip or failure is one log
 /// line; nothing else changes (docs/architecture.md, Snapshot). What the
 /// file takes is its size rounded up to whole blocks, and one more block
-/// for the new directory entry.
+/// for the new directory entry. The guard samples the state directory
+/// (`statvfs` on its descriptor): on the watched filesystem itself that is
+/// its space; through an overlay, eCryptfs or a pass-through FUSE
+/// filesystem it is what that filesystem reports, its backing one's; on a
+/// loop device's filesystem it is the image's, not the backing file's
+/// (a stated limit).
 pub fn write_held<H: Host>(
     host: &H,
     units: usize,
     held: Held<'_, H::Fd>,
-    guard: Guard,
+    guard: &Guard,
     bytes: &[u8],
     checks: WriteChecks<'_, H>,
     log: &mut dyn FnMut(&str),
@@ -508,15 +519,24 @@ pub fn write_held<H: Host>(
     let name = held.key.snapshot_name();
     let skipped = |why: &str| format!("index: snapshot {name} not written: {why}");
     let size = u64::try_from(bytes.len()).expect("fits u64");
-    if let (true, Some(min_free)) = (held.dir_fs == guard.fs, guard.min_free) {
-        match host.statvfs(held.locked.fd()) {
+    let shared = places::shared_space(held.dir_mount, &guard.watched);
+    if let (Some(why), Some(min_free)) = (shared, guard.min_free) {
+        match host.statvfs(held.dir) {
             Ok(space) => {
                 let block = space.block_bytes.max(1);
                 let takes = size.div_ceil(block).saturating_add(1).saturating_mul(block);
                 if space.avail_bytes.saturating_sub(takes) < min_free {
+                    let on = if places::same_space(held.dir_mount, &guard.watched) {
+                        "the state directory is on the reclaimed filesystem".to_owned()
+                    } else {
+                        format!(
+                            "the state directory may take its space from the reclaimed \
+                             filesystem ({why})"
+                        )
+                    };
                     return log(&skipped(&format!(
-                        "the state directory is on the reclaimed filesystem, and the {} it \
-                         takes would bring its {} available below --min-free {}",
+                        "{on}, and the {} it takes would bring its {} available below \
+                         --min-free {}",
                         format_bytes(takes),
                         format_bytes(space.avail_bytes),
                         format_bytes(min_free)

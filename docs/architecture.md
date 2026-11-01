@@ -562,11 +562,14 @@ the order of work.
   theirs is used, and only diskgc's own `index-<fs>` name is ever
   replaced there (TASK-30 review: accepted). `<fs>` is `uuid-<uuid>`, the filesystem's UUID where the system
   names one (the udev link `/dev/disk/by-uuid` whose block device is the
-  filesystem's device), otherwise `dev-<major>-<minor>`; not `f_fsid`,
-  which is 0 on tmpfs on older kernels, and not the mount path. tmpfs,
-  btrfs (whose files' `st_dev` is not its block device) and containers
-  without udev links get the device number, so their snapshots are
-  valid within one boot only (Validity). A UUID that cannot be read
+  filesystem's: the device mountinfo names for `PATH`'s mount, or for
+  btrfs, whose superblock's device is anonymous, the block device
+  mountinfo names as its source), otherwise `dev-<major>-<minor>` of the
+  device mountinfo names (Filesystem matching: one key for every
+  subvolume of one btrfs); not `f_fsid`, which is 0 on tmpfs on older
+  kernels (and per subvolume on btrfs), and not the mount path. tmpfs,
+  overlays and containers without udev links get the device number, so
+  their snapshots are valid within one boot only (Validity). A UUID that cannot be read
   (`EACCES` on the udev links) or used (not hex digits and dashes) falls
   back to the device number with one log line.
   - **Who writes, when.** `watch` every 5 minutes and on exit. `ensure`
@@ -595,10 +598,12 @@ the order of work.
     write). `ensure` seeds and writes only when its run tallies (it
     selects a tier the index serves).
   - **Never at the cost of the goal.** The snapshot is usually on
-    `/home`, possibly the filesystem just reclaimed. When the state
-    directory is on the filesystem the run works on, the writer skips
-    the write (one log line) unless available space minus what the
-    write takes stays at or above `--min-free` (in `watch`, its
+    `/home`, possibly the filesystem just reclaimed. Unless the state
+    directory's filesystem is proved independent of the one the run
+    works on (Filesystem matching: on it, on an overlay of it, or
+    unproved), the writer skips the write (one log line) unless
+    available space, sampled on the state directory's descriptor, minus
+    what the write takes stays at or above `--min-free` (in `watch`, its
     `--min-free`; in `watch --tally-only`, its optional `--min-free`,
     and without one only a failed write skips it). What it takes is
     its size rounded up to whole blocks (`f_frsize`) plus one block for
@@ -607,10 +612,14 @@ the order of work.
     are made before the walk (above), so what they take is already in
     the samples the walk acts on; so is a per-user reclaim lock made
     in `~/.local/state/diskgc` ([safety.md](safety.md#host-lock)), which
-    is made when the reclaim locks. "The filesystem the run works on" is
-    compared by the device mountinfo names for each mount (the
-    superblock's), not by `st_dev`, which differs between btrfs
-    subvolumes of one filesystem. The temporary file is an `O_TMPFILE` linked in only
+    is made when the reclaim locks. The state directory is placed by
+    its own mount (its descriptor's `stx_mnt_id`), never the lock
+    file's: a file bind mounted over `index-<fs>.lock` puts the lock
+    file on another filesystem while the snapshot is still written into
+    the directory. Through an overlay, eCryptfs or a pass-through FUSE
+    filesystem the sample is that filesystem's report, its backing
+    one's; on a loop device's filesystem it is the image's, not the
+    backing file's (a limit). The temporary file is an `O_TMPFILE` linked in only
     when complete, so a failed write leaves nothing behind; `ENOSPC` or
     any other write error is one log line and never changes the exit
     code.
@@ -942,10 +951,51 @@ reclaim(min, goal, filesystem, deadline):
 
 ### Filesystem matching
 
-Before any tier runs: filesystem candidates (including Cargo targets) by
-device and mount ([safety.md](safety.md#path-traversal)); Docker by its
-bound backend's storage root; Nix by the device of `/nix/store`, the only
-store it collects ([safety.md](safety.md#nix-store)).
+**The same filesystem** (TASK-286) is decided one way everywhere: by the
+device mountinfo names for each path's mount, the filesystem's
+superblock's (`places::space_of`). Every mount of one filesystem shows the
+same one: a bind mount, and every btrfs subvolume of one btrfs (Fedora's
+`/` and `/home`, openSUSE's `@` subvolumes). A `statx` `st_dev` is never
+compared for this: it identifies an object (with the inode,
+[safety.md](safety.md#path-traversal)), and on btrfs it is each
+subvolume's own anonymous device, never the superblock's. The rule
+decides:
+
+- which roots and candidates are on `PATH`'s filesystem (`other_fs`
+  otherwise): a root by the mount it resolves to, a candidate by the mount
+  discovery found it on (a Cargo target, and a candidate below an
+  unmounted nested btrfs subvolume, on its root's mount; the top of such
+  a subvolume, a directory on another device than its parent without a
+  mount between, is still `other_fs`: removing a subvolume is not
+  claimed); Docker by its
+  bound backend's storage root; Nix by `/nix/store`, the only store it
+  collects ([safety.md](safety.md#nix-store));
+- whether a `watch` cycle's `PATH` is still the filesystem watched since
+  start ([reference.md](reference.md#watch));
+- the snapshot's key `<fs>` (Snapshot, below), so one `watch` serves every
+  subvolume of one btrfs;
+- which open-but-deleted files `held_by_deleted_files` lists: each placed
+  by the mount it was opened through (`stx_mnt_id`); one opened through a
+  mount diskgc's table does not list (another mount namespace's) counts
+  only when its `st_dev` is `PATH`'s own.
+
+Deleting needs the same filesystem proved. Writing diskgc's own state
+needs the opposite proved: the snapshot is guarded (Snapshot: Never at the
+cost of the goal) unless the state directory's filesystem is
+**independent** of the reclaimed one (`places::shared_space`): another
+superblock, and neither filesystem one that may keep its data on another
+(an `overlay`; `ecryptfs`, `aufs`, `shiftfs`; FUSE, network types and
+`autofs`), nor on a loop device (major 7, its image is a file), nor two
+ZFS datasets of one pool (by the source's pool name). So an overlay whose
+upper directory is on `PATH`'s filesystem is `other_fs` for deleting and
+guarded for writing. Limits: ZFS datasets of one pool are `other_fs` for
+each other (they share the pool's space; reclaiming across them is not
+claimed); a block device stacked on a file in another way (device-mapper
+or md over a loop device, a network block device) counts as independent;
+the index records no unit on btrfs (a unit's identity device is its
+subvolume's `st_dev`, the trie's the superblock's), which costs warmth,
+never safety.
+
 A tier whose backend is elsewhere is skipped and reported (`other_fs`,
 `remote_backend`): deleting there would hurt a cache and free nothing here.
 

@@ -428,6 +428,12 @@ pub static TESTS: &[Test] = &[
         run: watch_suite::watch_tally_only_never_deletes_and_a_second_watch_exits_2,
     },
     Test {
+        name: "watch_tally_only_guard_is_not_defeated_by_a_file_bind_over_its_lock",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: watch_suite::watch_tally_only_guard_is_not_defeated_by_a_file_bind_over_its_lock,
+    },
+    Test {
         name: "watch_tally_pauses_while_another_process_holds_the_host_lock",
         tier: Tier::Fast,
         expect: Expect::Pass,

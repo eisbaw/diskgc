@@ -1067,6 +1067,17 @@
             "$ref": "#/$defs/StatxField"
           }
         },
+        "subvolume": {
+          "description": "A btrfs subvolume (`fs: btrfs`): the device `statx` reports for\nevery object reached through this mount (the subvolume's anonymous\ndevice), while mountinfo keeps `dev`, the filesystem's superblock's\n(TASK-286). Two mounts of subvolumes of one btrfs share `dev` and\ntheir space and differ here. A per-mount simplification: Linux\nreports the device of the subvolume an inode belongs to, whichever\nmount reaches it, and a nested subvolume (not mounted) is not\nmodelled. Absent: `statx` reports `dev`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Dev"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "uuid": {
           "description": "The filesystem's UUID as `fs_uuid` reports it (the udev link\n`/dev/disk/by-uuid`); absent: none (tmpfs, no udev).",
           "type": [

@@ -1085,49 +1085,119 @@ fn tallied_nonidle_cargo_targets_skip_before_any_target_flock() {
     assert!(calls(&host, Op::Unlinkat).is_empty());
 }
 
-/// Btrfs subvolumes have different statx devices while sharing free space.
-/// A deleted file on a sibling mount must appear in the requested mount's
-/// report when mountinfo identifies the same backing source.
+// ---- One filesystem identity (TASK-286) ----
+
+/// One btrfs (superblock device 0:40, 100G with 80G used by others): its
+/// top level at `/pool` and two subvolumes, `/home` (`@home`) and `/work`
+/// (`@work`), each with its own `statx` device (0:41, 0:42) while
+/// mountinfo names 0:40 for all three, as Linux shows btrfs subvolumes;
+/// `/data` is another filesystem (ext4). `extra` is appended to the
+/// mounts; `tree` holds the tree's entries.
+fn btrfs_yaml(extra: &str, tree: &str) -> String {
+    format!(
+        r#"host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {{id: 1, at: /, fs: ext4, dev: "254:1", size: 100G}}
+  - {{id: 3, at: /run, fs: tmpfs, dev: "0:30", size: 1G, parent: 1}}
+  - {{id: 40, at: /pool, fs: btrfs, dev: "0:40", size: 100G, other_used: 80G, parent: 1, subvolume: "0:45"}}
+  - {{id: 41, at: /home, fs: btrfs, dev: "0:40", size: 100G, other_used: 80G, parent: 1, bind_of: 40, bind_root: /@home, subvolume: "0:41"}}
+  - {{id: 42, at: /work, fs: btrfs, dev: "0:40", size: 100G, other_used: 80G, parent: 1, bind_of: 40, bind_root: /@work, subvolume: "0:42"}}
+  - {{id: 50, at: /data, fs: ext4, dev: "254:3", size: 100G, parent: 1}}
+{extra}tree:
+  /run/diskgc/lock: {{uid: 0, gid: 0}}
+  /home/mark: {{.: {{mode: "0755"}}}}
+{tree}"#
+    )
+}
+
+/// Two attached Cargo targets below `dir`: `old` (8G) and `new` (4G).
+fn targets_below(dir: &str) -> String {
+    format!(
+        "  {dir}/old/Cargo.toml: {{}}\n  {dir}/old/target:\n    CACHEDIR.TAG: {{cachedir_tag: true}}\n    debug: {old}\n  {dir}/new/Cargo.toml: {{}}\n  {dir}/new/target:\n    CACHEDIR.TAG: {{cachedir_tag: true}}\n    debug: {new}\n",
+        old = profile("8G", "2026-10-01T00:00:00Z"),
+        new = profile("4G", "2026-10-14T00:00:00Z"),
+    )
+}
+
+/// TASK-286: a root on a sibling btrfs subvolume of `PATH`'s is on
+/// `PATH`'s filesystem (one superblock, one pool of space), though its
+/// `statx` device differs: it is searched, not skipped `other_fs`, and the
+/// run reclaims there to the goal (it used to exit 3 with the space
+/// reclaimable). A root on another filesystem still is `other_fs`.
 #[test]
-fn btrfs_sibling_subvolume_deleted_file_is_reported() {
-    let scenario = yaml(
-        true,
-        "  /usr/bin/tail: {}\n  /mnt/other/gone: {size: 1G}\nprocesses:\n  - pid: 4242\n    exe: /usr/bin/tail\n    cwd: /home/mark\n    maps: [/usr/bin/tail]\n    environ: [PATH=/usr/bin]\n    fds: [{path: /mnt/other/gone, deleted: true}]\n",
-    )
-    .replace(
-        "fs: ext4, dev: \"254:2\"",
-        "fs: btrfs, dev: \"0:41\"",
-    )
-    .replace(
-        "tree:\n",
-        "  - {id: 5, at: /mnt/other, fs: btrfs, dev: \"0:43\", size: 100G, parent: 1}\ntree:\n",
+fn a_root_on_a_sibling_btrfs_subvolume_is_on_path_s_filesystem() {
+    let sibling = host(&btrfs_yaml("", &targets_below("/work/src")));
+    let report = ensure(
+        &sibling,
+        &request(
+            "profile:cargo-target",
+            &["/work/src"],
+            "/home/mark",
+            "12G",
+            None,
+        ),
+    );
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert_eq!(report.exit_code(), 0);
+    assert!(
+        report.skipped.iter().all(|s| s.reason != Reason::OtherFs),
+        "{report:#?}"
+    );
+    let acted: Vec<&Path> = report
+        .actions
+        .iter()
+        .map(|a| a.candidate.as_path())
+        .collect();
+    assert_eq!(acted, [Path::new("/work/src/old/target")], "{report:#?}");
+
+    let other = host(&btrfs_yaml("", &targets_below("/data/src")));
+    let report = ensure(
+        &other,
+        &request(
+            "profile:cargo-target",
+            &["/data/src"],
+            "/home/mark",
+            "30G",
+            None,
+        ),
+    );
+    assert_eq!(report.status, Status::Exhausted, "{report:#?}");
+    assert_eq!(report.exit_code(), 1);
+    let skip = report
+        .skipped
+        .iter()
+        .find(|s| s.candidate.as_deref() == Some(Path::new("/data/src")))
+        .expect("the root on another filesystem is skipped");
+    assert_eq!(skip.reason, Reason::OtherFs, "{report:#?}");
+    assert!(calls(&other, Op::Unlinkat).is_empty());
+}
+
+/// TASK-286: `held_by_deleted_files` places a held file by the mount it
+/// was opened through: one on a sibling subvolume of `PATH`'s btrfs is
+/// listed (its `statx` device is that subvolume's own); one on another
+/// btrfs filesystem is not, though mountinfo shows the same type.
+#[test]
+fn held_by_deleted_files_counts_every_subvolume_of_path_s_btrfs_only() {
+    let scenario = btrfs_yaml(
+        "  - {id: 60, at: /other, fs: btrfs, dev: \"0:60\", size: 100G, parent: 1, subvolume: \"0:61\"}\n",
+        "  /usr/bin/tail: {}\n  /work/gone: {size: 1G}\n  /other/gone: {size: 2G}\nprocesses:\n  - pid: 4242\n    exe: /usr/bin/tail\n    cwd: /home/mark\n    maps: [/usr/bin/tail]\n    environ: [PATH=/usr/bin]\n    fds: [{path: /work/gone, deleted: true}, {path: /other/gone, deleted: true}]\n",
     );
     let host = host(&scenario);
     let report = ensure(
         &host,
         &request(
-            "profile:cargo-target && filter:idle-30d",
-            &[SRC],
-            SRC,
-            "12G",
+            "profile:cargo-target",
+            &["/home/mark"],
+            "/home/mark",
+            "50G",
             None,
         ),
-    );
-    assert_eq!(report.status, Status::Exhausted, "{report:#?}");
-    assert_eq!(
-        calls(&host, Op::ProcMaps).len(),
-        1,
-        "process scan must read maps"
-    );
-    assert_eq!(
-        calls(&host, Op::ProcEnviron).len(),
-        1,
-        "process scan must read environ"
     );
     let held = report.held_by_deleted_files.as_deref().expect("a scan ran");
     assert_eq!(held.len(), 1, "{report:#?}");
     assert_eq!(held[0].pid, 4242);
-    assert_eq!(held[0].bytes, GIB);
+    assert_eq!(held[0].bytes, GIB, "only the file on PATH's btrfs");
     assert!(calls(&host, Op::Unlinkat).is_empty());
 }
 

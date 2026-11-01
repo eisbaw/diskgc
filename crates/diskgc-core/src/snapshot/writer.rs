@@ -15,7 +15,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::{Guard, Held, WriteChecks, encode, write_held};
-use crate::host::{Dev, FsKey, Host, LockMode, Locked, TryLock, WaitLock};
+use crate::host::{FsKey, Host, LockMode, Locked, MountEntry, TryLock, WaitLock};
 use crate::tally::TallyState;
 
 /// How long `watch` waits at start for the single-writer lock: an `ensure`
@@ -42,7 +42,9 @@ pub struct Encoded {
 #[derive(Debug)]
 pub struct Writer<F> {
     key: FsKey,
-    held: Option<(Locked<F>, Dev)>,
+    /// The lock, held, and the state directory's descriptor and mount
+    /// ([`crate::host::StateLock`]).
+    held: Option<(Locked<F>, F, MountEntry)>,
     guard: Guard,
     /// Whether a write found the lock held by someone else (said once).
     said_held: bool,
@@ -92,7 +94,9 @@ impl<F: std::fmt::Debug> Writer<F> {
         };
         let until = host.now().checked_add(START_LOCK_WAIT);
         match host.flock_wait(lock.fd, LockMode::Exclusive, until) {
-            Ok(WaitLock::Acquired(locked)) => writer.held = Some((locked, lock.dir_dev)),
+            Ok(WaitLock::Acquired(locked)) => {
+                writer.held = Some((locked, lock.dir, lock.dir_mount));
+            }
             Ok(WaitLock::DeadlinePassed(_)) => {
                 return Err(StartLock::Held(format!(
                     "another watch holds {} for this filesystem and user (state directory {}): \
@@ -148,19 +152,20 @@ impl<F: std::fmt::Debug> Writer<F> {
     /// arriving during the write cancels it in the port, before the link;
     /// one before the stop's write is [`crate::watch::run`]'s to skip.
     pub fn write<H: Host<Fd = F>>(&self, host: &H, encoded: &Encoded, log: &mut dyn FnMut(&str)) {
-        let Some((locked, dir_fs)) = &self.held else {
+        let Some((locked, dir, dir_mount)) = &self.held else {
             unreachable!("encoded only under the lock")
         };
         let held = Held {
             key: &self.key,
             locked,
-            dir_fs: *dir_fs,
+            dir,
+            dir_mount,
         };
         write_held(
             host,
             encoded.units,
             held,
-            self.guard,
+            &self.guard,
             &encoded.bytes,
             WriteChecks {
                 last_check: &|_| None,
@@ -181,7 +186,7 @@ impl<F: std::fmt::Debug> Writer<F> {
                     "index: single-writer lock {} taken; snapshots are written from now on",
                     self.key.lock_name()
                 ));
-                self.held = Some((locked, lock.dir_dev));
+                self.held = Some((locked, lock.dir, lock.dir_mount));
                 true
             }
             Ok(TryLock::Busy(_)) => {

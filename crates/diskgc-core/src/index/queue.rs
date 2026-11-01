@@ -46,7 +46,9 @@ pub struct Source<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TierQuery<'a> {
-    /// The filesystem the run works on.
+    /// The space of the filesystem the run works on
+    /// ([`crate::places::space_of`]), compared with each trie's
+    /// [`crate::index::MountKey::dev`], also a mountinfo device.
     pub dev: Dev,
     pub sources: &'a [Source<'a>],
     pub age: AgeFilter,

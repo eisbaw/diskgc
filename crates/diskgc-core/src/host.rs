@@ -1389,12 +1389,15 @@ pub trait Host {
 
     // ---- diskgc's own state (docs/architecture.md, The Host port) ----
 
-    /// The UUID of the filesystem on the block device `dev`, where the
-    /// system names one (`/dev/disk/by-uuid`): what the snapshot's
-    /// [`FsKey`] prefers, since device numbers can change between boots.
-    /// `None`: no UUID is known (tmpfs, btrfs, whose files' `st_dev` is
-    /// not its block device, or no udev links). Read-only.
-    fn fs_uuid(&self, dev: Dev) -> Result<Option<String>, HostError>;
+    /// The UUID of the filesystem `mount` shows, where the system names one
+    /// (a `/dev/disk/by-uuid` link to its block device): what the
+    /// snapshot's [`FsKey`] prefers, since device numbers can change
+    /// between boots. Its block device is the mount's device
+    /// ([`crate::places::space_of`]), or for btrfs, whose superblock has an
+    /// anonymous device (major 0), the device mountinfo names as its source
+    /// (one UUID for every subvolume and every member device). `None`: no
+    /// UUID is known (tmpfs, an overlay, no udev links). Read-only.
+    fn fs_uuid(&self, mount: &MountEntry) -> Result<Option<String>, HostError>;
 
     /// The file behind the loop block device `dev` (major 7):
     /// `/sys/dev/block/MAJ:MIN/loop/backing_file`, as the kernel prints it
@@ -1433,7 +1436,8 @@ pub trait Host {
     /// Opens the snapshot's single-writer lock file `index-<key>.lock` in
     /// diskgc's state directory, creating the directory (mode 0700) and
     /// the file (mode 0600, read-only open, never written, never renamed)
-    /// if absent, for [`Host::flock_try`] or [`Host::flock_wait`] only.
+    /// if absent, for [`Host::flock_try`] or [`Host::flock_wait`] only,
+    /// with the state directory's descriptor and mount ([`StateLock`]).
     /// The state directory is the implementation's own, never a name from
     /// the caller; it must be a directory owned by diskgc's user and
     /// writable by no one else, and the file a regular file of that user,
@@ -1615,16 +1619,19 @@ impl fmt::Display for FsKey {
 }
 
 /// The single-writer lock file [`Host::state_lock`] opened (not locked
-/// yet), and the device of the state directory's filesystem as mountinfo
-/// names it (the superblock's, the same for every btrfs subvolume of one
-/// filesystem; not the file's `st_dev`, which differs per subvolume): a
-/// writer on the filesystem it reclaims guards the goal
-/// (docs/architecture.md, Snapshot: Never at the cost of the goal;
-/// [`Host::statvfs`] on `fd` samples that filesystem).
+/// yet), and the state directory it is in: the directory's own descriptor
+/// and the mount mountinfo lists for it (by the directory's `stx_mnt_id`,
+/// never the lock file's: a file bind mounted over the lock file is on
+/// another mount, while the snapshot is written into the directory). A
+/// writer whose state directory may share the reclaimed filesystem's
+/// space ([`crate::places::shared_space`]) guards the goal, sampling
+/// [`Host::statvfs`] on `dir` (docs/architecture.md, Snapshot: Never at the
+/// cost of the goal).
 #[derive(Debug)]
 pub struct StateLock<F> {
     pub fd: F,
-    pub dir_dev: Dev,
+    pub dir: F,
+    pub dir_mount: MountEntry,
 }
 
 /// What [`Host::state_read`] found at `index-<key>`.

@@ -645,9 +645,9 @@ impl<H: Host> Host for Controlled<H> {
         self.host.proc_root_lookup(pid, path, climb)
     }
 
-    fn fs_uuid(&self, dev: diskgc_core::host::Dev) -> Result<Option<String>, HostError> {
+    fn fs_uuid(&self, mount: &diskgc_core::host::MountEntry) -> Result<Option<String>, HostError> {
         self.before("fs_uuid");
-        self.host.fs_uuid(dev)
+        self.host.fs_uuid(mount)
     }
 
     fn loop_backing_file(
@@ -858,7 +858,17 @@ processes:
             major: 0,
             minor: 42,
         };
-        assert_eq!(host.fs_uuid(dev).expect("fs_uuid"), None);
+        let tmpfs = diskgc_core::host::MountEntry {
+            id: 1,
+            parent_id: 1,
+            dev,
+            fs_root: PathBuf::from("/"),
+            mount_point: PathBuf::from("/tmp"),
+            fs_type: "tmpfs".to_owned(),
+            source: "tmpfs".to_owned(),
+            read_only: false,
+        };
+        assert_eq!(host.fs_uuid(&tmpfs).expect("fs_uuid"), None);
         assert_eq!(
             host.loop_backing_file(dev).expect("loop_backing_file"),
             None

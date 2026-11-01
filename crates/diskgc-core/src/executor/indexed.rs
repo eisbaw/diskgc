@@ -44,7 +44,7 @@ use crate::index::queue::{self, AgeFilter, QueueEntry, Queued, Source, TierQuery
 use crate::index::{Family, Finder, FinderSetId, MountKey, name_family};
 use crate::inuse::Checker;
 use crate::outcome::Stop;
-use crate::places::mount_for;
+use crate::places::{self, mount_for};
 use crate::report::Report;
 use crate::snapshot::{Reclaimed, RunIndex};
 use crate::tally::budget::Budget;
@@ -286,7 +286,7 @@ enum Window {
     Spent,
 }
 
-/// Runs the synchronous tally over `tiers` on the filesystem `dev`, for at
+/// Runs the synchronous tally over `tiers` on the filesystem `run.mount`, for at
 /// most `budget` (`None`: to completion) and never past `deadline`, before
 /// the host lock (docs/architecture.md, The tally: Synchronous). Returns
 /// whether the reclaim walk may take queues from the index, and what this
@@ -310,7 +310,7 @@ pub(super) fn sync_tally<'t, H: Host>(
     report: &mut Report,
     log: &mut dyn FnMut(&str),
 ) -> SyncTallied {
-    let (dev, deadline) = (run.dev, run.deadline);
+    let (space, deadline) = (places::space_of(&run.mount), run.deadline);
     let tiers = sync_tiers(tiers);
     // `watch`'s live index: the background tally keeps it, so a cycle
     // takes its queues from it as it is (docs/reference.md, `watch`: the
@@ -358,7 +358,7 @@ pub(super) fn sync_tally<'t, H: Host>(
         (d, None) => d,
         (None, b) => b,
     };
-    let done = sync::synchronous(host, state, &tiers, dev, until);
+    let done = sync::synchronous(host, state, &tiers, space, until);
     let took = host.now().saturating_since(started).as_millis();
     let stats = state.index.stats();
     let sync = match done {
@@ -599,7 +599,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let mut derived = queue::derive(
             &state.index,
             &TierQuery {
-                dev: self.measured.dev,
+                dev: self.measured.space,
                 sources: &sources,
                 age: AgeFilter::None,
             },

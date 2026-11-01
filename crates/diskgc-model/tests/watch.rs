@@ -747,6 +747,144 @@ fn second_watch_exits_2() {
     }
 }
 
+/// TASK-286 (TASK-262): two `PATH`s on two subvolumes of one btrfs are one
+/// filesystem (docs/reference.md, One process per filesystem): one
+/// snapshot key, by the filesystem's UUID where it has one, otherwise by
+/// the device mountinfo names (not a subvolume's `statx` device), so a
+/// second `watch` exits 2 while the first holds the lock. A `watch` of
+/// another filesystem starts beside it.
+#[test]
+fn a_second_watch_on_a_sibling_btrfs_subvolume_exits_2() {
+    for (uuid, key) in [
+        (
+            ", uuid: 4f0e2c1d-9a8b-4c7d-8e6f-5a4b3c2d1e0f",
+            "index-uuid-4f0e2c1d-9a8b-4c7d-8e6f-5a4b3c2d1e0f.lock",
+        ),
+        ("", "index-dev-0-70.lock"),
+    ] {
+        let mounts = format!(
+            "  - {{id: 40, at: /pool, fs: btrfs, dev: \"0:70\", size: 100G, parent: 1, subvolume: \"0:75\"{uuid}}}\n  \
+             - {{id: 41, at: /srv/a, fs: btrfs, dev: \"0:70\", size: 100G, parent: 1, bind_of: 40, bind_root: /@a, subvolume: \"0:71\"}}\n  \
+             - {{id: 42, at: /srv/b, fs: btrfs, dev: \"0:70\", size: 100G, parent: 1, bind_of: 40, bind_root: /@b, subvolume: \"0:72\"}}\n  \
+             - {{id: 50, at: /srv/c, fs: ext4, dev: \"254:3\", size: 100G, parent: 1}}\n"
+        );
+        let host =
+            host(&yaml("1G", "", "").replace("state_dir: ", &format!("{mounts}state_dir: ")));
+        let library = library();
+        let builtins = || Ok(library.clone());
+        let platform = Platform {
+            catalog: Catalog::Development,
+            draw_seed: &|| Ok(0),
+            builtins: &builtins,
+        };
+        let state = Path::new("/home/u/.local/state/diskgc");
+        let at = |path: &str| Selection {
+            path: PathBuf::from(path),
+            ..selection()
+        };
+        let mut lines = Vec::new();
+        let mode = Mode::TallyOnly { min_free: None };
+        let config = ConfigFile::NotFound { tried: Vec::new() };
+        let first = start(
+            &host,
+            &mode,
+            &at("/srv/a"),
+            &config,
+            &platform,
+            Some(state),
+            &mut |l| lines.push(l.to_owned()),
+        )
+        .unwrap_or_else(|r| panic!("the first watch starts: {r:?}\n{lines:#?}"));
+        assert_eq!(first.writer.key().lock_name(), key, "{lines:#?}");
+        let second = start(
+            &host,
+            &mode,
+            &at("/srv/b"),
+            &config,
+            &platform,
+            Some(state),
+            &mut |l| lines.push(l.to_owned()),
+        );
+        let refused = second.expect_err("a second watch of the same btrfs is refused");
+        assert_eq!(refused.exit_code, 2, "{lines:#?}");
+        let report = refused.report.expect("a start-failure object");
+        assert!(
+            report.errors[0]
+                .message
+                .contains(&format!("another watch holds {key}")),
+            "{report:#?}"
+        );
+        let other = start(
+            &host,
+            &mode,
+            &at("/srv/c"),
+            &config,
+            &platform,
+            Some(state),
+            &mut |l| lines.push(l.to_owned()),
+        );
+        assert!(
+            other.is_ok(),
+            "another filesystem's watch starts: {lines:#?}"
+        );
+        assert_eq!(deletions(&host), 0);
+        drop(first);
+    }
+}
+
+/// TASK-286: a state directory on an overlay whose upper directory is on
+/// the watched filesystem takes its space from it, though mountinfo names
+/// another device for the overlay: the snapshot write is guarded as on the
+/// watched filesystem itself (independence not proved), and sampled
+/// through the overlay.
+#[test]
+fn watch_tally_only_guards_a_state_directory_on_an_overlay_of_the_watched_filesystem() {
+    let events = "events:\n  - {at: {elapsed: 11m}, signal: term}\n";
+    let overlay = "  - {id: 60, at: /var/state, fs: overlay, dev: \"0:60\", size: 1G, parent: 1, overlay_upper: /tmp/upper}\n";
+    let host = host(
+        &yaml("10G", &old_candidates(2, "1M"), events)
+            .replace(
+                "state_dir: /home/u/.local/state/diskgc",
+                &format!("{overlay}state_dir: /var/state/u/diskgc"),
+            )
+            .replace(
+                "  /home/u: {.: {mode: \"0700\"}}\n",
+                "  /tmp/upper/u: {.: {mode: \"0700\"}}\n",
+            ),
+    );
+    let library = library();
+    let builtins = || Ok(library.clone());
+    let platform = Platform {
+        catalog: Catalog::Development,
+        draw_seed: &|| Ok(0),
+        builtins: &builtins,
+    };
+    let mut lines = Vec::new();
+    let started = start(
+        &host,
+        &Mode::TallyOnly {
+            min_free: Some(parse_size("1G").unwrap()),
+        },
+        &selection(),
+        &ConfigFile::NotFound { tried: Vec::new() },
+        &platform,
+        Some(Path::new("/var/state/u/diskgc")),
+        &mut |l: &str| lines.push(l.to_owned()),
+    )
+    .expect("starts");
+    watch::run_inline(&host, started, &|| Ok(0), None, &mut |l| {
+        lines.push(l.to_owned())
+    });
+    assert_eq!(host.trace_count(Op::StateWrite), 0, "{lines:#?}");
+    assert!(
+        lines.iter().any(|l| l.contains(
+            "not written: the state directory may take its space from the reclaimed \
+             filesystem (overlay at /var/state may store its data on another filesystem)"
+        )),
+        "{lines:#?}"
+    );
+}
+
 /// The holder is an `ensure` writing: released within the 10 s, the
 /// watch starts.
 #[test]

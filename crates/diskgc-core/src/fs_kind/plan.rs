@@ -41,8 +41,8 @@ pub struct Planned {
 }
 
 /// Finds the candidates of `find` below `roots` (absolute, `{uid}`
-/// replaced) and judges each (see the module docs). `dev` is the device of
-/// `PATH`'s filesystem. Errors of the run (a failing disk, no fds left, a
+/// replaced) and judges each (see the module docs). `space` is `PATH`'s
+/// filesystem's ([`crate::places::space_of`]). Errors of the run (a failing disk, no fds left, a
 /// process scan that fails, the deadline) stop it: they are returned with
 /// what was judged until then. Anything about one root, directory or
 /// candidate is in the result. A process scan serves the candidates
@@ -53,7 +53,7 @@ pub fn plan<H: Host>(
     host: &H,
     roots: &[PathBuf],
     find: &Find,
-    dev: Dev,
+    space: Dev,
     rules: &Rules<'_>,
     idle: IdleWindow,
     deadline: Option<MonoTime>,
@@ -87,7 +87,7 @@ pub fn plan<H: Host>(
         find,
         rules,
         idle,
-        dev,
+        space,
     };
     let mut checker = Checker::for_plan(rules)
         .with_pid_lookup(find.liveness_contract.is_some())

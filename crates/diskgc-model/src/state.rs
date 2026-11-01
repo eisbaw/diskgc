@@ -291,12 +291,22 @@ pub struct Mount {
     /// ([`crate::spec::MountSpec::overlay_upper`]): the device it reports
     /// instead. `dev` stays the filesystem that holds its inodes.
     pub overlay: Option<Dev>,
+    /// A btrfs subvolume's device ([`crate::spec::MountSpec::subvolume`]):
+    /// what `statx` reports for objects reached through this mount, while
+    /// mountinfo shows [`Self::shown_dev`].
+    pub subvolume: Option<Dev>,
 }
 
 impl Mount {
-    /// The device `statx` and mountinfo report for objects on this mount.
+    /// The device mountinfo reports for this mount (the superblock's).
     pub fn shown_dev(&self) -> Dev {
         self.overlay.unwrap_or(self.dev)
+    }
+
+    /// The device `statx` reports for objects reached through this mount:
+    /// a btrfs subvolume's own, otherwise [`Self::shown_dev`].
+    pub fn stat_dev(&self) -> Dev {
+        self.subvolume.unwrap_or_else(|| self.shown_dev())
     }
 }
 
@@ -597,6 +607,17 @@ impl State {
         }
     }
 
+    /// [`Self::dev_ino`] as a `statx` through `loc`'s mount reports it on a
+    /// btrfs subvolume (its own device); otherwise the same (an overlay
+    /// keeps its upper filesystem's, as `dev_ino`).
+    pub fn reported_dev_ino(&self, loc: Loc) -> DevIno {
+        let mount = self.mount(loc.mnt);
+        DevIno {
+            dev: mount.subvolume.unwrap_or(mount.dev),
+            ino: loc.ino,
+        }
+    }
+
     /// The topmost mount covering `loc`, if any (a later mount on the same
     /// directory covers an earlier one).
     fn mounted_on(&self, loc: Loc) -> Option<&Mount> {
@@ -691,6 +712,7 @@ impl State {
             read_only: false,
             dead: false,
             overlay: None,
+            subvolume: None,
         });
         Ok(())
     }
@@ -762,6 +784,7 @@ impl State {
             read_only: false,
             dead: from.dead,
             overlay: from.overlay,
+            subvolume: from.subvolume,
         });
         Ok(())
     }
@@ -1039,7 +1062,7 @@ impl State {
             (!fs.missing.contains(&field)).then_some(value)
         }
         Stat {
-            dev: self.mount(loc.mnt).shown_dev(),
+            dev: self.mount(loc.mnt).stat_dev(),
             file_type: when(fs, StatxField::Type, inode.file_type()),
             perm: when(fs, StatxField::Mode, inode.perm),
             // Link counting walks the inode graph. A modelled filesystem

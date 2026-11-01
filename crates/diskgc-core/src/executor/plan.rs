@@ -91,7 +91,7 @@ fn dry_run_inner<H: Host>(
         return deadline_before_plan(host, &measured, deadline, report, log, tier);
     }
     let started = host.now();
-    let roots = preflight_roots(host, tier, measured.dev);
+    let roots = preflight_roots(host, tier, measured.space);
     record_deadline_overrun(
         host,
         &mut report,
@@ -146,7 +146,7 @@ fn dry_run_inner<H: Host>(
         SourceKind::DockerBuildCache | SourceKind::DockerImages
     ) {
         let started = host.now();
-        let inspected = docker_backend::inspect_backend(host, measured.dev, docker_storage(tier));
+        let inspected = docker_backend::inspect_backend(host, measured.space, docker_storage(tier));
         record_deadline_overrun(
             host,
             &mut report,
@@ -252,7 +252,7 @@ fn dry_run_inner<H: Host>(
         SourceKind::CargoTarget => plan_cargo(
             host,
             tier,
-            measured.dev,
+            measured.space,
             &rules,
             &mut checker,
             deadline,
@@ -265,14 +265,22 @@ fn dry_run_inner<H: Host>(
                     host,
                     tier,
                     find,
-                    measured.dev,
+                    measured.space,
                     &rules,
                     deadline,
                     &mut report,
                     log,
                 )
             } else {
-                plan_fs_union(host, tier, measured.dev, &rules, deadline, &mut report, log)
+                plan_fs_union(
+                    host,
+                    tier,
+                    measured.space,
+                    &rules,
+                    deadline,
+                    &mut report,
+                    log,
+                )
             }
         }
         SourceKind::DockerBuildCache | SourceKind::DockerImages => unreachable!("handled above"),
@@ -416,8 +424,8 @@ fn dry_run_inner<H: Host>(
         report.held_by_deleted_files = held(
             host,
             &mut checker,
-            measured.dev,
-            &measured.at.mount,
+            measured.space,
+            measured.at.stat.dev,
             deadline,
             log,
         );
@@ -623,7 +631,7 @@ pub(super) fn docker_storage(tier: &Tier) -> Storage {
 pub(super) fn plan_cargo<H: Host>(
     host: &H,
     tier: &Tier,
-    dev: Dev,
+    space: Dev,
     rules: &Rules<'_>,
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
@@ -702,7 +710,7 @@ pub(super) fn plan_cargo<H: Host>(
                     skipped.push(plan_skip(tier, &target.path, &skip));
                     continue;
                 }
-                if let Some(skip) = other_fs(target, dev) {
+                if let Some(skip) = other_fs(target, space) {
                     skipped.push(plan_skip(tier, &target.path, &skip));
                     continue;
                 }
@@ -747,7 +755,7 @@ pub(super) fn plan_fs<H: Host>(
     host: &H,
     tier: &Tier,
     find: &Find,
-    dev: Dev,
+    space: Dev,
     rules: &Rules<'_>,
     deadline: Option<MonoTime>,
     report: &mut Report,
@@ -762,7 +770,7 @@ pub(super) fn plan_fs<H: Host>(
         host,
         &tier.roots,
         find,
-        dev,
+        space,
         rules,
         IdleWindow {
             at_least: tier.idle_for,
@@ -1161,7 +1169,7 @@ pub(super) fn union_guard_veto<H: Host>(
     candidate: &FsUnionCandidate,
     sources: &[FsUnionSourceRef<'_>],
     rules: &Rules<'_>,
-    dev: Dev,
+    space: Dev,
     deadline: Option<MonoTime>,
 ) -> Result<Option<(usize, Skip)>, Stop> {
     let evaluation_rules = Rules {
@@ -1178,7 +1186,7 @@ pub(super) fn union_guard_veto<H: Host>(
                     find: source.find,
                     rules: &evaluation_rules,
                     idle: source.idle,
-                    dev,
+                    space,
                 },
                 found,
                 checkouts: source.checkouts,
@@ -1193,7 +1201,7 @@ pub(super) fn union_guard_veto<H: Host>(
 pub(super) fn plan_fs_union<H: Host>(
     host: &H,
     tier: &Tier,
-    dev: Dev,
+    space: Dev,
     rules: &Rules<'_>,
     deadline: Option<MonoTime>,
     report: &mut Report,
@@ -1255,7 +1263,7 @@ pub(super) fn plan_fs_union<H: Host>(
         if host.interrupted().is_some() {
             return planned;
         }
-        match union_guard_veto(host, candidate, &sources, rules, dev, deadline) {
+        match union_guard_veto(host, candidate, &sources, rules, space, deadline) {
             Ok(Some((index, skip))) => {
                 let (source_index, found) = &candidate.guard_by[index];
                 let mut entry = plan_skip(tier, &skip.path, &skip);
@@ -1317,7 +1325,7 @@ pub(super) fn plan_fs_union<H: Host>(
                 find: source.find,
                 rules: &evaluation_rules,
                 idle: source.idle,
-                dev,
+                space,
             };
             match fs_kind::judge_walked(host, &judge, found, &mut checker, deadline) {
                 Ok(Ok((tally, record))) => {

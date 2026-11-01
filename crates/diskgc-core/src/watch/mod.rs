@@ -43,6 +43,7 @@ use crate::executor::{
 use crate::host::{Delete, Dev, Host, MonoTime, Timestamp};
 use crate::hostlock::{self, LockError, Readiness, ReclaimLock};
 use crate::invocation::{Loaded, Platform, Prepared, prepare};
+use crate::places;
 use crate::report::json::Json;
 use crate::report::{ErrorCause, ErrorEntry, Report, Signal, Status};
 use crate::snapshot::writer::{StartLock, Writer};
@@ -132,16 +133,14 @@ impl Goal {
 
 /// The filesystem watched: `PATH` as reached at start, whose descriptor is
 /// what every sample reads (a mount later stacked on `PATH` does not
-/// change it), its device (every cycle's resolution of `PATH` must find
-/// it), and the device mountinfo names for its mount (the snapshot's space
-/// guard).
+/// change it), and its filesystem's space ([`places::space_of`]: every
+/// cycle's resolution of `PATH` must find it).
 #[derive(Debug)]
 pub struct Watched<F> {
     pub fd: F,
     pub path: PathBuf,
     pub mount: PathBuf,
-    pub dev: Dev,
-    pub fs: Dev,
+    pub space: Dev,
 }
 
 /// Why `watch` did not start: its exit code (0 for a signal during the
@@ -383,15 +382,15 @@ pub fn start<H: Delete>(
     }
     let sources = executor::tally_sources(tiers.iter().copied());
     // 7. The single-writer lock.
-    let (key, fallback) = snapshot::fs_key(host, at.stat.dev);
+    let (key, fallback) = snapshot::fs_key(host, &at.mount);
     if let Some(why) = fallback {
         log(&format!(
             "index: filesystem {}: {why}; its snapshot is keyed by device number",
-            at.stat.dev
+            places::space_of(&at.mount)
         ));
     }
     let guard = Guard {
-        fs: at.mount.dev,
+        watched: at.mount.clone(),
         min_free: guard_min,
     };
     let writer =
@@ -408,8 +407,7 @@ pub fn start<H: Delete>(
             .collect();
         let mut seed = RunIndex::watch_seed();
         let run = Reclaimed {
-            dev: at.stat.dev,
-            fs: at.mount.dev,
+            mount: at.mount.clone(),
             min_free: guard_min.unwrap_or(0),
             deadline: None,
         };
@@ -441,8 +439,7 @@ pub fn start<H: Delete>(
         watched: Watched {
             path: path.to_path_buf(),
             mount: at.mount.mount_point.clone(),
-            dev: at.stat.dev,
-            fs: at.mount.dev,
+            space: places::space_of(&at.mount),
             fd: at.fd,
         },
         reclaim: goal.map(|goal| Reclaim { goal, prepared }),
@@ -678,7 +675,7 @@ pub fn run<H: Host, L: LiveIndex>(
                         format_bytes(bytes.target_free)
                     ));
                     let watch = WatchCycle {
-                        expect_dev: watched.dev,
+                        expect_space: watched.space,
                         origin: origin.0,
                         origin_wall: origin.1,
                     };

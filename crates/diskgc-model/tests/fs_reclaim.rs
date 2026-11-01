@@ -1574,7 +1574,7 @@ fn hardlink_alias_checkout_refusal_survives_lock_time_recheck() {
                 find: &cache_find,
                 rules: &rules,
                 idle,
-                dev,
+                space: dev,
             },
             found: cache_found,
             checkouts: Checkouts::Allow,
@@ -1585,7 +1585,7 @@ fn hardlink_alias_checkout_refusal_survives_lock_time_recheck() {
                 find: &marker_find,
                 rules: &rules,
                 idle,
-                dev,
+                space: dev,
             },
             found: marker_found,
             checkouts: Checkouts::Refuse,
@@ -1646,7 +1646,7 @@ fn no_admitted_union_term_reports_filtered_even_inside_checkout_metadata() {
         find: &find,
         rules: &rules,
         idle: diskgc_core::profile::IdleWindow::default(),
-        dev: host.stat_path(Path::new("/tmp")).expect("/tmp").dev,
+        space: host.stat_path(Path::new("/tmp")).expect("/tmp").dev,
     };
     let alternatives = [
         fs_kind::Alternative {
@@ -1974,7 +1974,7 @@ fn forty_thousand_tmp_candidates_reclaim_once_per_reuse_window() {
         find: &find,
         rules: &rules,
         idle: diskgc_core::profile::IdleWindow::default(),
-        dev: host.stat_path(Path::new("/tmp")).expect("/tmp").dev,
+        space: host.stat_path(Path::new("/tmp")).expect("/tmp").dev,
     };
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
     let started = std::time::Instant::now();
@@ -2997,7 +2997,7 @@ fn a_blocking_scan_past_the_deadline_stops_the_reclaim() {
         find: &find,
         rules: &rules,
         idle: diskgc_core::profile::IdleWindow::default(),
-        dev: host.stat_path(Path::new("/tmp")).expect("/tmp").dev,
+        space: host.stat_path(Path::new("/tmp")).expect("/tmp").dev,
     };
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
     let deadline = host.now().checked_add(Duration::from_secs(600));

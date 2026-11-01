@@ -155,7 +155,9 @@ fn query<H: Host>(host: &H, what: DockerQuery) -> Result<Result<String, Binding>
 
 /// Bind the local system Docker backend. Every decision is from one Host
 /// port, so ModelHost can reproduce remote, rootless, and mount
-/// failures without touching a developer's daemon.
+/// failures without touching a developer's daemon. `target` is the space
+/// of the requested filesystem ([`crate::places::space_of`]): the storage
+/// must be on it, or the kind is skipped `other_fs`.
 pub fn inspect_backend<H: Host>(
     host: &H,
     target: Dev,
@@ -290,14 +292,14 @@ pub fn inspect_backend<H: Host>(
     };
     for path in roots {
         match resolve::resolve(host, path, Want::Directory) {
-            Ok(resolved) if resolved.stat.dev == target => {}
+            Ok(resolved) if crate::places::space_of(&resolved.mount) == target => {}
             Ok(resolved) => {
                 return Ok(skip(
                     Reason::OtherFs,
                     format!(
                         "Docker storage {} is on {}, requested filesystem is {target}",
                         path.display(),
-                        resolved.stat.dev
+                        crate::places::space_of(&resolved.mount)
                     ),
                 ));
             }

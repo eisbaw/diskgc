@@ -343,6 +343,24 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
                 format!("device {dev} is an overlay's, mounted earlier"),
             ));
         }
+        let subvolume = spec.subvolume.map(|d| d.0);
+        if let Some(subvolume) = subvolume {
+            let taken = state.fss.contains_key(&subvolume)
+                || subvolume == dev
+                || state.mounts.iter().any(|mount| {
+                    mount.overlay == Some(subvolume)
+                        || (mount.dev != dev && mount.subvolume == Some(subvolume))
+                });
+            if spec.fs != "btrfs" || taken {
+                return Err(LoadError::new(
+                    &at,
+                    format!(
+                        "subvolume {subvolume} needs fs: btrfs and a device no filesystem, \
+                         overlay or other filesystem's subvolume uses"
+                    ),
+                ));
+            }
+        }
         if spec.overlay_upper.is_some() {
             if spec.fs != "overlay" || spec.bind_of.is_some() || !spec.statx_missing.is_empty() {
                 return Err(LoadError::new(
@@ -437,6 +455,7 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
                 read_only: spec.read_only,
                 dead: spec.dead,
                 overlay: Some(dev),
+                subvolume: None,
             });
             paths.insert(spec.id, spec.at.clone());
             continue;
@@ -464,6 +483,7 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
             read_only: spec.read_only,
             dead: spec.dead,
             overlay: None,
+            subvolume,
         });
         paths.insert(spec.id, spec.at.clone());
     }

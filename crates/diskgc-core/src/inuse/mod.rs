@@ -40,7 +40,7 @@ use crate::engine::{
 };
 use crate::host::{
     Access, Base, BoundSocket, Delete, Dev, DevIno, Errno, FileType, Host, HostError, LockMode,
-    Locked, MonoTime, Pid, PidNamespace, TryLock,
+    Locked, MonoTime, MountEntry, Pid, PidNamespace, TryLock,
 };
 use crate::liveness::pytest::Processes;
 use crate::liveness::{HIDEPID, NOT_INITIAL_PID_NAMESPACE, PidTable};
@@ -391,10 +391,11 @@ pub fn scan<H: Host>(
         for (var, path) in read.environ {
             s.environ.push(EnvPath { pid, var, path });
         }
-        for (id, bytes, text) in read.deleted {
+        for (id, mnt_id, bytes, text) in read.deleted {
             s.held_deleted.push(HeldDeleted {
                 pid,
                 id,
+                mnt_id,
                 bytes,
                 text,
             });
@@ -661,24 +662,30 @@ impl Scan {
     }
 
     /// The open-but-deleted files of the visible processes on the
-    /// filesystem `dev`, per process (docs/reference.md,
-    /// `held_by_deleted_files`).
-    pub fn held_by_deleted_files(&self, dev: Dev) -> Vec<HeldByDeleted> {
-        self.held_by_deleted_files_on(&[dev])
-    }
-
-    /// As [`Self::held_by_deleted_files`], accepting the devices of all
-    /// visible mounts sharing a space pool (btrfs subvolumes have distinct
-    /// `statx` devices). The caller establishes that relationship.
-    pub fn held_by_deleted_files_on(&self, devices: &[Dev]) -> Vec<HeldByDeleted> {
+    /// filesystem whose space is `space` ([`crate::places::space_of`]), per
+    /// process (docs/reference.md, `held_by_deleted_files`). A file is on
+    /// it when the mount it was opened through, found in `mounts` by its
+    /// mount id, has that space: so every btrfs subvolume of the filesystem
+    /// counts, whatever its `st_dev`. A file whose mount `mounts` does not
+    /// list (another mount namespace's) or that has no mount id counts only
+    /// when its `st_dev` is `path_dev` (`PATH`'s own): nothing else places
+    /// it.
+    pub fn held_by_deleted_files(
+        &self,
+        space: Dev,
+        path_dev: Dev,
+        mounts: &[MountEntry],
+    ) -> Vec<HeldByDeleted> {
+        let on_space = |held: &&HeldDeleted| match held
+            .mnt_id
+            .and_then(|id| mounts.iter().find(|mount| mount.id == id))
+        {
+            Some(mount) => crate::places::space_of(mount) == space,
+            None => held.id.dev == path_dev,
+        };
         let mut per_pid: BTreeMap<Pid, u64> = BTreeMap::new();
         let mut counted = HashSet::new();
-        let devices: HashSet<Dev> = devices.iter().copied().collect();
-        for held in self
-            .held_deleted
-            .iter()
-            .filter(|h| devices.contains(&h.id.dev))
-        {
+        for held in self.held_deleted.iter().filter(on_space) {
             // Keep every holder visible, but attribute shared bytes to one
             // process only. Scan collection visits pids in ascending order.
             let bytes = per_pid.entry(held.pid).or_default();

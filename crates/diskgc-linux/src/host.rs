@@ -2601,8 +2601,8 @@ impl Host for LinuxHost {
         )))
     }
 
-    fn fs_uuid(&self, dev: Dev) -> Result<Option<String>, HostError> {
-        crate::state::fs_uuid(dev)
+    fn fs_uuid(&self, mount: &MountEntry) -> Result<Option<String>, HostError> {
+        crate::state::fs_uuid(mount)
     }
 
     fn loop_backing_file(&self, dev: Dev) -> Result<Option<PathBuf>, HostError> {
@@ -2777,28 +2777,44 @@ impl Host for LinuxHost {
     }
 
     fn state_lock(&self, key: &FsKey) -> Result<StateLock<LinuxFd>, HostError> {
-        let (fd, shown, _) = crate::state::open_lock_file_ungated(self.state_dir()?, key)?;
-        // The superblock's device, as mountinfo names it for the lock
-        // file's mount (btrfs subvolumes share it; their st_dev differ).
-        let mnt_id =
-            rustix::fs::statx(&fd, "", AtFlags::EMPTY_PATH, rustix::fs::StatxFlags::MNT_ID)
-                .map_err(|e| HostError::errno("statx", shown.display(), errno_of(e)))?
-                .stx_mnt_id;
-        let dir_dev = self
+        let dir = self.state_dir()?;
+        let (fd, shown, dir_fd) = crate::state::open_lock_file_ungated(dir, key)?;
+        // The state directory's own mount, by its descriptor: the snapshot
+        // is written into the directory, and a file bind mounted over the
+        // lock file would put the lock file on another mount (TASK-286).
+        let held = rustix::fs::statx(
+            &dir_fd,
+            "",
+            AtFlags::EMPTY_PATH,
+            rustix::fs::StatxFlags::MNT_ID,
+        )
+        .map_err(|e| HostError::errno("statx", dir.display(), errno_of(e)))?;
+        if held.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() == 0 {
+            return Err(HostError::invalid(
+                "statx",
+                dir.display(),
+                "the kernel did not report the state directory's mount id",
+            ));
+        }
+        let mnt_id = held.stx_mnt_id;
+        let dir_mount = self
             .mountinfo()?
             .into_iter()
             .find(|m| m.id == mnt_id)
-            .map(|m| m.dev)
             .ok_or_else(|| {
                 HostError::invalid(
                     "mountinfo",
-                    shown.display(),
+                    dir.display(),
                     format!("no mount {mnt_id} for the state directory"),
                 )
             })?;
         Ok(StateLock {
             fd: LinuxFd { fd, shown },
-            dir_dev,
+            dir: LinuxFd {
+                fd: dir_fd,
+                shown: dir.to_owned(),
+            },
+            dir_mount,
         })
     }
 
@@ -7260,10 +7276,11 @@ mod tests {
         assert_eq!(host.state_read(&key, 1 << 20).expect("read"), None);
     }
 
-    /// The space guard compares filesystems by the device mountinfo names
-    /// (the superblock's), as the reclaimed `PATH`'s mount does.
+    /// The space guard places the state directory by its own mount, as
+    /// mountinfo lists it (the entry `PATH`'s resolution finds too), and
+    /// samples the directory's descriptor (TASK-286).
     #[test]
-    fn the_state_lock_names_its_filesystem_as_mountinfo_does() {
+    fn the_state_lock_names_its_directory_s_mount_as_mountinfo_does() {
         let tmp = TempDir::new();
         let host = state_host(&tmp.0);
         let key = FsKey::dev(Dev {
@@ -7272,7 +7289,11 @@ mod tests {
         });
         let lock = host.state_lock(&key).expect("lock file");
         let dir = resolve(&host, &tmp.0.join("state/diskgc"), Want::Directory).expect("resolve");
-        assert_eq!(lock.dir_dev, dir.mount.dev);
+        assert_eq!(lock.dir_mount, dir.mount);
+        assert_eq!(
+            host.statvfs(&lock.dir).expect("sample").size_bytes,
+            host.statvfs(&dir.fd).expect("sample").size_bytes
+        );
     }
 
     #[test]

@@ -142,7 +142,7 @@ fn lock_created_after_first_judgement_blocks_deletion() {
         find: &find,
         rules: &rules,
         idle: diskgc_core::profile::IdleWindow::default(),
-        dev: host.stat_path(Path::new("/tmp")).unwrap().dev,
+        space: host.stat_path(Path::new("/tmp")).unwrap().dev,
     };
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
     let outcome = fs_kind::reclaim(&host, &judge, &found, false, &mut checker, None);

@@ -1154,8 +1154,8 @@ impl Host for Gated {
     ) -> Result<Vec<diskgc_core::host::DevIno>, diskgc_core::host::ProcError> {
         self.0.proc_root_lookup(pid, path, climb)
     }
-    fn fs_uuid(&self, dev: diskgc_core::host::Dev) -> Result<Option<String>, HostError> {
-        self.0.fs_uuid(dev)
+    fn fs_uuid(&self, mount: &diskgc_core::host::MountEntry) -> Result<Option<String>, HostError> {
+        self.0.fs_uuid(mount)
     }
 
     fn loop_backing_file(

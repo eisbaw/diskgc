@@ -101,7 +101,7 @@ pub struct Deferred {
 }
 
 /// Runs the synchronous tally over `tiers` (policy order) on the
-/// filesystem `dev`, until `deadline` (`None`: to completion,
+/// filesystem whose space is `dev` ([`crate::places::space_of`]), until `deadline` (`None`: to completion,
 /// `--tally-budget 0`). An error is a failure of the host that stops it;
 /// what it did until then stays in `state`.
 pub fn synchronous<H: Host>(

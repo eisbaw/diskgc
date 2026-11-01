@@ -2193,13 +2193,13 @@ impl Host for ModelHost {
                         .lookup_link(&model_path)
                         .unwrap_or_else(|f| model_error(format!("{shown}: {f:?}")));
                     let object = state.dev_ino(loc);
-                    let mut chain = vec![object];
+                    let mut chain = vec![state.reported_dev_ino(loc)];
                     if climb && state.inode(loc).entries().is_some() {
                         for ancestor in model_path.ancestors().skip(1) {
                             let up = state
                                 .lookup(ancestor)
                                 .unwrap_or_else(|f| model_error(format!("{shown}: {f:?}")));
-                            chain.push(state.dev_ino(up));
+                            chain.push(state.reported_dev_ino(up));
                         }
                     }
                     let text = model_path.display().to_string();
@@ -2209,9 +2209,11 @@ impl Host for ModelHost {
         })
     }
 
-    fn fs_uuid(&self, dev: diskgc_core::host::Dev) -> Result<Option<String>, HostError> {
+    /// The model's UUID of the filesystem `mount` shows, by its mountinfo
+    /// device (every subvolume of a modelled btrfs shares it).
+    fn fs_uuid(&self, mount: &MountEntry) -> Result<Option<String>, HostError> {
         self.call(Op::FsUuid, None, None, |inner| {
-            let uuid = inner.state.fs_uuids.get(&dev).cloned();
+            let uuid = inner.state.fs_uuids.get(&mount.dev).cloned();
             let text = uuid.clone().unwrap_or_else(|| "none".to_owned());
             (Ok(uuid), None, text)
         })
@@ -2379,14 +2381,24 @@ impl Host for ModelHost {
                         "the lock file must be a regular file of diskgc's user",
                     ));
                 }
-                let dev = inner.state.mount(loc.mnt).shown_dev();
+                // The directory's own mount (TASK-286): the snapshot is
+                // written into it, whatever the lock file is on.
+                let dir_mount = inner
+                    .state
+                    .mountinfo()
+                    .into_iter()
+                    .find(|m| m.id == dir.mnt)
+                    .expect("the state directory's mount is listed");
+                let dir_path = inner.state.state_dir.clone().expect("a state dir");
                 let ofd =
                     inner
                         .state
                         .open_ofd(loc, path.clone().expect("a state dir"), Access::Read);
+                let dir_ofd = inner.state.open_ofd(dir, dir_path, Access::Read);
                 inner.state.own_ofds.insert(ofd);
+                inner.state.own_ofds.insert(dir_ofd);
                 inner.peak_open_fds = inner.peak_open_fds.max(inner.state.own_ofds.len());
-                Ok((ofd, dev))
+                Ok((ofd, dir_ofd, dir_mount))
             })();
             let text = match &result {
                 Ok(_) => "ok".to_owned(),
@@ -2394,9 +2406,10 @@ impl Host for ModelHost {
             };
             (result, None, text)
         });
-        opened.map(|(ofd, dir_dev)| StateLock {
+        opened.map(|(ofd, dir_ofd, dir_mount)| StateLock {
             fd: self.wrap(ofd),
-            dir_dev,
+            dir: self.wrap(dir_ofd),
+            dir_mount,
         })
     }
 

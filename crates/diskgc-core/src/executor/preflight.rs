@@ -8,6 +8,7 @@ use crate::engine::Reason;
 use crate::fs_kind;
 use crate::host::{Dev, Host, MonoTime};
 use crate::hostlock::{self, Readiness};
+use crate::places;
 use crate::report::{ErrorCause, ErrorEntry, Final, Report, SkipEntry, Status, conclude};
 use crate::resolve::{ResolveError, Resolved, Want, resolve_in, resolve_unscreened};
 use crate::units::Size;
@@ -155,7 +156,9 @@ pub(super) struct Measured<F> {
     /// `PATH`, reached safely (held for the run: its fd is what is sampled).
     pub(super) at: Resolved<F>,
     pub(super) path: PathBuf,
-    pub(super) dev: Dev,
+    /// `PATH`'s filesystem's space ([`places::space_of`]): what every
+    /// "the same filesystem" check compares with (`other_fs`).
+    pub(super) space: Dev,
     pub(super) min: u64,
     pub(super) target: u64,
 }
@@ -205,9 +208,9 @@ pub fn goal_bytes(
 /// sizes into bytes ([`goal_bytes`]); fills the report's `mount`, sizes and
 /// `avail_before_bytes`. Host sampling failures remain distinct from
 /// invalid path and size requests. In a `watch` cycle, `PATH` must be on
-/// the device it was on at start ([`super::WatchCycle::expect_dev`]): this
-/// is the resolution the cycle measures and reclaims on, so no mount made
-/// on `PATH` meanwhile goes unseen.
+/// the filesystem it was on at start ([`super::WatchCycle::expect_space`]):
+/// this is the resolution the cycle measures and reclaims on, so no mount
+/// of another filesystem made on `PATH` meanwhile goes unseen.
 pub(super) fn measure<H: Host>(
     host: &H,
     request: &Request,
@@ -215,15 +218,15 @@ pub(super) fn measure<H: Host>(
 ) -> Result<Measured<H::Fd>, MeasureFailure> {
     let at = reach_path(host, &request.path)?;
     report.mount = Some(at.mount.mount_point.clone());
+    let fs_space = places::space_of(&at.mount);
     if let Some(cycle) = request.watch
-        && at.stat.dev != cycle.expect_dev
+        && fs_space != cycle.expect_space
     {
         return Err(MeasureFailure::Host(format!(
-            "PATH {} is on device {}, not on the filesystem watched since start (device {}): \
-             nothing is reclaimed there (a mount stacked on PATH?)",
+            "PATH {} is on device {fs_space}, not on the filesystem watched since start (device \
+             {}): nothing is reclaimed there (a mount stacked on PATH?)",
             request.path.display(),
-            at.stat.dev,
-            cycle.expect_dev
+            cycle.expect_space
         )));
     }
     let space = host
@@ -244,7 +247,7 @@ pub(super) fn measure<H: Host>(
     report.min_free_bytes = Some(min);
     report.target_free_bytes = Some(target);
     Ok(Measured {
-        dev: at.stat.dev,
+        space: fs_space,
         at,
         path: request.path.clone(),
         min,
@@ -416,9 +419,10 @@ pub(super) fn nothing_searched(tier: &Tier) -> String {
 /// searched (TASK-260) (TASK-210, decided for 0.1: a
 /// skipped `other_fs` row, no new JSON field). An unsafe or unreadable root
 /// excludes its tier; all roots are checked before another tier may delete.
-/// Compare devices, not mount ids: a bind mount of the requested filesystem
-/// can free space on PATH.
-pub(super) fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev) -> RootPreflight {
+/// Compare spaces ([`places::space_of`]), not mount ids or `st_dev`: a bind
+/// mount of the requested filesystem, or another subvolume of its btrfs,
+/// frees space on PATH.
+pub(super) fn preflight_roots<H: Host>(host: &H, tier: &Tier, space: Dev) -> RootPreflight {
     // (profile, root, whether it is a negated profile's root)
     let mut roots = Vec::new();
     roots.extend(
@@ -502,7 +506,7 @@ pub(super) fn preflight_roots<H: Host>(host: &H, tier: &Tier, requested_dev: Dev
         // A local bind mount can sit below an unsafe ancestor: resolve_in
         // screens the full mount chain before it opens any of it.
         match resolve_in(host, &mounts, root, Want::Directory) {
-            Ok(resolved) if resolved.stat.dev != requested_dev && !negated_only => {
+            Ok(resolved) if places::space_of(&resolved.mount) != space && !negated_only => {
                 if !skipped
                     .iter()
                     .any(|skip: &SkipEntry| skip.candidate.as_ref() == Some(root))

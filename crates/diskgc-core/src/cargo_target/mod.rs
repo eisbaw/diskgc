@@ -43,7 +43,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::engine::{CARGO_LOCK_NAMES, Identity, Seen};
-use crate::host::{DevIno, FileType, Stat, Timestamp};
+use crate::host::{Dev, DevIno, FileType, Stat, Timestamp};
 
 pub use discover::{
     CARGO_MANIFEST, DISCOVERY_DEPTH, DiscoverCursor, Discovery, Project, Reached, Stepped,
@@ -76,6 +76,10 @@ pub struct Target {
     /// (`changed` otherwise). Its parent is the project directory of the
     /// process heuristics ([`cargo_evidence`]).
     pub identity: Identity,
+    /// The space of the mount discovery found it on
+    /// ([`crate::places::space_of`]; never its `st_dev`, which on btrfs is
+    /// its subvolume's): `other_fs` unless it is `PATH`'s.
+    pub space: Dev,
     /// What it held when found.
     pub inspected: Inspected,
     /// What the index needs of the `statx` that found it (the tally).

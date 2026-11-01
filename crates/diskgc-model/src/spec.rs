@@ -258,6 +258,16 @@ pub struct MountSpec {
     /// no byte of it in the model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_backing: Option<PathBuf>,
+    /// A btrfs subvolume (`fs: btrfs`): the device `statx` reports for
+    /// every object reached through this mount (the subvolume's anonymous
+    /// device), while mountinfo keeps `dev`, the filesystem's superblock's
+    /// (TASK-286). Two mounts of subvolumes of one btrfs share `dev` and
+    /// their space and differ here. A per-mount simplification: Linux
+    /// reports the device of the subvolume an inode belongs to, whichever
+    /// mount reaches it, and a nested subvolume (not mounted) is not
+    /// modelled. Absent: `statx` reports `dev`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subvolume: Option<DevSpec>,
     /// The filesystem's UUID as `fs_uuid` reports it (the udev link
     /// `/dev/disk/by-uuid`); absent: none (tmpfs, no udev).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -274,8 +274,7 @@ fn run<H: Delete>(
         index,
         tiers.iter().map(|(tier, _)| tier),
         Reclaimed {
-            dev: measured.dev,
-            fs: measured.at.mount.dev,
+            mount: measured.at.mount.clone(),
             min_free: measured.min,
             deadline,
         },
@@ -697,7 +696,7 @@ impl<H: Delete> Tallied<'_, H> {
     ) -> Result<Option<PreparedTier>, PastDeadline> {
         let (host, deadline) = (self.host, self.deadline);
         let started = host.now();
-        let roots = preflight_roots(host, tier, self.measured.dev);
+        let roots = preflight_roots(host, tier, self.measured.space);
         record_deadline_overrun(
             host,
             report,
@@ -803,7 +802,7 @@ impl<H: Delete> Tallied<'_, H> {
         let (host, deadline) = (self.host, self.deadline);
         let started = host.now();
         let inspected =
-            docker_backend::inspect_backend(host, self.measured.dev, docker_storage(tier));
+            docker_backend::inspect_backend(host, self.measured.space, docker_storage(tier));
         record_deadline_overrun(
             host,
             report,

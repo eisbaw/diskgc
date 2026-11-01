@@ -333,3 +333,62 @@ fn an_ancestry_changes_with_a_rename_above_a_binds_source() {
         ancestry(&then, Path::new("/src/work/sub/cruft")).expect("placed")
     );
 }
+
+/// TASK-286: the one rule of "the same filesystem". Every mount of one
+/// superblock is the same space (a bind, a btrfs subvolume: mountinfo
+/// names one device for them); writes elsewhere take nothing from it only
+/// when independence is proved, never for an overlay, a stacking or FUSE
+/// filesystem, a loop device's filesystem or another dataset of the same
+/// ZFS pool, whichever of the two mounts it is.
+#[test]
+fn one_superblock_is_one_space_and_independence_must_be_proved() {
+    let typed = |id, point: &str, dev: (u32, u32), root: &str, fs_type: &str, source: &str| {
+        let mut m = mount(id, 1, point, dev, root);
+        m.fs_type = fs_type.to_owned();
+        m.source = source.to_owned();
+        m
+    };
+    let home = typed(2, "/home", (0, 40), "/@home", "btrfs", "/dev/nvme0n1p2");
+    let work = typed(3, "/work", (0, 40), "/@work", "btrfs", "/dev/nvme0n1p2");
+    let bind = typed(
+        4,
+        "/alias",
+        (0, 40),
+        "/@home/mark",
+        "btrfs",
+        "/dev/nvme0n1p2",
+    );
+    let data = typed(5, "/data", (254, 3), "/", "ext4", "/dev/sda1");
+    let tmp = typed(6, "/tmp", (0, 42), "/", "tmpfs", "tmpfs");
+    for other in [&work, &bind] {
+        assert!(same_space(&home, other));
+        assert!(shared_space(other, &home).is_some_and(|why| why.contains("same filesystem")));
+    }
+    for other in [&data, &tmp] {
+        assert!(!same_space(&home, other));
+        assert_eq!(shared_space(other, &home), None);
+        assert_eq!(shared_space(&home, other), None);
+    }
+    let overlay = typed(7, "/var/state", (0, 60), "/", "overlay", "overlay");
+    let ecryptfs = typed(8, "/home/u", (0, 61), "/", "ecryptfs", "/home/.u");
+    let fuse = typed(9, "/mnt/b", (0, 62), "/", "fuse.bindfs", "/data/x");
+    let image = typed(10, "/mnt/img", (7, 0), "/", "ext4", "/dev/loop0");
+    for stacked in [&overlay, &ecryptfs, &fuse, &image] {
+        assert!(!same_space(stacked, &data), "{stacked:?}");
+        assert!(shared_space(stacked, &data).is_some(), "{stacked:?}");
+        assert!(shared_space(&data, stacked).is_some(), "{stacked:?}");
+    }
+    let tank_a = typed(11, "/tank/a", (0, 70), "/", "zfs", "tank/a");
+    let tank_b = typed(12, "/tank/b", (0, 71), "/", "zfs", "tank/b");
+    let other_pool = typed(13, "/pool/c", (0, 72), "/", "zfs", "pool/c");
+    assert!(!same_space(&tank_a, &tank_b));
+    assert!(shared_space(&tank_b, &tank_a).is_some_and(|why| why.contains("ZFS pool tank")));
+    assert_eq!(shared_space(&other_pool, &tank_a), None);
+    assert_eq!(
+        space_of(&home),
+        Dev {
+            major: 0,
+            minor: 40
+        }
+    );
+}

@@ -28,7 +28,7 @@ use crate::engine::{
     Work, is_cargo_lock_name, is_private_tmp, networked_why, path_in_private_tmp,
 };
 use crate::host::{
-    Access, Base, DevIno, DirListing, FileType, Host, HostError, MonoTime, MountEntry, Stat,
+    Access, Base, Dev, DevIno, DirListing, FileType, Host, HostError, MonoTime, MountEntry, Stat,
 };
 use crate::places;
 use crate::resolve::{
@@ -147,7 +147,7 @@ pub fn discover<H: Host>(
         let walked = cursor.walk(
             host,
             &mounts,
-            resolved.mount.id,
+            &resolved.mount,
             deadline,
             &mut found,
             vec![resolved.fd],
@@ -809,7 +809,8 @@ impl DiscoverCursor {
             }
             Some(_) => {}
         }
-        let mount_id = resolved.mount.id;
+        let mount = resolved.mount;
+        let mount_id = mount.id;
         let mut open = vec![resolved.fd];
         while open.len() < self.frames.len() {
             // Charged, never refused (bounded by DISCOVERY_DEPTH).
@@ -842,7 +843,7 @@ impl DiscoverCursor {
                 }
             }
         }
-        let walked = self.walk(host, &mounts, mount_id, None, out, open, pause)?;
+        let walked = self.walk(host, &mounts, &mount, None, out, open, pause)?;
         if matches!(walked, Stepped::Done) {
             self.done = true;
         }
@@ -868,13 +869,14 @@ impl DiscoverCursor {
         &mut self,
         host: &H,
         mounts: &[MountEntry],
-        mount_id: u64,
+        mount: &MountEntry,
         deadline: Option<MonoTime>,
         found: &mut Discovery,
         mut open: Vec<H::Fd>,
         pause: &mut dyn FnMut(Work) -> bool,
     ) -> Result<Stepped, Stop> {
         assert_eq!(open.len(), self.frames.len(), "a frame per open directory");
+        let (mount_id, space) = (mount.id, places::space_of(mount));
         let root = self.root.clone();
         let mut seen = std::mem::take(&mut self.seen);
         let result = (|| -> Result<Stepped, Stop> {
@@ -887,6 +889,7 @@ impl DiscoverCursor {
                     host,
                     root: &root,
                     mount_id,
+                    space,
                     mounts,
                     deadline,
                     found: &mut *found,
@@ -971,6 +974,9 @@ struct Walk<'a, H: Host> {
     host: &'a H,
     root: &'a Path,
     mount_id: u64,
+    /// The root's mount's space ([`places::space_of`]): every target is on
+    /// that mount.
+    space: Dev,
     mounts: &'a [MountEntry],
     deadline: Option<MonoTime>,
     found: &'a mut Discovery,
@@ -1086,6 +1092,7 @@ impl<H: Host> Walk<'_, H> {
                 root: self.root.to_owned(),
                 path: path.to_owned(),
                 identity,
+                space: self.space,
                 inspected,
                 seen: Seen {
                     parent_ino,

@@ -5,10 +5,10 @@
 //! actions.
 
 use crate::cargo_target::{self, Stop};
-use crate::engine::{CACHEDIR_TAG, Reason, Skip, may_be_networked};
+use crate::engine::{CACHEDIR_TAG, Reason, Skip};
 use crate::fs_kind;
 use crate::host::{DevIno, Host, HostError, MonoTime, MountEntry};
-use crate::places::{self, Place, mount_for};
+use crate::places::{self, LOOP_MAJOR, OVERLAY, Place, mount_for, stored_elsewhere};
 use crate::resolve::{
     MountScreenError, ResolveError, Want, resolve, resolve_in, screen_mount_chain,
 };
@@ -117,9 +117,6 @@ pub(super) fn overlaps_checked_in<H: Host>(
 /// How many loop images deep (an image inside an image) the verdict
 /// follows a backing file before it cannot prove anything any more.
 const LOOP_IMAGE_DEPTH: usize = 4;
-
-/// The block major of loop devices (`Documentation/admin-guide/devices.txt`).
-const LOOP_MAJOR: u32 = 7;
 
 /// [`overlaps_checked_until`]: by name, place and identity, then through
 /// loop images (TASK-268 review, Codex 3): a filesystem on a loop device is
@@ -295,7 +292,7 @@ pub(super) fn screen_overlap_mounts(
 
 /// The overlay rules of docs/safety.md, Not protected, not excluded: with
 /// any match, a candidate or match on an overlay mount, or a mount that
-/// stores its data in another filesystem's directories ([`stored_elsewhere`])
+/// stores its data in another filesystem's directories ([`places::stored_elsewhere`])
 /// at or below a match ([`nested_in`], TASK-268), cannot be proved apart.
 fn refuse_overlay(
     mounts: &[MountEntry],
@@ -345,26 +342,6 @@ fn refuse_overlay(
         }
     }
     Ok(())
-}
-
-/// The type name overlayfs has in mountinfo.
-const OVERLAY: &str = "overlay";
-
-/// Kernel filesystems that stack on directories of other filesystems and
-/// write through to them: eCryptfs (its ciphertext directory), aufs (its
-/// branches), shiftfs (the directory it shifts). Refused only when mounted
-/// at or below a match; on the candidate's or match's own mount they are
-/// taken as local (docs/safety.md, limits), or an eCryptfs-encrypted home
-/// would stop every run.
-const STACKED_ON_DIRECTORIES: &[&str] = &["ecryptfs", "aufs", "shiftfs"];
-
-/// Whether a filesystem of `fs_type` may store its data in directories of
-/// another filesystem, which mountinfo does not name: overlayfs, the
-/// [`STACKED_ON_DIRECTORIES`], and every type the mount screen refuses
-/// (FUSE such as `bindfs` or `fuse-overlayfs`, an NFS export of this host,
-/// an automount point).
-fn stored_elsewhere(fs_type: &str) -> bool {
-    fs_type == OVERLAY || STACKED_ON_DIRECTORIES.contains(&fs_type) || may_be_networked(fs_type)
 }
 
 /// The match `mount` lies at or below, if any: its mount point at or below
