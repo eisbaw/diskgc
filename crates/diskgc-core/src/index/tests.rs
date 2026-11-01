@@ -328,9 +328,23 @@ fn sources<'a>(root: &'a Path, hash: u64) -> [Source<'a>; 1] {
     }]
 }
 
+/// The space of an ext4 on `dev`, as mountinfo would show it.
+fn space(dev: Dev) -> crate::places::Space {
+    crate::places::space_of(&crate::host::MountEntry {
+        id: 1,
+        parent_id: 1,
+        dev,
+        fs_root: PathBuf::from("/"),
+        mount_point: PathBuf::from("/"),
+        fs_type: "ext4".to_owned(),
+        source: "/dev/fixture".to_owned(),
+        read_only: false,
+    })
+}
+
 fn tier<'a>(sources: &'a [Source<'a>], age: AgeFilter) -> TierQuery<'a> {
     TierQuery {
-        dev: DEV,
+        space: space(DEV),
         sources,
         age,
     }
@@ -406,7 +420,7 @@ fn oldest_order_with_blocks_by_their_oldest_member_and_hints_last() {
         .is_empty()
     );
     let elsewhere = TierQuery {
-        dev: Dev { major: 8, minor: 1 },
+        space: space(Dev { major: 8, minor: 1 }),
         ..tier(&src, AgeFilter::None)
     };
     assert!(derive(&index, &elsewhere).ready.is_empty());

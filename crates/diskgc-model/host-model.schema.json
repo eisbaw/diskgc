@@ -390,6 +390,17 @@
             }
           ]
         },
+        "subvolume": {
+          "description": "The top of a nested btrfs subvolume or snapshot (not mounted):\n`statx` reports this device for it and everything in its subtree\n(TASK-286 review), while mountinfo shows nothing there. A nested one\ninside it overrides it below its own top. On a `btrfs` mount only.\nEntries created later inside it take it too; an `rmdir` of its\nempty top succeeds, as Linux 4.18 and later allow.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Dev"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "uid": {
           "description": "Owner; default 1000.",
           "type": [

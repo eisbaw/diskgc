@@ -42,10 +42,11 @@ use super::schedule::{DISCOVERY_PERIOD, needs_sizing};
 use super::{Listed, Sizing, TallyState};
 use crate::config::Order;
 use crate::engine::Reason;
-use crate::host::{Dev, Host, HostError, MonoTime};
+use crate::host::{Host, HostError, MonoTime};
 use crate::index::queue::{self, AgeFilter, Queued, Source, TierQuery};
 use crate::index::{Finder, MountKey};
 use crate::outcome::Stop;
+use crate::places::Space;
 
 /// A selected tier, as the tally needs it: its sources (each a profile
 /// bound to one root) and its order. In policy order (group, tier).
@@ -101,14 +102,14 @@ pub struct Deferred {
 }
 
 /// Runs the synchronous tally over `tiers` (policy order) on the
-/// filesystem whose space is `dev` ([`crate::places::space_of`]), until `deadline` (`None`: to completion,
+/// filesystem whose space is `space` ([`crate::places::space_of`]), until `deadline` (`None`: to completion,
 /// `--tally-budget 0`). An error is a failure of the host that stops it;
 /// what it did until then stays in `state`.
 pub fn synchronous<H: Host>(
     host: &H,
     state: &mut TallyState,
     tiers: &[SyncTier],
-    dev: Dev,
+    space: Space,
     deadline: Option<MonoTime>,
 ) -> Result<SyncReport, HostError> {
     let mut report = SyncReport::default();
@@ -130,7 +131,7 @@ pub fn synchronous<H: Host>(
     if !report.pass1_done {
         return Ok(report);
     }
-    pass2(host, state, tiers, dev, deadline, &mut report)?;
+    pass2(host, state, tiers, space, deadline, &mut report)?;
     Ok(report)
 }
 
@@ -190,11 +191,11 @@ fn pass2<H: Host>(
     host: &H,
     state: &mut TallyState,
     tiers: &[SyncTier],
-    dev: Dev,
+    space: Space,
     deadline: Option<MonoTime>,
     report: &mut SyncReport,
 ) -> Result<(), HostError> {
-    let Some((first, stale)) = first_tier_stale(host, state, tiers, dev) else {
+    let Some((first, stale)) = first_tier_stale(host, state, tiers, space) else {
         return Ok(());
     };
     let stale = match stale {
@@ -253,7 +254,7 @@ fn first_tier_stale<H: Host>(
     host: &H,
     state: &TallyState,
     tiers: &[SyncTier],
-    dev: Dev,
+    space: Space,
 ) -> Option<(usize, Stale)> {
     let now = host.now();
     tiers.iter().enumerate().find_map(|(i, tier)| {
@@ -269,7 +270,7 @@ fn first_tier_stale<H: Host>(
         let q = queue::derive(
             &state.index,
             &TierQuery {
-                dev,
+                space,
                 sources: &sources,
                 age: AgeFilter::None,
             },

@@ -2050,6 +2050,33 @@ impl Host for ModelHost {
     }
 
     /// The magic number of the mount's `fs` name ([`crate::state::fs_magic`]).
+    /// The model's filesystem id: its device's number, as one word pair
+    /// (every modelled filesystem has a unique device).
+    fn fs_id(&self, fd: &ModelFd) -> Result<u64, HostError> {
+        let ofd = self.fd_ofd(fd);
+        let path = self.base_path(Base::Dir(fd), Path::new(""));
+        self.call(Op::FsMagic, Some(path), None, |inner| {
+            let mount = inner.state.mount(inner.loc_of(ofd).mnt);
+            let dev = mount.shown_dev();
+            let id = (u64::from(dev.major) << 32) | u64::from(dev.minor);
+            (Ok(id), None, format!("{id:#x}"))
+        })
+    }
+
+    /// Loop devices by their major only: the model has no partitions of
+    /// one and no btrfs on one.
+    fn loop_devices(
+        &self,
+        mount: &MountEntry,
+        _fd: Option<&ModelFd>,
+    ) -> Result<Vec<diskgc_core::host::Dev>, HostError> {
+        Ok(if mount.dev.major == diskgc_core::places::LOOP_MAJOR {
+            vec![mount.dev]
+        } else {
+            Vec::new()
+        })
+    }
+
     fn fs_magic(&self, fd: &ModelFd) -> Result<u64, HostError> {
         let ofd = self.fd_ofd(fd);
         let path = self.base_path(Base::Dir(fd), Path::new(""));
@@ -2211,7 +2238,7 @@ impl Host for ModelHost {
 
     /// The model's UUID of the filesystem `mount` shows, by its mountinfo
     /// device (every subvolume of a modelled btrfs shares it).
-    fn fs_uuid(&self, mount: &MountEntry) -> Result<Option<String>, HostError> {
+    fn fs_uuid(&self, _fd: &ModelFd, mount: &MountEntry) -> Result<Option<String>, HostError> {
         self.call(Op::FsUuid, None, None, |inner| {
             let uuid = inner.state.fs_uuids.get(&mount.dev).cloned();
             let text = uuid.clone().unwrap_or_else(|| "none".to_owned());
@@ -2483,11 +2510,13 @@ impl Host for ModelHost {
     fn state_write(
         &self,
         lock: &Locked<ModelFd>,
+        dir: &ModelFd,
         key: &FsKey,
         bytes: &[u8],
         cancel: &dyn Fn() -> bool,
     ) -> Result<StateWritten, HostError> {
         let lock_ofd = self.fd_ofd(lock.fd());
+        let dir_ofd = self.fd_ofd(dir);
         let path = self.state_path(&key.snapshot_name());
         let shown = path
             .as_ref()
@@ -2507,11 +2536,9 @@ impl Host for ModelHost {
                     errno_text(e),
                 );
             }
-            let dir = match inner.state_dir(false) {
-                Ok(Some(dir)) => dir,
-                Ok(None) => model_error("state_write without a state directory"),
-                Err(e) => return (Err(e), None, "refused".to_owned()),
-            };
+            // The held state directory (TASK-286 review), never the path
+            // looked up again.
+            let dir = inner.loc_of(dir_ofd);
             // The port's shape (docs/architecture.md, The Host port): only
             // under this key's single-writer lock, held exclusively.
             let lock_loc = inner

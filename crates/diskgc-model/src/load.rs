@@ -314,6 +314,28 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
     for (loc, attrs) in &deferred.dir_attrs {
         set_dir_attrs(&mut state, *loc, attrs, model);
     }
+    // Outer subvolumes first (the attributes are in tree order), so a
+    // nested one overrides below its own top.
+    for (loc, attrs) in &deferred.dir_attrs {
+        if let Some(dev) = attrs.subvolume {
+            let dev = dev.0;
+            let taken = state.fss.contains_key(&dev)
+                || state
+                    .mounts
+                    .iter()
+                    .any(|m| m.overlay == Some(dev) || m.subvolume == Some(dev));
+            if state.fs(loc.mnt).fs_type != "btrfs" || taken {
+                return Err(LoadError::new(
+                    "tree",
+                    format!(
+                        "a directory's subvolume {dev} needs a btrfs mount and a device no \
+                         filesystem, overlay or mounted subvolume uses"
+                    ),
+                ));
+            }
+            state.mark_subvolume(*loc, dev);
+        }
+    }
     let events = load_events(&state, model)?;
     Ok((state, events))
 }

@@ -698,10 +698,6 @@ impl Index {
         finder: &Finder,
         found: Discovered,
     ) -> Result<Insertion, HostError> {
-        assert_eq!(
-            found.identity.dev, mount.dev,
-            "a unit on another device than its mount"
-        );
         assert!(
             path.starts_with(&finder.root),
             "{} is not below its finder's root {}",
@@ -1251,10 +1247,6 @@ impl Index {
         mut finders: Vec<Finder>,
         parts: BlockParts,
     ) -> bool {
-        assert_eq!(
-            parts.site.dev, mount.dev,
-            "a block on another device than its mount"
-        );
         finders.sort();
         finders.dedup();
         assert!(!finders.is_empty(), "a block without finders");

@@ -1345,6 +1345,26 @@ pub trait Host {
     /// `fd`.
     fn fs_magic(&self, fd: &Self::Fd) -> Result<u64, HostError>;
 
+    /// The filesystem id (`fstatfs` `f_fsid`, its two words as one number)
+    /// of the filesystem holding `fd`: what confirms one filesystem where
+    /// its superblock device is not unique (bcachefs makes it from its
+    /// UUID; [`crate::places::space_at`]). Read-only.
+    fn fs_id(&self, fd: &Self::Fd) -> Result<u64, HostError>;
+
+    /// The loop block devices the filesystem `mount` shows is stored on
+    /// ([`crate::places::on_loop`]): its device when that is a loop device
+    /// (`/sys/dev/block/M:m/loop`) or a partition of one (`losetup -P`,
+    /// the parent's); for btrfs, whose superblock device is anonymous, each
+    /// member device that is one, found through the filesystem's id read
+    /// from `fd` (`BTRFS_IOC_FS_INFO` and `/sys/fs/btrfs/<fsid>/devices`),
+    /// or without `fd` through the device mountinfo names as its source.
+    /// Empty: none (another block device, tmpfs, an overlay). Read-only.
+    fn loop_devices(
+        &self,
+        mount: &MountEntry,
+        fd: Option<&Self::Fd>,
+    ) -> Result<Vec<Dev>, HostError>;
+
     /// The `Uid:` line of `/proc/<pid>/status` (real, effective, saved,
     /// filesystem), read as [`Host::proc_nspid`] reads that file: readable
     /// for every user's process unless `hidepid` hides it; `Gone` only on
@@ -1389,15 +1409,15 @@ pub trait Host {
 
     // ---- diskgc's own state (docs/architecture.md, The Host port) ----
 
-    /// The UUID of the filesystem `mount` shows, where the system names one
-    /// (a `/dev/disk/by-uuid` link to its block device): what the
-    /// snapshot's [`FsKey`] prefers, since device numbers can change
-    /// between boots. Its block device is the mount's device
-    /// ([`crate::places::space_of`]), or for btrfs, whose superblock has an
-    /// anonymous device (major 0), the device mountinfo names as its source
-    /// (one UUID for every subvolume and every member device). `None`: no
-    /// UUID is known (tmpfs, an overlay, no udev links). Read-only.
-    fn fs_uuid(&self, mount: &MountEntry) -> Result<Option<String>, HostError>;
+    /// The UUID of the filesystem `mount` shows, reached as `fd` (a
+    /// directory on it): what the snapshot's [`FsKey`] prefers, since
+    /// device numbers can change between boots. For btrfs, whose
+    /// superblock device is anonymous, its FSID read from `fd`
+    /// (`BTRFS_IOC_FS_INFO`: one for every subvolume, never taken from a
+    /// path); otherwise the name of the `/dev/disk/by-uuid` link whose
+    /// block device is the mount's device. `None`: no UUID is known (tmpfs,
+    /// an overlay, no udev links). Read-only.
+    fn fs_uuid(&self, fd: &Self::Fd, mount: &MountEntry) -> Result<Option<String>, HostError>;
 
     /// The file behind the loop block device `dev` (major 7):
     /// `/sys/dev/block/MAJ:MIN/loop/backing_file`, as the kernel prints it
@@ -1453,7 +1473,9 @@ pub trait Host {
     /// caller's to judge. Read-only.
     fn state_read(&self, key: &FsKey, limit: u64) -> Result<Option<StateFile>, HostError>;
 
-    /// Replaces the snapshot `index-<key>` with `bytes`, atomically: a new
+    /// Replaces the snapshot `index-<key>` in the state directory held as
+    /// `dir` ([`StateLock::dir`]: every name is opened relative to it, never
+    /// the directory reopened by path) with `bytes`, atomically: a new
     /// file (never `O_TRUNC`, mode 0600) is filled completely before it
     /// is linked in and renamed onto `index-<key>`, the only name it ever
     /// renames onto, so a reader sees the old file or the new one and a
@@ -1469,6 +1491,7 @@ pub trait Host {
     fn state_write(
         &self,
         lock: &Locked<Self::Fd>,
+        dir: &Self::Fd,
         key: &FsKey,
         bytes: &[u8],
         cancel: &dyn Fn() -> bool,

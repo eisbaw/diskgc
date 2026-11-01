@@ -8,7 +8,7 @@ use crate::config::Order;
 use crate::docker_backend::{self, Binding, Storage};
 use crate::engine::{Checkouts, Identity, Reason, Rules, Skip, checkout_metadata_below};
 use crate::fs_kind::{self, Find};
-use crate::host::{Dev, DevIno, Host, MonoTime, Timestamp};
+use crate::host::{DevIno, Host, MonoTime, Timestamp};
 use crate::inuse::Checker;
 use crate::profile::{Action, IdleWindow};
 use crate::report::{BuildEvidence, PlanEntry, Report, Status};
@@ -81,6 +81,9 @@ fn dry_run_inner<H: Host>(
     };
     if host.interrupted().is_some() {
         return report;
+    }
+    if let Some(note) = crate::places::space::cow_note(&measured.at.mount) {
+        log(&note);
     }
     // Read-only, as the plan: what the reclaim would lock (TASK-277).
     if say_lock == SayLock::Yes {
@@ -631,7 +634,7 @@ pub(super) fn docker_storage(tier: &Tier) -> Storage {
 pub(super) fn plan_cargo<H: Host>(
     host: &H,
     tier: &Tier,
-    space: Dev,
+    space: crate::places::Space,
     rules: &Rules<'_>,
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
@@ -755,7 +758,7 @@ pub(super) fn plan_fs<H: Host>(
     host: &H,
     tier: &Tier,
     find: &Find,
-    space: Dev,
+    space: crate::places::Space,
     rules: &Rules<'_>,
     deadline: Option<MonoTime>,
     report: &mut Report,
@@ -1169,7 +1172,7 @@ pub(super) fn union_guard_veto<H: Host>(
     candidate: &FsUnionCandidate,
     sources: &[FsUnionSourceRef<'_>],
     rules: &Rules<'_>,
-    space: Dev,
+    space: crate::places::Space,
     deadline: Option<MonoTime>,
 ) -> Result<Option<(usize, Skip)>, Stop> {
     let evaluation_rules = Rules {
@@ -1201,7 +1204,7 @@ pub(super) fn union_guard_veto<H: Host>(
 pub(super) fn plan_fs_union<H: Host>(
     host: &H,
     tier: &Tier,
-    space: Dev,
+    space: crate::places::Space,
     rules: &Rules<'_>,
     deadline: Option<MonoTime>,
     report: &mut Report,

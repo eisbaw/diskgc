@@ -107,7 +107,11 @@ process runs, even if that Cargo works in an unrelated directory; see
   error, so a hook launched from `/tmp` cannot silently free the wrong
   disk. It is reached like every configured path (no symlink on the way,
   [safety.md](safety.md#path-traversal)). The resolved mount point is
-  printed in every report.
+  printed in every report. On btrfs or ZFS a reclaiming or dry run says
+  once (stderr) that a deletion frees nothing while a snapshot shares its
+  extents: tallies are estimates there, and only the final sample of
+  available space decides the exit code (the PRD's non-goal, warned
+  about). `watch` says it at start.
 - `--min-free` (required): if available space is at least this, do nothing
   and exit 0, without taking a lock. `ensure` still checks that
   `/run/diskgc/lock` is a safely reachable, readable regular file. If it
@@ -1258,9 +1262,8 @@ is `host`.
   space returns only when the process closes them; diskgc never kills
   processes. A file held by several processes contributes its allocated bytes
   once, to the lowest listed pid; the other holders appear with zero bytes.
-  "On the requested filesystem" is by the mount each file was opened
-  through ([architecture.md](architecture.md#filesystem-matching)), so
-  every mounted subvolume of a btrfs counts.
+  Which files are on the requested filesystem:
+  [architecture.md](architecture.md#filesystem-matching).
   `command` is `null` when the process's command could not be read.
   It comes from the run's last process scan (one is made at the
   end if the run made none). It is `null` when that scan failed (diskgc
@@ -2603,9 +2606,10 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   overlay upper and work directories; a loop device's backing file is
   seen, [safety.md](safety.md#in-use), Loop devices),
   a mount point that exists only in another mount namespace, Cargo locks
-  taken through an overlay, a project directory shared over NFS or
-  virtiofs with another kernel, and a nested btrfs subvolume are not seen
-  or not fully handled. None is reproduced yet; the 0.1 `/tmp` built-ins
+  taken through an overlay, and a project directory shared over NFS or
+  virtiofs with another kernel are not seen or not fully handled (a
+  nested btrfs subvolume inside a candidate keeps it, TASK-286:
+  [architecture.md](architecture.md#filesystem-matching)). None is reproduced yet; the 0.1 `/tmp` built-ins
   are less exposed (their contracts keep a session or rc directory on
   their own evidence).
 - **diskgc in its own PID namespace** (most containers, `PrivatePIDs=`)

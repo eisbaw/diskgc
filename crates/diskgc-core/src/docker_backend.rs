@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::Value;
 
 use crate::engine::Reason;
-use crate::host::{Dev, DockerEnvironment, DockerQuery, Errno, Host, HostError};
+use crate::host::{DockerEnvironment, DockerQuery, Errno, Host, HostError};
 use crate::resolve::{self, ResolveError, Want};
 
 /// The image store that a bound Docker daemon uses.
@@ -160,7 +160,7 @@ fn query<H: Host>(host: &H, what: DockerQuery) -> Result<Result<String, Binding>
 /// must be on it, or the kind is skipped `other_fs`.
 pub fn inspect_backend<H: Host>(
     host: &H,
-    target: Dev,
+    target: crate::places::Space,
     storage: Storage,
 ) -> Result<Binding, HostError> {
     let DockerEnvironment {
@@ -292,14 +292,16 @@ pub fn inspect_backend<H: Host>(
     };
     for path in roots {
         match resolve::resolve(host, path, Want::Directory) {
-            Ok(resolved) if crate::places::space_of(&resolved.mount) == target => {}
+            Ok(resolved)
+                if crate::places::space_at(host, &resolved.mount, &resolved.fd)
+                    .same_as(&target) => {}
             Ok(resolved) => {
                 return Ok(skip(
                     Reason::OtherFs,
                     format!(
                         "Docker storage {} is on {}, requested filesystem is {target}",
                         path.display(),
-                        crate::places::space_of(&resolved.mount)
+                        crate::places::space_at(host, &resolved.mount, &resolved.fd)
                     ),
                 ));
             }

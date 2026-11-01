@@ -620,6 +620,20 @@ impl<H: Host> Host for Controlled<H> {
         self.host.pid_alive(pid)
     }
 
+    fn fs_id(&self, fd: &Self::Fd) -> Result<u64, HostError> {
+        self.before("fs_id");
+        self.host.fs_id(fd)
+    }
+
+    fn loop_devices(
+        &self,
+        mount: &diskgc_core::host::MountEntry,
+        fd: Option<&Self::Fd>,
+    ) -> Result<Vec<diskgc_core::host::Dev>, HostError> {
+        self.before("loop_devices");
+        self.host.loop_devices(mount, fd)
+    }
+
     fn fs_magic(&self, fd: &Self::Fd) -> Result<u64, HostError> {
         self.before("fs_magic");
         self.host.fs_magic(fd)
@@ -645,9 +659,13 @@ impl<H: Host> Host for Controlled<H> {
         self.host.proc_root_lookup(pid, path, climb)
     }
 
-    fn fs_uuid(&self, mount: &diskgc_core::host::MountEntry) -> Result<Option<String>, HostError> {
+    fn fs_uuid(
+        &self,
+        fd: &Self::Fd,
+        mount: &diskgc_core::host::MountEntry,
+    ) -> Result<Option<String>, HostError> {
         self.before("fs_uuid");
-        self.host.fs_uuid(mount)
+        self.host.fs_uuid(fd, mount)
     }
 
     fn loop_backing_file(
@@ -715,12 +733,13 @@ impl<H: Host> Host for Controlled<H> {
     fn state_write(
         &self,
         lock: &diskgc_core::host::Locked<Self::Fd>,
+        dir: &Self::Fd,
         key: &diskgc_core::host::FsKey,
         bytes: &[u8],
         cancel: &dyn Fn() -> bool,
     ) -> Result<diskgc_core::host::StateWritten, HostError> {
         self.before("state_write");
-        self.host.state_write(lock, key, bytes, cancel)
+        self.host.state_write(lock, dir, key, bytes, cancel)
     }
 }
 
@@ -868,7 +887,7 @@ processes:
             source: "tmpfs".to_owned(),
             read_only: false,
         };
-        assert_eq!(host.fs_uuid(&tmpfs).expect("fs_uuid"), None);
+        assert_eq!(host.fs_uuid(&a.fd, &tmpfs).expect("fs_uuid"), None);
         assert_eq!(
             host.loop_backing_file(dev).expect("loop_backing_file"),
             None
@@ -892,7 +911,7 @@ processes:
         else {
             panic!("the state lock is free")
         };
-        host.state_write(&locked, &key, b"x", &|| false)
+        host.state_write(&locked, &lock.dir, &key, b"x", &|| false)
             .expect("state_write");
         assert!(host.state_read(&key, 8).expect("state_read").is_some());
     }

@@ -67,6 +67,9 @@ pub struct Inode {
     pub mtime: Timestamp,
     pub ctime: Timestamp,
     pub btime: Timestamp,
+    /// The nested btrfs subvolume it belongs to
+    /// ([`crate::spec::DirAttrs::subvolume`]): the device `statx` reports.
+    pub subvolume: Option<Dev>,
 }
 
 impl Inode {
@@ -85,6 +88,7 @@ impl Inode {
             mtime: now,
             ctime: now,
             btime: now,
+            subvolume: None,
         }
     }
 
@@ -613,8 +617,46 @@ impl State {
     pub fn reported_dev_ino(&self, loc: Loc) -> DevIno {
         let mount = self.mount(loc.mnt);
         DevIno {
-            dev: mount.subvolume.unwrap_or(mount.dev),
+            dev: self
+                .inode(loc)
+                .subvolume
+                .or(mount.subvolume)
+                .unwrap_or(mount.dev),
             ino: loc.ino,
+        }
+    }
+
+    /// The device `statx` reports for `loc`: an overlay's own; otherwise
+    /// the nested subvolume its inode belongs to, else its mount's
+    /// subvolume, else the filesystem's.
+    pub fn stat_dev(&self, loc: Loc) -> Dev {
+        let mount = self.mount(loc.mnt);
+        if mount.overlay.is_some() {
+            return mount.shown_dev();
+        }
+        self.inode(loc)
+            .subvolume
+            .unwrap_or_else(|| mount.stat_dev())
+    }
+
+    /// Marks `top` and everything below it on its filesystem as the nested
+    /// subvolume `dev` ([`crate::spec::DirAttrs::subvolume`]).
+    pub fn mark_subvolume(&mut self, top: Loc, dev: Dev) {
+        let mut todo = vec![top.ino];
+        let mut seen = BTreeSet::new();
+        while let Some(ino) = todo.pop() {
+            if !seen.insert(ino) {
+                continue;
+            }
+            let loc = Loc { mnt: top.mnt, ino };
+            if let Some(entries) = self.inode(loc).entries() {
+                todo.extend(entries.values().copied());
+            }
+            self.fs_mut(top.mnt)
+                .inodes
+                .get_mut(&ino)
+                .expect("a live inode")
+                .subvolume = Some(dev);
         }
     }
 
@@ -1062,7 +1104,7 @@ impl State {
             (!fs.missing.contains(&field)).then_some(value)
         }
         Stat {
-            dev: self.mount(loc.mnt).stat_dev(),
+            dev: self.stat_dev(loc),
             file_type: when(fs, StatxField::Type, inode.file_type()),
             perm: when(fs, StatxField::Mode, inode.perm),
             // Link counting walks the inode graph. A modelled filesystem
@@ -1267,7 +1309,9 @@ impl State {
     /// Creates a new inode as entry `name` of `dir`.
     pub fn create_in(&mut self, dir: Loc, name: &OsStr, kind: Kind) -> Result<Loc, Fault> {
         let now = self.wall_now();
-        let ino = self.fs_mut(dir.mnt).add(Inode::new(kind, now));
+        let mut inode = Inode::new(kind, now);
+        inode.subvolume = self.inode(dir).subvolume;
+        let ino = self.fs_mut(dir.mnt).add(inode);
         self.link(dir, name, ino)?;
         Ok(Loc { mnt: dir.mnt, ino })
     }

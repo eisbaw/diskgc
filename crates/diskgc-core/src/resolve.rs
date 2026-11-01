@@ -832,6 +832,18 @@ pub(crate) mod tests {
             unreachable!()
         }
 
+        fn fs_id(&self, _: &Self::Fd) -> Result<u64, HostError> {
+            unreachable!()
+        }
+
+        fn loop_devices(
+            &self,
+            _: &MountEntry,
+            _: Option<&Self::Fd>,
+        ) -> Result<Vec<crate::host::Dev>, HostError> {
+            unreachable!()
+        }
+
         fn fs_magic(&self, _: &Self::Fd) -> Result<u64, HostError> {
             unreachable!()
         }
@@ -853,7 +865,7 @@ pub(crate) mod tests {
             unreachable!()
         }
 
-        fn fs_uuid(&self, _: &MountEntry) -> Result<Option<String>, HostError> {
+        fn fs_uuid(&self, _: &Self::Fd, _: &MountEntry) -> Result<Option<String>, HostError> {
             unreachable!()
         }
 
@@ -913,6 +925,7 @@ pub(crate) mod tests {
         fn state_write(
             &self,
             _: &crate::host::Locked<Self::Fd>,
+            _: &Self::Fd,
             _: &crate::host::FsKey,
             _: &[u8],
             _: &dyn Fn() -> bool,

@@ -17,7 +17,7 @@ use super::judge::{Judge, Tally, mountinfo};
 use super::source_anchor::SourceEvidence;
 use super::{Find, Found};
 use crate::engine::{Reason, Rules, Skip, WalkRecord};
-use crate::host::{Dev, Host, MonoTime};
+use crate::host::{Host, MonoTime};
 use crate::inuse::Checker;
 use crate::outcome::{Judged, Stop};
 use crate::profile::IdleWindow;
@@ -53,7 +53,7 @@ pub fn plan<H: Host>(
     host: &H,
     roots: &[PathBuf],
     find: &Find,
-    space: Dev,
+    space: crate::places::Space,
     rules: &Rules<'_>,
     idle: IdleWindow,
     deadline: Option<MonoTime>,

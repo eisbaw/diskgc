@@ -1131,6 +1131,18 @@ impl Host for Gated {
         self.0.pid_alive(pid)
     }
 
+    fn fs_id(&self, fd: &Self::Fd) -> Result<u64, HostError> {
+        self.0.fs_id(fd)
+    }
+
+    fn loop_devices(
+        &self,
+        mount: &diskgc_core::host::MountEntry,
+        fd: Option<&Self::Fd>,
+    ) -> Result<Vec<diskgc_core::host::Dev>, HostError> {
+        self.0.loop_devices(mount, fd)
+    }
+
     fn fs_magic(&self, fd: &Self::Fd) -> Result<u64, HostError> {
         self.0.fs_magic(fd)
     }
@@ -1154,8 +1166,12 @@ impl Host for Gated {
     ) -> Result<Vec<diskgc_core::host::DevIno>, diskgc_core::host::ProcError> {
         self.0.proc_root_lookup(pid, path, climb)
     }
-    fn fs_uuid(&self, mount: &diskgc_core::host::MountEntry) -> Result<Option<String>, HostError> {
-        self.0.fs_uuid(mount)
+    fn fs_uuid(
+        &self,
+        fd: &Self::Fd,
+        mount: &diskgc_core::host::MountEntry,
+    ) -> Result<Option<String>, HostError> {
+        self.0.fs_uuid(fd, mount)
     }
 
     fn loop_backing_file(
@@ -1215,11 +1231,12 @@ impl Host for Gated {
     fn state_write(
         &self,
         lock: &diskgc_core::host::Locked<Self::Fd>,
+        dir: &Self::Fd,
         key: &diskgc_core::host::FsKey,
         bytes: &[u8],
         cancel: &dyn Fn() -> bool,
     ) -> Result<diskgc_core::host::StateWritten, HostError> {
-        self.0.state_write(lock, key, bytes, cancel)
+        self.0.state_write(lock, dir, key, bytes, cancel)
     }
 }
 

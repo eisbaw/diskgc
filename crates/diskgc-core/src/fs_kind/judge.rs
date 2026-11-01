@@ -49,8 +49,8 @@ use crate::engine::{
     checkout_metadata_below, container_storage, networked_why,
 };
 use crate::host::{
-    Access, Base, Dev, DirListing, Errno, FileType, Host, HostError, MonoTime, MountEntry,
-    Timestamp, is_single_name,
+    Access, Base, DirListing, Errno, FileType, Host, HostError, MonoTime, MountEntry, Timestamp,
+    is_single_name,
 };
 use crate::outcome::{Judged, Stop};
 use crate::places;
@@ -70,7 +70,7 @@ pub struct Judge<'r> {
     pub find: &'r Find,
     pub rules: &'r Rules<'r>,
     pub idle: IdleWindow,
-    pub space: Dev,
+    pub space: crate::places::Space,
 }
 
 /// What a walked candidate showed: the walk's record and its newest
@@ -311,7 +311,7 @@ impl Judge<'_> {
         {
             return Err(refused);
         }
-        if found.space != self.space {
+        if !found.space.same_as(&self.space) {
             return Err(Skip::new(
                 Reason::OtherFs,
                 found.path.clone(),

@@ -36,7 +36,8 @@ fn verdict(host: &ModelHost) -> Option<Reason> {
         ..Where::default()
     };
     let find = Find::new(&["browser-cache".into()], EntryType::Dir, &where_, 1000);
-    let dev = host.stat_path(Path::new("/tmp")).unwrap().dev;
+    let dev =
+        diskgc_core::places::Space::unique_device(host.stat_path(Path::new("/tmp")).unwrap().dev);
     let (plan, stop) = fs_kind::plan(
         host,
         &[PathBuf::from("/tmp")],
@@ -82,7 +83,7 @@ fn relative_lock_path_is_bound_to_the_source_root() {
         &host,
         &[PathBuf::from("/tmp")],
         &find,
-        host.stat_path(Path::new("/tmp")).unwrap().dev,
+        diskgc_core::places::Space::unique_device(host.stat_path(Path::new("/tmp")).unwrap().dev),
         &Rules::new(&owners),
         diskgc_core::profile::IdleWindow::default(),
         None,
@@ -142,7 +143,15 @@ fn lock_created_after_first_judgement_blocks_deletion() {
         find: &find,
         rules: &rules,
         idle: diskgc_core::profile::IdleWindow::default(),
-        space: host.stat_path(Path::new("/tmp")).unwrap().dev,
+        space: {
+            let at = diskgc_core::resolve::resolve(
+                &host,
+                Path::new("/tmp"),
+                diskgc_core::resolve::Want::Directory,
+            )
+            .expect("/tmp");
+            diskgc_core::places::space_at(&host, &at.mount, &at.fd)
+        },
     };
     let mut checker = Checker::new(&rules, REUSE_LIMIT);
     let outcome = fs_kind::reclaim(&host, &judge, &found, false, &mut checker, None);

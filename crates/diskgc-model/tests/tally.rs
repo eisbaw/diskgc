@@ -725,7 +725,7 @@ fn sync_tally_leaves_an_oldest_first_tiers_sizing_to_the_walk() {
         &host,
         &mut state,
         &tiers_ordered(Order::Oldest),
-        TMP_DEV,
+        diskgc_core::places::Space::unique_device(TMP_DEV),
         None,
     )
     .unwrap();
@@ -760,7 +760,14 @@ fn sync_tally_leaves_an_oldest_first_tiers_sizing_to_the_walk() {
 fn sync_tally_discovers_every_tier_then_sizes_only_the_first() {
     let host = sync_model("");
     let mut state = state();
-    let report = synchronous(&host, &mut state, &tiers(), TMP_DEV, None).unwrap();
+    let report = synchronous(
+        &host,
+        &mut state,
+        &tiers(),
+        diskgc_core::places::Space::unique_device(TMP_DEV),
+        None,
+    )
+    .unwrap();
     assert!(report.pass1_done && report.stopped.is_none(), "{report:?}");
     assert_eq!(report.listed.len(), 2);
     assert_eq!(
@@ -816,17 +823,38 @@ fn sync_tally_discovers_every_tier_then_sizes_only_the_first() {
 fn sync_tally_skips_a_recent_listing_and_sizes_only_stale_units() {
     let host = sync_model("");
     let mut state = state();
-    synchronous(&host, &mut state, &tiers(), TMP_DEV, None).unwrap();
+    synchronous(
+        &host,
+        &mut state,
+        &tiers(),
+        diskgc_core::places::Space::unique_device(TMP_DEV),
+        None,
+    )
+    .unwrap();
     host.sleep(Duration::from_secs(3 * 60));
     let reads = host.trace_count(Op::ReadDir);
-    let report = synchronous(&host, &mut state, &tiers(), TMP_DEV, None).unwrap();
+    let report = synchronous(
+        &host,
+        &mut state,
+        &tiers(),
+        diskgc_core::places::Space::unique_device(TMP_DEV),
+        None,
+    )
+    .unwrap();
     assert_eq!(report.skipped_recent.len(), 2);
     assert!(report.listed.is_empty());
     assert_eq!(report.sized, 0, "tallied 3 minutes ago: not stale");
     assert_eq!(host.trace_count(Op::ReadDir), reads);
     // 70 minutes later both are listed again and tier a is sized again.
     host.sleep(Duration::from_secs(70 * 60));
-    let report = synchronous(&host, &mut state, &tiers(), TMP_DEV, None).unwrap();
+    let report = synchronous(
+        &host,
+        &mut state,
+        &tiers(),
+        diskgc_core::places::Space::unique_device(TMP_DEV),
+        None,
+    )
+    .unwrap();
     assert_eq!((report.listed.len(), report.sized), (2, 3));
 }
 
@@ -835,7 +863,14 @@ fn sync_tally_skips_a_recent_listing_and_sizes_only_stale_units() {
 fn sync_tally_sizes_the_first_tier_that_found_something() {
     let host = host(&yaml(&dirs("b", 2, 1), "  /tmp/a: {.: {}}\n"));
     let mut state = state();
-    let report = synchronous(&host, &mut state, &tiers(), TMP_DEV, None).unwrap();
+    let report = synchronous(
+        &host,
+        &mut state,
+        &tiers(),
+        diskgc_core::places::Space::unique_device(TMP_DEV),
+        None,
+    )
+    .unwrap();
     assert_eq!((report.first_tier, report.sized), (Some(1), 2));
 }
 
@@ -846,7 +881,14 @@ fn sync_tally_sizes_the_first_tier_that_found_something() {
 #[test]
 fn sync_tally_budget_ends_in_either_pass() {
     let host = sync_model("call_cost: 1ms\n");
-    let report = synchronous(&host, &mut state(), &tiers(), TMP_DEV, Some(host.now())).unwrap();
+    let report = synchronous(
+        &host,
+        &mut state(),
+        &tiers(),
+        diskgc_core::places::Space::unique_device(TMP_DEV),
+        Some(host.now()),
+    )
+    .unwrap();
     assert!(!report.pass1_done && report.listed.is_empty(), "{report:?}");
 
     // Pass 1's cost, measured on a copy of the model.
@@ -860,7 +902,14 @@ fn sync_tally_budget_ends_in_either_pass() {
     let pass1 = probe.elapsed();
     let host = sync_model("call_cost: 1ms\n");
     let deadline = MonoTime(host.now().0 + pass1 + Duration::from_millis(15));
-    let report = synchronous(&host, &mut state(), &tiers(), TMP_DEV, Some(deadline)).unwrap();
+    let report = synchronous(
+        &host,
+        &mut state(),
+        &tiers(),
+        diskgc_core::places::Space::unique_device(TMP_DEV),
+        Some(deadline),
+    )
+    .unwrap();
     assert!(report.pass1_done, "{report:?}");
     assert!(report.untallied > 0 && report.sized < 3, "{report:?}");
     assert!(report.stopped.is_some(), "{report:?}");
@@ -1013,7 +1062,16 @@ fn sync_tally_recounts_blocks_on_complete_listings_only() {
         sources: vec![two_level("a")],
         order: Order::Oldest,
     }];
-    let run = |state: &mut TallyState| synchronous(&host, state, &tier, TMP_DEV, None).unwrap();
+    let run = |state: &mut TallyState| {
+        synchronous(
+            &host,
+            state,
+            &tier,
+            diskgc_core::places::Space::unique_device(TMP_DEV),
+            None,
+        )
+        .unwrap()
+    };
     let first = run(&mut state);
     assert!(state.index.stats().blocks >= 1, "{:?}", state.index.stats());
     assert_eq!(counted(&state), 41, "{first:?}");

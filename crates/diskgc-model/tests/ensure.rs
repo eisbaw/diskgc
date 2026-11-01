@@ -1201,6 +1201,192 @@ fn held_by_deleted_files_counts_every_subvolume_of_path_s_btrfs_only() {
     assert!(calls(&host, Op::Unlinkat).is_empty());
 }
 
+/// `ensure --min-free MIN PATH` (`/home/mark`, on the btrfs of
+/// [`btrfs_yaml`]) with `policy`'s groups.
+fn btrfs_policy(host: &ModelHost, policy: &str, min: &str) -> Report {
+    let (tiers, timeouts) = configured(policy);
+    let mut request = request(
+        "profile:cargo-target",
+        &["/home/mark"],
+        "/home/mark",
+        min,
+        None,
+    );
+    request.tier = tiers[0].clone();
+    let mut lines = Vec::new();
+    let report =
+        executor::ensure_grouped(host, &request, &tiers, &timeouts, &[1000], &mut |line| {
+            lines.push(line.to_owned())
+        });
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    report
+}
+
+/// A `delete` profile of the directories `c-*` below `root`, in one tier.
+fn cache_dirs(root: &str) -> String {
+    format!(
+        "version: 1\nprofiles:\n  - name: cache-dirs\n    find: {{roots: [{root}], paths: [\"c-*\"], type: dir}}\n    action: delete\n    examples: {{match: [{root}/c-a]}}\ngroups:\n  - name: g\n    tiers:\n      - name: t\n        select: profile:cache-dirs\n"
+    )
+}
+
+/// The skip of `candidate` in `report`, which must be `contains_mount` for
+/// a nested subvolume at `at`.
+fn nested_subvolume_skip(report: &Report, candidate: &str, at: &str) {
+    let skip = report
+        .skipped
+        .iter()
+        .find(|s| s.candidate.as_deref() == Some(Path::new(candidate)))
+        .unwrap_or_else(|| panic!("{candidate} is not skipped: {report:#?}"));
+    assert_eq!(skip.reason, Reason::ContainsMount, "{report:#?}");
+    let detail = skip.detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains("nested subvolume") && detail.contains(at),
+        "{detail}"
+    );
+}
+
+/// TASK-286 review (both reviewers' blocker): a btrfs subvolume or
+/// snapshot nested (not mounted) inside a candidate shares its mount id,
+/// so a walk by mount id alone would empty it and `rmdir` its top (Linux
+/// 4.18 deletes an empty subvolume, unprivileged). A directory on another
+/// device than the candidate's own is refused: `contains_mount`, nothing
+/// deleted.
+#[test]
+fn a_nested_subvolume_inside_a_candidate_refuses_it() {
+    let old = "{mtime: 2026-10-01T00:00:00Z}";
+    let tree = format!(
+        "  /work/cache:\n    c-a:\n      .: {old}\n      data: {{size: 4G, mtime: 2026-10-01T00:00:00Z}}\n      snap:\n        .: {{mtime: 2026-10-01T00:00:00Z, subvolume: \"0:50\"}}\n        f: {{size: 4G, mtime: 2026-10-01T00:00:00Z}}\n"
+    );
+    let host = host(&btrfs_yaml("", &tree));
+    let report = btrfs_policy(&host, &cache_dirs("/work/cache"), "30G");
+    nested_subvolume_skip(&report, "/work/cache/c-a", "/work/cache/c-a/snap");
+    assert!(
+        0 == unlinked_below(&host, "/work/cache/c-a"),
+        "{:#?}",
+        host.trace()
+    );
+}
+
+/// TASK-286 review: the top of a nested subvolume matched as a candidate
+/// is refused at discovery (and by the walk), never emptied and removed.
+#[test]
+fn a_candidate_that_is_a_nested_subvolume_top_is_refused() {
+    let tree = "  /work/cache:\n    c-a:\n      .: {mtime: 2026-10-01T00:00:00Z, subvolume: \"0:50\"}\n      f: {size: 4G, mtime: 2026-10-01T00:00:00Z}\n";
+    let host = host(&btrfs_yaml("", tree));
+    let report = btrfs_policy(&host, &cache_dirs("/work/cache"), "30G");
+    nested_subvolume_skip(&report, "/work/cache/c-a", "/work/cache/c-a");
+    assert!(
+        0 == unlinked_below(&host, "/work/cache/c-a"),
+        "{:#?}",
+        host.trace()
+    );
+}
+
+/// TASK-286 review: a candidate inside a nested subvolume (its root there)
+/// is on `PATH`'s filesystem and is reclaimed like any other; only the
+/// subvolume's top is out of reach.
+#[test]
+fn a_candidate_inside_a_nested_subvolume_is_reclaimed() {
+    let tree = "  /work/sub:\n    .: {subvolume: \"0:51\"}\n    cache:\n      c-b:\n        .: {mtime: 2026-10-01T00:00:00Z}\n        f: {size: 4G, mtime: 2026-10-01T00:00:00Z}\n";
+    let host = host(&btrfs_yaml("", tree));
+    let report = btrfs_policy(&host, &cache_dirs("/work/sub/cache"), "18G");
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    let acted: Vec<&Path> = report
+        .actions
+        .iter()
+        .map(|a| a.candidate.as_path())
+        .collect();
+    assert_eq!(acted, [Path::new("/work/sub/cache/c-b")], "{report:#?}");
+}
+
+/// TASK-286 review: a nested subvolume inside a Cargo profile directory's
+/// entry is refused with the target, as for a filesystem candidate.
+#[test]
+fn a_nested_subvolume_inside_a_cargo_profile_entry_refuses_the_target() {
+    let at = "2026-10-01T00:00:00Z";
+    let profile = format!(
+        "{{.: {{mtime: {at}}}, .cargo-lock: {{mtime: {at}}}, .fingerprint: {{.: {{mtime: {at}}}, p-1: {{.: {{mtime: {at}}}, bin-p: {{mtime: {at}}}}}}}, deps: {{.: {{mtime: {at}}}, p-1: {{size: 4G, mtime: {at}}}, snap: {{.: {{mtime: {at}, subvolume: \"0:50\"}}, f: {{size: 4G, mtime: {at}}}}}}}}}"
+    );
+    let tree = format!(
+        "  /work/src/old/Cargo.toml: {{}}\n  /work/src/old/target:\n    CACHEDIR.TAG: {{cachedir_tag: true}}\n    debug: {profile}\n"
+    );
+    let host = host(&btrfs_yaml("", &tree));
+    let report = ensure(
+        &host,
+        &request(
+            "profile:cargo-target",
+            &["/work/src"],
+            "/home/mark",
+            "30G",
+            None,
+        ),
+    );
+    let skip = report
+        .skipped
+        .iter()
+        .find(|s| s.candidate.as_deref() == Some(Path::new("/work/src/old/target")))
+        .unwrap_or_else(|| panic!("the target is not skipped: {report:#?}"));
+    assert_eq!(skip.reason, Reason::ContainsMount, "{report:#?}");
+    assert!(
+        skip.detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("nested subvolume"),
+        "{skip:?}"
+    );
+    assert!(
+        0 == unlinked_below(&host, "/work/src/old/target/debug/deps/snap"),
+        "{:#?}",
+        host.trace()
+    );
+}
+
+/// TASK-286 review (Codex 2): on bcachefs the superblock device does not
+/// identify the filesystem alone, so "the same filesystem" also needs its
+/// id (`f_fsid`) read from both held descriptors; read and equal, the run
+/// reclaims as on any filesystem.
+#[test]
+fn bcachefs_is_the_same_filesystem_by_its_id_read_from_both_sides() {
+    let host =
+        host(&yaml(true, "").replace("fs: ext4, dev: \"254:2\"", "fs: bcachefs, dev: \"254:2\""));
+    let report = ensure(&host, &cargo("12G", None));
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    assert!(
+        report.skipped.iter().all(|s| s.reason != Reason::OtherFs),
+        "{report:#?}"
+    );
+    assert!(!calls(&host, Op::FsMagic).is_empty(), "its id was read");
+}
+
+/// TASK-286 review (mped S3; the PRD's non-goal "warned about"): a run
+/// that reclaims on btrfs says once that a deletion may free nothing while
+/// a snapshot shares the extents; on ext4 it does not.
+#[test]
+fn a_reclaim_on_btrfs_warns_that_snapshots_may_keep_the_space() {
+    let lines_of = |host: &ModelHost, path: &str, root: &str| {
+        let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e}"));
+        let mut lines = Vec::new();
+        executor::ensure(
+            host,
+            &request("profile:cargo-target", &[root], path, "12G", None),
+            &[uid],
+            &mut |l| lines.push(l.to_owned()),
+        );
+        lines
+    };
+    let btrfs = host(&btrfs_yaml("", &targets_below("/work/src")));
+    let lines = lines_of(&btrfs, "/home/mark", "/work/src");
+    let warned = |lines: &[String]| {
+        lines
+            .iter()
+            .filter(|l| l.contains("frees nothing while a snapshot shares its extents"))
+            .count()
+    };
+    assert_eq!(warned(&lines), 1, "{lines:#?}");
+    let ext4 = host(&yaml(true, ""));
+    assert_eq!(warned(&lines_of(&ext4, SRC, SRC)), 0);
+}
+
 /// Exit 3: a target whose delete fails is an error of that target; the
 /// next target is still reclaimed, and the run ends below `--min-free`.
 #[test]

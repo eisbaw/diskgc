@@ -38,6 +38,14 @@ pub fn dir(host: &ModelHost, path: &str) -> Resolved<ModelFd> {
         .unwrap_or_else(|e| panic!("resolve {path}: {e}"))
 }
 
+/// The space of the filesystem `path` is on, as the core reads it
+/// ([`diskgc_core::places::space_at`]).
+#[allow(dead_code)]
+pub fn space(host: &ModelHost, path: &str) -> diskgc_core::places::Space {
+    let at = dir(host, path);
+    diskgc_core::places::space_at(host, &at.mount, &at.fd)
+}
+
 /// The walk rules the executor builds for a `profile:cargo-target` tier
 /// run by `owners`: the defaults ([`Rules::new`]) and the built-in
 /// profile's `checkouts` setting, read from the library as the executor

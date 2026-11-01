@@ -66,15 +66,17 @@ pub fn state_dir(xdg_state_home: Option<&OsStr>, home: Option<&OsStr>) -> Option
         .map(|base| base.join("diskgc"))
 }
 
-/// The key of the filesystem `mount` shows: its UUID where the host knows
-/// one, otherwise the device mountinfo names for it ([`places::space_of`]:
-/// one key for every mount of one filesystem, every btrfs subvolume
-/// included, so one `watch` serves them all). A UUID that cannot be read or
-/// used (an `EACCES` on the udev links, an escaped name) falls back to the
+/// The key of the filesystem `mount` shows, reached as `path` (`PATH`'s
+/// held descriptor): its UUID where the host knows one
+/// ([`Host::fs_uuid`]: for btrfs read from `path`), otherwise the device
+/// mountinfo names for it ([`places::space_of`]: one key for every mount
+/// of one filesystem, every btrfs subvolume included, so one `watch`
+/// serves them all). A UUID that cannot be read or used (an `EACCES` on
+/// the udev links, an ioctl refused, an escaped name) falls back to the
 /// device number with the reason, for the log: only warmth is at stake.
-pub fn fs_key<H: Host>(host: &H, mount: &MountEntry) -> (FsKey, Option<String>) {
-    let dev = places::space_of(mount);
-    match host.fs_uuid(mount) {
+pub fn fs_key<H: Host>(host: &H, path: &H::Fd, mount: &MountEntry) -> (FsKey, Option<String>) {
+    let dev = places::space_of(mount).dev();
+    match host.fs_uuid(path, mount) {
         Ok(Some(uuid)) => match FsKey::uuid(&uuid) {
             Some(key) => (key, None),
             None => (
@@ -211,6 +213,7 @@ impl RunIndex {
         &mut self,
         host: &H,
         run: Reclaimed,
+        path: &H::Fd,
         bound: &BTreeMap<&str, u64>,
         log: &mut dyn FnMut(&str),
     ) {
@@ -228,11 +231,11 @@ impl RunIndex {
             return; // the tally is skipped too; nothing to seed or write
         }
         let tally = self.tally;
-        let (key, fallback) = fs_key(host, &run.mount);
+        let (key, fallback) = fs_key(host, path, &run.mount);
         if let Some(why) = fallback {
             log(&format!(
                 "index: filesystem {}: {why}; its snapshot is keyed by device number",
-                places::space_of(&run.mount)
+                places::space_of(&run.mount).dev()
             ));
         }
         // The state directory and the lock file are made now, before the
@@ -353,7 +356,9 @@ impl RunIndex {
     /// that filesystem
     /// below `--min-free`. Each skip or failure is one log line and changes
     /// nothing else (docs/architecture.md, Snapshot).
-    pub fn finish<H: Host>(&mut self, host: &H, log: &mut dyn FnMut(&str)) {
+    /// `path` is `PATH`'s held descriptor: what the space guard samples
+    /// besides the state directory.
+    pub fn finish<H: Host>(&mut self, host: &H, path: &H::Fd, log: &mut dyn FnMut(&str)) {
         let Some(Pending { key, run }) = self.pending.take() else {
             return;
         };
@@ -418,6 +423,7 @@ impl RunIndex {
             units,
             held,
             &guard,
+            path,
             &bytes,
             WriteChecks {
                 last_check: &last_check,
@@ -500,17 +506,20 @@ pub fn encode<H: Host>(host: &H, state: &TallyState, key: &FsKey) -> Result<Vec<
 /// [`WriteChecks`] stop it. Every skip or failure is one log
 /// line; nothing else changes (docs/architecture.md, Snapshot). What the
 /// file takes is its size rounded up to whole blocks, and one more block
-/// for the new directory entry. The guard samples the state directory
-/// (`statvfs` on its descriptor): on the watched filesystem itself that is
-/// its space; through an overlay, eCryptfs or a pass-through FUSE
-/// filesystem it is what that filesystem reports, its backing one's; on a
-/// loop device's filesystem it is the image's, not the backing file's
-/// (a stated limit).
+/// for the new directory entry. The guard ([`places::write_guard`]):
+/// proved independent, none; otherwise both the state directory and
+/// `PATH` (`path`, its held descriptor) are sampled and the lower one
+/// decides; a write whose effect on `PATH`'s space cannot be bounded (a
+/// state directory on a loop device's filesystem) is skipped, costing
+/// warmth only. The file is written into the held state directory
+/// ([`Host::state_write`]), the one sampled.
+#[allow(clippy::too_many_arguments)]
 pub fn write_held<H: Host>(
     host: &H,
     units: usize,
     held: Held<'_, H::Fd>,
     guard: &Guard,
+    path: &H::Fd,
     bytes: &[u8],
     checks: WriteChecks<'_, H>,
     log: &mut dyn FnMut(&str),
@@ -519,37 +528,51 @@ pub fn write_held<H: Host>(
     let name = held.key.snapshot_name();
     let skipped = |why: &str| format!("index: snapshot {name} not written: {why}");
     let size = u64::try_from(bytes.len()).expect("fits u64");
-    let shared = places::shared_space(held.dir_mount, &guard.watched);
-    if let (Some(why), Some(min_free)) = (shared, guard.min_free) {
-        match host.statvfs(held.dir) {
-            Ok(space) => {
-                let block = space.block_bytes.max(1);
-                let takes = size.div_ceil(block).saturating_add(1).saturating_mul(block);
-                if space.avail_bytes.saturating_sub(takes) < min_free {
-                    let on = if places::same_space(held.dir_mount, &guard.watched) {
-                        "the state directory is on the reclaimed filesystem".to_owned()
-                    } else {
-                        format!(
-                            "the state directory may take its space from the reclaimed \
-                             filesystem ({why})"
-                        )
-                    };
-                    return log(&skipped(&format!(
-                        "{on}, and the {} it takes would bring its {} available below \
-                         --min-free {}",
-                        format_bytes(takes),
-                        format_bytes(space.avail_bytes),
-                        format_bytes(min_free)
-                    )));
-                }
+    if let Some(min_free) = guard.min_free {
+        let why = match places::write_guard(host, held.dir, held.dir_mount, path, &guard.watched) {
+            places::WriteGuard::Independent => None,
+            places::WriteGuard::Unbounded(why) => {
+                return log(&skipped(&format!(
+                    "{why}: its effect on the reclaimed filesystem's space cannot be bounded"
+                )));
             }
-            Err(e) => return log(&skipped(&e.to_string())),
+            places::WriteGuard::Sample(why) => Some(why),
+        };
+        if let Some(why) = why {
+            let sampled = host
+                .statvfs(held.dir)
+                .and_then(|dir| host.statvfs(path).map(|watched| (dir, watched)));
+            let (dir, watched) = match sampled {
+                Ok(both) => both,
+                Err(e) => return log(&skipped(&e.to_string())),
+            };
+            let block = dir.block_bytes.max(watched.block_bytes).max(1);
+            let takes = size.div_ceil(block).saturating_add(1).saturating_mul(block);
+            let avail = dir.avail_bytes.min(watched.avail_bytes);
+            if avail.saturating_sub(takes) < min_free {
+                let on = if places::same_space(held.dir_mount, &guard.watched)
+                    || held.dir_mount.dev == guard.watched.dev
+                {
+                    "the state directory is on the reclaimed filesystem".to_owned()
+                } else {
+                    format!(
+                        "the state directory may take its space from the reclaimed filesystem \
+                         ({why})"
+                    )
+                };
+                return log(&skipped(&format!(
+                    "{on}, and the {} it takes would bring its {} available below --min-free {}",
+                    format_bytes(takes),
+                    format_bytes(avail),
+                    format_bytes(min_free)
+                )));
+            }
         }
     }
     if let Some(why) = last_check(host) {
         return log(&skipped(why));
     }
-    match host.state_write(held.locked, held.key, bytes, &|| cancel(host)) {
+    match host.state_write(held.locked, held.dir, held.key, bytes, &|| cancel(host)) {
         Ok(StateWritten::Replaced) => log(&format!(
             "index: snapshot {name} written: {units} unit(s), {}",
             format_bytes(size)

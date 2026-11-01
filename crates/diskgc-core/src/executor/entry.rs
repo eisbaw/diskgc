@@ -268,6 +268,9 @@ fn run<H: Delete>(
         measured.at.mount.mount_point.display(),
         min_text
     ));
+    if let Some(note) = crate::places::space::cow_note(&measured.at.mount) {
+        log(&note);
+    }
     // Read-only, before the host lock (docs/architecture.md, The tally).
     let mut tallied = indexed::sync_tally(
         host,
@@ -278,6 +281,7 @@ fn run<H: Delete>(
             min_free: measured.min,
             deadline,
         },
+        &measured.at.fd,
         request.tally_budget,
         &mut report,
         log,
@@ -340,7 +344,7 @@ fn run<H: Delete>(
     // would come after the deadline (exit 75 never writes).
     match ending {
         Ending::LockTimeout => index.decline("the host lock was still held at the deadline", log),
-        Ending::Decided | Ending::Concluded { .. } => index.finish(host, log),
+        Ending::Decided | Ending::Concluded { .. } => index.finish(host, &measured.at.fd, log),
     }
     ending.conclude(&run, &mut report, log);
     // Released only here, by closing, after the final sample.

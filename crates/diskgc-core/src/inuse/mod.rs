@@ -680,7 +680,7 @@ impl Scan {
             .mnt_id
             .and_then(|id| mounts.iter().find(|mount| mount.id == id))
         {
-            Some(mount) => crate::places::space_of(mount) == space,
+            Some(mount) => crate::places::space_of(mount).dev() == space,
             None => held.id.dev == path_dev,
         };
         let mut per_pid: BTreeMap<Pid, u64> = BTreeMap::new();

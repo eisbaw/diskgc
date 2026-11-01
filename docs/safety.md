@@ -2490,13 +2490,11 @@ Each with the number of events outside diskgc it needs:
   processes on regular files with link count 0, per process, each file's
   allocated bytes counted once across all processes. Every holder is listed;
   when several processes hold one file, its bytes are attributed to the
-  lowest pid and the other holders show 0 bytes. A file is on the
-  requested filesystem when the mount it was opened through is
-  ([architecture.md](architecture.md#filesystem-matching)): every
-  mounted subvolume of a btrfs counts. A file opened through a mount of
-  another mount namespace counts only when its `st_dev` is `PATH`'s, so
-  one there on a sibling subvolume may be omitted. A deleted file that is
-  only mapped (its fd closed) is not listed. diskgc never kills processes.
+  lowest pid and the other holders show 0 bytes. Which files are on the
+  requested filesystem, and what may be omitted:
+  [architecture.md](architecture.md#filesystem-matching). A deleted file
+  that is only mapped (its fd closed) is not listed. diskgc never kills
+  processes.
 - **tmpfs:** if `/tmp` is a tmpfs, profiles under it only help a request for
   that tmpfs (filesystem matching), which is correct: it frees memory, not
   disk.

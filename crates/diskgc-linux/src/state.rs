@@ -24,7 +24,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use diskgc_core::host::{
-    FileType, FsKey, HostError, MakeUserLock, MountEntry, StateFile, StateWritten, UserLockError,
+    Dev, FileType, FsKey, HostError, MakeUserLock, MountEntry, StateFile, StateWritten,
+    UserLockError,
 };
 use diskgc_core::hostlock::USER_LOCK_NAME;
 use rustix::fs::{AtFlags, Mode, OFlags};
@@ -54,12 +55,19 @@ pub(crate) fn open_state_dir(dir: &Path) -> Result<OwnedFd, HostError> {
         Mode::empty(),
     )
     .map_err(|e| HostError::errno("open", &shown, errno_of(e)))?;
-    let st = rustix::fs::fstat(&fd).map_err(|e| HostError::errno("fstat", &shown, errno_of(e)))?;
+    check_state_dir(fd.as_fd(), &shown)?;
+    Ok(fd)
+}
+
+/// The state directory open as `fd` (at `shown`) is still one diskgc may
+/// use: owned by this user and writable by no one else.
+fn check_state_dir(fd: BorrowedFd<'_>, shown: &str) -> Result<(), HostError> {
+    let st = rustix::fs::fstat(fd).map_err(|e| HostError::errno("fstat", shown, errno_of(e)))?;
     let uid = rustix::process::geteuid().as_raw();
     if st.st_uid != uid || st.st_mode & 0o022 != 0 {
         return Err(HostError::invalid(
             "open",
-            &shown,
+            shown,
             format!(
                 "the state directory must be owned by uid {uid} and writable by no one else \
                  (owner {}, mode {:04o})",
@@ -68,7 +76,7 @@ pub(crate) fn open_state_dir(dir: &Path) -> Result<OwnedFd, HostError> {
             ),
         ));
     }
-    Ok(fd)
+    Ok(())
 }
 
 /// Opens (creating it, and the state directory, if absent) the
@@ -406,7 +414,11 @@ pub(crate) fn read_snapshot(
 
 /// Whether `lock` is the open lock file of `key` in the state directory
 /// (the same object), so a write is made only under its own key's lock.
-fn is_lock_of(dir_fd: &OwnedFd, key: &FsKey, lock: BorrowedFd<'_>) -> Result<bool, HostError> {
+fn is_lock_of(
+    dir_fd: BorrowedFd<'_>,
+    key: &FsKey,
+    lock: BorrowedFd<'_>,
+) -> Result<bool, HostError> {
     let name = key.lock_name();
     let named = rustix::fs::statat(dir_fd, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
         .map_err(|e| HostError::errno("fstatat", &name, errno_of(e)))?;
@@ -426,19 +438,24 @@ fn is_lock_of(dir_fd: &OwnedFd, key: &FsKey, lock: BorrowedFd<'_>) -> Result<boo
 /// file torn by a crash fails its checksum and is ignored. When
 /// `cancelled` says so (a second signal, asked between chunks and right
 /// before the link), the file is never linked in:
-/// [`StateWritten::Cancelled`], the old snapshot unchanged.
+/// [`StateWritten::Cancelled`], the old snapshot unchanged. Everything is
+/// done relative to `dir_fd`, the state directory held since the lock was
+/// opened (TASK-286 review: the directory the space guard sampled, never
+/// one reopened by path); `dir` names it in messages only. It must still
+/// be one diskgc may use (owner, mode).
 pub(crate) fn write_snapshot_ungated(
     dir: &Path,
+    dir_fd: BorrowedFd<'_>,
     key: &FsKey,
     lock: BorrowedFd<'_>,
     bytes: &[u8],
     proc: BorrowedFd<'_>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<StateWritten, HostError> {
-    let dir_fd = open_state_dir(dir)?;
+    check_state_dir(dir_fd, &dir.display().to_string())?;
     let target = key.snapshot_name();
     let shown = dir.join(&target).display().to_string();
-    if !is_lock_of(&dir_fd, key, lock)? {
+    if !is_lock_of(dir_fd, key, lock)? {
         return Err(HostError::invalid(
             "write",
             &shown,
@@ -446,7 +463,7 @@ pub(crate) fn write_snapshot_ungated(
         ));
     }
     let temp = rustix::fs::openat(
-        &dir_fd,
+        dir_fd,
         ".",
         OFlags::TMPFILE | OFlags::WRONLY | OFlags::CLOEXEC,
         Mode::from_raw_mode(FILE_MODE),
@@ -477,7 +494,7 @@ pub(crate) fn write_snapshot_ungated(
         }
     }
     let new = key.new_name();
-    let link = |dir_fd: &OwnedFd| {
+    let link = |dir_fd: BorrowedFd<'_>| {
         rustix::fs::linkat(
             proc,
             format!("self/fd/{}", temp.as_fd().as_raw_fd()).as_str(),
@@ -486,52 +503,106 @@ pub(crate) fn write_snapshot_ungated(
             AtFlags::SYMLINK_FOLLOW,
         )
     };
-    let promote = |dir_fd: &OwnedFd| {
+    let promote = |dir_fd: BorrowedFd<'_>| {
         rustix::fs::renameat(dir_fd, new.as_str(), dir_fd, target.as_str())
             .map_err(|e| HostError::errno("renameat", &shown, errno_of(e)))
     };
     if cancelled() {
         return Ok(StateWritten::Cancelled);
     }
-    match link(&dir_fd) {
+    match link(dir_fd) {
         Ok(()) => {}
         Err(rustix::io::Errno::EXIST) => {
             // A complete `.new` a crashed writer left: promote it, then link.
             if cancelled() {
                 return Ok(StateWritten::Cancelled);
             }
-            promote(&dir_fd)?;
+            promote(dir_fd)?;
             if cancelled() {
                 return Ok(StateWritten::Cancelled);
             }
-            link(&dir_fd).map_err(|e| HostError::errno("linkat", &new, errno_of(e)))?;
+            link(dir_fd).map_err(|e| HostError::errno("linkat", &new, errno_of(e)))?;
         }
         Err(e) => return Err(HostError::errno("linkat", &new, errno_of(e))),
     }
-    promote(&dir_fd).map(|()| StateWritten::Replaced)
+    promote(dir_fd).map(|()| StateWritten::Replaced)
 }
 
-/// The UUID of the filesystem `mount` shows: the name of the
-/// `/dev/disk/by-uuid` link whose block device is the filesystem's. That
-/// device is the mount's own (mountinfo's major:minor), or for btrfs, whose
-/// superblock has an anonymous device (major 0) shared by every subvolume,
-/// the block device mountinfo names as its source (a `/dev/` path; every
-/// member device of a btrfs carries the one filesystem UUID). A source that
-/// is gone (`ENOENT`, `ENOTDIR`) or no block device gives no UUID from it.
-/// `None`: no link names it (tmpfs, an overlay, a container or a system
-/// without udev). Read-only: names are listed and their targets `stat`ed,
-/// nothing is opened.
-pub(crate) fn fs_uuid(mount: &MountEntry) -> Result<Option<String>, HostError> {
-    const BY_UUID: &str = "/dev/disk/by-uuid";
-    let mut wanted = vec![rustix::fs::makedev(mount.dev.major, mount.dev.minor)];
-    if mount.fs_type == "btrfs" && mount.dev.major == 0 && mount.source.starts_with("/dev/") {
-        match rustix::fs::stat(mount.source.as_str()) {
-            Ok(st) if file_type_of(st.st_mode) == FileType::BlockDevice => wanted.push(st.st_rdev),
-            Ok(_) => {}
-            Err(e) if e == rustix::io::Errno::NOENT || e == rustix::io::Errno::NOTDIR => {}
-            Err(e) => return Err(HostError::errno("stat", &mount.source, errno_of(e))),
-        }
+/// `BTRFS_IOC_FS_INFO` (`include/uapi/linux/btrfs.h`):
+/// `_IOR(0x94, 31, struct btrfs_ioctl_fs_info_args)`, 1024 bytes. No
+/// capability is needed; it only reports.
+const BTRFS_IOC_FS_INFO: rustix::ioctl::Opcode = 0x8400_941f;
+
+/// `struct btrfs_ioctl_fs_info_args` (`include/uapi/linux/btrfs.h`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BtrfsFsInfo {
+    max_id: u64,
+    num_devices: u64,
+    fsid: [u8; 16],
+    nodesize: u32,
+    sectorsize: u32,
+    clone_alignment: u32,
+    csum_type: u16,
+    csum_size: u16,
+    flags: u64,
+    generation: u64,
+    metadata_uuid: [u8; 16],
+    reserved: [u8; 944],
+}
+
+const _: () = assert!(std::mem::size_of::<BtrfsFsInfo>() == 1024);
+
+/// The FSID of the btrfs holding `fd` (`BTRFS_IOC_FS_INFO`), as blkid and
+/// `/sys/fs/btrfs` spell it: lowercase hex, 8-4-4-4-12. One for every
+/// subvolume and member device, read from the filesystem itself, never a
+/// path (TASK-286 review: a mountinfo source can name another device in
+/// diskgc's namespace).
+pub(crate) fn btrfs_fsid(fd: BorrowedFd<'_>, shown: &str) -> Result<String, HostError> {
+    // SAFETY: BTRFS_IOC_FS_INFO fills exactly one `struct
+    // btrfs_ioctl_fs_info_args` through its pointer argument (with `flags`
+    // 0 on entry, which the getter's zeroed buffer gives); `BtrfsFsInfo`
+    // is that struct's layout.
+    let info = unsafe {
+        rustix::ioctl::ioctl(
+            fd,
+            rustix::ioctl::Getter::<BTRFS_IOC_FS_INFO, BtrfsFsInfo>::new(),
+        )
     }
+    .map_err(|e| HostError::errno("ioctl BTRFS_IOC_FS_INFO", shown, errno_of(e)))?;
+    let hex: Vec<String> = info.fsid.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        hex[0..4].concat(),
+        hex[4..6].concat(),
+        hex[6..8].concat(),
+        hex[8..10].concat(),
+        hex[10..16].concat()
+    ))
+}
+
+/// Whether `mount` is a btrfs whose superblock device is anonymous (its
+/// files' devices are its subvolumes', never a block device's).
+fn is_btrfs(mount: &MountEntry) -> bool {
+    mount.fs_type == "btrfs"
+}
+
+/// The UUID of the filesystem `mount` shows, reached as `fd`
+/// ([`diskgc_core::host::Host::fs_uuid`]): for btrfs its FSID read from
+/// `fd` ([`btrfs_fsid`]); otherwise the name of the `/dev/disk/by-uuid`
+/// link whose block device is the mount's device. `None`: no such link (a
+/// container, a system without udev, tmpfs, an overlay). Read-only: names
+/// are listed and their targets `stat`ed, nothing is opened.
+pub(crate) fn fs_uuid(fd: BorrowedFd<'_>, mount: &MountEntry) -> Result<Option<String>, HostError> {
+    if is_btrfs(mount) {
+        let shown = mount.mount_point.display().to_string();
+        return btrfs_fsid(fd, &shown).map(Some);
+    }
+    const BY_UUID: &str = "/dev/disk/by-uuid";
+    if mount.dev.major == 0 {
+        return Ok(None);
+    }
+    let want = rustix::fs::makedev(mount.dev.major, mount.dev.minor);
     let entries = match std::fs::read_dir(BY_UUID) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -542,7 +613,7 @@ pub(crate) fn fs_uuid(mount: &MountEntry) -> Result<Option<String>, HostError> {
         let Ok(st) = rustix::fs::stat(entry.path()) else {
             continue; // a dangling link
         };
-        if file_type_of(st.st_mode) == FileType::BlockDevice && wanted.contains(&st.st_rdev) {
+        if file_type_of(st.st_mode) == FileType::BlockDevice && st.st_rdev == want {
             let name = entry.file_name();
             return Ok(std::str::from_utf8(name.as_bytes()).ok().map(str::to_owned));
         }
@@ -550,31 +621,145 @@ pub(crate) fn fs_uuid(mount: &MountEntry) -> Result<Option<String>, HostError> {
     Ok(None)
 }
 
+/// `/sys/dev/block/<dev>`: the sysfs directory of a block device.
+fn sys_block(dev: Dev) -> PathBuf {
+    PathBuf::from(format!("/sys/dev/block/{dev}"))
+}
+
+/// A sysfs `dev` file's `MAJ:MIN`.
+fn read_dev_file(path: &Path) -> Result<Dev, HostError> {
+    let text = std::fs::read_to_string(path).map_err(|e| io_error("read", path.display(), &e))?;
+    let parsed = text.trim().split_once(':').and_then(|(major, minor)| {
+        Some(Dev {
+            major: major.parse().ok()?,
+            minor: minor.parse().ok()?,
+        })
+    });
+    parsed
+        .ok_or_else(|| HostError::invalid("read", path.display(), format!("not MAJ:MIN: {text:?}")))
+}
+
+/// The loop device block device `dev` is: itself (it has a `loop`
+/// directory in sysfs), the loop device it is a partition of (`losetup
+/// -P`: a `partition` file, and the parent has `loop`), or none.
+fn loop_of(dev: Dev) -> Result<Option<Dev>, HostError> {
+    if dev.major == 0 {
+        return Ok(None);
+    }
+    let dir = sys_block(dev);
+    let exists = |path: &Path| match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(io_error("stat", path.display(), &e)),
+    };
+    if dev.major == diskgc_core::places::LOOP_MAJOR || exists(&dir.join("loop"))? {
+        return Ok(Some(dev));
+    }
+    if !exists(&dir)? || !exists(&dir.join("partition"))? {
+        return Ok(None);
+    }
+    let parent = std::fs::canonicalize(&dir)
+        .map_err(|e| io_error("canonicalize", dir.display(), &e))?
+        .parent()
+        .map(Path::to_owned)
+        .ok_or_else(|| HostError::invalid("read", dir.display(), "a partition without a parent"))?;
+    if exists(&parent.join("loop"))? {
+        Ok(Some(read_dev_file(&parent.join("dev"))?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// The loop devices the filesystem `mount` shows is stored on
+/// ([`diskgc_core::host::Host::loop_devices`]).
+pub(crate) fn loop_devices(
+    mount: &MountEntry,
+    fd: Option<BorrowedFd<'_>>,
+) -> Result<Vec<Dev>, HostError> {
+    let mut devices = Vec::new();
+    if mount.dev.major != 0 {
+        devices.push(mount.dev);
+    } else if is_btrfs(mount) {
+        match fd {
+            Some(fd) => {
+                let fsid = btrfs_fsid(fd, &mount.mount_point.display().to_string())?;
+                let members = PathBuf::from(format!("/sys/fs/btrfs/{fsid}/devices"));
+                let listing = std::fs::read_dir(&members)
+                    .map_err(|e| io_error("read_dir", members.display(), &e))?;
+                for entry in listing {
+                    let entry = entry.map_err(|e| io_error("read_dir", members.display(), &e))?;
+                    devices.push(read_dev_file(&entry.path().join("dev"))?);
+                }
+            }
+            None if mount.source.starts_with("/dev/") => {
+                match rustix::fs::stat(mount.source.as_str()) {
+                    Ok(st) if file_type_of(st.st_mode) == FileType::BlockDevice => {
+                        devices.push(Dev {
+                            major: rustix::fs::major(st.st_rdev),
+                            minor: rustix::fs::minor(st.st_rdev),
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(e) if e == rustix::io::Errno::NOENT || e == rustix::io::Errno::NOTDIR => {}
+                    Err(e) => return Err(HostError::errno("stat", &mount.source, errno_of(e))),
+                }
+            }
+            None => {}
+        }
+    }
+    let mut loops = Vec::new();
+    for dev in devices {
+        loops.extend(loop_of(dev)?);
+    }
+    loops.sort();
+    loops.dedup();
+    Ok(loops)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diskgc_core::host::Dev;
 
     #[test]
     fn a_missing_by_uuid_directory_or_device_is_no_uuid() {
         // The test sandbox may or may not have udev links; a device that
-        // cannot exist never has one.
+        // cannot exist never has one, and an anonymous device none.
+        let dir = rustix::fs::open("/", OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty())
+            .expect("open /");
+        let mount = |major, minor| MountEntry {
+            id: 1,
+            parent_id: 1,
+            dev: Dev { major, minor },
+            fs_root: PathBuf::from("/"),
+            mount_point: PathBuf::from("/"),
+            fs_type: "ext4".to_owned(),
+            source: "/dev/diskgc-no-such-device".to_owned(),
+            read_only: false,
+        };
         assert_eq!(
-            fs_uuid(&MountEntry {
-                id: 1,
-                parent_id: 1,
-                dev: Dev {
-                    major: 4095,
-                    minor: 1_048_575
-                },
-                fs_root: PathBuf::from("/"),
-                mount_point: PathBuf::from("/"),
-                fs_type: "btrfs".to_owned(),
-                source: "/dev/diskgc-no-such-device".to_owned(),
-                read_only: false,
-            })
-            .expect("listing"),
+            fs_uuid(dir.as_fd(), &mount(4095, 1_048_575)).expect("listing"),
             None
         );
+        assert_eq!(
+            fs_uuid(dir.as_fd(), &mount(0, 42)).expect("anonymous"),
+            None
+        );
+        assert_eq!(
+            loop_devices(&mount(4095, 1_048_575), None).expect("sysfs"),
+            []
+        );
+        assert_eq!(
+            loop_devices(&mount(0, 42), Some(dir.as_fd())).expect("tmpfs"),
+            []
+        );
+    }
+
+    /// `BTRFS_IOC_FS_INFO` on a directory of another filesystem fails
+    /// (`ENOTTY`): its FSID is never made up.
+    #[test]
+    fn a_btrfs_fsid_is_read_only_from_btrfs() {
+        let dir = rustix::fs::open("/proc", OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty())
+            .expect("open /proc");
+        assert!(btrfs_fsid(dir.as_fd(), "/proc").is_err());
     }
 }

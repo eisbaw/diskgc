@@ -17,9 +17,9 @@
 //! Only diskgc's own mount namespace's table is read: a mount made in
 //! another namespace is not seen (docs/safety.md states the limit).
 //!
-//! It is also the one home of "the same filesystem" ([`space_of`],
-//! [`same_space`], [`shared_space`]; TASK-286): by the device mountinfo
-//! names for a mount, never by a `statx` `st_dev`.
+//! Its [`space`] module is the one home of "the same filesystem"
+//! (TASK-286): by the device mountinfo names for a mount, never by a
+//! `statx` `st_dev`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -27,6 +27,13 @@ use std::path::{Path, PathBuf};
 
 use crate::host::{Dev, MountEntry};
 use crate::resolve::Unsafe;
+
+pub mod space;
+pub use space::{
+    BLOCK_EXT_MAJOR, DEVICE_NOT_UNIQUE, LOOP_MAJOR, OVERLAY, STACKED_ON_DIRECTORIES, Space,
+    WriteGuard, on_loop, same_space, shared_space, space_at, space_of, stored_elsewhere,
+    write_guard,
+};
 
 /// The mount a path is on: the deepest mount point that is a (component-
 /// wise) prefix of `path`; of mounts stacked on that point, the topmost (the
@@ -392,100 +399,6 @@ fn joined(base: &Path, below: &Path) -> PathBuf {
         base.to_owned()
     } else {
         base.join(below)
-    }
-}
-
-// ---- Space: which filesystem a path's bytes are taken from (TASK-286) ----
-
-/// The block major of loop devices (`Documentation/admin-guide/devices.txt`).
-pub const LOOP_MAJOR: u32 = 7;
-
-/// The type name overlayfs has in mountinfo.
-pub const OVERLAY: &str = "overlay";
-
-/// Kernel filesystems that stack on directories of other filesystems and
-/// write through to them: eCryptfs (its ciphertext directory), aufs (its
-/// branches), shiftfs (the directory it shifts). Refused only when mounted
-/// at or below a match; on the candidate's or match's own mount they are
-/// taken as local (docs/safety.md, limits), or an eCryptfs-encrypted home
-/// would stop every run.
-pub const STACKED_ON_DIRECTORIES: &[&str] = &["ecryptfs", "aufs", "shiftfs"];
-
-/// Whether a filesystem of `fs_type` may store its data in directories of
-/// another filesystem, which mountinfo does not name: overlayfs, the
-/// [`STACKED_ON_DIRECTORIES`], and every type the mount screen refuses
-/// (FUSE such as `bindfs` or `fuse-overlayfs`, an NFS export of this host,
-/// an automount point).
-pub fn stored_elsewhere(fs_type: &str) -> bool {
-    fs_type == OVERLAY
-        || STACKED_ON_DIRECTORIES.contains(&fs_type)
-        || crate::engine::may_be_networked(fs_type)
-}
-
-/// The space a mount's files take and free: the device mountinfo names for
-/// it, its filesystem's superblock's (docs/architecture.md, Filesystem
-/// matching). Every mount of one filesystem shows the same one: a bind
-/// mount, and every btrfs subvolume of one btrfs. It is not a `statx`
-/// `st_dev`, which on btrfs is the subvolume's own device and never this
-/// one: `st_dev` (with the inode) identifies an object, this a pool of
-/// space. Never compare the two.
-pub fn space_of(mount: &MountEntry) -> Dev {
-    mount.dev
-}
-
-/// Whether deleting on mount `a` frees space on mount `b`, proved: both
-/// show one superblock ([`space_of`]). A filesystem that only may store its
-/// data on the other (an overlay whose upper directory is there) is not the
-/// same space here: nothing is deleted through it as if it were
-/// (`other_fs`); [`shared_space`] is the conservative side for writes.
-pub fn same_space(a: &MountEntry, b: &MountEntry) -> bool {
-    space_of(a) == space_of(b)
-}
-
-/// Why writing on mount `other` may take space from mount `watched`'s
-/// filesystem; `None` only when they are proved independent: different
-/// superblocks ([`same_space`]), neither one a filesystem that may store its
-/// data on another ([`stored_elsewhere`]) or on a loop device (its image is
-/// a file somewhere), and not two datasets of one ZFS pool. What diskgc
-/// writes for itself (the snapshot) is guarded unless this is `None`
-/// (docs/architecture.md, Snapshot: Never at the cost of the goal). A block
-/// device stacked on a file in other ways (device-mapper or md over a loop
-/// device, a network block device) is not recognised: a stated limit.
-pub fn shared_space(other: &MountEntry, watched: &MountEntry) -> Option<String> {
-    if same_space(other, watched) {
-        return Some(format!(
-            "the same filesystem (device {})",
-            space_of(watched)
-        ));
-    }
-    for mount in [other, watched] {
-        let at = mount.mount_point.display();
-        if stored_elsewhere(&mount.fs_type) {
-            return Some(format!(
-                "{} at {at} may store its data on another filesystem",
-                mount.fs_type
-            ));
-        }
-        if mount.dev.major == LOOP_MAJOR {
-            return Some(format!(
-                "{at} is on the loop device {}, whose image is a file on another filesystem",
-                mount.dev
-            ));
-        }
-    }
-    let pool = |mount: &MountEntry| {
-        (mount.fs_type == "zfs").then(|| {
-            mount
-                .source
-                .split('/')
-                .next()
-                .unwrap_or_default()
-                .to_owned()
-        })
-    };
-    match (pool(other), pool(watched)) {
-        (Some(a), Some(b)) if a == b => Some(format!("two datasets of the ZFS pool {a}")),
-        _ => None,
     }
 }
 

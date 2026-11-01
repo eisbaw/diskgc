@@ -885,6 +885,118 @@ fn watch_tally_only_guards_a_state_directory_on_an_overlay_of_the_watched_filesy
     );
 }
 
+/// `watch --tally-only --min-free 1G` of `path` on `host` with the state
+/// directory `state`, run until its SIGTERM event; its log lines.
+fn tally_only_lines(host: &ModelHost, path: &str, state: &str) -> Vec<String> {
+    let library = library();
+    let builtins = || Ok(library.clone());
+    let platform = Platform {
+        catalog: Catalog::Development,
+        draw_seed: &|| Ok(0),
+        builtins: &builtins,
+    };
+    let mut lines = Vec::new();
+    let selection = Selection {
+        path: PathBuf::from(path),
+        ..selection()
+    };
+    let started = start(
+        host,
+        &Mode::TallyOnly {
+            min_free: Some(parse_size("1G").unwrap()),
+        },
+        &selection,
+        &ConfigFile::NotFound { tried: Vec::new() },
+        &platform,
+        Some(Path::new(state)),
+        &mut |l: &str| lines.push(l.to_owned()),
+    )
+    .unwrap_or_else(|r| panic!("starts: {r:?}"));
+    watch::run_inline(host, started, &|| Ok(0), None, &mut |l| {
+        lines.push(l.to_owned())
+    });
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    lines
+}
+
+/// TASK-286 review (Codex 3): a state directory on a filesystem stored on
+/// a loop device (its image a sparse file, here on the watched `/tmp`)
+/// can take more of the watched filesystem than the image's own free space
+/// shows; how much cannot be bounded, so the snapshot is not written (one
+/// line; warmth only), however much the image has free.
+#[test]
+fn watch_tally_only_skips_a_snapshot_on_a_loop_image_s_filesystem() {
+    let events = "events:\n  - {at: {elapsed: 11m}, signal: term}\n";
+    let image = "  - {id: 60, at: /var/state, fs: ext4, dev: \"7:0\", size: 50G, parent: 1, loop_backing: /tmp/state.img}\n";
+    let host = host(
+        &yaml("10G", &old_candidates(2, "1M"), events)
+            .replace(
+                "state_dir: /home/u/.local/state/diskgc",
+                &format!("{image}state_dir: /var/state/u/diskgc"),
+            )
+            .replace(
+                "  /home/u: {.: {mode: \"0700\"}}\n",
+                "  /tmp/state.img: {size: 1M}\n  /var/state/u: {.: {mode: \"0700\"}}\n",
+            ),
+    );
+    let lines = tally_only_lines(&host, "/tmp", "/var/state/u/diskgc");
+    assert_eq!(host.trace_count(Op::StateWrite), 0, "{lines:#?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("is stored on loop device 7:0") && l.contains("cannot be bounded")),
+        "{lines:#?}"
+    );
+}
+
+/// TASK-286 review (Codex 3, mped S1): where the state directory may share
+/// the watched filesystem's space, the guard samples `PATH` too and the
+/// lower one decides: a watched filesystem on a loop image with less than
+/// `--min-free` left is not written into from a state directory with
+/// plenty.
+#[test]
+fn watch_tally_only_guard_samples_path_as_well_as_the_state_directory() {
+    let events = "events:\n  - {at: {elapsed: 11m}, signal: term}\n";
+    let image = "  - {id: 60, at: /mnt/img, fs: ext4, dev: \"7:1\", size: 2G, other_used: 1600M, parent: 1, loop_backing: /home/u/img}\n";
+    let host = host(
+        &yaml("1G", &old_candidates(2, "1M"), events)
+            .replace("state_dir: ", &format!("{image}state_dir: "))
+            .replace(
+                "  /home/u: {.: {mode: \"0700\"}}\n",
+                "  /home/u: {.: {mode: \"0700\"}, img: {size: 1M}}\n  /mnt/img/a00: {}\n",
+            ),
+    );
+    let lines = tally_only_lines(&host, "/mnt/img", "/home/u/.local/state/diskgc");
+    assert_eq!(host.trace_count(Op::StateWrite), 0, "{lines:#?}");
+    assert!(
+        lines.iter().any(
+            |l| l.contains("not written: the state directory may take its space")
+                && l.contains("loop device 7:1")
+        ),
+        "{lines:#?}"
+    );
+}
+
+/// TASK-286 review (mped S5): on btrfs a unit's identity has its
+/// subvolume's `statx` device, never the trie's mountinfo device; the
+/// index keeps such units (it recorded none on btrfs before), so the
+/// snapshot of a watched btrfs subvolume holds its candidates.
+#[test]
+fn the_index_keeps_units_on_a_btrfs_subvolume() {
+    let events = "events:\n  - {at: {elapsed: 11m}, signal: term}\n";
+    let host = host(&yaml("1G", &old_candidates(2, "1M"), events).replace(
+        "{id: 30, at: /tmp, fs: tmpfs, dev: \"0:42\"",
+        "{id: 30, at: /tmp, fs: btrfs, dev: \"0:42\", subvolume: \"0:43\"",
+    ));
+    let lines = tally_only_lines(&host, "/tmp", "/home/u/.local/state/diskgc");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("index: snapshot index-dev-0-42 written: 2 unit(s)")),
+        "{lines:#?}"
+    );
+}
+
 /// The holder is an `ensure` writing: released within the 10 s, the
 /// watch starts.
 #[test]

@@ -496,7 +496,7 @@ fn a_state_write_without_the_exclusive_lock_fails_the_test() {
     else {
         panic!("busy")
     };
-    let _ = host.state_write(&shared, &key, b"x", &|| false);
+    let _ = host.state_write(&shared, &lock.dir, &key, b"x", &|| false);
 }
 
 /// TASK-30 review (Codex 6, mped): the write's allocation, not its encoded

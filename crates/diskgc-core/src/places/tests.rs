@@ -385,7 +385,7 @@ fn one_superblock_is_one_space_and_independence_must_be_proved() {
     assert!(shared_space(&tank_b, &tank_a).is_some_and(|why| why.contains("ZFS pool tank")));
     assert_eq!(shared_space(&other_pool, &tank_a), None);
     assert_eq!(
-        space_of(&home),
+        space_of(&home).dev(),
         Dev {
             major: 0,
             minor: 40

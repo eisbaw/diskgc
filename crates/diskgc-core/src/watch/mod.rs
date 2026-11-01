@@ -40,7 +40,7 @@ use std::time::Duration;
 use crate::executor::{
     self, MeasureFailure, WatchCycle, goal_bytes, reach_path, timed_report_from,
 };
-use crate::host::{Delete, Dev, Host, MonoTime, Timestamp};
+use crate::host::{Delete, Host, MonoTime, Timestamp};
 use crate::hostlock::{self, LockError, Readiness, ReclaimLock};
 use crate::invocation::{Loaded, Platform, Prepared, prepare};
 use crate::places;
@@ -140,7 +140,7 @@ pub struct Watched<F> {
     pub fd: F,
     pub path: PathBuf,
     pub mount: PathBuf,
-    pub space: Dev,
+    pub space: places::Space,
 }
 
 /// Why `watch` did not start: its exit code (0 for a signal during the
@@ -382,11 +382,14 @@ pub fn start<H: Delete>(
     }
     let sources = executor::tally_sources(tiers.iter().copied());
     // 7. The single-writer lock.
-    let (key, fallback) = snapshot::fs_key(host, &at.mount);
+    if let Some(note) = places::space::cow_note(&at.mount) {
+        log(&note);
+    }
+    let (key, fallback) = snapshot::fs_key(host, &at.fd, &at.mount);
     if let Some(why) = fallback {
         log(&format!(
             "index: filesystem {}: {why}; its snapshot is keyed by device number",
-            places::space_of(&at.mount)
+            places::space_of(&at.mount).dev()
         ));
     }
     let guard = Guard {
@@ -411,7 +414,7 @@ pub fn start<H: Delete>(
             min_free: guard_min.unwrap_or(0),
             deadline: None,
         };
-        seed.seed(host, run, &bound, log);
+        seed.seed(host, run, &at.fd, &bound, log);
         state = seed.state;
     }
     let stats = state.index.stats();
@@ -439,7 +442,7 @@ pub fn start<H: Delete>(
         watched: Watched {
             path: path.to_path_buf(),
             mount: at.mount.mount_point.clone(),
-            space: places::space_of(&at.mount),
+            space: places::space_at(host, &at.mount, &at.fd),
             fd: at.fd,
         },
         reclaim: goal.map(|goal| Reclaim { goal, prepared }),
@@ -576,6 +579,7 @@ fn write_snapshot<H: Host, L: LiveIndex>(
     host: &H,
     live: &mut L,
     writer: &mut Writer<H::Fd>,
+    path: &H::Fd,
     log: &mut dyn FnMut(&str),
 ) {
     let until = host
@@ -594,7 +598,7 @@ fn write_snapshot<H: Host, L: LiveIndex>(
         }
     });
     if let Some(encoded) = encoded {
-        writer.write(host, &encoded, log);
+        writer.write(host, &encoded, path, log);
     }
 }
 
@@ -634,7 +638,7 @@ pub fn run<H: Host, L: LiveIndex>(
         }
         let now = host.now();
         if now >= next_snapshot {
-            write_snapshot(host, live, writer, log);
+            write_snapshot(host, live, writer, &watched.fd, log);
             next_snapshot = after(next_snapshot, SNAPSHOT_PERIOD, host.now());
         }
         let Some((goal, cycle)) = &mut reclaim else {
@@ -734,7 +738,7 @@ pub fn run<H: Host, L: LiveIndex>(
             writer.key().snapshot_name()
         ));
     } else {
-        write_snapshot(host, live, writer, log);
+        write_snapshot(host, live, writer, &watched.fd, log);
     }
     Ended::Stopped(signal)
 }

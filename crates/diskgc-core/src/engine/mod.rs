@@ -128,91 +128,27 @@ impl<'a, F> Candidate<'a, F> {
     }
 }
 
-/// Filesystem types diskgc never takes candidates from: network and
-/// cluster filesystems, and filesystems shared with another machine (a VM
-/// host's), whose files another host may be using while no process of this
-/// one is (docs/safety.md, Before the walk: `unsupported_fs`). Their locks
-/// are not the local kernel's alone (Cargo does not lock there), and a dead
-/// server can hang any operation on them. Compared with mountinfo's type in
-/// full, and a FUSE type (`fuse.<name>`) by its `<name>` too. Every FUSE
-/// type is refused anyway ([`may_be_networked`]); the FUSE names here only
-/// make the reason clear.
-pub const NETWORK_FS_TYPES: &[&str] = &[
-    // Network filesystems in the kernel.
-    "9p",
-    "afs",
-    "ceph",
-    "cifs",
-    "coda",
-    "ncpfs",
-    "nfs",
-    "nfs4",
-    "smb3",
-    "smbfs",
-    // Cluster and parallel filesystems (shared storage of several hosts).
-    "beegfs",
-    "gfs2",
-    "gpfs",
-    "lustre",
-    "ocfs2",
-    "orangefs",
-    "pvfs2",
-    // Shared with a VM's host.
-    "vboxsf",
-    "virtiofs",
-    "vmhgfs",
-    // FUSE clients of network storage (`fuse.<name>`).
-    "ceph-fuse",
-    "curlftpfs",
-    "davfs",
-    "gcsfuse",
-    "glusterfs",
-    "goofys",
-    "gvfsd-fuse",
-    "juicefs",
-    "lizardfs",
-    "mfs",
-    "moosefs",
-    "rclone",
-    "s3fs",
-    "sshfs",
-    "vmhgfs-fuse",
-];
+pub use crate::places::space::{AUTOFS, NETWORK_FS_TYPES, may_be_networked, networked_why};
 
-/// mountinfo's type of an automount trigger that has not been triggered
-/// (systemd `x-systemd.automount`, the automounter daemon). Once mounted,
-/// the real filesystem is stacked on it and is the one screened.
-pub const AUTOFS: &str = "autofs";
-
-/// Whether mountinfo's filesystem type `fs_type` may hold files another
-/// host uses: a type in [`NETWORK_FS_TYPES`] (directly, or as
-/// `fuse.<type>`), or any FUSE type (`fuse`, `fuseblk`, and their subtypes).
-/// A FUSE type cannot establish where its backing data is stored.
-///
-/// An untriggered automount point ([`AUTOFS`]) too (TASK-180, fail
-/// closed): a path lookup through it mounts whatever it stands for, most
-/// often NFS, and with that server down the lookup hangs in the kernel
-/// before any deadline can act. mountinfo does not say what it would
-/// mount, so a root at or below one is refused without being looked up.
-pub fn may_be_networked(fs_type: &str) -> bool {
-    NETWORK_FS_TYPES.contains(&fs_type)
-        || fs_type == AUTOFS
-        || matches!(fs_type, "fuse" | "fuseblk")
-        || fs_type.starts_with("fuse.")
-        || fs_type.starts_with("fuseblk.")
-}
-
-/// Why [`may_be_networked`] refuses `fs_type`, for messages.
-pub fn networked_why(fs_type: &str) -> &'static str {
-    let named = |name: &str| NETWORK_FS_TYPES.contains(&name);
-    if named(fs_type) || fs_type.strip_prefix("fuse.").is_some_and(named) {
-        "a network, cluster or shared filesystem"
-    } else if fs_type == AUTOFS {
-        "an untriggered automount point (fail closed: a lookup would mount it, often over \
-         the network)"
-    } else {
-        "a FUSE filesystem (fail closed: its data may be on another host)"
-    }
+/// `contains_mount` for a directory at `path` on device `dev` inside one on
+/// `parent_dev` with no mount between (TASK-286): the top of a nested btrfs
+/// subvolume or snapshot, which `rmdir` deletes once it is empty (Linux
+/// 4.18, unprivileged), or a directory of another filesystem shown without
+/// a mount of its own. Directories only: overlayfs without `xino` shows a
+/// file of a lower layer under that layer's device. The discovery of a
+/// candidate, the eligibility walk and the Cargo inspection all refuse it,
+/// as the tally does not enter it ([`crate::tally`]).
+pub fn nested_subvolume(
+    path: PathBuf,
+    dev: crate::host::Dev,
+    parent_dev: crate::host::Dev,
+) -> Skip {
+    let detail = format!(
+        "{} is a directory on device {dev} inside one on device {parent_dev} without a mount \
+         between (a nested subvolume or snapshot): not touched",
+        path.display()
+    );
+    Skip::new(Reason::ContainsMount, path, detail)
 }
 
 /// Work a resumable discovery walk reports to its pause callback

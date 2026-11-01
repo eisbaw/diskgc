@@ -144,10 +144,11 @@ pub fn discover<H: Host>(
         cursor.root_id = Some(identity);
         cursor.frames.push(Frame::root(resolved.stat.ino));
         cursor.seen = std::mem::take(&mut seen);
+        let space = places::space_at(host, &resolved.mount, &resolved.fd);
         let walked = cursor.walk(
             host,
             &mounts,
-            &resolved.mount,
+            (resolved.mount.id, space),
             deadline,
             &mut found,
             vec![resolved.fd],
@@ -335,7 +336,7 @@ fn subdir<H: Host>(
     host: &H,
     dir: &H::Fd,
     mounts: &[MountEntry],
-    mount_id: u64,
+    (mount_id, dev): (u64, Option<Dev>),
     name: &OsString,
     path: &Path,
 ) -> Judged<Option<Stat>> {
@@ -363,6 +364,16 @@ fn subdir<H: Host>(
             Reason::ContainsMount,
             path.to_owned(),
             format!("on mount {mnt_id}, not the target's mount {mount_id}"),
+        )));
+    }
+    if let Some(dev) = dev
+        && file_type == FileType::Directory
+        && stat.dev != dev
+    {
+        return Ok(Err(crate::engine::nested_subvolume(
+            path.to_owned(),
+            stat.dev,
+            dev,
         )));
     }
     Ok(Ok((file_type == FileType::Directory).then_some(stat)))
@@ -494,6 +505,13 @@ fn inspect_in<H: Host>(
     if let Err(skip) = check_listing(path, &names) {
         return Ok(Err(skip));
     }
+    // Every directory inspected below must be on the target's own device:
+    // one that is not is a nested subvolume (TASK-286), as the tally and
+    // the eligibility walk see it.
+    let dev = match host.statx(Base::Dir(target), Path::new("")) {
+        Ok(stat) => stat.dev,
+        Err(e) => return failure(path.to_owned(), "stat", &e),
+    };
     let mut inspected = Inspected {
         profiles: Vec::new(),
         dirs: Vec::new(),
@@ -508,7 +526,16 @@ fn inspect_in<H: Host>(
         if is_private_tmp(name) {
             return Ok(Err(private_entry(&at)));
         }
-        if judged!(subdir(host, target, mounts, mount_id, name, &at)).is_none() {
+        if judged!(subdir(
+            host,
+            target,
+            mounts,
+            (mount_id, Some(dev)),
+            name,
+            &at
+        ))
+        .is_none()
+        {
             continue;
         }
         let (fd, stat) = judged!(open_dir(host, target, mount_id, &rel, &at));
@@ -539,7 +566,16 @@ fn inspect_in<H: Host>(
             if is_private_tmp(child) {
                 return Ok(Err(private_entry(&child_at)));
             }
-            if judged!(subdir(host, &fd, mounts, mount_id, child, &child_at)).is_none() {
+            if judged!(subdir(
+                host,
+                &fd,
+                mounts,
+                (mount_id, Some(dev)),
+                child,
+                &child_at
+            ))
+            .is_none()
+            {
                 continue;
             }
             let (child_fd, child_stat) =
@@ -809,8 +845,8 @@ impl DiscoverCursor {
             }
             Some(_) => {}
         }
-        let mount = resolved.mount;
-        let mount_id = mount.id;
+        let space = places::space_at(host, &resolved.mount, &resolved.fd);
+        let mount_id = resolved.mount.id;
         let mut open = vec![resolved.fd];
         while open.len() < self.frames.len() {
             // Charged, never refused (bounded by DISCOVERY_DEPTH).
@@ -843,7 +879,7 @@ impl DiscoverCursor {
                 }
             }
         }
-        let walked = self.walk(host, &mounts, &mount, None, out, open, pause)?;
+        let walked = self.walk(host, &mounts, (mount_id, space), None, out, open, pause)?;
         if matches!(walked, Stepped::Done) {
             self.done = true;
         }
@@ -869,14 +905,13 @@ impl DiscoverCursor {
         &mut self,
         host: &H,
         mounts: &[MountEntry],
-        mount: &MountEntry,
+        (mount_id, space): (u64, places::Space),
         deadline: Option<MonoTime>,
         found: &mut Discovery,
         mut open: Vec<H::Fd>,
         pause: &mut dyn FnMut(Work) -> bool,
     ) -> Result<Stepped, Stop> {
         assert_eq!(open.len(), self.frames.len(), "a frame per open directory");
-        let (mount_id, space) = (mount.id, places::space_of(mount));
         let root = self.root.clone();
         let mut seen = std::mem::take(&mut self.seen);
         let result = (|| -> Result<Stepped, Stop> {
@@ -899,8 +934,11 @@ impl DiscoverCursor {
                     if pause(Work::Next(1)) {
                         return Ok(Stepped::Paused);
                     }
-                    let parent_ino = depth.checked_sub(1).and_then(|p| self.frames[p].ino);
-                    match walk.visit(&open[depth], &path, self.frames[depth].depth, parent_ino)? {
+                    let parent = depth.checked_sub(1).map(|p| &self.frames[p]);
+                    let parent_ino = parent.and_then(|p| p.ino);
+                    let parent_dev = parent.and_then(|p| p.id).map(|id| id.dev);
+                    let at_depth = self.frames[depth].depth;
+                    match walk.visit(&open[depth], &path, at_depth, (parent_ino, parent_dev))? {
                         Some(names) => {
                             // Charged one operation per name listed.
                             pause(Work::Listed(names.len()));
@@ -937,7 +975,7 @@ impl DiscoverCursor {
                 }
                 let child_depth = frame.depth + 1;
                 self.frames[depth].next += 1;
-                match subdir(host, &open[depth], mounts, mount_id, &name, &at)? {
+                match subdir(host, &open[depth], mounts, (mount_id, None), &name, &at)? {
                     Ok(Some(_)) => {}
                     Ok(None) => continue,
                     // A mount below the root is not crossed, and not
@@ -974,9 +1012,9 @@ struct Walk<'a, H: Host> {
     host: &'a H,
     root: &'a Path,
     mount_id: u64,
-    /// The root's mount's space ([`places::space_of`]): every target is on
+    /// The root's mount's space ([`places::space_at`]): every target is on
     /// that mount.
-    space: Dev,
+    space: places::Space,
     mounts: &'a [MountEntry],
     deadline: Option<MonoTime>,
     found: &'a mut Discovery,
@@ -1001,7 +1039,7 @@ impl<H: Host> Walk<'_, H> {
         fd: &H::Fd,
         path: &Path,
         depth: usize,
-        parent_ino: Option<u64>,
+        (parent_ino, parent_dev): (Option<u64>, Option<Dev>),
     ) -> Result<Option<Vec<OsString>>, Stop> {
         let names = match list(self.host, fd, path, self.deadline)? {
             Ok(names) => names,
@@ -1018,7 +1056,7 @@ impl<H: Host> Walk<'_, H> {
             return Ok(None);
         }
         if names.iter().any(|n| n == CACHEDIR_TAG) {
-            match self.target_at(fd, path, parent_ino)? {
+            match self.target_at(fd, path, parent_ino, parent_dev)? {
                 Ok(true) => return Ok(None),
                 Ok(false) => {}
                 Err(skip) => {
@@ -1037,7 +1075,13 @@ impl<H: Host> Walk<'_, H> {
     /// tag and a profile directory); `Ok(Ok(true))` then, so it is not
     /// descended into. So too for one refused as unsettled
     /// ([`INSPECT_ATTEMPTS`]), which is recorded among the refusals.
-    fn target_at(&mut self, fd: &H::Fd, path: &Path, parent_ino: Option<u64>) -> Judged<bool> {
+    fn target_at(
+        &mut self,
+        fd: &H::Fd,
+        path: &Path,
+        parent_ino: Option<u64>,
+        parent_dev: Option<Dev>,
+    ) -> Judged<bool> {
         let tag = path.join(CACHEDIR_TAG);
         if is_mount_point(self.mounts, &tag) {
             return Ok(Err(mounted(&tag)));
@@ -1087,6 +1131,16 @@ impl<H: Host> Walk<'_, H> {
             Ok(identity) => identity,
             Err(skip) => return Ok(Err(skip)),
         };
+        // The top of a nested subvolume is never a target (TASK-286).
+        if let Some(parent_dev) = parent_dev
+            && identity.id.dev != parent_dev
+        {
+            return Ok(Err(crate::engine::nested_subvolume(
+                path.to_owned(),
+                identity.id.dev,
+                parent_dev,
+            )));
+        }
         if self.seen.insert(identity.id) {
             self.found.targets.push(Target {
                 root: self.root.to_owned(),

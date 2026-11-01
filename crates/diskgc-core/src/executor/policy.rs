@@ -8,7 +8,7 @@ use crate::cargo_target::{self, Stop};
 use crate::engine::{CACHEDIR_TAG, Reason, Skip};
 use crate::fs_kind;
 use crate::host::{DevIno, Host, HostError, MonoTime, MountEntry};
-use crate::places::{self, LOOP_MAJOR, OVERLAY, Place, mount_for, stored_elsewhere};
+use crate::places::{self, OVERLAY, Place, mount_for, stored_elsewhere};
 use crate::resolve::{
     MountScreenError, ResolveError, Want, resolve, resolve_in, screen_mount_chain,
 };
@@ -205,40 +205,65 @@ fn loop_images<H: Host>(
     candidate: &Path,
     matches: &[PathBuf],
 ) -> Result<(Option<PathBuf>, Vec<PathBuf>), String> {
-    let image_of = |mount: &MountEntry| -> Result<Option<PathBuf>, String> {
-        if mount.dev.major != LOOP_MAJOR {
-            return Ok(None);
-        }
-        let cannot = |why: String| {
+    // The images behind `mount`: one per loop device it is stored on
+    // ([`places::on_loop`]: a loop device, a partition of one, or a btrfs
+    // with a member on one; mped S1 on TASK-286).
+    let images_of = |mount: &MountEntry| -> Result<Vec<PathBuf>, String> {
+        let cannot = |dev: String, why: String| {
             format!(
-                "cannot prove overlap at {}: the image behind loop device {} (mounted at {}) {why}",
+                "cannot prove overlap at {}: the image behind loop device {dev} (mounted at {}) \
+                 {why}",
                 candidate.display(),
-                mount.dev,
                 mount.mount_point.display()
             )
         };
-        let backing = host
-            .loop_backing_file(mount.dev)
-            .map_err(|error| cannot(format!("cannot be read: {error}")))?
-            .ok_or_else(|| cannot("is not reported (no loop/backing_file)".to_owned()))?;
-        if backing.to_string_lossy().ends_with(" (deleted)") || !backing.is_absolute() {
-            return Err(cannot(format!("is {}", backing.display())));
+        let loops = places::on_loop(host, mount, None)
+            .map_err(|error| cannot(mount.dev.to_string(), format!("cannot be told: {error}")))?;
+        let mut images = Vec::new();
+        for dev in loops {
+            let backing = host
+                .loop_backing_file(dev)
+                .map_err(|error| cannot(dev.to_string(), format!("cannot be read: {error}")))?
+                .ok_or_else(|| {
+                    cannot(
+                        dev.to_string(),
+                        "is not reported (no loop/backing_file)".to_owned(),
+                    )
+                })?;
+            if backing.to_string_lossy().ends_with(" (deleted)") || !backing.is_absolute() {
+                return Err(cannot(dev.to_string(), format!("is {}", backing.display())));
+            }
+            images.push(backing);
         }
-        Ok(Some(backing))
+        Ok(images)
     };
     let on = |path: &Path| {
         mount_for(mounts, path)
             .map_err(|why| format!("cannot prove overlap at {}: {why}", path.display()))
     };
-    let inside = image_of(on(candidate)?)?;
+    let mut inside_images = images_of(on(candidate)?)?;
+    let inside = match inside_images.len() {
+        0 | 1 => inside_images.pop(),
+        _ => {
+            return Err(format!(
+                "cannot prove overlap at {}: its filesystem is stored on several loop images",
+                candidate.display()
+            ));
+        }
+    };
     let mut images = Vec::new();
     for matched in matches {
-        images.extend(image_of(on(matched)?)?);
+        images.extend(images_of(on(matched)?)?);
     }
-    let loops: Vec<&MountEntry> = mounts
-        .iter()
-        .filter(|mount| mount.dev.major == LOOP_MAJOR)
-        .collect();
+    let mut loops = Vec::new();
+    for mount in mounts {
+        if !places::on_loop(host, mount, None)
+            .map_err(|error| format!("cannot prove overlap at {}: {error}", candidate.display()))?
+            .is_empty()
+        {
+            loops.push(mount);
+        }
+    }
     if !loops.is_empty() {
         let by_id = places::by_id(mounts);
         let places = matches
@@ -247,7 +272,7 @@ fn loop_images<H: Host>(
             .collect::<Result<Vec<_>, _>>()?;
         for mount in loops {
             if nested_in(&by_id, mount, matches, &places, candidate)?.is_some() {
-                images.extend(image_of(mount)?);
+                images.extend(images_of(mount)?);
             }
         }
     }

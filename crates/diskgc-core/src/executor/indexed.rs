@@ -101,8 +101,9 @@ pub(super) fn takes_index(tier: &Tier) -> bool {
 
 /// Why `roots` may reach one object under two spellings that a restricted
 /// re-match cannot reconcile (TASK-252 review): two of them lie on
-/// different mounts of one filesystem (a bind mount, by device as
-/// mountinfo shows it). Discovery walks every root, outermost first, and
+/// different mounts of one filesystem whose root fields overlap (a bind
+/// mount, by device as mountinfo shows it; two btrfs subvolumes side by
+/// side, `/@home` and `/@work`, show no object twice). Discovery walks every root, outermost first, and
 /// records an object once, under the first root that reaches it, whose
 /// path then decides the rules by path (a keep marker on the way); a unit
 /// re-matched from the other root alone would be judged by its own way
@@ -118,9 +119,14 @@ fn bind_view(mounts: &[MountEntry], roots: &[PathBuf]) -> Option<String> {
                 root.display()
             ));
         };
+        // Two mounts of one filesystem show one object only where their
+        // root fields overlap: not two btrfs subvolumes side by side.
+        let overlap = |m: &MountEntry| {
+            m.fs_root.starts_with(&mount.fs_root) || mount.fs_root.starts_with(&m.fs_root)
+        };
         if let Some((other, _)) = placed
             .iter()
-            .find(|(_, m)| m.dev == mount.dev && m.id != mount.id)
+            .find(|(_, m)| m.dev == mount.dev && m.id != mount.id && overlap(m))
         {
             return Some(format!(
                 "roots {} and {} lie on two mounts of one filesystem (device {})",
@@ -306,11 +312,12 @@ pub(super) fn sync_tally<'t, H: Host>(
     index: &mut RunIndex,
     tiers: impl IntoIterator<Item = &'t Tier>,
     run: Reclaimed,
+    path: &H::Fd,
     budget: Option<Duration>,
     report: &mut Report,
     log: &mut dyn FnMut(&str),
 ) -> SyncTallied {
-    let (space, deadline) = (places::space_of(&run.mount), run.deadline);
+    let (space, deadline) = (places::space_at(host, &run.mount, path), run.deadline);
     let tiers = sync_tiers(tiers);
     // `watch`'s live index: the background tally keeps it, so a cycle
     // takes its queues from it as it is (docs/reference.md, `watch`: the
@@ -349,7 +356,7 @@ pub(super) fn sync_tally<'t, H: Host>(
         .flat_map(|t| &t.sources)
         .map(|s| (&*s.finder.profile, s.finder.profile_hash))
         .collect();
-    index.seed(host, run, &bound, log);
+    index.seed(host, run, path, &bound, log);
     let state = &mut index.state;
     let started = host.now();
     let budget_end = budget.and_then(|b| started.checked_add(b));
@@ -599,7 +606,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let mut derived = queue::derive(
             &state.index,
             &TierQuery {
-                dev: self.measured.space,
+                space: self.measured.space,
                 sources: &sources,
                 age: AgeFilter::None,
             },

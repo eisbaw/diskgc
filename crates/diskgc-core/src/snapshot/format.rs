@@ -548,12 +548,6 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, String> {
         let identity = r.identity("single identity")?;
         let units_finders = r.indices(finders.len(), "single finders")?;
         let at = mount_of(mount, "single")?;
-        if identity.dev != at.dev {
-            return Err(format!(
-                "{}: identity on another device than its mount",
-                path.display()
-            ));
-        }
         if path == at.mount_point || !path.starts_with(&at.mount_point) {
             return Err(format!(
                 "{}: not strictly below its mount point {}",
@@ -610,7 +604,7 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, String> {
         let site_identity = r.identity("block site identity")?;
         let block_finders = r.indices(finders.len(), "block finders")?;
         let at = mount_of(mount, "block")?;
-        if site_identity.dev != at.dev || !site.starts_with(&at.mount_point) {
+        if !site.starts_with(&at.mount_point) {
             return Err(format!(
                 "block at {}: not on its mount {}",
                 site.display(),
@@ -807,10 +801,6 @@ mod tests {
             ),
             (Box::new(|s| s.singles[0].finders = vec![]), "no finder"),
             (Box::new(|s| s.singles[0].mount = 1), "mount 1 of 1"),
-            (
-                Box::new(|s| s.singles[0].identity.dev = Dev { major: 0, minor: 1 }),
-                "another device",
-            ),
             (Box::new(|s| s.blocks[0].members = 0), "without members"),
             (
                 Box::new(|s| s.blocks[0].members = u64::MAX),

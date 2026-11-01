@@ -141,8 +141,11 @@ fn indexed(
     at: MonoTime,
     now_wall: Timestamp,
 ) -> Option<Listed> {
+    // Not by device: a unit's identity has its `statx` device, which on
+    // btrfs is its subvolume's, never the trie's mountinfo device
+    // (TASK-286); the unit is on the mount discovery reached it on.
     let mount = MountKey::of(mount_for(mounts, path).ok()?);
-    if mount.dev != found.id.dev || path == mount.mount_point {
+    if path == mount.mount_point {
         return None;
     }
     Some(Listed {

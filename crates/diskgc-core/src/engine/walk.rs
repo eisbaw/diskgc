@@ -39,7 +39,9 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::host::{Base, DirListing, Errno, FileType, Host, HostError, MonoTime, Stat, Timestamp};
+use crate::host::{
+    Base, Dev, DirListing, Errno, FileType, Host, HostError, MonoTime, Stat, Timestamp,
+};
 use crate::resolve::{ResolveError, Unsafe};
 
 use super::frames::{OpenFailed, OpenFailure, Stack};
@@ -328,9 +330,22 @@ pub fn walk<H: Host>(
         }
         Err(e) => return Err(host_failure(path(), "stat", &e)),
     };
+    // The candidate's own device, which every directory below must show
+    // (no nested subvolume, TASK-286); a directory candidate on another
+    // device than its parent directory is itself the top of one.
+    if stat.file_type == Some(FileType::Directory) {
+        let parent = match host.statx(Base::Dir(candidate.parent), Path::new("")) {
+            Ok(parent) => parent,
+            Err(e) => return Err(host_failure(path(), "stat", &e)),
+        };
+        if parent.dev != stat.dev {
+            return Err(super::nested_subvolume(path(), stat.dev, parent.dev).into());
+        }
+    }
     let mut walker = Walker {
         host,
         candidate,
+        dev: stat.dev,
         rules,
         deadline,
         mount_points,
@@ -392,6 +407,9 @@ pub fn walk<H: Host>(
 struct Walker<'w, H: Host> {
     host: &'w H,
     candidate: &'w Candidate<'w, H::Fd>,
+    /// The candidate's own `st_dev`: a directory below on another one is a
+    /// nested subvolume ([`super::nested_subvolume`]).
+    dev: Dev,
     rules: &'w Rules<'w>,
     deadline: Option<MonoTime>,
     mount_points: Vec<PathBuf>,
@@ -507,6 +525,9 @@ impl<H: Host> Walker<'_, H> {
                     self.candidate.mount_id
                 ),
             ));
+        }
+        if identity.file_type == FileType::Directory && stat.dev != self.dev {
+            return Err(super::nested_subvolume(path(), stat.dev, self.dev));
         }
         if name == KEEP_MARKER {
             return Err(skip(Reason::KeepMarker, "inside the candidate".to_owned()));

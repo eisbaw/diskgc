@@ -6,7 +6,7 @@
 
 use crate::engine::Reason;
 use crate::fs_kind;
-use crate::host::{Dev, Host, MonoTime};
+use crate::host::{Host, MonoTime};
 use crate::hostlock::{self, Readiness};
 use crate::places;
 use crate::report::{ErrorCause, ErrorEntry, Final, Report, SkipEntry, Status, conclude};
@@ -158,7 +158,7 @@ pub(super) struct Measured<F> {
     pub(super) path: PathBuf,
     /// `PATH`'s filesystem's space ([`places::space_of`]): what every
     /// "the same filesystem" check compares with (`other_fs`).
-    pub(super) space: Dev,
+    pub(super) space: places::Space,
     pub(super) min: u64,
     pub(super) target: u64,
 }
@@ -218,9 +218,9 @@ pub(super) fn measure<H: Host>(
 ) -> Result<Measured<H::Fd>, MeasureFailure> {
     let at = reach_path(host, &request.path)?;
     report.mount = Some(at.mount.mount_point.clone());
-    let fs_space = places::space_of(&at.mount);
+    let fs_space = places::space_at(host, &at.mount, &at.fd);
     if let Some(cycle) = request.watch
-        && fs_space != cycle.expect_space
+        && !fs_space.same_as(&cycle.expect_space)
     {
         return Err(MeasureFailure::Host(format!(
             "PATH {} is on device {fs_space}, not on the filesystem watched since start (device \
@@ -422,7 +422,11 @@ pub(super) fn nothing_searched(tier: &Tier) -> String {
 /// Compare spaces ([`places::space_of`]), not mount ids or `st_dev`: a bind
 /// mount of the requested filesystem, or another subvolume of its btrfs,
 /// frees space on PATH.
-pub(super) fn preflight_roots<H: Host>(host: &H, tier: &Tier, space: Dev) -> RootPreflight {
+pub(super) fn preflight_roots<H: Host>(
+    host: &H,
+    tier: &Tier,
+    space: places::Space,
+) -> RootPreflight {
     // (profile, root, whether it is a negated profile's root)
     let mut roots = Vec::new();
     roots.extend(
@@ -506,7 +510,10 @@ pub(super) fn preflight_roots<H: Host>(host: &H, tier: &Tier, space: Dev) -> Roo
         // A local bind mount can sit below an unsafe ancestor: resolve_in
         // screens the full mount chain before it opens any of it.
         match resolve_in(host, &mounts, root, Want::Directory) {
-            Ok(resolved) if places::space_of(&resolved.mount) != space && !negated_only => {
+            Ok(resolved)
+                if !places::space_at(host, &resolved.mount, &resolved.fd).same_as(&space)
+                    && !negated_only =>
+            {
                 if !skipped
                     .iter()
                     .any(|skip: &SkipEntry| skip.candidate.as_ref() == Some(root))

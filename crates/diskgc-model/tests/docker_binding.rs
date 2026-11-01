@@ -15,10 +15,24 @@ const DOCKER_FS: Dev = Dev {
     minor: 2,
 };
 
+/// The space of an ext4 on `dev`, as the requested filesystem's.
+fn space(dev: Dev) -> diskgc_core::places::Space {
+    diskgc_core::places::space_of(&diskgc_core::host::MountEntry {
+        id: 1,
+        parent_id: 1,
+        dev,
+        fs_root: PathBuf::from("/"),
+        mount_point: PathBuf::from("/"),
+        fs_type: "ext4".to_owned(),
+        source: "/dev/fixture".to_owned(),
+        read_only: false,
+    })
+}
+
 fn bind(model: &str, target: Dev) -> (Binding, ModelHost) {
     let host = ModelHost::from_yaml(model).expect("valid fake host");
-    let result =
-        docker_backend::inspect_backend(&host, target, Storage::Images).expect("query succeeds");
+    let result = docker_backend::inspect_backend(&host, space(target), Storage::Images)
+        .expect("query succeeds");
     (result, host)
 }
 
@@ -58,7 +72,7 @@ fn build_cache_refuses_a_separate_buildkit_mount() {
         "  - {id: 3, at: /var/lib/docker/buildkit, fs: ext4, dev: \"254:3\", size: 10G, parent: 2}\ntree:\n",
     );
     let host = ModelHost::from_yaml(&model).expect("valid separate BuildKit mount");
-    let binding = docker_backend::inspect_backend(&host, DOCKER_FS, Storage::BuildCache)
+    let binding = docker_backend::inspect_backend(&host, space(DOCKER_FS), Storage::BuildCache)
         .expect("queries succeed");
     assert!(
         matches!(binding, Binding::Skipped(ref skip) if skip.reason == Reason::OtherFs),
@@ -66,7 +80,7 @@ fn build_cache_refuses_a_separate_buildkit_mount() {
     );
     assert_eq!(host.trace_count(Op::RunCommand), 0);
     assert!(matches!(
-        docker_backend::inspect_backend(&host, DOCKER_FS, Storage::Images).unwrap(),
+        docker_backend::inspect_backend(&host, space(DOCKER_FS), Storage::Images).unwrap(),
         Binding::Bound(_)
     ));
 }
@@ -82,11 +96,11 @@ fn build_cache_binding_does_not_require_the_image_store_mount() {
     );
     let host = ModelHost::from_yaml(&model).expect("valid separate image-store mount");
     assert!(matches!(
-        docker_backend::inspect_backend(&host, DOCKER_FS, Storage::BuildCache).unwrap(),
+        docker_backend::inspect_backend(&host, space(DOCKER_FS), Storage::BuildCache).unwrap(),
         Binding::Bound(_)
     ));
     assert!(matches!(
-        docker_backend::inspect_backend(&host, DOCKER_FS, Storage::Images).unwrap(),
+        docker_backend::inspect_backend(&host, space(DOCKER_FS), Storage::Images).unwrap(),
         Binding::Skipped(ref skip) if skip.reason == Reason::OtherFs
     ));
 }
@@ -119,13 +133,13 @@ fn remote_rootless_and_external_store_fail_closed() {
     );
     let model = format!("{BUNDLED}\n  host: tcp://remote:2375\n");
     let host = ModelHost::from_yaml(&model).expect("valid fake host");
-    let result = docker_backend::inspect_backend(&host, DOCKER_FS, Storage::Images).unwrap();
+    let result = docker_backend::inspect_backend(&host, space(DOCKER_FS), Storage::Images).unwrap();
     assert!(matches!(result, Binding::Skipped(ref s) if s.reason == Reason::RemoteBackend));
     assert_eq!(host.trace_count(Op::DockerQuery), 0);
 
     let model = format!("{BUNDLED}\n  host: unix:///run/user/1000/docker.sock\n");
     let host = ModelHost::from_yaml(&model).expect("valid fake host");
-    let result = docker_backend::inspect_backend(&host, DOCKER_FS, Storage::Images).unwrap();
+    let result = docker_backend::inspect_backend(&host, space(DOCKER_FS), Storage::Images).unwrap();
     assert!(matches!(result, Binding::Skipped(ref s) if s.reason == Reason::UnsupportedBackend));
     assert_eq!(host.trace_count(Op::DockerQuery), 0);
 }
@@ -138,12 +152,12 @@ fn unverified_docker_client_dispatch_refuses_build_cache_only() {
     );
     let host = ModelHost::from_yaml(&model).unwrap();
     assert!(matches!(
-        docker_backend::inspect_backend(&host, DOCKER_FS, Storage::BuildCache).unwrap(),
+        docker_backend::inspect_backend(&host, space(DOCKER_FS), Storage::BuildCache).unwrap(),
         Binding::Skipped(ref skip) if skip.reason == Reason::UnsupportedBackend
     ));
     assert_eq!(host.trace_count(Op::RunCommand), 0);
     assert!(matches!(
-        docker_backend::inspect_backend(&host, DOCKER_FS, Storage::Images).unwrap(),
+        docker_backend::inspect_backend(&host, space(DOCKER_FS), Storage::Images).unwrap(),
         Binding::Bound(_)
     ));
 }
@@ -259,7 +273,7 @@ fn podman_compatibility_server_at_the_system_socket_is_unsupported() {
     assert_ne!(model, BUNDLED, "fixture server identity line moved");
     for storage in [Storage::Images, Storage::BuildCache] {
         let host = ModelHost::from_yaml(&model).expect("valid fake host");
-        let binding = docker_backend::inspect_backend(&host, DOCKER_FS, storage).unwrap();
+        let binding = docker_backend::inspect_backend(&host, space(DOCKER_FS), storage).unwrap();
         assert!(
             matches!(binding, Binding::Skipped(ref s) if s.reason == Reason::UnsupportedBackend
                 && s.detail.contains("not Docker Engine")),

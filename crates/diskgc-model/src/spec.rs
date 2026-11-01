@@ -403,6 +403,14 @@ pub struct DirAttrs {
     /// Permission bits in octal; default `"0755"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<Mode>,
+    /// The top of a nested btrfs subvolume or snapshot (not mounted):
+    /// `statx` reports this device for it and everything in its subtree
+    /// (TASK-286 review), while mountinfo shows nothing there. A nested one
+    /// inside it overrides it below its own top. On a `btrfs` mount only.
+    /// Entries created later inside it take it too; an `rmdir` of its
+    /// empty top succeeds, as Linux 4.18 and later allow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subvolume: Option<DevSpec>,
 }
 
 /// A `flock` held by a process.

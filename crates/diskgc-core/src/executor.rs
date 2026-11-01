@@ -218,7 +218,7 @@ pub struct WatchCycle {
     /// one is an error of the host before anything is deleted (a mount of
     /// another filesystem stacked on `PATH`). Another subvolume of the same
     /// btrfs stacked there is the same space, and is not.
-    pub expect_space: Dev,
+    pub expect_space: crate::places::Space,
     /// The sample that triggered the cycle: the cycle's deadline
     /// (`--timeout`) and its `started_at` and `duration_ms` count from it,
     /// through the lock wait and the reclaim.
@@ -610,8 +610,8 @@ fn excluded(skip: &Skip) -> String {
 /// (docs/architecture.md, Filesystem matching). By space
 /// ([`crate::places::space_of`]): a bind mount of the same filesystem, or
 /// another subvolume of its btrfs, frees the same space.
-fn other_fs(target: &Target, space: Dev) -> Option<Skip> {
-    (target.space != space).then(|| {
+fn other_fs(target: &Target, space: crate::places::Space) -> Option<Skip> {
+    (!target.space.same_as(&space)).then(|| {
         Skip::new(
             Reason::OtherFs,
             target.path.clone(),
@@ -715,7 +715,7 @@ impl<'l> NotesOncePerRun<'l> {
 fn held<H: Host>(
     host: &H,
     checker: &mut Checker<'_>,
-    space: Dev,
+    space: crate::places::Space,
     path_dev: Dev,
     deadline: Option<MonoTime>,
     log: &mut dyn FnMut(&str),
@@ -748,7 +748,7 @@ fn held<H: Host>(
         }
     };
     Some(
-        scan.held_by_deleted_files(space, path_dev, &mounts)
+        scan.held_by_deleted_files(space.dev(), path_dev, &mounts)
             .into_iter()
             .map(|h| HeldEntry {
                 pid: h.pid.0,

@@ -2426,6 +2426,24 @@ impl Host for LinuxHost {
         }
     }
 
+    fn fs_id(&self, fd: &LinuxFd) -> Result<u64, HostError> {
+        let fs =
+            rustix::fs::fstatfs(fd).map_err(|e| HostError::errno("fstatfs", fd, errno_of(e)))?;
+        // `f_fsid` is two 32-bit words (`__kernel_fsid_t`).
+        if std::mem::size_of_val(&fs.f_fsid) != 8 {
+            return Err(HostError::invalid(
+                "fstatfs",
+                fd,
+                "f_fsid is not two 32-bit words",
+            ));
+        }
+        // SAFETY: checked above to be eight bytes: `__kernel_fsid_t`,
+        // `struct { int val[2]; }`, with no padding and no invalid bit
+        // patterns for `[u32; 2]`.
+        let words: [u32; 2] = unsafe { std::mem::transmute_copy(&fs.f_fsid) };
+        Ok((u64::from(words[0]) << 32) | u64::from(words[1]))
+    }
+
     fn fs_magic(&self, fd: &LinuxFd) -> Result<u64, HostError> {
         let fs =
             rustix::fs::fstatfs(fd).map_err(|e| HostError::errno("fstatfs", fd, errno_of(e)))?;
@@ -2601,8 +2619,16 @@ impl Host for LinuxHost {
         )))
     }
 
-    fn fs_uuid(&self, mount: &MountEntry) -> Result<Option<String>, HostError> {
-        crate::state::fs_uuid(mount)
+    fn fs_uuid(&self, fd: &LinuxFd, mount: &MountEntry) -> Result<Option<String>, HostError> {
+        crate::state::fs_uuid(fd.as_fd(), mount)
+    }
+
+    fn loop_devices(
+        &self,
+        mount: &MountEntry,
+        fd: Option<&LinuxFd>,
+    ) -> Result<Vec<Dev>, HostError> {
+        crate::state::loop_devices(mount, fd.map(AsFd::as_fd))
     }
 
     fn loop_backing_file(&self, dev: Dev) -> Result<Option<PathBuf>, HostError> {
@@ -2847,6 +2873,7 @@ impl Host for LinuxHost {
     fn state_write(
         &self,
         lock: &Locked<LinuxFd>,
+        dir: &LinuxFd,
         key: &FsKey,
         bytes: &[u8],
         cancel: &dyn Fn() -> bool,
@@ -2860,6 +2887,7 @@ impl Host for LinuxHost {
         }
         crate::state::write_snapshot_ungated(
             self.state_dir()?,
+            dir.as_fd(),
             key,
             lock.fd().as_fd(),
             bytes,
@@ -7054,15 +7082,11 @@ mod tests {
         names
     }
 
-    fn exclusive(host: &LinuxHost, key: &FsKey) -> Locked<LinuxFd> {
-        match host
-            .flock_try(
-                host.state_lock(key).expect("lock file").fd,
-                LockMode::Exclusive,
-            )
-            .expect("flock")
-        {
-            TryLock::Acquired(locked) => locked,
+    /// The lock of `key`, held exclusively, and its state directory held.
+    fn exclusive(host: &LinuxHost, key: &FsKey) -> (Locked<LinuxFd>, LinuxFd) {
+        let lock = host.state_lock(key).expect("lock file");
+        match host.flock_try(lock.fd, LockMode::Exclusive).expect("flock") {
+            TryLock::Acquired(locked) => (locked, lock.dir),
             TryLock::Busy(_) => panic!("the single-writer lock is busy"),
         }
     }
@@ -7114,10 +7138,10 @@ mod tests {
             major: 0,
             minor: 42,
         });
-        let locked = exclusive(&host, &key);
-        host.state_write(&locked, &key, b"first snapshot", &|| false)
+        let (locked, dir) = exclusive(&host, &key);
+        host.state_write(&locked, &dir, &key, b"first snapshot", &|| false)
             .expect("write");
-        host.state_write(&locked, &key, b"second", &|| false)
+        host.state_write(&locked, &dir, &key, b"second", &|| false)
             .expect("rewrite");
         drop(locked);
         let file = host
@@ -7145,10 +7169,10 @@ mod tests {
             major: 0,
             minor: 42,
         });
-        let locked = exclusive(&host, &key);
+        let (locked, dir) = exclusive(&host, &key);
         let state = tmp.0.join("state/diskgc");
         std::fs::write(state.join("index-dev-0-42.new"), b"left by a crash").expect("plant");
-        host.state_write(&locked, &key, b"fresh", &|| false)
+        host.state_write(&locked, &dir, &key, b"fresh", &|| false)
             .expect("write");
         let file = host
             .state_read(&key, 1 << 20)
@@ -7189,12 +7213,12 @@ mod tests {
         for nth in [1, 2] {
             let tmp = TempDir::new();
             let host = state_host(&tmp.0);
-            let locked = exclusive(&host, &key);
-            host.state_write(&locked, &key, b"old", &|| false)
+            let (locked, dir) = exclusive(&host, &key);
+            host.state_write(&locked, &dir, &key, b"old", &|| false)
                 .expect("write");
             let (asked, cancel) = cancel_at(nth);
             let written = host
-                .state_write(&locked, &key, b"new snapshot", &|| cancel(&asked))
+                .state_write(&locked, &dir, &key, b"new snapshot", &|| cancel(&asked))
                 .expect("write");
             assert_eq!(written, StateWritten::Cancelled, "asked {nth}");
             assert_eq!(asked.get(), nth);
@@ -7211,14 +7235,14 @@ mod tests {
         for (nth, snapshot) in [(3, &b"old"[..]), (4, &b"left by a crash"[..])] {
             let tmp = TempDir::new();
             let host = state_host(&tmp.0);
-            let locked = exclusive(&host, &key);
-            host.state_write(&locked, &key, b"old", &|| false)
+            let (locked, dir) = exclusive(&host, &key);
+            host.state_write(&locked, &dir, &key, b"old", &|| false)
                 .expect("write");
             let state = tmp.0.join("state/diskgc");
             std::fs::write(state.join("index-dev-0-42.new"), b"left by a crash").expect("plant");
             let (asked, cancel) = cancel_at(nth);
             let written = host
-                .state_write(&locked, &key, b"new snapshot", &|| cancel(&asked))
+                .state_write(&locked, &dir, &key, b"new snapshot", &|| cancel(&asked))
                 .expect("write");
             assert_eq!(written, StateWritten::Cancelled, "asked {nth}");
             assert_eq!(asked.get(), nth);
@@ -7264,16 +7288,43 @@ mod tests {
             major: 0,
             minor: 43,
         });
-        let locked = exclusive(&host, &other);
+        let (locked, dir) = exclusive(&host, &other);
         drop(host.state_lock(&key).expect("its own lock file"));
         let refused = host
-            .state_write(&locked, &key, b"x", &|| false)
+            .state_write(&locked, &dir, &key, b"x", &|| false)
             .expect_err("another key's lock");
         assert!(
             refused.to_string().contains("not this snapshot's"),
             "{refused}"
         );
         assert_eq!(host.state_read(&key, 1 << 20).expect("read"), None);
+    }
+
+    /// TASK-286 review (Codex 4): the snapshot is written into the state
+    /// directory held since the lock was opened, the one the space guard
+    /// sampled, never the path opened again: a directory renamed away and
+    /// replaced at the state path keeps the write, the new one gets
+    /// nothing.
+    #[test]
+    fn state_write_goes_to_the_held_directory_whatever_the_path_names_now() {
+        let tmp = TempDir::new();
+        let host = state_host(&tmp.0);
+        let key = FsKey::dev(Dev {
+            major: 0,
+            minor: 42,
+        });
+        let (locked, dir) = exclusive(&host, &key);
+        let state = tmp.0.join("state/diskgc");
+        std::fs::rename(&state, tmp.0.join("state/held")).expect("rename the state directory");
+        std::fs::create_dir(&state).expect("a new directory at the state path");
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        host.state_write(&locked, &dir, &key, b"held", &|| false)
+            .expect("write");
+        assert_eq!(
+            names_in(&tmp.0.join("state/held")),
+            ["index-dev-0-42", "index-dev-0-42.lock"]
+        );
+        assert!(names_in(&state).is_empty(), "{:?}", names_in(&state));
     }
 
     /// The space guard places the state directory by its own mount, as

@@ -151,7 +151,14 @@ impl<F: std::fmt::Debug> Writer<F> {
     /// signal ([`Host::second_signal`]: docs/reference.md, Watch signals)
     /// arriving during the write cancels it in the port, before the link;
     /// one before the stop's write is [`crate::watch::run`]'s to skip.
-    pub fn write<H: Host<Fd = F>>(&self, host: &H, encoded: &Encoded, log: &mut dyn FnMut(&str)) {
+    /// `path` is `PATH`'s held descriptor, which the guard samples too.
+    pub fn write<H: Host<Fd = F>>(
+        &self,
+        host: &H,
+        encoded: &Encoded,
+        path: &F,
+        log: &mut dyn FnMut(&str),
+    ) {
         let Some((locked, dir, dir_mount)) = &self.held else {
             unreachable!("encoded only under the lock")
         };
@@ -166,6 +173,7 @@ impl<F: std::fmt::Debug> Writer<F> {
             encoded.units,
             held,
             &self.guard,
+            path,
             &encoded.bytes,
             WriteChecks {
                 last_check: &|_| None,

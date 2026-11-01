@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use super::unit::{Block, Family, FinderSetId, Single};
 use super::{Index, MountKey, UnitRef};
-use crate::host::{Dev, Timestamp};
+use crate::host::Timestamp;
 
 /// A tier's idle filter, reduced to what a stored age can decide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,10 +46,11 @@ pub struct Source<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TierQuery<'a> {
-    /// The space of the filesystem the run works on
-    /// ([`crate::places::space_of`]), compared with each trie's
-    /// [`crate::index::MountKey::dev`], also a mountinfo device.
-    pub dev: Dev,
+    /// The space of the filesystem the run works on: each trie's
+    /// [`crate::index::MountKey::dev`], also a mountinfo device, is
+    /// compared with its device (the index is a cache; every unit is
+    /// judged again, `other_fs` included).
+    pub space: crate::places::Space,
     pub sources: &'a [Source<'a>],
     pub age: AgeFilter,
 }
@@ -138,7 +139,7 @@ fn may_pass(oldest: Timestamp, newest: Timestamp, tallied: bool, age: AgeFilter)
 pub fn derive(index: &Index, tier: &TierQuery<'_>) -> TierQueue {
     let mut queue = TierQueue::default();
     index.for_each_unit(|mount, path, unit| {
-        if mount.dev != tier.dev {
+        if mount.dev != tier.space.dev() {
             return;
         }
         let (set, oldest, newest, tallied, hinted, queued) = match unit {
