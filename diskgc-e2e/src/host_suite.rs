@@ -613,9 +613,11 @@ pub fn host_proc_readers(ctx: &Ctx) -> TestResult {
 }
 
 /// A kernel older than 5.8 exits 2 at startup. Simulated by the kernel
-/// itself: the `UNAME26` personality makes uname report `2.6.x`. `--version`
-/// stays exempt, and without the personality the same command line reaches
-/// the (scaffold) usage error instead.
+/// itself: the `UNAME26` personality makes uname report `2.6.x`. The
+/// command line is a valid read-only dry run, so it reaches the startup
+/// check. `--version` stays exempt, and a command line that is not
+/// understood is the usage error even there: it is reported before the
+/// startup check (TASK-291, docs/reference.md, Exit codes).
 pub fn host_kernel_older_than_5_8_exits_2(ctx: &Ctx) -> TestResult {
     let diskgc = ctx.diskgc();
     let diskgc = to_str(&diskgc)?;
@@ -625,10 +627,26 @@ pub fn host_kernel_older_than_5_8_exits_2(ctx: &Ctx) -> TestResult {
         &ctx.self_exe,
         &["uname-2.6", "--", self_exe, "probe", "host-kernel"],
     )?;
-    let old = ctx.run_as_tester(&ctx.self_exe, &["uname-2.6", "--", diskgc, "ensure"])?;
+    let dry_run = [
+        diskgc,
+        "ensure",
+        "--dry-run",
+        "--min-free",
+        "1M",
+        "--select",
+        "profile:cargo-target",
+        "--roots",
+        "/tmp",
+        "/tmp",
+    ];
+    let old = ctx.run_as_tester(
+        &ctx.self_exe,
+        &[&["uname-2.6", "--"][..], &dry_run[..]].concat(),
+    )?;
     let version = ctx.run_as_tester(&ctx.self_exe, &["uname-2.6", "--", diskgc, "--version"])?;
+    let typo = ctx.run_as_tester(&ctx.self_exe, &["uname-2.6", "--", diskgc, "ensure"])?;
     let current = ctx.run_as_tester(&ctx.diskgc(), &["ensure"])?;
-    let verdict = oracle.judge_runs(&[&seen, &old, &version, &current])?;
+    let verdict = oracle.judge_runs(&[&seen, &old, &version, &typo, &current])?;
 
     seen.expect_code(0)?;
     info!("under UNAME26: {}", seen.stdout.trim());
@@ -645,12 +663,14 @@ pub fn host_kernel_older_than_5_8_exits_2(ctx: &Ctx) -> TestResult {
         old.stderr
     );
     version.expect_code(0)?;
-    current.expect_code(2)?;
-    ensure!(
-        !current.stderr.contains("Linux 5.8") && current.stderr.contains("usage: diskgc"),
-        "on the real kernel, expected the usage error: {:?}",
-        current.stderr
-    );
+    for (run, kernel) in [(&typo, "a 2.6 kernel"), (&current, "the real kernel")] {
+        run.expect_code(2)?;
+        ensure!(
+            !run.stderr.contains("Linux 5.8") && run.stderr.contains("usage: diskgc"),
+            "on {kernel}, expected the usage error: {:?}",
+            run.stderr
+        );
+    }
     verdict.assert_clean()
 }
 
