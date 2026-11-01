@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-01T05:37:00Z'
-updated_date: '2026-11-01T09:42:00Z'
+updated_date: '2026-11-01T11:11:00Z'
 labels:
   - contract
 dependencies: []
@@ -23,4 +23,6 @@ Periodic full review #2 on master 794e0e1 (2026-11-01; Codex tmp/reviews/codex-f
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-01: in progress in tmp/worktrees/t267 (branch t267-bind-places).
+
+2026-11-01 correction: the 'in progress in tmp/worktrees/t267' note above was put here by mistake (the orchestrator's brief named TASK-291 but meant TASK-290, contains_mount). This task's own items are untouched.
 <!-- SECTION:NOTES:END -->
