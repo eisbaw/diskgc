@@ -8,8 +8,10 @@
 //! in the same test), shaped so that even a broken gate could touch nothing
 //! but the test's own fixture: their roots and PATH are a fresh temp
 //! directory holding a fake Cargo target and an old directory, and their
-//! config is a file of the test's own. Every other run here is refused
-//! before the machine is measured (usage errors).
+//! config is a file of the test's own. Every other `ensure` here is a
+//! `--dry-run` and every `watch` a `--tally-only`, also where the command
+//! line or the configuration is refused before anything runs (TASK-282):
+//! `tools/host_reclaim_scan.py` (`just check`) fails on any other.
 
 use std::collections::BTreeSet;
 use std::os::unix::fs::MetadataExt;
@@ -60,39 +62,6 @@ fn version_prints_name_and_package_version() {
     let out = diskgc(&["--version"]);
     assert!(out.status.success(), "status: {:?}", out.status);
     assert_eq!(text(&out.stdout), expected_version_line());
-}
-
-/// TASK-276 open: the release catalog refuses a reclaiming `watch` with
-/// exit 2 before it looks at the machine, in text and under `--json`.
-#[cfg(feature = "proposed-release-01-catalog")]
-#[test]
-fn the_release_catalog_refuses_a_reclaiming_watch() {
-    let watch = [
-        "watch",
-        "--min-free",
-        "1G",
-        "--target-free",
-        "2G",
-        "/nonexistent",
-    ];
-    let want = concat!(
-        "a reclaiming `watch` is not in diskgc ",
-        env!("CARGO_PKG_VERSION"),
-        " yet; its commands are ensure, watch --tally-only, check and profiles"
-    );
-    let out = diskgc(&watch);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(out.stdout.is_empty());
-    assert_eq!(text(&out.stderr), format!("diskgc: error: {want}\n"));
-
-    let mut with_json = watch.to_vec();
-    with_json.push("--json");
-    let out = diskgc(&with_json);
-    assert_eq!(out.status.code(), Some(2));
-    let error = json(&out);
-    assert_eq!(error["status"], "usage_error");
-    assert_eq!(error["errors"][0]["cause"], "usage");
-    assert_eq!(error["errors"][0]["message"], want);
 }
 
 #[test]
@@ -279,7 +248,7 @@ fn no_arguments_is_a_usage_error_with_exit_2() {
 fn a_usage_error_shows_the_error_then_only_the_command_usage() {
     for (args, error, usage_lines) in [
         (
-            &["ensure", "--min-fre", "1G", "/nonexistent"][..],
+            &["ensure", "--dry-run", "--min-fre", "1G", "/nonexistent"][..],
             "diskgc: error: ensure: unknown flag --min-fre; did you mean --min-free?",
             3,
         ),
@@ -324,12 +293,13 @@ fn a_usage_error_shows_the_error_then_only_the_command_usage() {
 fn bare_numbers_and_months_are_usage_errors() {
     for (args, needle) in [
         (
-            &["ensure", "--min-free", "50", "/nonexistent"][..],
+            &["ensure", "--dry-run", "--min-free", "50", "/nonexistent"][..],
             "bare number",
         ),
         (
             &[
                 "ensure",
+                "--dry-run",
                 "--min-free",
                 "1G",
                 "--timeout",
@@ -398,6 +368,7 @@ fn timeout_and_tally_budget_zero_as_documented_parse() {
     );
     let out = diskgc(&[
         "ensure",
+        "--dry-run",
         "--min-free",
         "1G",
         "--timeout",
@@ -417,11 +388,14 @@ fn timeout_and_tally_budget_zero_as_documented_parse() {
 }
 
 /// A given configuration file that does not exist is exit 2, never a
-/// fallback to another file.
+/// fallback to another file. A dry run (TASK-282): the configuration is
+/// read before the mode matters; the container test
+/// `invalid_config_never_falls_back_or_reclaims` covers a reclaiming one.
 #[test]
 fn a_missing_given_config_is_exit_2() {
     let out = diskgc(&[
         "ensure",
+        "--dry-run",
         "--min-free",
         "1G",
         "--config",
@@ -583,8 +557,13 @@ fn check_never_falls_back_after_an_explicit_file_typo() {
     assert!(text(&out.stderr).contains(&absent.display().to_string()));
 }
 
+/// `check` and `ensure` report an invalid configuration alike, and touch
+/// nothing. A dry run (TASK-282): `ensure` reads and loads the
+/// configuration before the mode matters (main.rs `ensure_with`); the
+/// container test `invalid_config_never_falls_back_or_reclaims` covers a
+/// reclaiming `ensure` with an eligible candidate.
 #[test]
-fn invalid_config_has_the_same_error_in_check_and_ensure_before_deletion() {
+fn invalid_config_has_the_same_error_in_check_and_a_dry_run_ensure() {
     let tmp = TempDir::new("check-invalid");
     let path = tmp.0.join("config.yaml");
     std::fs::write(&path, "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: old\n        select: profile:missing\n").expect("write");
@@ -595,6 +574,7 @@ fn invalid_config_has_the_same_error_in_check_and_ensure_before_deletion() {
     assert_eq!(check.status.code(), Some(2));
     let ensure = diskgc(&[
         "ensure",
+        "--dry-run",
         "--config",
         config,
         "--min-free",
@@ -845,8 +825,8 @@ fn help_anywhere_prints_the_full_help() {
         &["profiles", "--help"][..],
         &["profiles", "list", "--help"],
         &["profiles", "show", "cargo-target", "-h"],
-        &["ensure", "--help"],
-        &["ensure", "--min-free", "50", "--help"],
+        &["ensure", "--dry-run", "--help"],
+        &["ensure", "--dry-run", "--min-free", "50", "--help"],
     ] {
         let out = diskgc(args);
         assert_eq!(
@@ -886,7 +866,10 @@ fn json_anywhere_gives_one_object() {
             &["profiles", "--json"],
             "list, show NAME or test is required",
         ),
-        (&["watch", "--json"], "watch: --min-free SIZE is required"),
+        (
+            &["watch", "--tally-only", "--interval", "1m", "--json", "/x"],
+            "watch: --interval is not valid with --tally-only",
+        ),
         (
             &["survey", "--json"],
             concat!(
@@ -901,8 +884,23 @@ fn json_anywhere_gives_one_object() {
         assert!(error.contains(needle), "{args:?}: {error}");
     }
     for args in [
-        &["ensure", "--json=yes", "--min-free", "1G", "/x"][..],
-        &["ensure", "--min-free", "1G", "--config", "--json", "/x"],
+        &[
+            "ensure",
+            "--dry-run",
+            "--json=yes",
+            "--min-free",
+            "1G",
+            "/x",
+        ][..],
+        &[
+            "ensure",
+            "--dry-run",
+            "--min-free",
+            "1G",
+            "--config",
+            "--json",
+            "/x",
+        ],
     ] {
         let out = diskgc(args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");

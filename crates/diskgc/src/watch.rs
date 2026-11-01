@@ -499,6 +499,11 @@ mod tests {
 
     #[test]
     fn watch_usage_errors_say_why() {
+        let e = parse(&["/home"]).unwrap_err();
+        assert!(
+            e.contains("--min-free SIZE is required (or --tally-only)"),
+            "{e}"
+        );
         let e = parse(&["--min-free", "30G", "/home"]).unwrap_err();
         assert!(e.contains("--target-free SIZE is required"), "{e}");
         assert!(e.contains("sliver"), "{e}");

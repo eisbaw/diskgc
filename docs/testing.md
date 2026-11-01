@@ -14,8 +14,24 @@ One named exception proves the pre-release sandbox gate itself:
 a fresh temp directory holding a fake Cargo target and an old directory
 the config's `fs` user profile finds, the config a file of its own, the
 goal unreachable; the gate is expected to refuse (exit 2), and every
-fixture object must keep its inode. The other binary tests stop at usage
-errors before the machine is read.
+fixture object must keep its inode. Every other host test that runs the
+binary gives `ensure` `--dry-run` and `watch` `--tally-only`, also where
+the command line or the configuration is refused before anything runs;
+the reclaiming forms of those refusals run in containers (for example
+`invalid_config_never_falls_back_or_reclaims`,
+`release_candidate_refuses_a_reclaiming_watch`). `tools/host_reclaim_scan.py`
+(`just check`) enforces this: it reads the host test sources (the Rust
+tests, benches and examples of the workspace and the fuzz project, and
+`tools/test_*.py`; not `diskgc-e2e`, which runs only in Nix builds and
+containers) and fails on an `"ensure"` argv literal without `"--dry-run"`,
+or a `"watch"` one without `"--tally-only"`, in the same list, outside the script's
+allowlist, whose entries each name a function, pin a count and give a
+reason. It is a text tripwire, not a proof: it does not see argv built
+from variables or formatted strings, a command line written as one string
+(`sh -c "diskgc ensure ..."`), a script a test runs that names `ensure`
+itself (`tools/test_agent_pre_job.py` runs `docs/agent-pre-job.py`, so its
+stand-in `diskgc` is all its `PATH` holds), nor a reclaim run in-process
+on a `LinuxHost`.
 
 ## Grounding: acceptance signals and negative feedback
 

@@ -49,7 +49,11 @@ class AgentPreJobTest(unittest.TestCase):
                 sys.exit({code})
                 """))
             fake.chmod(0o755)
-            env = dict(os.environ, PATH=f"{bin_dir}:{os.environ.get('PATH', '')}")
+            # The stand-in is all PATH holds: the script runs a reclaiming
+            # `diskgc ensure`, and a PATH search goes on past an entry it
+            # cannot execute (a noexec temp dir), so a real diskgc later on
+            # PATH must not be there to be found (TASK-282).
+            env = dict(os.environ, PATH=bin_dir)
             run = subprocess.run(
                 [sys.executable, str(SCRIPT), "--min-free", "1G", "/w"],
                 env=env, stdout=subprocess.PIPE, text=True, check=False)

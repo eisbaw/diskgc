@@ -1055,6 +1055,16 @@ fn finish(report: &Report, json: bool) -> ExitCode {
     }
 }
 
+/// What the release catalog says to a reclaiming `watch` (TASK-276), which
+/// it refuses at the command line.
+fn reclaiming_watch_refusal() -> String {
+    format!(
+        "a reclaiming `watch` is not in diskgc {} yet; its commands are ensure, watch \
+         --tally-only, check and profiles",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 /// A command this build does not run: exit 2 with `why` on stderr, and
 /// under `--json` the usage-error object every command fails with.
 fn not_yet(why: &str, json: bool) -> ExitCode {
@@ -1137,14 +1147,7 @@ fn main() -> ExitCode {
             ),
             json,
         ),
-        Invocation::ReclaimingWatchNotInCatalog => not_yet(
-            &format!(
-                "a reclaiming `watch` is not in diskgc {} yet; its commands are ensure, watch \
-                 --tally-only, check and profiles",
-                env!("CARGO_PKG_VERSION")
-            ),
-            json,
-        ),
+        Invocation::ReclaimingWatchNotInCatalog => not_yet(&reclaiming_watch_refusal(), json),
         Invocation::UsageError(reason) => {
             // The kernel check comes first, as for every command that may
             // touch the machine: an old kernel is the reason to report.
@@ -1577,6 +1580,17 @@ mod tests {
                 assert_eq!(reclaim, Invocation::ReclaimingWatchNotInCatalog)
             }
         }
+        // Its words, which the binary prints (the release suite's
+        // `release_candidate_refuses_a_reclaiming_watch` runs it, in a
+        // container: TASK-282 keeps reclaiming argv off the host).
+        assert_eq!(
+            reclaiming_watch_refusal(),
+            concat!(
+                "a reclaiming `watch` is not in diskgc ",
+                env!("CARGO_PKG_VERSION"),
+                " yet; its commands are ensure, watch --tally-only, check and profiles"
+            )
+        );
         let tally = parse(&args(&["watch", "--tally-only", "/p"]));
         assert!(matches!(tally, Invocation::Watch(_)), "{tally:?}");
         // A syntax error is reported as such in either build.
