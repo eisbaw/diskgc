@@ -21,6 +21,14 @@
 //! walk reads: a tag on the candidate's way down that is no enumerated match
 //! makes the check enumerate again ([`tagged_ancestor`]).
 //!
+//! Nor does a rename above the source of a bind mount the candidate is
+//! reached through (TASK-285): `/alias/cruft` keeps its path, identity and
+//! times when `/src/work`, which `/alias` binds a directory of, becomes
+//! `/src/keep-work`. The mount table shows it (the bind's root field
+//! follows the rename), so the table read before the enumeration is kept,
+//! and a candidate the table now shows differently ([`places::Ancestry`])
+//! makes the check enumerate again.
+//!
 //! What the cached set cannot see (docs/safety.md states it): such a tag made
 //! after the candidate's last check, and a change inside the candidate whose
 //! times were set back past the enumeration by a wall-clock step that
@@ -32,8 +40,9 @@ use std::time::Duration;
 use super::policy::{Refresh, judge_negated, judge_protect, policy_failed, tagged_ancestor};
 use super::{NegatedKind, NegatedSource, ProtectedKind, ProtectedSource, scan_protections};
 use crate::engine::{Reason, Skip};
-use crate::host::{Host, MonoTime, Timestamp};
+use crate::host::{Host, MonoTime, MountEntry, Timestamp};
 use crate::outcome::{PolicyAt, Stop};
+use crate::places;
 
 /// How far before the enumeration a change's recorded time may lie and
 /// still count as made after it began. A filesystem records a change at or
@@ -62,11 +71,16 @@ impl Instant {
     }
 }
 
-/// The run's `protect` matches and when their enumeration began.
+/// The run's `protect` matches, when their enumeration began and the mount
+/// table read just before it. The instant and the table are the horizon of
+/// the tier's cached matches, `protect`'s and the negated sources' (which
+/// are enumerated after these): what changed since then may have changed a
+/// verdict ([`DeletePolicy::skip`]).
 #[derive(Debug, Clone)]
 pub(super) struct Protection {
     pub matches: Vec<PathBuf>,
     pub enumerated: Instant,
+    pub mounts: Vec<MountEntry>,
 }
 
 impl Protection {
@@ -77,12 +91,24 @@ impl Protection {
         protections: &[ProtectedSource],
         deadline: Option<MonoTime>,
     ) -> Result<Self, String> {
+        let mounts = host.mountinfo().map_err(|error| {
+            format!("cannot read mountinfo before enumerating protected matches: {error}")
+        })?;
         let enumerated = Instant::now(host);
         let matches = scan_protections(host, protections, deadline)?;
         Ok(Self {
             matches,
             enumerated,
+            mounts,
         })
+    }
+
+    /// Takes `fresh`'s matches under this horizon: the tier's negated matches
+    /// were enumerated after this one began, not after `fresh` did, so the
+    /// cache stays as old as its oldest part. Changes made since cost an
+    /// enumeration more, never a verdict on stale matches.
+    pub fn refresh(&mut self, fresh: Protection) {
+        self.matches = fresh.matches;
     }
 }
 
@@ -127,7 +153,7 @@ impl DeletePolicy<'_> {
             ),
             _ => false,
         };
-        let refresh = if changed || self.tag_on_the_way(host, path) {
+        let refresh = if changed || self.moved(host, path) || self.tag_on_the_way(host, path) {
             Refresh::Always
         } else {
             Refresh::OnError
@@ -168,6 +194,30 @@ impl DeletePolicy<'_> {
 }
 
 impl DeletePolicy<'_> {
+    /// Whether the mount table shows `path` differently now than before the
+    /// enumeration (TASK-285): another place, or other mount points showing
+    /// it or attached where they are ([`places::ancestry`]). A rename above
+    /// a bind's source, a mount point's ancestor renamed, or a mount made
+    /// or removed on the way changes what the matches say about it while
+    /// its path, identity and times stay. A table that cannot be read, or
+    /// a path either table cannot place, is a doubt: yes. Nothing to judge
+    /// against (no `protect`, no negated source) asks nothing.
+    fn moved<H: Host>(&self, host: &H, path: &Path) -> bool {
+        if self.protections.is_empty() && self.negated.is_empty() {
+            return false;
+        }
+        let Ok(now) = host.mountinfo() else {
+            return true;
+        };
+        match (
+            places::ancestry(&self.protection.mounts, path),
+            places::ancestry(&now, path),
+        ) {
+            (Ok(then), Ok(now)) => then != now,
+            _ => true,
+        }
+    }
+
     /// [`tagged_ancestor`] for the Cargo sources of `protect` and of this
     /// term's `!profile:`s, against their enumerated matches.
     fn tag_on_the_way<H: Host>(&self, host: &H, path: &Path) -> bool {

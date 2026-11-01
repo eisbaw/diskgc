@@ -53,6 +53,7 @@ use crate::host::{
     Timestamp, is_single_name,
 };
 use crate::outcome::{Judged, Stop};
+use crate::places;
 use crate::profile::{IdleWindow, Idleness, NewestGroup, Unknown, age_secs};
 use crate::resolve::{
     MountScreenError, ResolveError, Resolved, Want, is_mount_point, name_present, open_beneath,
@@ -689,15 +690,31 @@ fn file_name(found: &Found) -> Result<&OsStr, Stop> {
 
 /// A mount at `at` or anywhere below it, by `mountinfo` (`contains_mount`):
 /// the candidate is never looked into (a dead FUSE mount would hang the
-/// first `statx` that reaches it).
+/// first `statx` that reaches it). By path, or by place
+/// ([`places::mount_within`], TASK-290): a mount point reached through a
+/// non-recursive bind is an uncovered directory there, which Linux refuses
+/// to remove (`EBUSY`) after everything around it was deleted. A candidate
+/// whose place the table cannot tell is `unsafe_path`, never looked into.
 pub(super) fn mounted_at_or_inside(mounts: &[MountEntry], at: &Path) -> Option<Skip> {
-    let mount = mounts.iter().find(|m| m.mount_point.starts_with(at))?;
-    let (path, detail) = if mount.mount_point == at {
-        (at.to_owned(), "a mount point (mountinfo): not touched")
+    let (mount, path) = match places::mount_within(mounts, at) {
+        Ok(found) => found?,
+        Err(why) => {
+            return Some(Skip::new(
+                Reason::UnsafePath,
+                at.to_owned(),
+                format!("cannot be placed in its filesystem (mountinfo): {why}"),
+            ));
+        }
+    };
+    let detail = if mount.mount_point == at {
+        "a mount point (mountinfo): not touched".to_owned()
+    } else if mount.mount_point == path {
+        "a mount point inside (mountinfo): not looked into".to_owned()
     } else {
-        (
-            mount.mount_point.clone(),
-            "a mount point inside (mountinfo): not looked into",
+        format!(
+            "a mount point inside by its place in the filesystem (mount {} is attached there, \
+             mountinfo): not looked into",
+            mount.mount_point.display()
         )
     };
     Some(Skip::new(Reason::ContainsMount, path, detail))

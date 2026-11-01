@@ -1,0 +1,41 @@
+# TASK-267. As container-storage-behind-a-subdirectory-bind, for the Cargo
+# kind and for form (a) of the task: `/mnt/layers` binds the graphroot's
+# `overlay` directory, and the root `/mnt/layers/0a1b2c/diff` lies in an
+# image layer whose Cargo target discovery would otherwise find. Every
+# directory above the root's place, wherever the table shows it, is asked
+# for the storage markers, so the root is refused once, with the storage
+# root as the candidate. `/mnt/src/proj`, through a bind of `src`, is
+# reclaimed.
+profile_vector: 1
+profile: cargo-target
+roots:
+  - /mnt/layers/0a1b2c/diff
+  - /mnt/src/proj
+path: /home/tester
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /mnt/layers, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2, bind_root: /tester/.local/share/containers/storage/overlay}
+    - {id: 4, at: /mnt/src, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2, bind_root: /tester/src}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.local/share/containers/storage/storage.lock: {}
+    /home/tester/.local/share/containers/storage/overlay-layers: {layers.json: {}}
+    /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/app/target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}
+    /home/tester/src/storage.lock: {}
+    /home/tester/src/proj/target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
+    - {candidate: /mnt/src/proj/target}
+  reclaim_exit: 1
+  actions: [/mnt/src/proj/target]
+  removed: [/mnt/src/proj/target/debug/deps]
+  skipped:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
+  preserved:
+    - /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/app/target/debug/deps/app

@@ -7,10 +7,10 @@
 use crate::cargo_target::{self, Stop};
 use crate::engine::{CACHEDIR_TAG, Reason, Skip, may_be_networked};
 use crate::fs_kind;
-use crate::host::{Dev, DevIno, Host, HostError, MonoTime, MountEntry};
+use crate::host::{DevIno, Host, HostError, MonoTime, MountEntry};
+use crate::places::{self, Place};
 use crate::resolve::{
-    MountScreenError, ResolveError, Want, mount_for, place_in_filesystem, resolve, resolve_in,
-    screen_mount_chain,
+    MountScreenError, ResolveError, Want, mount_for, resolve, resolve_in, screen_mount_chain,
 };
 use crate::select;
 use std::collections::HashMap;
@@ -225,11 +225,10 @@ fn loop_images<H: Host>(
         .filter(|mount| mount.dev.major == LOOP_MAJOR)
         .collect();
     if !loops.is_empty() {
-        let by_id: HashMap<u64, &MountEntry> =
-            mounts.iter().map(|mount| (mount.id, mount)).collect();
+        let by_id = places::by_id(mounts);
         let places = matches
             .iter()
-            .map(|matched| place_of(mounts, matched))
+            .map(|matched| placed(mounts, matched))
             .collect::<Result<Vec<_>, _>>()?;
         for mount in loops {
             if nested_in(&by_id, mount, matches, &places, candidate)?.is_some() {
@@ -304,10 +303,10 @@ fn refuse_overlay(
     if nested.is_empty() {
         return Ok(());
     }
-    let by_id: HashMap<u64, &MountEntry> = mounts.iter().map(|mount| (mount.id, mount)).collect();
+    let by_id = places::by_id(mounts);
     let places = matches
         .iter()
-        .map(|matched| place_of(mounts, matched))
+        .map(|matched| placed(mounts, matched))
         .collect::<Result<Vec<_>, _>>()?;
     for mount in nested {
         if let Some(matched) = nested_in(&by_id, mount, matches, &places, candidate)? {
@@ -352,31 +351,29 @@ fn stored_elsewhere(fs_type: &str) -> bool {
 
 /// The match `mount` lies at or below, if any: its mount point at or below
 /// the match's path, or one of the places its point is attached at down
-/// its parent chain ([`attachments`]) inside the match's place on the same
-/// device (`places`: each match's, in order), which finds it through a
-/// bind of the match or of one of its ancestors. A chain that cannot be
-/// placed is an error (`candidate`: what was being proved).
+/// its parent chain ([`places::attachments`]) inside the match's place
+/// (`places`: each match's, in order), which finds it through a bind of
+/// the match or of one of its ancestors. A chain that cannot be placed is
+/// an error (`candidate`: what was being proved).
 fn nested_in<'m>(
     by_id: &HashMap<u64, &MountEntry>,
     mount: &MountEntry,
     matches: &'m [PathBuf],
-    places: &[(Dev, PathBuf)],
+    places: &[Place],
     candidate: &Path,
 ) -> Result<Option<&'m Path>, String> {
     let mut attached_at = Vec::new();
-    attachments(by_id, mount, candidate, &mut attached_at)?;
+    places::attachments(by_id, mount, &mut attached_at)
+        .map_err(|why| cannot_prove(candidate, why))?;
     Ok(matches
         .iter()
         .zip(places)
-        .find(|(matched, (dev, place))| {
+        .find(|(matched, place)| {
             // By path as well as by place: a mount whose parent the table
             // does not list (another namespace's, or a root outside the
             // process's) has no attachment to compare, yet lies below
             // the match's path.
-            mount.mount_point.starts_with(matched)
-                || attached_at
-                    .iter()
-                    .any(|(on, at)| on == dev && at.starts_with(place))
+            mount.mount_point.starts_with(matched) || attached_at.iter().any(|at| at.within(place))
         })
         .map(|(matched, _)| matched.as_path()))
 }
@@ -407,26 +404,19 @@ pub(super) fn overlaps_in_filesystem(
     matches: &[PathBuf],
     mut check_time: impl FnMut() -> Result<(), String>,
 ) -> Result<bool, String> {
-    let by_id: HashMap<u64, &MountEntry> = mounts.iter().map(|mount| (mount.id, mount)).collect();
-    let (dev, at) = place_of(mounts, candidate)?;
     // Mount points showing the candidate's place, and the places on other
     // mounts they are attached at: few, so each match is checked cheaply.
-    let mut shown_at = Vec::new();
-    let mut attached_at = Vec::new();
-    for mount in mounts.iter().filter(|mount| mount.dev == dev) {
-        if select::overlaps(&at, root_of(mount, candidate)?) {
-            shown_at.push(mount.mount_point.as_path());
-            attachments(&by_id, mount, candidate, &mut attached_at)?;
-        }
-    }
+    let shown = places::ancestry(mounts, candidate).map_err(|why| cannot_prove(candidate, why))?;
     for protected in matches {
         check_time()?;
-        let (protected_dev, protected_at) = place_of(mounts, protected)?;
-        if (protected_dev == dev && select::overlaps(&at, &protected_at))
-            || shown_at.iter().any(|point| point.starts_with(protected))
-            || attached_at
+        let at = placed(mounts, protected)?;
+        if shown.place.within(&at)
+            || at.within(&shown.place)
+            || shown
+                .shown_at
                 .iter()
-                .any(|(on, place)| *on == protected_dev && place.starts_with(&protected_at))
+                .any(|point| point.starts_with(protected))
+            || shown.attached_at.iter().any(|place| place.within(&at))
         {
             return Ok(true);
         }
@@ -434,69 +424,14 @@ pub(super) fn overlaps_in_filesystem(
     Ok(false)
 }
 
-/// The places `mount`'s point is attached at, down its parent chain: on
-/// each parent, the parent's root field joined with the child's point below
-/// the parent's (a mount stacked on a point: the parent's root). The chain
-/// ends at a mount whose parent the table does not list or that is its own
-/// parent (the root of the namespace's tree). A child point not below its
-/// parent's, or a chain longer than the table, cannot be placed: an error.
-fn attachments(
-    by_id: &HashMap<u64, &MountEntry>,
-    mount: &MountEntry,
-    candidate: &Path,
-    out: &mut Vec<(Dev, PathBuf)>,
-) -> Result<(), String> {
-    let mut child = mount;
-    for _ in 0..=by_id.len() {
-        let Some(parent) = by_id
-            .get(&child.parent_id)
-            .filter(|parent| parent.id != child.id)
-        else {
-            return Ok(());
-        };
-        let place = place_in_filesystem(parent, &child.mount_point).ok_or_else(|| {
-            format!(
-                "cannot prove overlap at {}: mount {} cannot be placed on its parent {} \
-                 (root field {})",
-                candidate.display(),
-                child.mount_point.display(),
-                parent.mount_point.display(),
-                parent.fs_root.display()
-            )
-        })?;
-        out.push((parent.dev, place));
-        child = parent;
-    }
-    Err(format!(
-        "cannot prove overlap at {}: the parent chain of mount {} does not end",
-        candidate.display(),
-        mount.mount_point.display()
-    ))
+/// `path`'s place ([`places::place_of`]); one that cannot be placed cannot
+/// be proved apart from anything.
+fn placed(mounts: &[MountEntry], path: &Path) -> Result<Place, String> {
+    places::place_of(mounts, path).map_err(|why| cannot_prove(path, why))
 }
 
-/// `path`'s device and place in its filesystem, from the mount table alone;
-/// an unclear table or a root field that is not absolute fails closed.
-fn place_of(mounts: &[MountEntry], path: &Path) -> Result<(Dev, PathBuf), String> {
-    let mount = mount_for(mounts, path)
-        .map_err(|why| format!("cannot prove overlap at {}: {why}", path.display()))?;
-    root_of(mount, path)?;
-    let place = place_in_filesystem(mount, path).expect("mount_for returns a prefix mount");
-    Ok((mount.dev, place))
-}
-
-/// The mount's root field, which must be an absolute path to translate
-/// anything on that filesystem (`path`: what was being proved).
-fn root_of<'m>(mount: &'m MountEntry, path: &Path) -> Result<&'m Path, String> {
-    if mount.fs_root.is_absolute() {
-        Ok(&mount.fs_root)
-    } else {
-        Err(format!(
-            "cannot prove overlap at {}: mount {} has filesystem root {}, not an absolute path",
-            path.display(),
-            mount.mount_point.display(),
-            mount.fs_root.display()
-        ))
-    }
+fn cannot_prove(at: &Path, why: impl std::fmt::Display) -> String {
+    format!("cannot prove overlap at {}: {why}", at.display())
 }
 
 pub(super) fn overlaps_with(
@@ -561,28 +496,78 @@ pub(super) fn ancestor_identities(
 /// candidate. The check then enumerates again ([`Refresh::Always`]), and the
 /// recognition there decides. Only the tag's presence is looked up (one
 /// lookup per directory, from the root down); any doubt answers yes.
+///
+/// The way down is by path and by place (TASK-285): a candidate reached
+/// through a bind mount (`/alias` showing `/p/target/debug/deps`) lies
+/// below a root (`/p`) in its filesystem though not by path, and so does
+/// one on a filesystem mounted below a root (where it is attached,
+/// [`places::Ancestry::attached_at`]). Each directory between the root's
+/// place and the candidate's (or the mount point's) is looked up below the
+/// root, where discovery from that root finds it; one the table does not
+/// show there is a doubt.
 pub(super) fn tagged_ancestor<'r, H: Host>(
     host: &H,
     roots: impl IntoIterator<Item = &'r PathBuf>,
     matches: impl Fn(&Path) -> bool,
     path: &Path,
 ) -> bool {
-    for root in roots {
+    let roots: Vec<&PathBuf> = roots.into_iter().collect();
+    if roots.is_empty() {
+        return false;
+    }
+    let tagged = |dir: &Path| {
+        !matches(dir)
+            && !matches!(
+                resolve(host, &dir.join(CACHEDIR_TAG), Want::Any),
+                Err(ResolveError::Missing { .. })
+            )
+    };
+    for root in &roots {
         let Ok(below) = path.strip_prefix(root) else {
             continue;
         };
-        let mut dir = root.clone();
+        let mut dir = (*root).clone();
         // Every directory above the candidate, from the root down; a tag in
         // the candidate itself makes it a target, not a match holding it,
         // and its own walk lists that.
         for name in below.iter() {
-            if !matches(&dir) {
-                match resolve(host, &dir.join(CACHEDIR_TAG), Want::Any) {
-                    Err(ResolveError::Missing { .. }) => {}
-                    Ok(_) | Err(_) => return true,
-                }
+            if tagged(&dir) {
+                return true;
             }
             dir.push(name);
+        }
+    }
+    let Ok(mounts) = host.mountinfo() else {
+        return true;
+    };
+    let Ok(shown) = places::ancestry(&mounts, path) else {
+        return true;
+    };
+    for root in &roots {
+        let Ok(at) = places::place_of(&mounts, root) else {
+            return true;
+        };
+        // The candidate's own place when its path does not show it below
+        // the root (that was the loop above), and every place a mount
+        // showing it is attached at.
+        let lexical = path.starts_with(root);
+        let held = (!lexical).then_some(&shown.place).into_iter();
+        for place in held.chain(&shown.attached_at) {
+            let Ok(below) = place.path.strip_prefix(&at.path) else {
+                continue;
+            };
+            if place.dev != at.dev {
+                continue;
+            }
+            let mut dir = (*root).clone();
+            let mut dir_place = at.clone();
+            for name in below.iter() {
+                if places::place_of(&mounts, &dir).as_ref() != Ok(&dir_place) || tagged(&dir) {
+                    return true;
+                }
+                dir.push(name);
+                dir_place.path.push(name);
+            }
         }
     }
     false

@@ -448,6 +448,36 @@ impl Scratch {
         std::fs::remove_file(&path).map_err(|e| format!("remove {}: {e}", path.display()))
     }
 
+    /// `rmdir` of the directory `rel`, reached through a bind of a scratch
+    /// directory ([`Scratch::bind_mount`]), so on another mount id than the
+    /// scratch mount but on its filesystem (same device; checked on the
+    /// parent, not following it). A probe of the kernel's rule for a mount
+    /// point seen through another mount (TASK-290: `EBUSY`): the errno
+    /// Linux answers, or `None` when it removed the directory.
+    pub fn rmdir_through_bind(&self, rel: &str) -> Result<Option<i32>, String> {
+        let path = self.join_checked("rmdir_through_bind", rel);
+        let parent = path.parent().expect("joined path has a parent");
+        let dev = |at: &Path| {
+            std::fs::symlink_metadata(at)
+                .map(|meta| meta.dev())
+                .map_err(|e| format!("lstat {}: {e}", at.display()))
+        };
+        if dev(parent)? != dev(&self.root)? {
+            interlock::abort_outside_scratch(
+                "rmdir_through_bind",
+                &path,
+                "its parent is not on the scratch filesystem",
+            );
+        }
+        match std::fs::remove_dir(&path) {
+            Ok(()) => Ok(None),
+            Err(e) => e
+                .raw_os_error()
+                .map(Some)
+                .ok_or_else(|| format!("rmdir {}: {e}", path.display())),
+        }
+    }
+
     /// Unmounts the mount on the scratch directory `rel` (one made by
     /// [`Scratch::mount_tmpfs`] or [`Scratch::bind_mount`]); refuses unless
     /// what is there is a mount whose mount point lies on the scratch mount.

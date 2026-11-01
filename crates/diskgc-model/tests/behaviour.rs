@@ -201,6 +201,43 @@ fn cross_bind_rename_is_exdev_and_alias_reference_prevents_inode_reuse() {
     );
 }
 
+/// TASK-290: a mount point is a directory of its filesystem, whatever mount
+/// shows it. Through a non-recursive bind of its parent (`/alias` shows
+/// `/tmp/a`; the mount at `/tmp/a/sub` is not repeated there) the directory
+/// is reachable as `/alias/sub`, uncovered, and Linux refuses to remove or
+/// rename it there too (`EBUSY`: `is_local_mountpoint` looks at the
+/// directory, not at the mount it was reached through). Its contents can be
+/// removed: they are the directory's own, hidden under the mount at
+/// `/tmp/a/sub`.
+#[test]
+fn a_mount_point_reached_through_another_mount_is_busy() {
+    let yaml = tmp_yaml("").replace(
+        "tree:\n",
+        "  - {id: 31, at: /tmp/a/sub, fs: tmpfs, dev: \"0:43\", size: 1M, parent: 30}\n  \
+         - {id: 32, at: /alias, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1, bind_of: 30, \
+         bind_root: /a}\ntree:\n",
+    );
+    let model = parse_yaml(&yaml).expect("model");
+    let (mut state, _) = diskgc_model::load::load(&model).expect("state");
+    let through_bind = state.lookup(Path::new("/alias/sub")).expect("uncovered");
+    let covered = state.lookup(Path::new("/tmp/a/sub")).expect("mount root");
+    assert_ne!(through_bind.mnt, covered.mnt, "not the inner mount's root");
+    let alias = state.lookup(Path::new("/alias")).expect("bind");
+    assert_eq!(
+        state.unlinkat(alias, OsStr::new("sub"), true),
+        Err(Errno::EBUSY)
+    );
+    assert_eq!(
+        state.rename_path(Path::new("/alias/sub"), Path::new("/alias/moved")),
+        Err(Fault::Errno(Errno::EBUSY))
+    );
+    assert_eq!(
+        state.remove_path(Path::new("/alias")),
+        Err(Fault::Errno(Errno::EBUSY))
+    );
+    assert!(state.lookup(Path::new("/tmp/a/sub")).is_ok());
+}
+
 // ---- Path resolution ----
 
 #[test]

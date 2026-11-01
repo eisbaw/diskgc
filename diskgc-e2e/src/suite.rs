@@ -1490,6 +1490,18 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::protect_refuses_an_overlay_mounted_inside_a_protected_cargo_target,
     },
     Test {
+        name: "a_non_recursive_bind_keeps_a_candidate_holding_a_mount_point",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::a_non_recursive_bind_keeps_a_candidate_holding_a_mount_point,
+    },
+    Test {
+        name: "a_root_bound_from_inside_container_storage_is_refused",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::a_root_bound_from_inside_container_storage_is_refused,
+    },
+    Test {
         name: "ensure_above_min_free_exits_0_without_the_host_lock",
         tier: Tier::Fast,
         expect: Expect::Pass,

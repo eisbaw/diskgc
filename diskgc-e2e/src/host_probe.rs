@@ -793,6 +793,7 @@ pub fn tag(e: &ResolveError) -> &'static str {
             Unsafe::AmbiguousMounts(_) => "ambiguous_mounts",
             Unsafe::MountMismatch { .. } => "mount_mismatch",
             Unsafe::LeftMount { .. } => "left_mount",
+            Unsafe::Unplaceable(_) => "unplaceable",
         },
         ResolveError::Screened {
             why: MountScreenError::Networked { .. },

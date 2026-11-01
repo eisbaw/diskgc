@@ -2419,10 +2419,21 @@ development package stays sandbox gated.
   enumerated it (a `cargo clean` of a protected target) no longer stops
   the run or the dry run (exit 3) at a candidate's first check: the
   matches are enumerated again, then the candidate is judged.
-
-**Open limits** (in 0.1.0 and on master; static readings, not
-reproduced): TASK-267, container storage behind a subdirectory bind is
-not recognised (the check probes lexical ancestors only).
+- TASK-267: a root that is a bind mount of a directory inside container
+  storage (or lies below one) is refused like a root named inside it: the
+  directories above its place in its filesystem are asked too, where the
+  mount table shows them. In 0.1.0 and before this change only its path's
+  ancestors were asked (reproduced in the model).
+- TASK-290: a candidate holding a mount point only by place (reached
+  through a non-recursive or private bind of its parent) is
+  `contains_mount`; before, its other entries were deleted and the mount
+  point's directory failed with `EBUSY` (reproduced in the model).
+- TASK-285: a delete action's cached `protect` and `!profile` matches are
+  enumerated again when the mount table shows the candidate differently
+  than before the enumeration (a rename above a bind's source), and a
+  `CACHEDIR.TAG` above a Cargo source's root is looked up by place as well
+  as by path; before, a candidate reached through a bind could be deleted
+  after such a change made it protected (reproduced in the model).
 
 **What it does.** One command frees space, two read-only ones explain
 it:

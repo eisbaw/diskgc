@@ -920,7 +920,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         )?;
         let detail = protected.then(|| at.detail(fresh.is_some()));
         if let Some(fresh) = fresh {
-            self.protection = fresh;
+            self.protection.refresh(fresh);
         }
         Ok(detail)
     }

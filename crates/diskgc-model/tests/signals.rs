@@ -447,7 +447,10 @@ fn host_lock_operation_overrun_is_reported_before_any_delete() {
 
 #[test]
 fn root_preflight_overrun_stops_before_discovery() {
-    let extra = "events:\n  - {at: {op: mountinfo, nth: 3, when: before}, advance: 20m}\n";
+    // The fourth table read is the root preflight's: the third is the one
+    // the `protect` enumeration keeps (TASK-285), read even with nothing to
+    // protect.
+    let extra = "events:\n  - {at: {op: mountinfo, nth: 4, when: before}, advance: 20m}\n";
     let host = common::host(&model(extra));
     let report = executor::ensure(&host, &request(), &[1000], &mut |_| {});
     assert_eq!(report.status, Status::Deadline, "{report:#?}");

@@ -1,0 +1,42 @@
+# TASK-290, for the Cargo kind: discovery does not look inside a
+# target's profile entries, so the eligibility walk's own mount check is
+# what keeps them. `/src/proj/target/debug/deps/m` is a mount point (a
+# tmpfs); `/alias` is a non-recursive bind of `/src`, so through it `m` is
+# the uncovered directory and no mount point lies below the target by
+# path. The walk refuses a mount attached at a place inside the entry it
+# walks, as one below it by path (`contains_mount`), before anything of
+# the target is unlinked; `/alias/other`'s target is reclaimed.
+profile_vector: 1
+profile: cargo-target
+roots: [/alias]
+path: /src
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /src, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /src/proj/target/debug/deps/m, fs: tmpfs, dev: "0:50", size: 1G, parent: 2}
+    - {id: 4, at: /alias, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /src/proj/Cargo.toml: {}
+    /src/proj/target/CACHEDIR.TAG: {cachedir_tag: true}
+    /src/proj/target/debug/.cargo-lock: {}
+    /src/proj/target/debug/deps/app: {size: 1M}
+    /src/proj/target/debug/deps/m/inner: {size: 4K}
+    /src/other/Cargo.toml: {}
+    /src/other/target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}
+expect:
+  plan:
+    - {candidate: /alias/other/target}
+    - {candidate: /alias/proj/target, reason: contains_mount}
+  reclaim_exit: 1
+  actions: [/alias/other/target]
+  removed: [/alias/other/target/debug/deps]
+  skipped:
+    - {candidate: /alias/proj/target, reason: contains_mount}
+  preserved:
+    - /src/proj/target/debug/deps/app
+    - /src/proj/target/debug/deps/m/inner

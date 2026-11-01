@@ -1,0 +1,53 @@
+# TASK-285, the horizon of the cached matches. The tier's negated source
+# `keep` (`/src/keep-*`) is enumerated at the tier's start, after the run's
+# `protect` enumeration, and matches nothing. Then, before the candidate's
+# first check, `/src/work` (which `/alias` binds a directory of) becomes
+# `/src/keep-work`, and the protected Cargo target `/g/target` is removed.
+# The first check cannot prove the removed match any more and enumerates
+# `protect` again, replacing the tier's protected matches. The negated
+# matches are still the old ones, so the check under the lock compares the
+# candidate with the mount table read before the first `protect`
+# enumeration, not the fresh one: the candidate moved, the negated source
+# is enumerated again, and the candidate is `excluded`.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: alias-cruft
+      find: {roots: [/alias], paths: [cruft], type: dir}
+      action: delete
+      examples: {match: [/alias/cruft]}
+    - name: keep
+      find: {roots: [/src], paths: ["keep-*"], type: dir}
+      action: delete
+      examples: {match: [/src/keep-a]}
+  protect:
+    - {profile: cargo-target, roots: [/g]}
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: "profile:alias-cruft && !profile:keep"}
+path: /src
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /src, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /alias, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2, bind_root: /work/sub}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /g/Cargo.toml: {}
+    /g/target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}
+    /src/work/sub/cruft: {.: {mtime: 2026-10-01T00:00:00Z}, blob: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+  events:
+    - {at: {op: read_dir, path: /src, when: after}, rename: {from: /src/work, to: /src/keep-work}}
+    - {at: {op: read_dir, path: /src, when: after}, remove: /g/target}
+expect:
+  plan: [{candidate: /alias/cruft}]
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: [{candidate: /alias/cruft, reason: excluded}]
+  preserved: [/src/keep-work/sub/cruft/blob]

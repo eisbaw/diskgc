@@ -194,6 +194,177 @@ pub fn protect_refuses_an_overlay_mounted_inside_a_protected_cargo_target(ctx: &
     judged.assert_clean()
 }
 
+/// TASK-290 on a real kernel: `/tmp/nrb/src/c/m` is a tmpfs mount point,
+/// and `/tmp/nrb/alias` a non-recursive bind of `/tmp/nrb/src`, so
+/// `/tmp/nrb/alias/c/m` is the uncovered directory under that tmpfs. The
+/// premise is checked first: the kernel's mount table lists no mount below
+/// `/tmp/nrb/alias/c`, yet `rmdir` of that directory is `EBUSY`. Before
+/// TASK-290 the reclaiming run unlinked `/tmp/nrb/alias/c/f` and then failed
+/// on `m`; now the candidate is `contains_mount` and only `/tmp/nrb/alias/d`
+/// (also `/tmp/nrb/src/d`) is deleted.
+pub fn a_non_recursive_bind_keeps_a_candidate_holding_a_mount_point(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdirs("nrb/src/c/m", 0o755, TESTER)?;
+    s.mkdirs("nrb/src/d", 0o755, TESTER)?;
+    s.mkdir("nrb/alias", 0o755, TESTER)?;
+    s.write_file("nrb/src/c/f", &[7; 8192], 0o644, TESTER)?;
+    s.write_file("nrb/src/d/f", &[7; 8192], 0o644, TESTER)?;
+    s.mount_tmpfs("nrb/src/c/m")?;
+    s.bind_mount("nrb/src", "nrb/alias")?;
+    let uncovered = s.path("nrb/alias/c/m");
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|e| format!("read mountinfo: {e}"))?;
+    let below = s.path("nrb/alias/c");
+    ensure!(
+        !mountinfo.lines().any(|line| line
+            .split(' ')
+            .nth(4)
+            .is_some_and(|point| Path::new(point).starts_with(&below))),
+        "the bind repeated the submount below {}:\n{mountinfo}",
+        below.display()
+    );
+    let busy = s.rmdir_through_bind("nrb/alias/c/m")?;
+    ensure!(
+        busy == Some(rustix::io::Errno::BUSY.raw_os_error()),
+        "rmdir {} through the bind: expected EBUSY, got {busy:?}",
+        uncovered.display()
+    );
+    ctx.home.write_file(
+        "diskgc-nrb.yaml",
+        b"version: 1\nprofiles:\n  - name: alias-dirs\n    find: {roots: [/tmp/nrb/alias], paths: [\"*\"], type: dir}\n    action: delete\n    examples: {match: [/tmp/nrb/alias/c]}\n",
+        0o600,
+        TESTER,
+    )?;
+    let oracle = Oracle::arm(
+        Fixture::new()
+            .eligible(s.path("nrb/alias/d"))
+            .eligible(s.path("nrb/src/d")),
+    )?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--config",
+            "/home/tester/diskgc-nrb.yaml",
+            "--select",
+            "profile:alias-dirs",
+            "--min-free",
+            "100%",
+            "--timeout",
+            "10s",
+            "/tmp",
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(1)?;
+    let result = report(&run)?;
+    let candidate = s.path("nrb/alias/c");
+    ensure!(
+        result["skipped"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["candidate"]
+                == candidate.to_string_lossy().as_ref()
+                && row["reason"] == "contains_mount")),
+        "{} not skipped contains_mount: {result}",
+        candidate.display()
+    );
+    ensure!(
+        s.path("nrb/src/c/f").exists(),
+        "the candidate's other entry was deleted"
+    );
+    ensure!(
+        !s.path("nrb/src/d").exists(),
+        "the eligible candidate is left"
+    );
+    judged.assert_clean()
+}
+
+/// TASK-267 on a real kernel: `/tmp/csb/l` is a bind of an image layer's
+/// `diff` directory inside a rootless Podman graphroot
+/// (`/tmp/csb/home/.local/share/containers/storage`), so the root's path has
+/// no storage root above it. The kernel's root field for the bind is checked
+/// first. The run refuses the root (`contains_special`, the storage root as
+/// the candidate) and deletes nothing.
+pub fn a_root_bound_from_inside_container_storage_is_refused(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    let storage = "csb/home/.local/share/containers/storage";
+    s.mkdirs(
+        &format!("{storage}/overlay/0a1b2c/diff/cache"),
+        0o755,
+        TESTER,
+    )?;
+    s.mkdirs(&format!("{storage}/overlay-layers"), 0o755, TESTER)?;
+    s.write_file(&format!("{storage}/storage.lock"), b"", 0o644, TESTER)?;
+    s.write_file(
+        &format!("{storage}/overlay-layers/layers.json"),
+        b"[]",
+        0o644,
+        TESTER,
+    )?;
+    s.write_file(
+        &format!("{storage}/overlay/0a1b2c/diff/cache/blob"),
+        &[7; 8192],
+        0o644,
+        TESTER,
+    )?;
+    s.mkdir("csb/l", 0o755, TESTER)?;
+    s.bind_mount(&format!("{storage}/overlay/0a1b2c/diff"), "csb/l")?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|e| format!("read mountinfo: {e}"))?;
+    let point = s.path("csb/l");
+    let root_field = mountinfo
+        .lines()
+        .map(|line| line.split(' ').collect::<Vec<_>>())
+        .find(|fields| fields.get(4).is_some_and(|at| Path::new(at) == point))
+        .and_then(|fields| fields.get(3).map(|root| (*root).to_owned()))
+        .ok_or_else(|| format!("no mount at {}:\n{mountinfo}", point.display()))?;
+    ensure!(
+        root_field.ends_with("/.local/share/containers/storage/overlay/0a1b2c/diff"),
+        "unexpected root field {root_field} for {}",
+        point.display()
+    );
+    ctx.home.write_file(
+        "diskgc-csb.yaml",
+        b"version: 1\nprofiles:\n  - name: layer-cache\n    find: {roots: [/tmp/csb/l], paths: [cache], type: dir}\n    action: delete\n    examples: {match: [/tmp/csb/l/cache]}\n",
+        0o600,
+        TESTER,
+    )?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--config",
+            "/home/tester/diskgc-csb.yaml",
+            "--select",
+            "profile:layer-cache",
+            "--min-free",
+            "100%",
+            "--timeout",
+            "10s",
+            "/tmp",
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(1)?;
+    let result = report(&run)?;
+    let storage_root = s.path(storage);
+    ensure!(
+        result["skipped"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["candidate"]
+                == storage_root.to_string_lossy().as_ref()
+                && row["reason"] == "contains_special")),
+        "{} not skipped contains_special: {result}",
+        storage_root.display()
+    );
+    ensure!(
+        result["actions"].as_array().is_some_and(Vec::is_empty),
+        "something was deleted: {result}"
+    );
+    judged.assert_clean()
+}
+
 /// The configured CLI path must execute both groups in policy order, with
 /// each candidate deletion checked by the independent filesystem oracle.
 pub fn configured_groups_reclaim_in_order(ctx: &Ctx) -> TestResult {

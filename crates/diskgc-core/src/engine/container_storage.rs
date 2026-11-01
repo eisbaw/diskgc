@@ -21,8 +21,10 @@
 //! Where it is asked (docs/safety.md, No container storage): every listing
 //! of the eligibility walk and of discovery ([`check_listing`]); every
 //! directory between a root and a candidate ([`storage_in`]); and every
-//! directory above a root, from `/` down ([`storage_above`]), so a root
-//! named inside container storage is refused too. Only names count, whatever their type, so a check needs a
+//! directory above a root, from `/` down and above its place in its
+//! filesystem wherever the mount table shows it ([`storage_above`]), so a
+//! root named inside container storage, or bound from inside it, is refused
+//! too. Only names count, whatever their type, so a check needs a
 //! listing of the directory or one `statx` per name and nothing else, and
 //! errs on the side of keeping (a project that happens to hold such names
 //! is kept, and the skip names the markers).
@@ -42,14 +44,16 @@
 //!   with the containerd image store): its metadata or content plugin's
 //!   directory.
 
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use super::{Reason, Skip};
 use crate::host::{Access, Host, HostError, MountEntry};
+use crate::places;
 use crate::resolve::{
-    MountedNames, ResolveError, Resolved, Want, mount_for, name_present_in, open_beneath,
+    MountedNames, ResolveError, Resolved, Unsafe, Want, mount_for, name_present_in, open_beneath,
     resolve_in,
 };
 
@@ -260,16 +264,58 @@ pub enum Above {
     Skip,
 }
 
-/// The refusal of `root` when a directory strictly above it, from `/` down
-/// to its parent, is a storage root: the root lies inside container storage
-/// (`contains_special`, the storage root as its path). Each directory is
-/// reached as a root is (no symlink, no mount crossed but at a mount
-/// point, where its mount is resolved anew) and asked by [`storage_in`].
-/// A directory that cannot be reached or asked is the error: the caller
-/// refuses the root as it refuses one it cannot reach (fail closed). It
-/// costs one open and a handful of `statx` calls per level; it holds
-/// nothing open when it returns.
+/// The refusal of `root` when a directory above it is a storage root: the
+/// root lies inside container storage (`contains_special`, the storage root
+/// as its path). Above means on its path, from `/` down to its parent, and
+/// in its filesystem (TASK-267): a bind mount of a directory inside
+/// storage has no storage root on its path, so every directory above the
+/// root's place that the table shows somewhere ([`places::places_above`])
+/// is asked too, at the path that shows it. Each directory is reached as a
+/// root is (no symlink, no mount crossed but at a mount point, where its
+/// mount is resolved anew) and asked by [`storage_in`]. A directory that
+/// cannot be reached or asked, or a root the table cannot place, is the
+/// error: the caller refuses the root as it refuses one it cannot reach
+/// (fail closed). A directory above the root's place that no mount shows
+/// (the top of a btrfs volume above a subvolume mounted alone, a host
+/// directory above a container's bind volume) is not asked: a stated limit
+/// (docs/safety.md). It costs one open and a handful of `statx` calls per
+/// level, and per directory shown only elsewhere; it holds nothing open
+/// when it returns.
 pub fn storage_above<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    root: &Path,
+) -> Result<Option<Skip>, ResolveError> {
+    if let Some(found) = storage_on_the_path(host, mounts, root)? {
+        return Ok(Some(found));
+    }
+    let unplaceable = |why: String| ResolveError::UnsafePath {
+        path: root.to_owned(),
+        why: Unsafe::Unplaceable(why),
+    };
+    let on_the_path = root
+        .ancestors()
+        .skip(1)
+        .map(|at| places::place_of(mounts, at))
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(unplaceable)?;
+    for (place, at) in places::places_above(mounts, root).map_err(unplaceable)? {
+        if on_the_path.contains(&place) {
+            continue;
+        }
+        let dir = resolve_in(host, mounts, &at, Want::Directory)?;
+        match storage_in(host, &dir.fd, &at, mounts) {
+            Ok(None) => {}
+            Ok(Some(storage)) => return Ok(Some(storage.inside(&at, root))),
+            Err((_, e)) => return Err(ResolveError::Host(e)),
+        }
+    }
+    Ok(None)
+}
+
+/// [`storage_above`] on the root's path: each directory from `/` down to
+/// its parent, one open below the last where they share a mount.
+fn storage_on_the_path<H: Host>(
     host: &H,
     mounts: &[MountEntry],
     root: &Path,

@@ -1,0 +1,45 @@
+# TASK-267 (mped, full review #2). A root that is a bind mount of a
+# directory inside container storage: `/mnt/l` shows the image layer
+# `.../storage/overlay/0a1b2c/diff` of `/home`'s filesystem (mountinfo root
+# field `/tester/.local/share/containers/storage/overlay/0a1b2c/diff`).
+# Its path has no storage root above it; its place in the filesystem has:
+# the directories above the root's place, reached where the table shows
+# them (`/home/tester/...`), are asked for the storage markers too, and
+# the root is refused (`contains_special`, the storage root as the
+# candidate). `/mnt/p`, a bind of `proj/build`, under a directory holding
+# only `storage.lock`, is searched as usual.
+profile_vector: 1
+user_profiles:
+  - name: layer-cache
+    find: {roots: [/mnt/l, /mnt/p], paths: [cache], type: dir}
+    action: delete
+    examples: {match: [/mnt/p/cache]}
+profile: layer-cache
+path: /home/tester
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /mnt/l, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2, bind_root: /tester/.local/share/containers/storage/overlay/0a1b2c/diff}
+    - {id: 4, at: /mnt/p, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2, bind_root: /tester/proj/build}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.local/share/containers/storage/storage.lock: {}
+    /home/tester/.local/share/containers/storage/overlay-layers: {layers.json: {}}
+    /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/cache: {blob: {size: 1M}}
+    /home/tester/proj/storage.lock: {}
+    /home/tester/proj/build/cache: {blob: {size: 1M}}
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
+    - {candidate: /mnt/p/cache}
+  reclaim_exit: 1
+  actions: [/mnt/p/cache]
+  removed: [/mnt/p/cache]
+  skipped:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: contains_special}
+  preserved:
+    - /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/cache/blob

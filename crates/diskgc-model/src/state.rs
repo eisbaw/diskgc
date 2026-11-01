@@ -1084,13 +1084,37 @@ impl State {
         Ok(here)
     }
 
-    /// Whether a mount sits on `loc` or anywhere below it.
+    /// Whether a mount sits on `loc` or anywhere below it, reached through
+    /// any mount of its filesystem ([`Self::is_mount_point`]).
     fn holds_mount(&self, loc: Loc) -> bool {
         let below = self.fs(loc.mnt).closure([loc.ino]);
         self.mounts
             .iter()
             .filter_map(|m| m.on)
-            .any(|on| on.mnt == loc.mnt && below.contains(&on.ino))
+            .any(|on| self.same_filesystem(on.mnt, loc.mnt) && below.contains(&on.ino))
+    }
+
+    /// Whether a mount sits on the directory `loc` names, whichever mount of
+    /// its filesystem `loc` was reached through: Linux marks the directory
+    /// (its dentry), not a mount showing it, so removing or renaming a mount
+    /// point is `EBUSY` through a non-recursive bind of its parent too, where
+    /// the directory is not covered (`is_local_mountpoint`; TASK-290).
+    /// Lookups still cross only the mount a path goes through
+    /// ([`Self::through_mounts`]).
+    fn is_mount_point(&self, loc: Loc) -> bool {
+        self.mounts
+            .iter()
+            .filter_map(|m| m.on)
+            .any(|on| on.ino == loc.ino && self.same_filesystem(on.mnt, loc.mnt))
+    }
+
+    /// Whether two mounts show one filesystem's directories: the same
+    /// filesystem, and both an overlay of it or neither (an overlay's
+    /// directories are its own, though the model keeps them in its upper
+    /// directory's filesystem).
+    fn same_filesystem(&self, a: u64, b: u64) -> bool {
+        let (a, b) = (self.mount(a), self.mount(b));
+        a.dev == b.dev && a.overlay == b.overlay
     }
 
     /// `rm -r`: unlinks every entry below a directory, then its name. An
@@ -1136,13 +1160,10 @@ impl State {
             .entries()
             .and_then(|e| e.get(from_name))
             .ok_or(Errno::ENOENT)?;
-        if self
-            .mounted_on(Loc {
-                mnt: from_dir.mnt,
-                ino: moving,
-            })
-            .is_some()
-        {
+        if self.is_mount_point(Loc {
+            mnt: from_dir.mnt,
+            ino: moving,
+        }) {
             return Err(Errno::EBUSY.into());
         }
         let moving_is_dir = self
@@ -1159,13 +1180,10 @@ impl State {
             .get(to_name)
             .copied();
         if let Some(old) = existing {
-            if self
-                .mounted_on(Loc {
-                    mnt: to_dir.mnt,
-                    ino: old,
-                })
-                .is_some()
-            {
+            if self.is_mount_point(Loc {
+                mnt: to_dir.mnt,
+                ino: old,
+            }) {
                 return Err(Errno::EBUSY.into());
             }
             let old_inode = self.inode(Loc {
@@ -1292,7 +1310,7 @@ impl State {
         let entries = self.inode(dir).entries().ok_or(Errno::ENOTDIR)?;
         let ino = *entries.get(name).ok_or(Errno::ENOENT)?;
         let target = Loc { mnt: dir.mnt, ino };
-        if self.mounted_on(target).is_some() {
+        if self.is_mount_point(target) {
             return Err(Errno::EBUSY);
         }
         if self.mount(dir.mnt).read_only {

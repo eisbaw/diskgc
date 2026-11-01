@@ -407,7 +407,11 @@ How the format reads (the schema documents every key):
   exposes that filesystem's root through a distinct mount ID, or with
   `bind_root: /dir` that directory of it (a path from the filesystem's
   root, mountinfo's root field; missing directories are created).
-  Filesystem metadata must match. `fs: overlay` with `overlay_upper:
+  Filesystem metadata must match. A bind never repeats the mounts below
+  its source (it is non-recursive, or private), so it shows a mount point
+  there as the uncovered directory; removing or renaming that directory is
+  still `EBUSY` through every mount of its filesystem, as Linux marks the
+  directory, not a mount showing it (TASK-290). `fs: overlay` with `overlay_upper:
   /path` (a directory on an earlier mount) shows that directory's tree
   under the overlay's own `dev` and root field `/`, so an unlink on either
   side removes the entry from both; lower layers, whiteouts and copy-up
@@ -555,8 +559,14 @@ Model scenarios required by [safety.md](safety.md) and
   `a_protected_cargo_target_seen_through_a_bind_protects_its_source_tree`,
   `a_filesystem_mounted_inside_a_protected_cargo_target_is_protected_elsewhere`);
   a filesystem mounted on a private bind of a protected subdirectory and
-  again elsewhere is `protected` there (the mount point placed on its
-  parent: `protect_covers_a_filesystem_mounted_on_a_private_bind_of_its_subdirectory`);
+  again elsewhere stops the run at enumeration, the match holding that
+  mount by place (TASK-290:
+  `protect_stops_the_run_on_a_filesystem_mounted_on_a_private_bind_of_its_subdirectory`);
+  a rename above the source of a bind a candidate is reached through, or
+  a `CACHEDIR.TAG` made above it under a Cargo `protect` root, after the
+  enumeration, keeps the candidate `protected` (TASK-285:
+  `vectors/config/protect-rename-above-a-bind-source`,
+  `vectors/config/protect-cargo-tag-above-a-bind-source`);
   with any match, a candidate or match on an `overlay` mount is an error
   and a reclaim through it deletes nothing
   (`an_overlay_on_either_side_cannot_prove_no_overlap`,

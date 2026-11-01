@@ -1,0 +1,43 @@
+# TASK-290 (mped, full review #2). `/src/c/m` is a mount point (its own
+# tmpfs); `/alias` is a non-recursive bind of `/src`, so `/alias/c/m` is
+# the uncovered directory under that mount and no mount point lies below
+# `/alias/c` by path. Linux refuses to remove that directory through any
+# mount (`EBUSY`): deleting `/alias/c` would unlink `f` and then fail, a
+# partial deletion of a candidate that holds a mount. A mount attached at
+# a place inside the candidate's place, on any mount of its filesystem,
+# is a mount inside it (`contains_mount`), and nothing is touched.
+# `/alias/d` holds no mount and is deleted.
+profile_vector: 1
+user_profiles:
+  - name: alias-dirs
+    find: {roots: [/alias], paths: ["*"], type: dir}
+    action: delete
+    examples: {match: [/alias/c]}
+profile: alias-dirs
+path: /src
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /src, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /src/c/m, fs: tmpfs, dev: "0:50", size: 1G, parent: 2}
+    - {id: 4, at: /alias, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /src/c/f: {size: 4K}
+    /src/c/m/inner: {size: 4K}
+    /src/d/f: {size: 4K}
+expect:
+  plan:
+    - {candidate: /alias/c, reason: contains_mount}
+    - {candidate: /alias/d}
+  reclaim_exit: 1
+  actions: [/alias/d]
+  removed: [/alias/d]
+  skipped:
+    - {candidate: /alias/c, reason: contains_mount}
+  preserved:
+    - /src/c/f
+    - /src/c/m/inner

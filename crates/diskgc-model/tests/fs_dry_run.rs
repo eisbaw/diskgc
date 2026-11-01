@@ -1346,9 +1346,13 @@ fn protect_stops_the_run_on_a_filesystem_mounted_inside_a_match() {
 /// protected subdirectory (`/mnt/x/sub`, not seen at `/tmp/gen/x/sub`) and
 /// again at `/mnt/f`. No path of a mount lies under `/tmp/gen`, so only the
 /// place the mount point is attached at (`/gen/x/sub` of the protected
-/// filesystem) relates the candidate to the match.
+/// filesystem) relates the candidate to the match. Since TASK-290 the
+/// enumeration sees that place too: the `fs` match `/tmp/gen` holds a mount
+/// (`contains_mount` at `/tmp/gen/x/sub`, the uncovered directory there),
+/// which stops the run, as a mount below a match by path does
+/// (`protect_stops_the_run_on_a_filesystem_mounted_inside_a_match` above).
 #[test]
-fn protect_covers_a_filesystem_mounted_on_a_private_bind_of_its_subdirectory() {
+fn protect_stops_the_run_on_a_filesystem_mounted_on_a_private_bind_of_its_subdirectory() {
     let model = subdir_bind_model().replacen(
         "tree:\n",
         "  - {id: 50, at: /mnt/x/sub, fs: tmpfs, dev: \"0:50\", size: 1G, parent: 40}\n  - {id: 51, at: /mnt/f, fs: tmpfs, dev: \"0:50\", size: 1G, parent: 1, bind_of: 50}\ntree:\n  /mnt/f/w: {payload: {size: 1K}}\n",
@@ -1361,11 +1365,14 @@ fn protect_covers_a_filesystem_mounted_on_a_private_bind_of_its_subdirectory() {
         &host,
         &subdir_bind_request(&["gen"], "profile:entries", &["/mnt/f"]),
     );
-    assert_eq!(
-        reason_of(&report, "/mnt/f/w"),
-        Some(Some(Reason::Protected)),
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert!(
+        report.errors.iter().any(|error| error
+            .message
+            .contains("protect `gen` cannot prove matches at /tmp/gen/x/sub: contains_mount")),
         "{report:#?}"
     );
+    assert_ne!(reason_of(&report, "/mnt/f/w"), Some(None), "{report:#?}");
     nothing_locked_or_deleted(&host);
 }
 

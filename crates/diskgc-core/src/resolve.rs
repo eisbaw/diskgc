@@ -81,6 +81,10 @@ pub enum Unsafe {
     /// The opened object is on another mount than the one it was opened
     /// below.
     LeftMount { expected: u64, found: u64 },
+    /// The mount table cannot tell where the path is in its filesystem
+    /// ([`crate::places`]): a root field that is not absolute, a parent
+    /// chain that cannot be placed or does not end.
+    Unplaceable(String),
 }
 
 impl fmt::Display for Unsafe {
@@ -108,6 +112,7 @@ impl fmt::Display for Unsafe {
                     "opened object is on mount id {found}, expected {expected}"
                 )
             }
+            Self::Unplaceable(why) => write!(f, "cannot be placed in its filesystem: {why}"),
         }
     }
 }
@@ -223,10 +228,15 @@ pub fn mount_for<'m>(mounts: &'m [MountEntry], path: &Path) -> Result<&'m MountE
 /// translated then. Nothing is looked up.
 pub fn place_in_filesystem(mount: &MountEntry, path: &Path) -> Option<PathBuf> {
     let below = path.strip_prefix(&mount.mount_point).ok()?;
-    mount
-        .fs_root
-        .is_absolute()
-        .then(|| mount.fs_root.join(below))
+    // No trailing `/` for the mount point itself (`Path` compares and
+    // hashes by components, so this is only for what is shown).
+    mount.fs_root.is_absolute().then(|| {
+        if below.as_os_str().is_empty() {
+            mount.fs_root.clone()
+        } else {
+            mount.fs_root.join(below)
+        }
+    })
 }
 
 /// A reason to refuse a root before opening it or any ancestor. A local

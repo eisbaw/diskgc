@@ -1,0 +1,47 @@
+# TASK-285 (Codex P1, full review #2). `/alias` binds `/src/work/sub`
+# (mountinfo root field `/work/sub` on `/src`'s filesystem); `protect`
+# matches `/src/keep-*`, none when enumerated. Under the candidate's lock,
+# `/src/work` is renamed to `/src/keep-work`: `/alias/cruft` keeps its
+# path, identity and times, but is now `/src/keep-work/sub/cruft`. The
+# candidate's place changed since the enumeration (the root field follows
+# the rename), so the check enumerates again and the candidate is
+# `protected`.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: alias-cruft
+      find: {roots: [/alias], paths: [cruft], type: dir}
+      action: delete
+      examples: {match: [/alias/cruft]}
+    - name: keep
+      find: {roots: [/src], paths: ["keep-*"], type: dir}
+      action: delete
+      examples: {match: [/src/keep-a]}
+  protect: [keep]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: "profile:alias-cruft"}
+path: /src
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /src, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /alias, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2, bind_root: /work/sub}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /src/work/sub/cruft: {.: {mtime: 2026-10-01T00:00:00Z}, blob: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+  events:
+    - {at: {op: flock, path: /alias/cruft, when: after}, rename: {from: /src/work, to: /src/keep-work}}
+expect:
+  # The plan runs before the rename (the dry run takes no lock).
+  plan: [{candidate: /alias/cruft}]
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: [{candidate: /alias/cruft, reason: protected}]
+  preserved: [/src/keep-work/sub/cruft/blob]

@@ -1,0 +1,47 @@
+# TASK-285 (mped). As protect-cargo-tag-made-after-enumeration, with the
+# candidate reached through a bind: `/alias` binds `/p/target/debug/deps`.
+# `/p/target` held `debug/.cargo-lock` but no tag when `protect` enumerated
+# its Cargo targets below `/p`, so it was no match; a valid tag renamed in
+# under the candidate's lock makes it a target holding `/alias/cruft`.
+# `/alias/cruft` is not below `/p` by path, but its place is: the
+# directories between the protect root's place and the candidate's are
+# looked up for a tag, the check enumerates again, and the candidate is
+# `protected`.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: alias-cruft
+      find: {roots: [/alias], paths: [cruft], type: dir}
+      action: delete
+      examples: {match: [/alias/cruft]}
+  protect:
+    - {profile: cargo-target, roots: [/p]}
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: "profile:alias-cruft"}
+path: /p
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /p, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /alias, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2, bind_root: /target/debug/deps}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /p/Cargo.toml: {}
+    /p/stash/CACHEDIR.TAG: {cachedir_tag: true, mtime: 2026-10-01T00:00:00Z}
+    /p/target/debug/.cargo-lock: {mtime: 2026-10-01T00:00:00Z}
+    /p/target/debug/deps/cruft: {.: {mtime: 2026-10-01T00:00:00Z}, blob: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+  events:
+    - {at: {op: flock, path: /alias/cruft, when: after}, rename: {from: /p/stash/CACHEDIR.TAG, to: /p/target/CACHEDIR.TAG}}
+expect:
+  plan: [{candidate: /alias/cruft}]
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: [{candidate: /alias/cruft, reason: protected}]
+  preserved: [/p/target/debug/deps/cruft/blob, /p/target/CACHEDIR.TAG]

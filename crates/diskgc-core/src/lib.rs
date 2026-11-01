@@ -52,6 +52,7 @@ pub mod kernel;
 pub mod kind;
 pub mod liveness;
 pub mod outcome;
+pub mod places;
 pub mod profile;
 pub mod report;
 pub mod resolve;

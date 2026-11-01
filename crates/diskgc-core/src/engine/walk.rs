@@ -282,8 +282,8 @@ impl From<Skip> for WalkStop {
 
 /// The eligibility walk of `candidate`: its record, or why it is not
 /// eligible. Reads mountinfo first and refuses any mount point in its
-/// tree before statx; checks the deadline before every `statx`, open and
-/// listing.
+/// tree, by path or by place ([`crate::places::mounts_within`]), before
+/// statx; checks the deadline before every `statx`, open and listing.
 /// Refuses a VCS checkout inside ([`CHECKOUT_MARKERS`],
 /// `contains_checkout`) unless `rules` allow checkouts (the source
 /// profile's `checkouts: allow`).
@@ -300,16 +300,24 @@ pub fn walk<H: Host>(
     if deadline_passed(host, deadline) {
         return Err(WalkStop::DeadlinePassed { path: path() });
     }
-    let mount_points: Vec<PathBuf> = host
-        .mountinfo()
-        .map_err(|error| WalkStop::Failed {
-            path: PathBuf::from("/proc/self/mountinfo"),
-            error,
-        })?
-        .into_iter()
-        .map(|mount| mount.mount_point)
-        .filter(|mount| mount.starts_with(candidate.path))
-        .collect();
+    let mounts = host.mountinfo().map_err(|error| WalkStop::Failed {
+        path: PathBuf::from("/proc/self/mountinfo"),
+        error,
+    })?;
+    // By path and by place (TASK-290): through a non-recursive bind a
+    // mount point is an uncovered directory of the candidate's mount,
+    // which the mount ids below do not tell, and Linux refuses to remove.
+    let mount_points: Vec<PathBuf> = match crate::places::mounts_within(&mounts, candidate.path) {
+        Ok(found) => found.into_iter().map(|(_, at)| at).collect(),
+        Err(why) => {
+            return Err(Skip::new(
+                Reason::UnsafePath,
+                path(),
+                format!("cannot be placed in its filesystem (mountinfo): {why}"),
+            )
+            .into());
+        }
+    };
     if mount_points.iter().any(|mount| mount == candidate.path) {
         return Err(mounted(path()).into());
     }
