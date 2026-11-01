@@ -1128,15 +1128,14 @@ is accepted until measured otherwise.
   is a second typed operation beside it, `state_lock`: `LinuxHost` opens
   (creating if absent, with the state directory, mode 0700)
   `index-<fs>.lock` beneath the state-directory fd,
-  `O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC` (never `O_TRUNC`), mode 0600, for
-  `flock` only: an NFS client emulates `flock` with byte-range locks, and
-  an exclusive one needs a descriptor open for writing (TASK-288; where
-  the user may not write the file, `EACCES` or `EROFS`, `O_RDONLY` as
-  before, which a local `flock` needs no more than); nothing is ever
-  written to it or renamed onto it. Each of the two is
-  its own ungated entry in the source scan's allowlist
+  inspected through `O_PATH|O_NOFOLLOW` (a regular file of the user;
+  missing, made `O_CREAT|O_EXCL`, mode 0600), then reopened for `flock`
+  only, read-only but on a network filesystem
+  ([safety.md](safety.md#host-lock), Lock files on a network
+  filesystem); nothing is ever written to it or renamed onto it. Each of
+  the two is its own ungated entry in the source scan's allowlist
   (`diskgc-linux/src/state.rs`, with its reason and exact match count;
-  the open for writing, `open_for_flock`, is a third);
+  the reopen, `reopen_lock`, is a third);
   the per-user reclaim lock is a third, `user_lock` (what it checks and
   makes: [safety.md](safety.md#host-lock)): it takes no name, only
   whether it may make what is missing; `LinuxHost` finds the place

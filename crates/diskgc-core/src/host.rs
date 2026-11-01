@@ -1464,8 +1464,9 @@ pub trait Host {
 
     /// Opens the snapshot's single-writer lock file `index-<key>.lock` in
     /// diskgc's state directory, creating the directory (mode 0700) and
-    /// the file (mode 0600, read-only open, never written, never renamed)
-    /// if absent, for [`Host::flock_try`] or [`Host::flock_wait`] only,
+    /// the file (mode 0600, never written, never renamed) if absent, for
+    /// [`Host::flock_try`] or [`Host::flock_wait`] only (read-only, but
+    /// for writing on a network filesystem: docs/safety.md, Host lock),
     /// with the state directory's descriptor and mount ([`StateLock`]).
     /// The state directory is the implementation's own, never a name from
     /// the caller; it must be a directory owned by diskgc's user and
@@ -1522,9 +1523,10 @@ pub trait Host {
 
     /// Opens diskgc's per-user reclaim lock at [`Host::user_lock_path`]
     /// (its failure is [`UserLockError::Lookup`]) for [`Host::flock_try`]
-    /// or [`Host::flock_wait`] only, for writing where the user may (an
-    /// exclusive `flock` on NFS needs it), never truncated: nothing is
-    /// ever written to it or renamed onto it. It takes no name
+    /// or [`Host::flock_wait`] only: read-only, but for writing on a
+    /// network filesystem (docs/safety.md, Host lock: Lock files on a
+    /// network filesystem); nothing is ever written to it or renamed onto
+    /// it. It takes no name
     /// from the caller. What exists is inspected before it is opened for
     /// reading (an `O_PATH` open that never follows a symlink): the
     /// directory must be a directory of diskgc's user writable by no one

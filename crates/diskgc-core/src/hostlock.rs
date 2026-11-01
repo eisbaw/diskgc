@@ -329,7 +329,7 @@ pub fn prepare<H: Host>(host: &H) -> Result<ReclaimLock, LockError> {
 
 /// What [`open_lock`] found.
 enum Opened<F> {
-    /// The lock, open and readable for `flock`.
+    /// The lock, open for `flock`.
     Lock(F, ReclaimLock),
     /// No lock can be had: the reclaim runs without one.
     Unlocked(Unlocked),
@@ -414,7 +414,7 @@ pub fn acquire<H: Host>(
         return Err(LockError::Interrupted(signal));
     }
     let started = host.now();
-    let (readable, lock) = match open_lock(host)? {
+    let (lockable, lock) = match open_lock(host)? {
         Opened::Lock(fd, lock) => (fd, lock),
         Opened::Unlocked(unlocked) => {
             return Ok(HeldLock {
@@ -427,10 +427,12 @@ pub fn acquire<H: Host>(
     if let Some(signal) = host.interrupted() {
         return Err(LockError::Interrupted(signal));
     }
-    // Read-only is enough for flock, and is what the host lock's mode
-    // (0644 root) gives every user (docs/safety.md, Host lock).
+    // The host lock is open read-only (its mode, 0644 root, gives every
+    // user that much; enough for flock on `/run`); a per-user lock as the
+    // host opened it, for writing only on a network filesystem
+    // (docs/safety.md, Host lock).
     let locked = match host
-        .flock_wait(readable, LockMode::Exclusive, deadline)
+        .flock_wait(lockable, LockMode::Exclusive, deadline)
         .map_err(|e| LockError::Failed(lock.clone(), e))?
     {
         WaitLock::Acquired(locked) => locked,
@@ -462,7 +464,7 @@ pub fn acquire<H: Host>(
 /// trying the lock in that instant finds it busy once and tries again (it
 /// waits by polling, [`Host::flock_wait`]).
 pub fn held_by_another<H: Host>(host: &H) -> Result<Option<ReclaimLock>, LockError> {
-    let (readable, lock) = match open_host_lock(host) {
+    let (lockable, lock) = match open_host_lock(host) {
         Ok(fd) => (fd, ReclaimLock::Host),
         Err(LockError::Missing { .. }) if may_fall_back(host) => {
             match host.user_lock(MakeUserLock::Never) {
@@ -482,7 +484,7 @@ pub fn held_by_another<H: Host>(host: &H) -> Result<Option<ReclaimLock>, LockErr
         Err(e) => return Err(e),
     };
     match host
-        .flock_try(readable, LockMode::Shared)
+        .flock_try(lockable, LockMode::Shared)
         .map_err(|e| LockError::Failed(lock.clone(), e))?
     {
         TryLock::Acquired(probe) => {

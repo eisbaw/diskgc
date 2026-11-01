@@ -1097,10 +1097,10 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
         file: "crates/diskgc-linux/src/state.rs",
         function: "open_lock_file_ungated",
         gate: Gate::Ungated(
-            "creates only the snapshot's lock file index-<fs>.lock (0600, O_NOFOLLOW, opened \
-             for writing without O_TRUNC so flock works on NFS, never written) named by a \
-             typed FsKey in the state directory (made by make_dirs_ungated); diskgc's cache, \
-             never user data",
+            "creates only the snapshot's lock file index-<fs>.lock (0600, O_EXCL, \
+             O_NOFOLLOW, inspected through O_PATH first, reopened by reopen_lock, never \
+             written) named by a typed FsKey in the state directory (made by \
+             make_dirs_ungated); diskgc's cache, never user data",
         ),
         matches: 2, // CREATE, the make_dirs_ungated call
     },
@@ -1110,19 +1110,20 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
         gate: Gate::Ungated(
             "creates only the per-user reclaim lock (TASK-277) where user_lock_path found it: \
              the directory (mkdirat 0700, its parent by make_dirs_ungated) and `lock` in it \
-             (0600, O_EXCL, O_NOFOLLOW; reopened for writing without O_TRUNC so flock works \
-             on NFS, never written), each inspected through O_PATH first; no name from a \
-             caller; diskgc's own state, never user data",
+             (0600, O_EXCL, O_NOFOLLOW; reopened by reopen_lock, never written), each \
+             inspected through O_PATH first; no name from a caller; diskgc's own state, \
+             never user data",
         ),
         matches: 3, // mkdirat, CREATE, the make_dirs_ungated call
     },
     Allowed {
         file: "crates/diskgc-linux/src/state.rs",
-        function: "open_for_flock",
+        function: "reopen_lock",
         gate: Gate::Ungated(
-            "opens one of the two lock files above for writing, without O_TRUNC, for flock \
-             only (an exclusive flock on NFS needs it, TASK-288); the open is its caller's \
-             (by its checked name or fd), nothing is written",
+            "reopens, through /proc/self/fd, one of the two lock files above that its caller \
+             inspected (O_PATH), for flock only: for writing (never O_TRUNC, never written) \
+             only on a network filesystem, where an exclusive flock needs it (TASK-288; a \
+             writable open on overlayfs would copy up), read-only elsewhere",
         ),
         matches: 1, // RDWR
     },

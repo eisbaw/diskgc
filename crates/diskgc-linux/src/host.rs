@@ -2852,7 +2852,8 @@ impl Host for LinuxHost {
 
     fn state_lock(&self, key: &FsKey) -> Result<StateLock<LinuxFd>, HostError> {
         let dir = self.state_dir()?;
-        let (fd, shown, dir_fd) = crate::state::open_lock_file_ungated(dir, key)?;
+        let (fd, shown, dir_fd) =
+            crate::state::open_lock_file_ungated(dir, key, self.proc.as_fd())?;
         // The state directory's own mount, by its descriptor: the snapshot
         // is written into the directory, and a file bind mounted over the
         // lock file would put the lock file on another mount (TASK-286).
@@ -3032,7 +3033,7 @@ fn parse_cmdline(bytes: &[u8]) -> Vec<OsString> {
 /// 32-bit ABI's signed word holding a magic with the top bit set)
 /// reinterpreted. Anything else is no magic (`None`), so the local list
 /// can never be matched by truncation.
-fn fs_magic_of(f_type: i128) -> Option<u64> {
+pub(crate) fn fs_magic_of(f_type: i128) -> Option<u64> {
     if let Ok(magic) = u32::try_from(f_type) {
         return Some(u64::from(magic));
     }
@@ -4690,6 +4691,7 @@ mod tests {
             .join()
             .expect("holder thread"),
             "exec-loop" => exec_loop(),
+            "overlay-lock" => overlay_lock(),
             "pidns-parent" => {
                 // Root of a new user namespace (made before this exec): a
                 // new pid namespace for the children of this thread (a
@@ -4733,6 +4735,118 @@ mod tests {
     fn set_next_pid(pid: u32) {
         std::fs::write("/proc/sys/kernel/ns_last_pid", (pid - 1).to_string())
             .unwrap_or_else(|e| panic!("write ns_last_pid: {e}; {USERNS_NEEDED}"));
+    }
+
+    /// As root of a user namespace of its own (the test's uid and gid
+    /// mapped to 0), with the overlay at `HOLDER_DIR/merged` that
+    /// [`a_lock_file_on_an_overlay_is_not_copied_up`] made: opens the state
+    /// directory's `index-dev-0-42.lock` and the per-user lock as
+    /// `LinuxHost` does, takes each exclusively, and prints each
+    /// descriptor's access mode and whether the upper layer got a copy of
+    /// the file.
+    fn overlay_lock() {
+        let base = PathBuf::from(std::env::var_os(HOLDER_DIR).expect("holder dir"));
+        let merged = base.join("merged");
+        let host = LinuxHost::new()
+            .expect("host setup")
+            .with_state_dir(merged.join("state"));
+        let key = FsKey::dev(Dev {
+            major: 0,
+            minor: 42,
+        });
+        let access = |fd: &OwnedFd| {
+            if rustix::fs::fcntl_getfl(fd).expect("getfl") & OFlags::RWMODE == OFlags::RDONLY {
+                "read-only"
+            } else {
+                "writable"
+            }
+        };
+        let lock = host.state_lock(&key).expect("state lock");
+        let state_access = access(&lock.fd.fd);
+        let state_held = matches!(
+            host.flock_try(lock.fd, LockMode::Exclusive).expect("flock"),
+            TryLock::Acquired(_)
+        );
+        let (fd, shown) = crate::state::open_user_lock_ungated(
+            &merged.join("user/diskgc"),
+            MakeUserLock::Never,
+            host.proc.as_fd(),
+        )
+        .expect("per-user lock")
+        .expect("present");
+        let user_access = access(&fd);
+        let user_held = matches!(
+            host.flock_try(LinuxFd { fd, shown }, LockMode::Exclusive)
+                .expect("flock"),
+            TryLock::Acquired(_)
+        );
+        let copied = |file: &str| base.join("upper").join(file).exists();
+        println!(
+            "state lock: {state_access}, held {state_held}, copied up {}",
+            copied("state/index-dev-0-42.lock")
+        );
+        println!(
+            "per-user lock: {user_access}, held {user_held}, copied up {}",
+            copied("user/diskgc/lock")
+        );
+    }
+
+    /// TASK-288 review (Codex 1) on the real kernel: on overlayfs a
+    /// writable open of a lower file copies it up (a write). The two lock
+    /// files are reopened read-only there, nothing is copied up, and each
+    /// is still taken exclusively.
+    #[test]
+    fn a_lock_file_on_an_overlay_is_not_copied_up() {
+        let dir = TempDir::new();
+        let base = &dir.0;
+        // The lower layer: a state directory and a per-user lock
+        // directory, each with its lock file (0600, this user's).
+        for sub in [
+            "lower/state",
+            "lower/user/diskgc",
+            "upper",
+            "work",
+            "merged",
+        ] {
+            std::fs::create_dir_all(base.join(sub)).expect("mkdir");
+        }
+        for sub in ["lower/state", "lower/user", "lower/user/diskgc"] {
+            std::fs::set_permissions(base.join(sub), std::fs::Permissions::from_mode(0o700))
+                .expect("chmod");
+        }
+        for file in ["lower/state/index-dev-0-42.lock", "lower/user/diskgc/lock"] {
+            std::fs::write(base.join(file), b"").expect("make");
+            std::fs::set_permissions(base.join(file), std::fs::Permissions::from_mode(0o600))
+                .expect("chmod");
+        }
+        let cstring = |text: String| std::ffi::CString::new(text).expect("no NUL");
+        let overlay = (
+            cstring(base.join("merged").display().to_string()),
+            cstring(format!(
+                "lowerdir={},upperdir={},workdir={}",
+                base.join("lower").display(),
+                base.join("upper").display(),
+                base.join("work").display()
+            )),
+        );
+        let said = in_user_namespace(
+            "overlay-lock",
+            &[(HOLDER_DIR, base.as_path())],
+            Some(overlay),
+        );
+        // overlayfs leaves its work directory mode 0; let the cleanup in.
+        let _ = std::fs::set_permissions(
+            dir.0.join("work/work"),
+            std::fs::Permissions::from_mode(0o700),
+        );
+        assert!(
+            said.contains("state lock: read-only, held true, copied up false"),
+            "{said}"
+        );
+        assert!(
+            said.contains("per-user lock: read-only, held true, copied up false"),
+            "{said}"
+        );
     }
 
     /// pid 1 of a pid namespace A (in a user namespace of its own): mounts
@@ -6342,23 +6456,60 @@ mod tests {
     /// -Ur`; no privilege needed), starting `next` as pid 1 of a new pid
     /// namespace, and returns what was printed.
     fn in_new_pid_namespace(next: &str) -> String {
+        in_user_namespace("pidns-parent", &[(HOLDER_NEXT, Path::new(next))], None)
+    }
+
+    /// Runs the helper `mode`, with `env` set, as root of a new user
+    /// namespace (like `unshare -Ur`; no privilege needed), and returns what
+    /// it printed. With `overlay` (its mount point and options), in a mount
+    /// namespace of its own too, with that overlay mounted before the exec,
+    /// so the whole helper process sees it (a mount namespace is a
+    /// thread's: one a test thread made is not `/proc/self`'s).
+    fn in_user_namespace(
+        mode: &str,
+        env: &[(&str, &Path)],
+        overlay: Option<(std::ffi::CString, std::ffi::CString)>,
+    ) -> String {
         let mut parent = Command::new(std::env::current_exe().expect("own executable"));
         parent
             .args(HOLDER_ARGS)
-            .env(HOLDER_MODE, "pidns-parent")
-            .env(HOLDER_NEXT, next)
+            .env(HOLDER_MODE, mode)
+            .envs(env.iter().map(|(k, v)| (*k, v.as_os_str())))
             .stderr(Stdio::inherit());
         // Made before the fork: the closure below must not allocate.
         let uid_map = format!("0 {} 1", rustix::process::getuid().as_raw()).into_bytes();
+        let gid_map = format!("0 {} 1", rustix::process::getgid().as_raw()).into_bytes();
         // SAFETY: between fork and exec the closure makes only syscalls
         // (`unshare`, `open`, `write`) on memory made before the fork.
         unsafe {
             parent.pre_exec(move || {
-                // A new user namespace, with this uid as its root, so the
-                // exec'd helper keeps the namespace's capabilities.
+                // A new user namespace, with this uid and gid as its root
+                // (an overlay mount needs both mapped), so the exec'd helper
+                // keeps the namespace's capabilities.
                 rustix::thread::unshare_unsafe(rustix::thread::UnshareFlags::NEWUSER)?;
-                let map = rustix::fs::open(c"/proc/self/uid_map", OFlags::WRONLY, Mode::empty())?;
-                rustix::io::write(&map, &uid_map)?;
+                let write = |path: &std::ffi::CStr, bytes: &[u8]| -> std::io::Result<()> {
+                    let fd = rustix::fs::open(path, OFlags::WRONLY, Mode::empty())?;
+                    rustix::io::write(&fd, bytes)?;
+                    Ok(())
+                };
+                write(c"/proc/self/uid_map", &uid_map)?;
+                write(c"/proc/self/setgroups", b"deny")?;
+                write(c"/proc/self/gid_map", &gid_map)?;
+                if let Some((target, options)) = &overlay {
+                    use rustix::mount::{MountFlags, MountPropagationFlags, mount, mount_change};
+                    rustix::thread::unshare_unsafe(rustix::thread::UnshareFlags::NEWNS)?;
+                    mount_change(
+                        c"/",
+                        MountPropagationFlags::PRIVATE | MountPropagationFlags::REC,
+                    )?;
+                    mount(
+                        c"overlay",
+                        target.as_c_str(),
+                        c"overlay",
+                        MountFlags::empty(),
+                        Some(options.as_c_str()),
+                    )?;
+                }
                 Ok(())
             });
         }
@@ -7459,59 +7610,106 @@ mod tests {
             & 0o7777
     }
 
-    /// TASK-288: an NFS client emulates `flock` with byte-range locks, so
-    /// an exclusive one needs a descriptor open for writing (flock(2)). A
-    /// local POSIX write lock (`F_SETLK`, `F_WRLCK`) makes the same check
-    /// (`EBADF` on a descriptor not open for writing), so it stands in for
-    /// NFS here: the per-user lock's and the single-writer lock's
-    /// descriptors take one, and nothing is truncated or written. A lock
-    /// file the user made read-only is still opened (read-only), and a
-    /// local `flock` still takes it.
+    /// TASK-288 review (Codex 1): a lock file is reopened for writing only
+    /// on a network filesystem, where an exclusive `flock` needs it (NFS);
+    /// on a local one, overlayfs included (where a writable open copies a
+    /// lower file up), read-only, as before TASK-288.
     #[test]
-    fn the_lock_files_are_open_for_writing_so_an_exclusive_lock_works_on_nfs() {
+    fn only_a_network_filesystem_s_lock_is_reopened_for_writing() {
+        for network in [0x6969, 0xFF53_4D42, 0xFE53_4D42, 0x00C3_6400, 0x0102_1997] {
+            assert!(crate::state::flock_needs_write(network), "{network:#x}");
+        }
+        // ext4, tmpfs, btrfs, xfs, overlayfs, FUSE (fuse-overlayfs copies up too).
+        for local in [
+            0xEF53,
+            0x0102_1994,
+            0x9123_683E,
+            0x5846_5342,
+            0x794C_7630,
+            0x6573_5546,
+        ] {
+            assert!(!crate::state::flock_needs_write(local), "{local:#x}");
+        }
+        // This machine's temporary directory is local: both locks read-only,
+        // empty, and lockable.
         let tmp = TempDir::new();
         let host = LinuxHost::new().expect("host setup");
-        let write_lock = |fd: &OwnedFd, what: &str| {
-            rustix::fs::fcntl_lock(fd, FlockOperation::NonBlockingLockExclusive)
-                .unwrap_or_else(|e| panic!("a write lock on {what}: {e}"));
-            rustix::fs::fcntl_lock(fd, FlockOperation::NonBlockingUnlock).expect("unlock");
-        };
         let access = |fd: &OwnedFd| rustix::fs::fcntl_getfl(fd).expect("getfl") & OFlags::RWMODE;
         let dir = tmp.0.join("run/diskgc");
         let (fd, path) = open_user_lock(&host, &dir, MakeUserLock::IfAbsent)
             .expect("made")
             .expect("open");
-        write_lock(&fd, "the per-user lock");
-        assert_eq!(access(&fd), OFlags::RDWR);
-        drop(fd);
+        assert_eq!(access(&fd), OFlags::RDONLY);
         let state = state_host(&tmp.0);
         let key = FsKey::dev(Dev {
             major: 0,
             minor: 42,
         });
         let lock = state.state_lock(&key).expect("state lock");
-        write_lock(&lock.fd.fd, "the single-writer lock");
-        assert_eq!(access(&lock.fd.fd), OFlags::RDWR);
-        drop(lock);
-        for file in [path.clone(), tmp.0.join("state/diskgc/index-dev-0-42.lock")] {
-            assert_eq!(std::fs::metadata(&file).expect("stat").len(), 0, "{file:?}");
-        }
-        // Made read-only by its user (still private): opened read-only
-        // (root may write it whatever its mode).
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).expect("chmod");
-        let (fd, shown) = open_user_lock(&host, &dir, MakeUserLock::Never)
-            .expect("opened")
-            .expect("present");
-        let root = rustix::process::geteuid().is_root();
-        assert_eq!(
-            access(&fd),
-            if root { OFlags::RDWR } else { OFlags::RDONLY }
-        );
+        assert_eq!(access(&lock.fd.fd), OFlags::RDONLY);
         assert!(matches!(
-            host.flock_try(LinuxFd { fd, shown }, LockMode::Exclusive)
+            state
+                .flock_try(lock.fd, LockMode::Exclusive)
                 .expect("flock"),
             TryLock::Acquired(_)
         ));
+        drop(fd);
+        for file in [path, tmp.0.join("state/diskgc/index-dev-0-42.lock")] {
+            assert_eq!(std::fs::metadata(&file).expect("stat").len(), 0, "{file:?}");
+        }
+    }
+
+    /// TASK-288: where a write is needed (a network filesystem), the reopen
+    /// is for writing, so a byte-range write lock, what an NFS client's
+    /// `flock` becomes, takes it: a local `F_SETLK` `F_WRLCK` makes the
+    /// kernel's same check (`EBADF` on a descriptor not open for writing).
+    /// A lock file its user made read-only (`EACCES`) is reopened read-only,
+    /// so a local `flock` still takes it; `EPERM` (`chattr +i`) and `EROFS`
+    /// take the same arm (they need privilege or a read-only mount to show).
+    #[test]
+    fn a_lock_reopened_for_writing_takes_a_write_lock_or_falls_back_to_read_only() {
+        let tmp = TempDir::new();
+        let host = LinuxHost::new().expect("host setup");
+        let file = tmp.0.join("lock");
+        std::fs::write(&file, b"").expect("make");
+        let checked = |path: &Path| {
+            rustix::fs::open(path, OFlags::PATH | OFlags::CLOEXEC, Mode::empty()).expect("O_PATH")
+        };
+        let access = |fd: &OwnedFd| rustix::fs::fcntl_getfl(fd).expect("getfl") & OFlags::RWMODE;
+        let read_only = crate::state::reopen_lock(host.proc.as_fd(), checked(&file).as_fd(), false)
+            .expect("read-only");
+        assert_eq!(access(&read_only), OFlags::RDONLY);
+        assert_eq!(
+            rustix::fs::fcntl_lock(&read_only, FlockOperation::NonBlockingLockExclusive),
+            Err(rustix::io::Errno::BADF),
+            "the NFS failure, locally"
+        );
+        let writable = crate::state::reopen_lock(host.proc.as_fd(), checked(&file).as_fd(), true)
+            .expect("for writing");
+        assert_eq!(access(&writable), OFlags::RDWR);
+        rustix::fs::fcntl_lock(&writable, FlockOperation::NonBlockingLockExclusive)
+            .expect("a write lock");
+        drop((read_only, writable));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).expect("chmod");
+        let fallback = crate::state::reopen_lock(host.proc.as_fd(), checked(&file).as_fd(), true)
+            .expect("read-only fallback");
+        let root = rustix::process::geteuid().is_root();
+        assert_eq!(
+            access(&fallback),
+            if root { OFlags::RDWR } else { OFlags::RDONLY }
+        );
+        assert!(matches!(
+            host.flock_try(
+                LinuxFd {
+                    fd: fallback,
+                    shown: file.clone()
+                },
+                LockMode::Exclusive
+            )
+            .expect("flock"),
+            TryLock::Acquired(_)
+        ));
+        assert_eq!(std::fs::metadata(&file).expect("stat").len(), 0);
     }
 
     #[test]

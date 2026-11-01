@@ -38,18 +38,68 @@ const DIR_MODE: u32 = 0o700;
 /// Mode of the files diskgc creates there (the umask can only narrow it).
 const FILE_MODE: u32 = 0o600;
 
-/// Opens a lock file for `flock` with `open(access | rest)`: for writing
-/// (never truncated, never written), since an NFS client emulates `flock`
-/// with byte-range locks and an exclusive one needs a descriptor open for
-/// writing (flock(2); TASK-288: read-only, every lock on an NFS home
-/// failed with `EBADF`). Where this user may not write it (`EACCES`: a
-/// lock file made read-only; `EROFS`), read-only, which a local
-/// filesystem's `flock` needs no more than.
-fn open_for_flock(
-    open: impl Fn(OFlags) -> rustix::io::Result<OwnedFd>,
+/// The in-kernel network filesystems (those of
+/// `diskgc_core::places::space::NETWORK_FS_TYPES` the kernel itself
+/// mounts), by `statfs` magic (`include/uapi/linux/magic.h`): NFS, SMB
+/// (`cifs` and `smb3`), Ceph, 9p, AFS (both), Coda. Their `flock` is a lock
+/// on the server, and an NFS client's an emulated byte-range lock whose
+/// exclusive form needs a descriptor open for writing (flock(2); the
+/// kernel's `F_WRLCK` check, `check_fmode_for_setlk`, gives `EBADF`).
+const NETWORK_FS_MAGICS: &[u64] = &[
+    0x6969,      // NFS_SUPER_MAGIC
+    0xFF53_4D42, // CIFS_SUPER_MAGIC
+    0xFE53_4D42, // SMB2_SUPER_MAGIC
+    0x00C3_6400, // CEPH_SUPER_MAGIC
+    0x0102_1997, // V9FS_MAGIC
+    0x5346_414F, // AFS_SUPER_MAGIC
+    0x6B41_4653, // AFS_FS_MAGIC
+    0x7375_7245, // CODA_SUPER_MAGIC
+];
+
+/// Whether a lock file on a filesystem of `statfs` magic `f_type` is
+/// reopened for writing ([`reopen_for_flock`]): only on a network
+/// filesystem ([`NETWORK_FS_MAGICS`]). Anywhere else a read-only
+/// descriptor is enough for `flock`, and a writable open is not harmless:
+/// on overlayfs it copies a lower file up (a write, TASK-288 review).
+pub(crate) fn flock_needs_write(f_type: u64) -> bool {
+    NETWORK_FS_MAGICS.contains(&f_type)
+}
+
+/// Reopens the lock file `checked` (an `O_PATH` descriptor of the object
+/// its caller inspected) through `/proc/self/fd`, for `flock` only, never
+/// truncated and never written: for writing on a network filesystem
+/// ([`flock_needs_write`]; docs/safety.md, Host lock), read-only elsewhere.
+/// Where the user may not write it (`EACCES`: a lock file made read-only;
+/// `EPERM`: `chattr +i` or `+a`; `EROFS`), read-only too, as before
+/// TASK-288: an exclusive lock there then fails on NFS (exit 3), and works
+/// on the other network types that do not check the mode.
+fn reopen_for_flock(proc: BorrowedFd<'_>, checked: BorrowedFd<'_>) -> rustix::io::Result<OwnedFd> {
+    let f_type = crate::host::fs_magic_of(i128::from(rustix::fs::fstatfs(checked)?.f_type));
+    reopen_lock(proc, checked, f_type.is_some_and(flock_needs_write))
+}
+
+/// [`reopen_for_flock`] once it is decided whether to try writing.
+pub(crate) fn reopen_lock(
+    proc: BorrowedFd<'_>,
+    checked: BorrowedFd<'_>,
+    write: bool,
 ) -> rustix::io::Result<OwnedFd> {
+    let through = format!("self/fd/{}", checked.as_raw_fd());
+    let open = |access: OFlags| {
+        rustix::fs::openat(
+            proc,
+            through.as_str(),
+            access | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+    };
+    if !write {
+        return open(OFlags::RDONLY);
+    }
     match open(OFlags::RDWR) {
-        Err(rustix::io::Errno::ACCESS | rustix::io::Errno::ROFS) => open(OFlags::RDONLY),
+        Err(rustix::io::Errno::ACCESS | rustix::io::Errno::PERM | rustix::io::Errno::ROFS) => {
+            open(OFlags::RDONLY)
+        }
         other => other,
     }
 }
@@ -96,18 +146,24 @@ fn check_state_dir(fd: BorrowedFd<'_>, shown: &str) -> Result<(), HostError> {
 }
 
 /// Opens (creating it, and the state directory, if absent) the
-/// single-writer lock file of `key`, for `flock` only ([`open_for_flock`]:
-/// for writing where it may be, so an exclusive lock works on NFS): nothing
-/// is ever written to it or renamed onto it (docs/architecture.md, Single
-/// writer). The directory is created mode 0700 with its missing parents;
-/// the file mode 0600, `O_NOFOLLOW` (a symlink there is refused), and it
-/// must be a regular file of this user. Returns the lock file's fd and
-/// path, and the state directory's fd: what the snapshot is written into,
-/// and so what its space guard samples and places (never the lock file's
-/// mount: a file can be bind mounted over the lock file).
+/// single-writer lock file of `key`, for `flock` only: nothing is ever
+/// written to it or renamed onto it (docs/architecture.md, Single writer).
+/// The directory is created mode 0700 with its missing parents. The file
+/// is inspected through an `O_PATH | O_NOFOLLOW` open before anything opens
+/// it for reading or writing: it must be a regular file of this user (a
+/// symlink, a FIFO or a device there is refused without being opened);
+/// missing, it is made mode 0600 with `O_EXCL` (never over something
+/// else; one made meanwhile by another run is inspected like any). The
+/// checked object is then reopened ([`reopen_for_flock`]: read-only but on
+/// a network filesystem) and checked to be the same object. Returns the
+/// lock file's fd and path, and the state directory's fd: what the
+/// snapshot is written into, and so what its space guard samples and
+/// places (never the lock file's mount: a file can be bind mounted over
+/// the lock file).
 pub(crate) fn open_lock_file_ungated(
     dir: &Path,
     key: &FsKey,
+    proc: BorrowedFd<'_>,
 ) -> Result<(OwnedFd, PathBuf, OwnedFd), HostError> {
     let dir_fd = match open_state_dir(dir) {
         Err(e) if e.is(diskgc_core::host::Errno::ENOENT) => {
@@ -119,21 +175,41 @@ pub(crate) fn open_lock_file_ungated(
     let name = key.lock_name();
     let path = dir.join(&name);
     let shown = path.display().to_string();
-    let fd = open_for_flock(|access| {
-        rustix::fs::openat(
-            &dir_fd,
-            name.as_str(),
-            access
-                | OFlags::CREATE
-                | OFlags::NOFOLLOW
-                | OFlags::NONBLOCK
-                | OFlags::NOCTTY
-                | OFlags::CLOEXEC,
-            Mode::from_raw_mode(FILE_MODE),
-        )
-    })
-    .map_err(|e| HostError::errno("open", &shown, errno_of(e)))?;
-    let st = rustix::fs::fstat(&fd).map_err(|e| HostError::errno("fstat", &shown, errno_of(e)))?;
+    let failed = |op: &'static str, e| HostError::errno(op, &shown, errno_of(e));
+    let mut made = false;
+    let (file, st) = loop {
+        match inspect_name(dir_fd.as_fd(), OsStr::new(name.as_str())) {
+            Ok(Some(found)) => break found,
+            Ok(None) if made => {
+                return Err(HostError::invalid(
+                    "open",
+                    &shown,
+                    "the lock file vanished right after it was made",
+                ));
+            }
+            Ok(None) => {
+                match rustix::fs::openat(
+                    &dir_fd,
+                    name.as_str(),
+                    OFlags::RDONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::NONBLOCK
+                        | OFlags::NOCTTY
+                        | OFlags::CLOEXEC,
+                    Mode::from_raw_mode(FILE_MODE),
+                ) {
+                    // Made: inspected like one found, above.
+                    Ok(fd) => drop(fd),
+                    Err(rustix::io::Errno::EXIST) => {}
+                    Err(e) => return Err(failed("open", e)),
+                }
+                made = true;
+            }
+            Err((op, e)) => return Err(failed(op, e)),
+        }
+    };
     let uid = rustix::process::geteuid().as_raw();
     if file_type_of(st.st_mode) != FileType::Regular || st.st_uid != uid {
         return Err(HostError::invalid(
@@ -144,6 +220,15 @@ pub(crate) fn open_lock_file_ungated(
                 file_type_of(st.st_mode),
                 st.st_uid
             ),
+        ));
+    }
+    let fd = reopen_for_flock(proc, file.as_fd()).map_err(|e| failed("open", e))?;
+    let opened = rustix::fs::fstat(&fd).map_err(|e| failed("fstat", e))?;
+    if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino) {
+        return Err(HostError::invalid(
+            "open",
+            &shown,
+            "the lock file changed between checking it and opening it",
         ));
     }
     Ok((fd, path, dir_fd))
@@ -178,11 +263,11 @@ enum Inspected {
 /// `O_PATH | O_NOFOLLOW` open (a symlink is opened as itself) and `fstat`.
 /// Needs search permission on `dir` only, so another user's object is
 /// inspected and refused, never an `EACCES` (TASK-277 review, Codex 1).
-fn inspect(dir: BorrowedFd<'_>, name: &OsStr, shown: &Path) -> Result<Inspected, UserLockError> {
-    let failed = |op, e| UserLockError::Failed {
-        path: shown.to_path_buf(),
-        error: HostError::errno(op, shown.display(), errno_of(e)),
-    };
+/// `None`: absent; an error names its operation.
+fn inspect_name(
+    dir: BorrowedFd<'_>,
+    name: &OsStr,
+) -> Result<Option<(OwnedFd, rustix::fs::Stat)>, (&'static str, rustix::io::Errno)> {
     match rustix::fs::openat(
         dir,
         name,
@@ -190,18 +275,29 @@ fn inspect(dir: BorrowedFd<'_>, name: &OsStr, shown: &Path) -> Result<Inspected,
         Mode::empty(),
     ) {
         Ok(fd) => {
-            let st = rustix::fs::fstat(&fd).map_err(|e| failed("fstat", e))?;
-            Ok(Inspected::Present(fd, st))
+            let st = rustix::fs::fstat(&fd).map_err(|e| ("fstat", e))?;
+            Ok(Some((fd, st)))
         }
-        Err(rustix::io::Errno::NOENT) => Ok(Inspected::Absent),
-        Err(e) => Err(failed("open", e)),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(e) => Err(("open", e)),
+    }
+}
+
+/// [`inspect_name`] for [`open_user_lock_ungated`], its failure a
+/// [`UserLockError::Failed`] at `shown`.
+fn inspect(dir: BorrowedFd<'_>, name: &OsStr, shown: &Path) -> Result<Inspected, UserLockError> {
+    match inspect_name(dir, name) {
+        Ok(Some((fd, st))) => Ok(Inspected::Present(fd, st)),
+        Ok(None) => Ok(Inspected::Absent),
+        Err((op, e)) => Err(UserLockError::Failed {
+            path: shown.to_path_buf(),
+            error: HostError::errno(op, shown.display(), errno_of(e)),
+        }),
     }
 }
 
 /// Opens the per-user reclaim lock `dir/lock` (docs/safety.md, Host lock)
-/// for `flock` only ([`open_for_flock`]: for writing where it may be, so an
-/// exclusive lock works on NFS): nothing is ever written to it or renamed
-/// onto it. `dir` is the per-user lock directory `LinuxHost` found
+/// for `flock` only: nothing is ever written to it or renamed onto it. `dir` is the per-user lock directory `LinuxHost` found
 /// (`/run/user/<uid>/diskgc` or `<home>/.local/state/diskgc`). Its parent
 /// is reached following symlinks (made, mode 0700 with its missing
 /// parents, when `make` allows). The directory and the file are inspected
@@ -209,8 +305,9 @@ fn inspect(dir: BorrowedFd<'_>, name: &OsStr, shown: &Path) -> Result<Inspected,
 /// be a directory of this user that no one else may write to, the file a
 /// regular file of this user that no one else may open (`mode & 0o077`:
 /// they could hold the lock); anything else, whoever owns it, is
-/// [`UserLockError::Unsafe`]. Then the checked file is reopened, without
-/// truncation, through `/proc/self/fd` and checked to be the same object. What is
+/// [`UserLockError::Unsafe`]. Then the checked file is reopened
+/// ([`reopen_for_flock`]: read-only but on a network filesystem) and
+/// checked to be the same object. What is
 /// missing is made when `make` is [`MakeUserLock::IfAbsent`] (the directory
 /// mode 0700, the file mode 0600 with `O_EXCL`, so never over something
 /// else; a name made meanwhile by another run is inspected like any), and
@@ -346,26 +443,16 @@ pub(crate) fn open_user_lock_ungated(
             ),
         ));
     }
-    // Reopened through the checked object, never by name again; for
-    // writing where it may be ([`open_for_flock`]: NFS).
-    let through = format!("self/fd/{}", file.as_raw_fd());
-    let readable = open_for_flock(|access| {
-        rustix::fs::openat(
-            proc,
-            through.as_str(),
-            access | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-    })
-    .map_err(|e| failed("open", &path, e))?;
-    let opened = rustix::fs::fstat(&readable).map_err(|e| failed("fstat", &path, e))?;
+    // Reopened through the checked object, never by name again.
+    let lockable = reopen_for_flock(proc, file.as_fd()).map_err(|e| failed("open", &path, e))?;
+    let opened = rustix::fs::fstat(&lockable).map_err(|e| failed("fstat", &path, e))?;
     if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino) {
         return Err(unsafe_(
             &path,
             "the per-user lock changed between checking it and opening it".into(),
         ));
     }
-    Ok(Some((readable, path)))
+    Ok(Some((lockable, path)))
 }
 
 /// What is at `index-<key>` in the state directory, never following a

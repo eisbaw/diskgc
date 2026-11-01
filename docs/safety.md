@@ -3934,11 +3934,16 @@ the other documents link here.
     user's account entry's (`getpwuid_r`), and `$HOME` only when that
     lookup finds none (a static musl build without nscd cannot resolve
     NSS-only accounts; `ENOENT`, which musl returns when there is no
-    `/etc/passwd`, counts as none). A lookup that fails (an NSS source
-    unreachable, `EIO`, `EMFILE`, ...) is not "none": where the lock is
-    cannot be told, and `$HOME`, which a cron job and a login session of
-    one user may set differently, is not guessed. It is a failure of the
-    host (below; TASK-288), asked again at the next use.
+    `/etc/passwd`, counts as none). A lookup that fails with another
+    error (`EIO`, `EMFILE`, ...) is not "none": where the lock is cannot
+    be told, and `$HOME`, which a cron job and a login session of one
+    user may set differently, is not guessed. It is a failure of the
+    host (below; TASK-288), asked again at the next use. With glibc an
+    NSS outage usually still reads as none (`sssd` down: a later module's
+    "not found", or `ENOENT` from its missing socket), so `$HOME` is used
+    and two runs may take different per-user locks. That is accepted: the
+    per-user lock only serialises reclaims; it is not a safety boundary
+    (below).
 
   The place is decided at each use: while the user has a session the
   lock is in `/run/user/<uid>`, after the last session ends (without
@@ -3953,14 +3958,30 @@ the other documents link here.
   user that no one else may write to, the file a regular file of the
   user that no one else may open (`mode & 0o077 == 0`: anyone who can
   open it can hold it). The checked file is then reopened through
-  `/proc/self/fd`, for writing and never truncated (an NFS client
-  emulates `flock` with byte-range locks, and an exclusive one needs a
-  descriptor open for writing, flock(2); read-only only where the user
-  may not write it, `EACCES` or `EROFS`, which a local `flock` needs no
-  more than; TASK-288), and checked to be the same object. What is
+  `/proc/self/fd` (Lock files on a network filesystem, below) and
+  checked to be the same object. What is
   missing is made: the directory mode 0700, the file mode 0600 with
   `O_EXCL`, never over something else. Making them is a state write (Pre-release
   sandbox gate: an ungated wrapper of its own, like the snapshot's).
+- **Lock files on a network filesystem.** Both lock files diskgc makes
+  in a home, the per-user lock and the snapshot's single-writer lock
+  `index-<fs>.lock` ([architecture.md](architecture.md#the-tally),
+  Snapshot), are reopened, after their checks, for `flock` only and never
+  written or truncated: for writing on an in-kernel network filesystem
+  (NFS, SMB, Ceph, 9p, AFS, Coda, told by `statfs` magic), read-only
+  everywhere else (TASK-288). An NFS client emulates `flock` with
+  byte-range locks on the server, and an exclusive one needs a
+  descriptor open for writing (flock(2); the kernel's `F_WRLCK` check
+  gives `EBADF`): read-only, every reclaim on an NFS home falling back to
+  the per-user lock exited 3, and a `watch` there kept no snapshot.
+  Elsewhere a writable open is not harmless: on overlayfs it copies a
+  lower file up, which is a write (TASK-288 review). Where the user may
+  not write the file on a network filesystem (`EACCES`: made read-only;
+  `EPERM`: `chattr +i` or `+a`; `EROFS`), it is reopened read-only, as
+  before, so the lock is still taken where it was (on NFS an exclusive
+  one then fails, exit 3). A writable open changes nothing in the file;
+  on NFSv4 it is an open for writing on the server, which may recall
+  another client's read delegation of it.
 - **Unsafe is refused; unavailable is not.** The per-user lock only
   serialises; it is not a safety boundary: every check is per candidate
   and made under the candidate's own locks (Cargo's lock files, an `fs`
