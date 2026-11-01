@@ -124,9 +124,9 @@ pub fn configured_protect_marks_overlapping_fs_candidates_in_dry_run(ctx: &Ctx) 
 /// target, whose upper directory holds the candidate. Cargo discovery does
 /// not enter the target, and the overlay is on neither the candidate's nor
 /// the match's mount chain, so before TASK-268 the reclaiming run deleted
-/// `/tmp/cache/upper/cruft`, which the protected target shows at
-/// `/tmp/ovp/proj/target/debug/deps/view/cruft`. Now the overlap is unprovable: exit 3, and the oracle
-/// (nothing eligible) sees no deletion.
+/// `/tmp/ovp/cache/upper/cruft`, which the protected target shows at
+/// `/tmp/ovp/proj/target/debug/deps/view/cruft`. Now the overlap is
+/// unprovable: exit 3, and the oracle (nothing eligible) sees no deletion.
 pub fn protect_refuses_an_overlay_mounted_inside_a_protected_cargo_target(ctx: &Ctx) -> TestResult {
     let s = &ctx.scratch;
     s.mkdirs("ovp/proj/target/debug/deps/view", 0o755, TESTER)?;
