@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-31T00:59:00Z'
+updated_date: '2026-11-01T04:10:00Z'
 labels:
   - watch
   - contract
@@ -24,3 +25,9 @@ From TASK-32: docs/reference.md (Watch signals) says a second SIGTERM, SIGINT or
 - [ ] #1 A second signal during the stop's snapshot write leaves the old snapshot unchanged and exits 0 (model test, ModelHost signal events)
 - [ ] #2 A second signal during a cycle's child grace exits 0 without waiting out the grace, the child keeps the host lock it inherited
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+t272 branch 4be0390: Host::second_signal (LinuxHost counts under watch's handlers only), state_write -> StateWritten::Cancelled before the link, watch stop skips the write, LinuxHost run_command leaves the child running on a second signal during its grace. Model tests for AC1, container watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock for AC2 (PASS, bite FAIL with second_signal forced false). Awaiting review round.
+<!-- SECTION:NOTES:END -->
