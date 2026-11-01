@@ -229,6 +229,7 @@ fn mount(
         fs_type: fs_type.into(),
         source: "src".into(),
         read_only: false,
+        idmapped: false,
     }
 }
 

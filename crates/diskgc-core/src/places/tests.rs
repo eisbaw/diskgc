@@ -19,6 +19,7 @@ fn mount(id: u64, parent_id: u64, point: &str, dev: (u32, u32), root: &str) -> M
         fs_type: "ext4".to_owned(),
         source: "fixture".to_owned(),
         read_only: false,
+        idmapped: false,
     }
 }
 
@@ -391,4 +392,37 @@ fn one_superblock_is_one_space_and_independence_must_be_proved() {
             minor: 40
         }
     );
+}
+
+/// TASK-299: which mounts may show an owner other than the one stored, so
+/// that a file no owner of a run owns may still look like an owner's
+/// through them: an idmapped mount of any type, an overlay (its layers may
+/// be idmapped mounts the table does not list), the other types that store
+/// their data elsewhere, but not eCryptfs, which reports its lower file's
+/// owner unmapped. A plain mount, a bind and btrfs show the stored owner.
+#[test]
+fn which_mounts_may_show_other_owners() {
+    let typed = |fs_type: &str, idmapped: bool| MountEntry {
+        fs_type: fs_type.to_owned(),
+        idmapped,
+        ..mount(9, 1, "/m", (0, 9), "/")
+    };
+    for (fs_type, idmapped, shows) in [
+        ("ext4", false, false),
+        ("btrfs", false, false),
+        ("tmpfs", false, false),
+        ("ext4", true, true),
+        ("btrfs", true, true),
+        ("overlay", false, true),
+        ("shiftfs", false, true),
+        ("aufs", false, true),
+        ("fuse.bindfs", false, true),
+        ("ecryptfs", false, false),
+    ] {
+        assert_eq!(
+            may_show_other_owners(&typed(fs_type, idmapped)),
+            shows,
+            "{fs_type} idmapped {idmapped}"
+        );
+    }
 }

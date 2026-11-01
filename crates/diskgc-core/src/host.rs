@@ -437,6 +437,12 @@ pub struct MountEntry {
     pub source: String,
     /// `ro` among the per-mount or superblock options.
     pub read_only: bool,
+    /// `idmapped` among the per-mount options (Linux 5.12 on; the kernel's
+    /// `show_vfsmnt_opts`): an idmapped mount shows its filesystem's owners
+    /// through an id mapping, so the owner `statx` reports through it need
+    /// not be the one stored, nor the one another mount of the filesystem
+    /// shows (TASK-299). Which mapping is not said.
+    pub idmapped: bool,
 }
 
 /// Space on a filesystem, from `statvfs` (docs/architecture.md, Measuring
@@ -1356,9 +1362,12 @@ pub trait Host {
     /// (`/sys/dev/block/M:m/loop`) or a partition of one (`losetup -P`,
     /// the parent's); for btrfs, whose superblock device is anonymous, each
     /// member device that is one, found through the filesystem's id read
-    /// from `fd` (`BTRFS_IOC_FS_INFO` and `/sys/fs/btrfs/<fsid>/devices`),
-    /// or without `fd` through the device mountinfo names as its source.
-    /// Empty: none (another block device, tmpfs, an overlay). Read-only.
+    /// from `fd`, a directory on it (`BTRFS_IOC_FS_INFO` and
+    /// `/sys/fs/btrfs/<fsid>/devices`). A btrfs without `fd`, or with fewer
+    /// members listed than it has (a missing member), is an error: never
+    /// answered from the device mountinfo names as its source, which is
+    /// one member (TASK-299). Empty: none (another block device, tmpfs, an
+    /// overlay). Read-only.
     fn loop_devices(
         &self,
         mount: &MountEntry,

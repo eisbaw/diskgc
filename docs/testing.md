@@ -422,7 +422,14 @@ How the format reads (the schema documents every key):
   side removes the entry from both; lower layers, whiteouts and copy-up
   are not modelled. On a device of major 7, `loop_backing: /path` is what
   `/sys/dev/block/7:N/loop/backing_file` reads (absent: `EACCES`); the
-  image's bytes are not tied to that file's.
+  image's bytes are not tied to that file's. `members: ["8:1", "7:5"]` on a
+  btrfs of major 0 lists the block devices it is stored on, which
+  `loop_devices` reports through a descriptor of it (an error without
+  one, as on Linux); partitions of a loop device are not modelled.
+  `idmap: [{stored: 0, shown: 1000}]` makes a mount idmapped (mountinfo's
+  `idmapped`): `statx` and the listing permission show each stored owner
+  and group mapped, an unlisted one as 65534; an overlay's idmapped
+  layers are not modelled.
 - **Processes:** `exe`, `cwd`, `root`, `environ`, `fds` (`deleted: true`
   for a deleted-but-open file), `maps`, and `proc: denied|failed` for the
   `/proc` read errors; a pid that exits is `Gone`. What `status` shows,
@@ -667,7 +674,9 @@ Model scenarios required by [safety.md](safety.md) and
   match protects its file; an unreadable or deleted backing file is an
   error, and a loop device in no match is never read (model:
   `loop_backing` on a mount of major 7; `tests/fs_dry_run.rs`
-  `a_loop_image_overlaps_the_file_behind_it`,
+  `a_loop_image_overlaps_the_file_behind_it`, and for every loop member
+  of a btrfs, an unreadable membership and a covered mount point
+  `every_loop_member_of_a_btrfs_is_judged`,
   `vectors/config/{protect,negated}-loop-image-file`,
   `vectors/config/protect-loop-image-unreadable`; no container test: a
   rootless container cannot attach a loop device);

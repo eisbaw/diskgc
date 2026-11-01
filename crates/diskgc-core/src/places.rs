@@ -31,8 +31,8 @@ use crate::resolve::Unsafe;
 pub mod space;
 pub use space::{
     BLOCK_EXT_MAJOR, DEVICE_NOT_UNIQUE, LOOP_MAJOR, OVERLAY, STACKED_ON_DIRECTORIES, Space,
-    WriteGuard, on_loop, same_space, shared_space, space_at, space_of, stored_elsewhere,
-    write_guard,
+    WriteGuard, may_be_on_loop, may_show_other_owners, on_loop, same_space, shared_space, space_at,
+    space_of, stored_elsewhere, write_guard,
 };
 
 /// The mount a path is on: the deepest mount point that is a (component-

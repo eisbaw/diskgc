@@ -886,6 +886,7 @@ processes:
             fs_type: "tmpfs".to_owned(),
             source: "tmpfs".to_owned(),
             read_only: false,
+            idmapped: false,
         };
         assert_eq!(host.fs_uuid(&a.fd, &tmpfs).expect("fs_uuid"), None);
         assert_eq!(

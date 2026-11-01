@@ -553,12 +553,22 @@ struct BtrfsFsInfo {
 
 const _: () = assert!(std::mem::size_of::<BtrfsFsInfo>() == 1024);
 
-/// The FSID of the btrfs holding `fd` (`BTRFS_IOC_FS_INFO`), as blkid and
-/// `/sys/fs/btrfs` spell it: lowercase hex, 8-4-4-4-12. One for every
-/// subvolume and member device, read from the filesystem itself, never a
-/// path (TASK-286 review: a mountinfo source can name another device in
-/// diskgc's namespace).
-pub(crate) fn btrfs_fsid(fd: BorrowedFd<'_>, shown: &str) -> Result<String, HostError> {
+/// What `BTRFS_IOC_FS_INFO` on a descriptor of a btrfs says of it.
+pub(crate) struct BtrfsInfo {
+    /// The FSID as blkid and `/sys/fs/btrfs` spell it: lowercase hex,
+    /// 8-4-4-4-12. One for every subvolume and member device, read from
+    /// the filesystem itself, never a path (TASK-286 review: a mountinfo
+    /// source can name another device in diskgc's namespace).
+    pub fsid: String,
+    /// `num_devices`: the filesystem's own devices (`fs_devices->devices`),
+    /// a missing one and a replace target included, a seed filesystem's
+    /// not.
+    pub num_devices: u64,
+}
+
+/// `BTRFS_IOC_FS_INFO` on `fd`, which must be opened for reading (an
+/// `O_PATH` descriptor gets `EBADF`).
+pub(crate) fn btrfs_info(fd: BorrowedFd<'_>, shown: &str) -> Result<BtrfsInfo, HostError> {
     // SAFETY: BTRFS_IOC_FS_INFO fills exactly one `struct
     // btrfs_ioctl_fs_info_args` through its pointer argument (with `flags`
     // 0 on entry, which the getter's zeroed buffer gives); `BtrfsFsInfo`
@@ -571,14 +581,17 @@ pub(crate) fn btrfs_fsid(fd: BorrowedFd<'_>, shown: &str) -> Result<String, Host
     }
     .map_err(|e| HostError::errno("ioctl BTRFS_IOC_FS_INFO", shown, errno_of(e)))?;
     let hex: Vec<String> = info.fsid.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(format!(
-        "{}-{}-{}-{}-{}",
-        hex[0..4].concat(),
-        hex[4..6].concat(),
-        hex[6..8].concat(),
-        hex[8..10].concat(),
-        hex[10..16].concat()
-    ))
+    Ok(BtrfsInfo {
+        fsid: format!(
+            "{}-{}-{}-{}-{}",
+            hex[0..4].concat(),
+            hex[4..6].concat(),
+            hex[6..8].concat(),
+            hex[8..10].concat(),
+            hex[10..16].concat()
+        ),
+        num_devices: info.num_devices,
+    })
 }
 
 /// Whether `mount` is a btrfs whose superblock device is anonymous (its
@@ -589,14 +602,14 @@ fn is_btrfs(mount: &MountEntry) -> bool {
 
 /// The UUID of the filesystem `mount` shows, reached as `fd`
 /// ([`diskgc_core::host::Host::fs_uuid`]): for btrfs its FSID read from
-/// `fd` ([`btrfs_fsid`]); otherwise the name of the `/dev/disk/by-uuid`
+/// `fd` ([`btrfs_info`]; `fd` opened for reading); otherwise the name of the `/dev/disk/by-uuid`
 /// link whose block device is the mount's device. `None`: no such link (a
 /// container, a system without udev, tmpfs, an overlay). Read-only: names
 /// are listed and their targets `stat`ed, nothing is opened.
 pub(crate) fn fs_uuid(fd: BorrowedFd<'_>, mount: &MountEntry) -> Result<Option<String>, HostError> {
     if is_btrfs(mount) {
         let shown = mount.mount_point.display().to_string();
-        return btrfs_fsid(fd, &shown).map(Some);
+        return btrfs_info(fd, &shown).map(|info| Some(info.fsid));
     }
     const BY_UUID: &str = "/dev/disk/by-uuid";
     if mount.dev.major == 0 {
@@ -671,40 +684,50 @@ fn loop_of(dev: Dev) -> Result<Option<Dev>, HostError> {
 }
 
 /// The loop devices the filesystem `mount` shows is stored on
-/// ([`diskgc_core::host::Host::loop_devices`]).
+/// ([`diskgc_core::host::Host::loop_devices`]). A btrfs's members are read
+/// through `fd`, a directory of it opened for reading: its FSID
+/// (`BTRFS_IOC_FS_INFO`), then `/sys/fs/btrfs/<fsid>/devices`, which links
+/// every member that has a block device (a seed filesystem's included).
+/// Fewer links than the filesystem's own device count (`num_devices`: a
+/// missing member, a link the kernel failed to make) is an incomplete
+/// membership, an error (TASK-299: fail closed); a btrfs without `fd` is
+/// an error too, never answered from mountinfo's source, which names one
+/// member. Read-only.
 pub(crate) fn loop_devices(
     mount: &MountEntry,
     fd: Option<BorrowedFd<'_>>,
 ) -> Result<Vec<Dev>, HostError> {
+    let shown = mount.mount_point.display().to_string();
     let mut devices = Vec::new();
     if mount.dev.major != 0 {
         devices.push(mount.dev);
     } else if is_btrfs(mount) {
-        match fd {
-            Some(fd) => {
-                let fsid = btrfs_fsid(fd, &mount.mount_point.display().to_string())?;
-                let members = PathBuf::from(format!("/sys/fs/btrfs/{fsid}/devices"));
-                let listing = std::fs::read_dir(&members)
-                    .map_err(|e| io_error("read_dir", members.display(), &e))?;
-                for entry in listing {
-                    let entry = entry.map_err(|e| io_error("read_dir", members.display(), &e))?;
-                    devices.push(read_dev_file(&entry.path().join("dev"))?);
-                }
-            }
-            None if mount.source.starts_with("/dev/") => {
-                match rustix::fs::stat(mount.source.as_str()) {
-                    Ok(st) if file_type_of(st.st_mode) == FileType::BlockDevice => {
-                        devices.push(Dev {
-                            major: rustix::fs::major(st.st_rdev),
-                            minor: rustix::fs::minor(st.st_rdev),
-                        });
-                    }
-                    Ok(_) => {}
-                    Err(e) if e == rustix::io::Errno::NOENT || e == rustix::io::Errno::NOTDIR => {}
-                    Err(e) => return Err(HostError::errno("stat", &mount.source, errno_of(e))),
-                }
-            }
-            None => {}
+        let fd = fd.ok_or_else(|| {
+            HostError::invalid(
+                "loop_devices",
+                &shown,
+                "a btrfs's member devices are read from a descriptor of it",
+            )
+        })?;
+        let info = btrfs_info(fd, &shown)?;
+        let members = PathBuf::from(format!("/sys/fs/btrfs/{}/devices", info.fsid));
+        let listing =
+            std::fs::read_dir(&members).map_err(|e| io_error("read_dir", members.display(), &e))?;
+        for entry in listing {
+            let entry = entry.map_err(|e| io_error("read_dir", members.display(), &e))?;
+            devices.push(read_dev_file(&entry.path().join("dev"))?);
+        }
+        if (devices.len() as u64) < info.num_devices {
+            return Err(HostError::invalid(
+                "read_dir",
+                members.display(),
+                format!(
+                    "{} member devices listed, the filesystem has {}: a member is missing or \
+                     not linked, so its loop devices cannot be told",
+                    devices.len(),
+                    info.num_devices
+                ),
+            ));
         }
     }
     let mut loops = Vec::new();
@@ -735,6 +758,7 @@ mod tests {
             fs_type: "ext4".to_owned(),
             source: "/dev/diskgc-no-such-device".to_owned(),
             read_only: false,
+            idmapped: false,
         };
         assert_eq!(
             fs_uuid(dir.as_fd(), &mount(4095, 1_048_575)).expect("listing"),
@@ -760,6 +784,28 @@ mod tests {
     fn a_btrfs_fsid_is_read_only_from_btrfs() {
         let dir = rustix::fs::open("/proc", OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty())
             .expect("open /proc");
-        assert!(btrfs_fsid(dir.as_fd(), "/proc").is_err());
+        assert!(btrfs_info(dir.as_fd(), "/proc").is_err());
+    }
+
+    /// TASK-299: a btrfs's members are never answered without a
+    /// descriptor of it (mountinfo's source names one member).
+    #[test]
+    fn a_btrfs_without_a_descriptor_has_no_members_to_tell() {
+        let mount = MountEntry {
+            id: 1,
+            parent_id: 1,
+            dev: Dev {
+                major: 0,
+                minor: 42,
+            },
+            fs_root: PathBuf::from("/"),
+            mount_point: PathBuf::from("/data"),
+            fs_type: "btrfs".to_owned(),
+            source: "/dev/loop0".to_owned(),
+            read_only: false,
+            idmapped: false,
+        };
+        let error = loop_devices(&mount, None).expect_err("no descriptor");
+        assert!(error.to_string().contains("descriptor"), "{error}");
     }
 }

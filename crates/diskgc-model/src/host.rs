@@ -208,7 +208,8 @@ fn errno_text(e: Errno) -> String {
 fn read_denied(state: &State, loc: Loc) -> bool {
     let inode = state.inode(loc);
     let own = state.own_uid;
-    let bit = if inode.uid == own { 0o400 } else { 0o004 };
+    let owner = state.mount(loc.mnt).shown_id(inode.uid);
+    let bit = if owner == own { 0o400 } else { 0o004 };
     own != 0 && inode.entries().is_some() && inode.perm & bit == 0
 }
 
@@ -2063,17 +2064,61 @@ impl Host for ModelHost {
         })
     }
 
-    /// Loop devices by their major only: the model has no partitions of
-    /// one and no btrfs on one.
+    /// A loop device by its major, or a btrfs's members that are loop
+    /// devices ([`crate::spec::MountSpec::members`]): those of the
+    /// filesystem `fd` is on (as Linux reads the FSID from it). A btrfs
+    /// without `fd` is an error, as on Linux. The model has no partitions
+    /// of a loop device.
     fn loop_devices(
         &self,
         mount: &MountEntry,
-        _fd: Option<&ModelFd>,
+        fd: Option<&ModelFd>,
     ) -> Result<Vec<diskgc_core::host::Dev>, HostError> {
-        Ok(if mount.dev.major == diskgc_core::places::LOOP_MAJOR {
-            vec![mount.dev]
-        } else {
-            Vec::new()
+        let is_loop = |dev: &diskgc_core::host::Dev| dev.major == diskgc_core::places::LOOP_MAJOR;
+        let held = fd.map(|fd| {
+            (
+                self.fd_ofd(fd),
+                self.base_path(Base::Dir(fd), Path::new("")),
+            )
+        });
+        let shown = mount.mount_point.display().to_string();
+        let path = held.as_ref().map(|(_, path)| path.clone());
+        self.call(Op::LoopDevices, path, None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("loop_devices", &shown, e)),
+                    None,
+                    errno_text(e),
+                );
+            }
+            let devices: Vec<diskgc_core::host::Dev> = match &held {
+                Some((ofd, _)) => {
+                    let m = inner.state.mount(inner.loc_of(*ofd).mnt);
+                    let members = &inner.state.fs(m.id).members;
+                    if members.is_empty() {
+                        vec![m.shown_dev()]
+                    } else {
+                        members.clone()
+                    }
+                }
+                None if mount.fs_type == "btrfs" => {
+                    let e = HostError::invalid(
+                        "loop_devices",
+                        &shown,
+                        "a btrfs's member devices are read from a descriptor of it",
+                    );
+                    let text = e.to_string();
+                    return (Err(e), None, text);
+                }
+                None => vec![mount.dev],
+            };
+            let loops: Vec<_> = devices.into_iter().filter(is_loop).collect();
+            let text = loops
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" ");
+            (Ok(loops), None, text)
         })
     }
 

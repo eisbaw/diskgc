@@ -655,6 +655,35 @@ impl LinuxHost {
         self.root()
             .open(&rel, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY)
     }
+
+    /// The directory open as `dir` (an `O_PATH` descriptor, as
+    /// [`diskgc_core::resolve`] gives), opened again read-only through
+    /// `/proc/self/fd`, the object itself, never a name looked up again,
+    /// so that a btrfs ioctl can be asked on it (`ioctl` on an `O_PATH`
+    /// descriptor is `EBADF`; TASK-299). `O_DIRECTORY` makes the kernel
+    /// refuse anything but a directory (`ENOTDIR`) before it opens it, so a
+    /// FIFO or a device is never opened.
+    fn reopen_directory(&self, dir: &LinuxFd) -> Result<OwnedFd, HostError> {
+        let rel = format!("self/fd/{}", dir.as_fd().as_raw_fd());
+        self.root().open(
+            &rel,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NONBLOCK | OFlags::NOCTTY,
+        )
+    }
+
+    /// `fd` ready for a btrfs ioctl when `mount` is a btrfs
+    /// ([`Self::reopen_directory`]); `None` for any other filesystem, whose
+    /// readers do not use it.
+    fn btrfs_reader(
+        &self,
+        mount: &MountEntry,
+        fd: Option<&LinuxFd>,
+    ) -> Result<Option<OwnedFd>, HostError> {
+        match fd {
+            Some(fd) if mount.fs_type == "btrfs" => self.reopen_directory(fd).map(Some),
+            _ => Ok(None),
+        }
+    }
 }
 
 /// This process's `status`, relative to the procfs root.
@@ -2620,7 +2649,9 @@ impl Host for LinuxHost {
     }
 
     fn fs_uuid(&self, fd: &LinuxFd, mount: &MountEntry) -> Result<Option<String>, HostError> {
-        crate::state::fs_uuid(fd.as_fd(), mount)
+        let reader = self.btrfs_reader(mount, Some(fd))?;
+        let fd = reader.as_ref().map_or_else(|| fd.as_fd(), AsFd::as_fd);
+        crate::state::fs_uuid(fd, mount)
     }
 
     fn loop_devices(
@@ -2628,7 +2659,8 @@ impl Host for LinuxHost {
         mount: &MountEntry,
         fd: Option<&LinuxFd>,
     ) -> Result<Vec<Dev>, HostError> {
-        crate::state::loop_devices(mount, fd.map(AsFd::as_fd))
+        let reader = self.btrfs_reader(mount, fd)?;
+        crate::state::loop_devices(mount, reader.as_ref().map(AsFd::as_fd))
     }
 
     fn loop_backing_file(&self, dev: Dev) -> Result<Option<PathBuf>, HostError> {
@@ -5086,6 +5118,35 @@ mod tests {
     /// name was replaced, and refuses a FIFO without opening it (an inotify
     /// watch sees no open; the regular file is the control) and a
     /// directory.
+    /// TASK-299: `BTRFS_IOC_FS_INFO` on the `O_PATH` descriptor a resolve
+    /// gives is `EBADF`, so a btrfs's FSID and members were never read
+    /// through one. The directory is reopened (the object itself) first;
+    /// anything but a directory is refused.
+    #[test]
+    fn a_resolved_directory_is_reopened_for_a_btrfs_ioctl() {
+        let host = LinuxHost::new().expect("host setup");
+        let dir = TempDir::new();
+        std::fs::write(dir.0.join("file"), b"").expect("write");
+        let held = resolve(&host, &dir.0, Want::Directory).expect("resolve").fd;
+        let path_only = crate::state::btrfs_info(held.as_fd(), "O_PATH")
+            .err()
+            .expect("an O_PATH descriptor answers no ioctl");
+        assert!(path_only.is(Errno::EBADF), "{path_only}");
+        let reopened = host.reopen_directory(&held).expect("reopen");
+        assert_eq!(
+            rustix::fs::fstat(&reopened).expect("fstat").st_ino,
+            rustix::fs::fstat(&held).expect("fstat").st_ino
+        );
+        // Answered by the filesystem now: ENOTTY off btrfs, an FSID on it.
+        if let Err(e) = crate::state::btrfs_info(reopened.as_fd(), "reopened") {
+            assert!(e.is(Errno(25)), "ENOTTY: {e}");
+        }
+        let file = resolve(&host, &dir.0.join("file"), Want::Any)
+            .expect("resolve")
+            .fd;
+        assert!(host.reopen_directory(&file).is_err(), "a file is refused");
+    }
+
     #[test]
     fn reopen_regular_locks_the_object_of_the_fd_and_never_opens_a_fifo() {
         use rustix::fs::inotify;

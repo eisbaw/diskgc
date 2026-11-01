@@ -2513,6 +2513,17 @@ line says it was reproduced.
   detached ([safety.md](safety.md#in-use), Loop devices). 0.1.0: yes; it
   read no loop device, so it deleted such an image, whose data was gone
   once the device detached (static reading).
+- TASK-299: three holes in the loop rules close (static configurations,
+  found by review, reproduced in the model). A root-owned image that an
+  idmapped mount or an overlay may show as the user's no longer clears
+  candidates on such a mount; a device opened through an overlay (by a
+  deleted name, or as the device's own identity) keeps every candidate
+  `in_use_unknown`, not only those on the overlay's device; and a
+  `protect` or `!profile` check reads every member of a btrfs on loop
+  devices, not only the one mountinfo names
+  ([safety.md](safety.md#in-use), Loop devices; Not protected, not
+  excluded). 0.1.0: yes, more broadly; it read no loop device (static
+  reading).
 - TASK-263 review: `skipped[].unknown_cause` says why an
   `in_use_unknown` could not be judged (Output). 0.1.0: no such field
   (static reading).

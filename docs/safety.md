@@ -499,14 +499,24 @@ Immediately before acting, diskgc walks the candidate's whole tree
   match, such a backing file that cannot be read, is not reported, was
   deleted (` (deleted)`) or is not an absolute path is an error (TASK-268
   review); loop devices inside no match and holding no candidate are
-  never asked about. Limits: the translation knows only the mount table
-  read for the check (a bind made after it is the enumeration limit
-  below) and compares places on one device only, and a loop device is
-  recognised by its major only: a partition of one (`loop0p1`, the
-  extended major 259), a device-mapper device stacked on one (a LUKS
-  container file), or btrfs on one (whose mountinfo device is
-  anonymous) is not related to its file. The backing path is the one the
-  kernel prints for diskgc's own root and mount namespace. Btrfs subvolumes are reasoned (mountinfo names the
+  never asked about. A filesystem's loop devices are its own device of
+  major 7, the loop device a partition of one belongs to (`loop0p1`, the
+  extended major 259, by its sysfs parent), and for btrfs, whose
+  mountinfo device is anonymous, every member that is one: read through
+  a directory of the mount held for the check (its mount point, which
+  must reach that mount, not one covering it), by its FSID
+  (`BTRFS_IOC_FS_INFO`) and `/sys/fs/btrfs/<fsid>/devices` (TASK-299:
+  mountinfo's source names one member, so a second member's image inside
+  a protected Cargo target was missed). Each image is judged: a candidate
+  on a filesystem with several is inside each. A membership that cannot
+  be read completely (fewer members listed than the filesystem has, a
+  member missing, a mount point that cannot be reached) is an error.
+  Limits: the translation knows only the mount table read for the check
+  (a bind made after it is the enumeration limit below) and compares
+  places on one device only; a device-mapper or md device stacked on a
+  loop device (a LUKS container file) is not related to its file. The
+  backing path is the one the kernel prints for diskgc's own root and
+  mount namespace. Btrfs subvolumes are reasoned (mountinfo names the
   subvolume in the root field), not tested on one.
 
   `protect` matches are enumerated
@@ -1278,7 +1288,23 @@ while it is bound, `loop/backing_file`; read-only) and judges each:
    it: root (`--allow-root`), or a user in the `disk` group. udisks does
    not give a user its loop devices: `/dev/loop<N>` stays `root:disk`
    `0660` (no `chown` of a loop device in udisks 2.11.2; its only
-   ownership change is a filesystem's `TakeOwnership`).
+   ownership change is a filesystem's `TakeOwnership`). The kernel takes
+   that identity from the path the file was opened by (`loop_get_status`:
+   `vfs_getattr` of the backing file's `f_path`), so it is the one that
+   mount shows (TASK-299 review of this step). A file opened through a
+   filesystem stored in another's directories (`overlay`, `ecryptfs`,
+   FUSE: the types of Not protected, not excluded, above) shows an
+   identity none of its other names has: overlayfs reports its own device
+   (all layers on one filesystem, or `xino`) or a layer's anonymous one,
+   and perhaps the inode of the copy-up origin (`ovl_getattr`,
+   `ovl_map_dev_ino`), eCryptfs its own device (`ecryptfs_getattr`), while
+   a name on the underlying filesystem shows that one's. So while such a
+   device is configured, every candidate is `in_use_unknown`
+   (`unknown_cause: loop_device`): told by the identity's device being
+   such a mount's, or by the name the device prints (its parent, when
+   deleted) lying on one, from the mount table alone; a name the table
+   cannot place counts too. Bind and idmapped mounts and btrfs subvolumes
+   show one identity for a file by every name, and keep the exact match.
 2. Otherwise only the path the kernel prints (`d_path`) is left, and it
    proves nothing about identity: a mount made over the file's directory
    after the device opened it makes a fresh lookup reach another file (a
@@ -1288,19 +1314,35 @@ while it is bound, `loop/backing_file`; read-only) and judges each:
    network, FUSE and automount mounts never touched):
    - it reaches a file none of the run's owners owns (root's snap images,
      for a user's run): no candidate can hold that file, since the
-     eligibility walk admits only the owners' entries. Noted, not
-     blocking. Limit: a decoy of another user's mounted over a real file
-     of an owner's hides it; such a mount in diskgc's own mount namespace
-     takes root;
+     eligibility walk admits only the owners' entries, on a mount that
+     shows owners as stored. Noted, not blocking, except for candidates
+     on a mount that may show another owner (TASK-299): an idmapped
+     mount (mountinfo's per-mount option `idmapped`, Linux 5.12 on), an
+     `overlay` (its layers may be idmapped mounts it holds privately,
+     which the table does not list), and the other types of Not
+     protected, not excluded (`shiftfs` shifts owners; `aufs`, FUSE and
+     network types say nothing of theirs) but `ecryptfs`, which reports
+     its lower file's owner unmapped. Those candidates are
+     `in_use_unknown` (`unknown_cause: loop_device`): an idmapped bind of
+     a Cargo target holding root's image shows it as the user's, and the
+     walk through the bind admits it. And where the name reaches the file
+     through such a mount itself, the owner it shows proves nothing:
+     every candidate, as below. Limit: a decoy of another user's mounted
+     over a real file of an owner's hides it; such a mount in diskgc's own
+     mount namespace takes root; an idmapped mount made after the scan is
+     the check-to-delete race (limit 5);
    - it is not an absolute path (`d_dname`, an object no directory names):
      noted, not blocking;
    - it ends in ` (deleted)`: the name the device opened is gone, and
      another link of the file can only be on the same filesystem, so the
      candidates on the filesystem of the name's surviving parent directory
      are `in_use_unknown` (`unknown_cause: loop_device`) and the others
-     are judged; with no surviving parent, every candidate. A live file
-     whose name really ends in ` (deleted)` is taken as deleted. Limit: a
-     mount made over that parent since;
+     are judged; with no surviving parent, or one on a filesystem stored
+     in another's directories (an `overlay`: the other link lies on a
+     layer's filesystem, under that one's device, not the overlay's;
+     TASK-299), every candidate. A live file whose name really ends in
+     ` (deleted)` is taken as deleted. Limit: a mount made over that
+     parent since;
    - anything else, every candidate is `in_use_unknown`
      (`unknown_cause: loop_device`), naming the device and how to end it
      (`losetup -d`, `udisksctl loop-delete`, or run diskgc as a reader

@@ -689,6 +689,7 @@ pub(crate) mod tests {
             fs_type: "tmpfs".into(),
             source: "tmpfs".into(),
             read_only: false,
+            idmapped: false,
         }
     }
 

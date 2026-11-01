@@ -325,6 +325,152 @@ fn a_loop_on_another_users_file_does_not_block_the_run() {
     );
 }
 
+/// TASK-299 (Codex, full review #3): a root-owned image the device holds,
+/// `/srv/build/c/disk.img`, shown by an idmapped bind (`/mnt/u`, stored 0
+/// shown as 1000) as the user's, inside the candidate `/mnt/u/c`. Its name
+/// reaches it through `/`, where it is root's, but the walk through the
+/// bind sees uid 1000 everywhere and admits it: the owner rule cannot
+/// clear a candidate on a mount that may show other owners. Candidates on
+/// a mount that shows owners as stored (`/tmp/c`) stay clear.
+#[test]
+fn a_foreign_image_shown_as_an_owners_by_an_idmapped_bind_is_not_cleared() {
+    let idmapped = |idmap: &str| {
+        yaml(
+            "loops:\n  - {dev: \"7:0\", backing: /srv/build/c/disk.img}",
+            "  /srv/build/c: {.: {uid: 0, gid: 0}, disk.img: {size: 1M, uid: 0, gid: 0}, f: {uid: 0, gid: 0}}",
+        )
+        .replacen(
+            "  - {id: 30,",
+            &format!(
+                "  - {{id: 31, at: /mnt/u, fs: ext4, dev: \"254:1\", size: 100G, parent: 1, bind_of: 1, bind_root: /srv/build{idmap}}}\n  - {{id: 30,"
+            ),
+            1,
+        )
+    };
+    let host = common::host(&idmapped(", idmap: [{stored: 0, shown: 1000}]"));
+    let skip = loop_unknown(check_at(&host, "/mnt/u", "/mnt/u/c"), "idmapped");
+    assert!(
+        skip.detail
+            .starts_with("loop device 7:0 is backed by /srv/build/c/disk.img")
+            && skip.detail.contains("/mnt/u"),
+        "{skip}"
+    );
+    let host = common::host(&idmapped(", idmap: [{stored: 0, shown: 1000}]"));
+    assert_eq!(check_c(&host).0, Ok(()), "a plain mount shows uid 0");
+}
+
+/// TASK-299: the other way round. The device opened the user's
+/// `/tmp/c/disk.img` through an idmapped bind of `/tmp` (`/mnt/r`, stored
+/// 1000 shown as 0), so its name reaches a file of uid 0, while the walk of
+/// `/tmp/c` sees the stored owner, 1000. An owner read through a mount that
+/// may show other owners proves nothing: every candidate.
+#[test]
+fn a_backing_name_read_through_an_idmapped_mount_proves_no_owner() {
+    let text = yaml(
+        "loops:\n  - {dev: \"7:0\", backing: /mnt/r/c/disk.img}",
+        "",
+    )
+    .replacen(
+        "  - {id: 30, at: /tmp, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1}\n",
+        "  - {id: 30, at: /tmp, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1}\n  - {id: 31, at: /mnt/r, fs: tmpfs, dev: \"0:42\", size: 1G, parent: 1, bind_of: 30, idmap: [{stored: 1000, shown: 0}]}\n",
+        1,
+    );
+    let host = common::host(&text);
+    let skip = loop_unknown(check_c(&host).0, "read through an idmapped mount");
+    assert!(skip.detail.contains("/mnt/r"), "{skip}");
+}
+
+/// TASK-299: an overlay may show its layers' files under other owners
+/// (an idmapped layer is a private mount the table does not list), so a
+/// candidate on an overlay is not cleared by the owner rule either.
+#[test]
+fn a_foreign_image_does_not_clear_a_candidate_on_an_overlay() {
+    let text = yaml(
+        "loops:\n  - {dev: \"7:0\", backing: /var/lib/snapd/snaps/core_1.snap}",
+        "  /var/lib/snapd/snaps/core_1.snap: {size: 1M, uid: 0}\n  /data/upper/c/f: {size: 1K}",
+    )
+    .replacen(
+        "  - {id: 30,",
+        "  - {id: 60, at: /merged, fs: overlay, dev: \"0:60\", size: 1G, parent: 1, overlay_upper: /data/upper}\n  - {id: 30,",
+        1,
+    );
+    let host = common::host(&text);
+    loop_unknown(check_at(&host, "/merged", "/merged/c"), "on an overlay");
+    let host = common::host(&text);
+    assert_eq!(check_c(&host).0, Ok(()), "on a plain mount");
+}
+
+/// TASK-299 (Codex, full review #3): the device opened `/merged/img`
+/// through an overlay whose upper directory is `/data/upper` on `/`; the
+/// merged name was removed while a hard link survives at
+/// `/data/keep/c/img-link`, on `/` but outside the upper directory. The
+/// surviving parent `/merged` reports the overlay's device, the link the
+/// underlying one: scoping the doubt to the overlay's device would clear
+/// the link's last name. A deleted name on a filesystem stored in another's
+/// directories leaves every candidate in doubt.
+#[test]
+fn a_deleted_name_on_an_overlay_keeps_every_candidate_in_doubt() {
+    let text = |loops: &str| {
+        yaml(
+            &format!("{loops}\nevents:\n  - {{at: {{op: loop_backing_files, when: before}}, remove: /merged/img}}"),
+            "  /data/upper/img: {size: 1M}\n  /data/keep/c/img-link: {link: /data/upper/img}",
+        )
+        .replacen(
+            "  - {id: 30,",
+            "  - {id: 60, at: /merged, fs: overlay, dev: \"0:60\", size: 1G, parent: 1, overlay_upper: /data/upper}\n  - {id: 30,",
+            1,
+        )
+    };
+    let host = common::host(&text("loops:\n  - {dev: \"7:1\", backing: /merged/img}"));
+    let skip = loop_unknown(
+        check_at(&host, "/data/keep", "/data/keep/c"),
+        "deleted on an overlay",
+    );
+    assert!(
+        skip.detail
+            .contains("loop device 7:1 is backed by /merged/img (deleted)")
+            && skip.detail.contains("overlay"),
+        "{skip}"
+    );
+}
+
+/// TASK-299 audit of the device's own word: `LOOP_GET_STATUS64` answers
+/// with the (device, inode) of the file as the mount it was opened through
+/// shows it (`vfs_getattr` of its path), and overlayfs shows a file under
+/// its own device (or a layer's anonymous one), never the underlying
+/// filesystem's. The device opened `/merged/img`; its only other name is
+/// `/data/keep/c/img-link`, which the walk sees on `/`. The identity
+/// matches no object there, so a device on a filesystem stored in
+/// another's directories leaves every candidate in doubt, whatever its
+/// name says (here a rendering from another namespace, `/ns/img`). An
+/// identity whose file is reached on a plain mount is still exact.
+#[test]
+fn a_device_identity_on_an_overlay_keeps_every_candidate_in_doubt() {
+    let text = |backing: &str, file: &str| {
+        yaml(
+            &format!(
+                "loops:\n  - {{dev: \"7:1\", backing: {backing}, file: {file}, readable: true}}"
+            ),
+            "  /data/upper/img: {size: 1M}\n  /data/keep/c/img-link: {link: /data/upper/img}",
+        )
+        .replacen(
+            "  - {id: 30,",
+            "  - {id: 60, at: /merged, fs: overlay, dev: \"0:60\", size: 1G, parent: 1, overlay_upper: /data/upper}\n  - {id: 30,",
+            1,
+        )
+    };
+    let host = common::host(&text("/ns/img", "/merged/img"));
+    let skip = loop_unknown(
+        check_at(&host, "/data/keep", "/data/keep/c"),
+        "identity on an overlay",
+    );
+    assert!(skip.detail.contains("overlay"), "{skip}");
+    // Opened on `/`: the identity is the link's own, `in_use`.
+    let host = common::host(&text("/ns/img", "/data/upper/img"));
+    let skip = check_at(&host, "/data/keep", "/data/keep/c").expect_err("in use");
+    assert_eq!(skip.reason, Reason::InUse, "{skip}");
+}
+
 /// A device diskgc cannot open whose name was deleted: another link of the
 /// file can only be on the filesystem of the name's surviving directory,
 /// so candidates there are `in_use_unknown` and others are clear (mped

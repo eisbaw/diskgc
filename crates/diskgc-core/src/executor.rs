@@ -2696,6 +2696,7 @@ mod best_fit_tests {
             fs_type: "tmpfs".to_owned(),
             source: "fixture".to_owned(),
             read_only: false,
+            idmapped: false,
         };
         vec![
             mount(1, 0, "/", 1, "/"),
@@ -2858,6 +2859,7 @@ mod best_fit_tests {
             fs_type: fs_type.to_owned(),
             source: "fixture".to_owned(),
             read_only: false,
+            idmapped: false,
         };
         let mounts = [
             mount(1, "/", "ext4"),

@@ -70,6 +70,9 @@ fn parse_line(line: &[u8]) -> Result<MountEntry, String> {
         )
         .into_owned(),
         read_only: has_ro(fields[5]) || has_ro(fields[sep + 3]),
+        // Per-mount options only: the kernel prints `idmapped` there
+        // (`show_vfsmnt_opts`), never among a superblock's options.
+        idmapped: fields[5].split(|b| *b == b',').any(|o| o == b"idmapped"),
     })
 }
 
@@ -249,6 +252,29 @@ mod tests {
         assert_eq!(bind.source, "tmp fs");
         assert_eq!(bind.fs_type, "tmpfs");
         assert!(bind.read_only, "superblock option ro");
+    }
+
+    /// TASK-299: the kernel prints `idmapped` among the per-mount options
+    /// (`show_vfsmnt_opts`, after `rw`/`ro`); a superblock option of that
+    /// name (a filesystem's own text) is not the flag.
+    #[test]
+    fn the_idmapped_flag_is_read_from_the_per_mount_options() {
+        let mounts = parse_mountinfo(
+            b"\
+50 28 254:1 /home/u /mnt/u rw,relatime,idmapped shared:9 - ext4 /dev/mapper/root rw
+51 28 254:1 /home/u /mnt/v rw,relatime - ext4 /dev/mapper/root rw,idmapped
+52 28 254:1 /home/u /mnt/w ro,nosuid,idmapped,nosymfollow - ext4 /dev/mapper/root rw
+",
+        )
+        .expect("parses");
+        let flags: Vec<bool> = mounts.iter().map(|m| m.idmapped).collect();
+        assert_eq!(flags, [true, false, true]);
+        assert!(
+            parse_mountinfo(SAMPLE)
+                .expect("parses")
+                .iter()
+                .all(|m| !m.idmapped)
+        );
     }
 
     #[test]

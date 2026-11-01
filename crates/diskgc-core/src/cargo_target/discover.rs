@@ -1397,6 +1397,7 @@ mod private_tmp_tests {
             fs_type: "tmpfs".into(),
             source: "tmpfs".into(),
             read_only: false,
+            idmapped: false,
         };
         let root = MountEntry {
             id: 1,
@@ -1407,6 +1408,7 @@ mod private_tmp_tests {
             fs_type: "ext4".into(),
             source: "/dev/test".into(),
             read_only: false,
+            idmapped: false,
         };
         let bound = Path::new("/srv/bound");
         assert!(matches!(

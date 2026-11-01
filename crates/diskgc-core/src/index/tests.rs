@@ -339,6 +339,7 @@ fn space(dev: Dev) -> crate::places::Space {
         fs_type: "ext4".to_owned(),
         source: "/dev/fixture".to_owned(),
         read_only: false,
+        idmapped: false,
     })
 }
 

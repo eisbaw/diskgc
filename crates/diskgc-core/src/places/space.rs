@@ -283,32 +283,56 @@ pub fn shared_space(other: &MountEntry, watched: &MountEntry) -> Option<String> 
     }
 }
 
+/// Whether the filesystem of `mount` can be stored on a loop device, from
+/// the table alone: a loop device's own major, the extended major
+/// partitions take ([`BLOCK_EXT_MAJOR`]), or btrfs on an anonymous device
+/// (its members are read through a descriptor, [`on_loop`]). Any other is
+/// on none (device-mapper or md over a loop device is not followed: a
+/// stated limit).
+pub fn may_be_on_loop(mount: &MountEntry) -> bool {
+    match mount.dev.major {
+        LOOP_MAJOR | BLOCK_EXT_MAJOR => true,
+        0 => mount.fs_type == "btrfs",
+        _ => false,
+    }
+}
+
 /// The loop devices the filesystem of `mount` is stored on
 /// ([`Host::loop_devices`]): a loop device itself, a partition of one, or
-/// for btrfs (whose superblock device is anonymous) each member that is
-/// one. Read through `fd`, a directory on the mount, where one is held;
-/// without one, a btrfs is related to its members through the device
-/// mountinfo names as its source (a path in diskgc's namespace: a limit).
-///
-/// Only a mount that can be on one is asked: a loop device's own major, the
-/// extended major partitions take ([`BLOCK_EXT_MAJOR`]), and btrfs on an
-/// anonymous device; any other is on none without a call (device-mapper or
-/// md over a loop device is not followed: a stated limit).
+/// for btrfs each member that is one, read through `fd`, a directory on the
+/// mount (its FSID, never mountinfo's source, which names one member:
+/// TASK-299). A btrfs without `fd`, or whose membership cannot be read
+/// completely, is an error. Only a mount that [`may_be_on_loop`] is asked.
 pub fn on_loop<H: Host>(
     host: &H,
     mount: &MountEntry,
     fd: Option<&H::Fd>,
 ) -> Result<Vec<Dev>, crate::host::HostError> {
-    let may_be = match mount.dev.major {
-        LOOP_MAJOR | BLOCK_EXT_MAJOR => true,
-        0 => mount.fs_type == "btrfs",
-        _ => false,
-    };
-    if may_be {
+    if may_be_on_loop(mount) {
         host.loop_devices(mount, fd)
     } else {
         Ok(Vec::new())
     }
+}
+
+/// Filesystem types the mount screen does not refuse whose `statx` owner
+/// is the stored one even though they stack on another filesystem's
+/// directories: eCryptfs copies its lower inode's owner unmapped
+/// (`fsstack_copy_attr_all`) and reports it without an id mapping
+/// (`ecryptfs_getattr`), and its mounts cannot be idmapped.
+const SHOWS_STORED_OWNERS: &[&str] = &["ecryptfs"];
+
+/// Whether `statx` through `mount` may report an owner other than the one
+/// stored, and so another than a different mount of the same file shows
+/// (TASK-299): an idmapped mount; an overlay, whose layers may be idmapped
+/// mounts the table does not list (private clones the overlay holds); and
+/// every other type that may store its data elsewhere ([`stored_elsewhere`]:
+/// shiftfs exists to shift owners, aufs and the FUSE and network types say
+/// nothing of theirs) but eCryptfs ([`SHOWS_STORED_OWNERS`]).
+pub fn may_show_other_owners(mount: &MountEntry) -> bool {
+    mount.idmapped
+        || (stored_elsewhere(&mount.fs_type)
+            && !SHOWS_STORED_OWNERS.contains(&mount.fs_type.as_str()))
 }
 
 /// The warning for a `PATH` on a copy-on-write filesystem with snapshots

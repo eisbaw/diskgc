@@ -743,6 +743,7 @@ impl Scan {
         if let Some(why) = record
             .objects()
             .find_map(|id| self.loops.unknown_on.get(&id.dev))
+            .or_else(|| self.loops.unknown_through.get(&candidate.mount_id()))
         {
             return Err(Skip::in_use_unknown(
                 path.to_owned(),

@@ -1590,6 +1590,91 @@ tree:
     );
 }
 
+/// TASK-299 (Codex, full review #3): a multi-device btrfs is stored on each
+/// of its members, and mountinfo's source names one. `/data` (members
+/// `8:1` and loop `7:5`, backed by `/proj/target/debug/data.img` inside the
+/// match `/proj/target`) holds the candidate `/data/cruft`: deleting there
+/// writes into the protected image. `/proj/target/vol` (members `8:2` and
+/// loop `7:6`, backed by `/cache/vol.img`) is mounted inside the match, so
+/// its second image is part of what the match shows. Membership is read
+/// from a descriptor of the filesystem (its FSID), never from the source
+/// alone; a membership that cannot be read completely fails closed.
+#[test]
+fn every_loop_member_of_a_btrfs_is_judged() {
+    let model = |covered: &str, events: &str| {
+        format!(
+            r#"host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {{id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}}
+  - {{id: 2, at: /data, fs: btrfs, dev: "0:50", size: 10G, parent: 1, members: ["8:1", "7:5"]}}
+  - {{id: 3, at: /proj/target/vol, fs: btrfs, dev: "0:51", size: 1G, parent: 1, members: ["8:2", "7:6"]}}
+  - {{id: 4, at: /two, fs: btrfs, dev: "0:52", size: 1G, parent: 1, members: ["7:7", "7:8"]}}
+{covered}loops:
+  - {{dev: "7:5", backing: /proj/target/debug/data.img}}
+  - {{dev: "7:6", backing: /cache/vol.img}}
+  - {{dev: "7:7", backing: /cache/a.img}}
+  - {{dev: "7:8", backing: /proj/target/b.img}}
+tree:
+  /proj/target/debug/data.img: {{}}
+  /proj/target/b.img: {{}}
+  /proj/target/f: {{}}
+  /data/cruft/f: {{}}
+  /two/x: {{}}
+  /cache/vol.img: {{}}
+  /cache/a.img: {{}}
+  /cache/other: {{}}
+{events}"#
+        )
+    };
+    let host = host(&model("", ""));
+    let verdict = |candidate: &str, matched: &str| {
+        executor::overlaps_checked(&host, Path::new(candidate), &[PathBuf::from(matched)])
+    };
+    for (candidate, matched, overlaps) in [
+        // On the btrfs: inside its second member's image, in the match.
+        ("/data/cruft", "/proj/target", true),
+        // Two loop members: either image may hold the match.
+        ("/two/x", "/proj/target", true),
+        ("/two/x", "/proj/target/f", false),
+        ("/data/cruft", "/proj/target/debug/data.img", true),
+        ("/data/cruft", "/proj/target/f", false),
+        // The btrfs inside the match: its second member's image.
+        ("/cache/vol.img", "/proj/target", true),
+        ("/cache/other", "/proj/target", false),
+    ] {
+        assert_eq!(
+            verdict(candidate, matched),
+            Ok(overlaps),
+            "{candidate} against {matched}"
+        );
+    }
+    let host = common::host(&model(
+        "",
+        "events:\n  - {at: {op: loop_devices, when: before}, fail: EIO}\n",
+    ));
+    let error = executor::overlaps_checked(
+        &host,
+        Path::new("/data/cruft"),
+        &[PathBuf::from("/proj/target")],
+    )
+    .expect_err("membership unread");
+    assert!(error.contains("cannot be told"), "{error}");
+    // A tmpfs mounted over the btrfs inside the match: its point reaches
+    // the tmpfs, whose members say nothing of the covered btrfs's.
+    let host = common::host(&model(
+        "  - {id: 5, at: /proj/target/vol, fs: tmpfs, dev: \"0:53\", size: 1G, parent: 3}\n",
+        "",
+    ));
+    let error = executor::overlaps_checked(
+        &host,
+        Path::new("/cache/other"),
+        &[PathBuf::from("/proj/target")],
+    )
+    .expect_err("covered");
+    assert!(error.contains("reaches mount 5, not mount 3"), "{error}");
+}
+
 /// A negated profile's root on another filesystem than PATH's was dropped
 /// with the tier's foreign source roots ("cannot free space"), so its
 /// matches excluded nothing: here the candidate lies inside the negated

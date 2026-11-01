@@ -176,7 +176,7 @@ fn overlaps_through_images<H: Host>(
         return Ok(true);
     }
     let (inside, images) = loop_images(host, mounts, candidate, matches)?;
-    if inside.is_none() && images.is_empty() {
+    if inside.is_empty() && images.is_empty() {
         return Ok(false);
     }
     let Some(depth) = depth.checked_sub(1) else {
@@ -185,29 +185,33 @@ fn overlaps_through_images<H: Host>(
             candidate.display()
         ));
     };
-    if let Some(image) = inside
-        && overlaps_through_images(host, mounts, &image, matches, deadline, depth)?
-    {
-        return Ok(true);
+    for image in &inside {
+        if overlaps_through_images(host, mounts, image, matches, deadline, depth)? {
+            return Ok(true);
+        }
     }
     overlaps_through_images(host, mounts, candidate, &images, deadline, depth)
 }
 
-/// The backing file of the loop device `candidate`'s mount is on, if it is
-/// one (`inside`), and those of the loop filesystems the matches show: a
-/// match on one, or one mounted at or below a match ([`nested_in`]). Read
-/// through [`Host::loop_backing_file`]; one that cannot be read, is not an
-/// absolute path or was deleted (` (deleted)`) relates to nothing a place
-/// can prove: an error.
+/// The backing files of the loop devices `candidate`'s mount is stored on
+/// (`inside`: several for a btrfs with several loop members), and those of
+/// the loop filesystems the matches show: a match on one, or one mounted at
+/// or below a match ([`nested_in`]). Read through
+/// [`Host::loop_backing_file`]; one that cannot be read, is not an absolute
+/// path or was deleted (` (deleted)`) relates to nothing a place can prove:
+/// an error.
 fn loop_images<H: Host>(
     host: &H,
     mounts: &[MountEntry],
     candidate: &Path,
     matches: &[PathBuf],
-) -> Result<(Option<PathBuf>, Vec<PathBuf>), String> {
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
     // The images behind `mount`: one per loop device it is stored on
-    // ([`places::on_loop`]: a loop device, a partition of one, or a btrfs
-    // with a member on one; mped S1 on TASK-286).
+    // ([`places::on_loop`]: a loop device, a partition of one, or each
+    // member of a btrfs that is one; mped S1 on TASK-286). A btrfs's
+    // members are read through a directory of it held here (TASK-299:
+    // mountinfo's source names one member), reached on the mount the table
+    // names; one that cannot be reached cannot be told.
     let images_of = |mount: &MountEntry| -> Result<Vec<PathBuf>, String> {
         let cannot = |dev: String, why: String| {
             format!(
@@ -217,7 +221,18 @@ fn loop_images<H: Host>(
                 mount.mount_point.display()
             )
         };
-        let loops = places::on_loop(host, mount, None)
+        if !places::may_be_on_loop(mount) {
+            return Ok(Vec::new());
+        }
+        let held =
+            if mount.dev.major == 0 {
+                Some(held_root(host, mounts, mount).map_err(|why| {
+                    cannot(mount.dev.to_string(), format!("cannot be told: {why}"))
+                })?)
+            } else {
+                None
+            };
+        let loops = places::on_loop(host, mount, held.as_ref())
             .map_err(|error| cannot(mount.dev.to_string(), format!("cannot be told: {error}")))?;
         let mut images = Vec::new();
         for dev in loops {
@@ -241,29 +256,17 @@ fn loop_images<H: Host>(
         mount_for(mounts, path)
             .map_err(|why| format!("cannot prove overlap at {}: {why}", path.display()))
     };
-    let mut inside_images = images_of(on(candidate)?)?;
-    let inside = match inside_images.len() {
-        0 | 1 => inside_images.pop(),
-        _ => {
-            return Err(format!(
-                "cannot prove overlap at {}: its filesystem is stored on several loop images",
-                candidate.display()
-            ));
-        }
-    };
+    let inside = images_of(on(candidate)?)?;
     let mut images = Vec::new();
     for matched in matches {
         images.extend(images_of(on(matched)?)?);
     }
-    let mut loops = Vec::new();
-    for mount in mounts {
-        if !places::on_loop(host, mount, None)
-            .map_err(|error| format!("cannot prove overlap at {}: {error}", candidate.display()))?
-            .is_empty()
-        {
-            loops.push(mount);
-        }
-    }
+    // Only a mount that may be on a loop device is placed (the table
+    // alone), and only one inside a match is asked about.
+    let loops: Vec<&MountEntry> = mounts
+        .iter()
+        .filter(|mount| places::may_be_on_loop(mount))
+        .collect();
     if !loops.is_empty() {
         let by_id = places::by_id(mounts);
         let places = matches
@@ -279,6 +282,25 @@ fn loop_images<H: Host>(
     images.sort();
     images.dedup();
     Ok((inside, images))
+}
+
+/// The root directory of `mount`, reached by its mount point on the mount
+/// the table names (a mount covered since is refused, never another one's
+/// root taken for it): what a btrfs's members are read through.
+fn held_root<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    mount: &MountEntry,
+) -> Result<H::Fd, String> {
+    let held = resolve_in(host, mounts, &mount.mount_point, Want::Directory)
+        .map_err(|error| format!("its mount point cannot be reached: {error}"))?;
+    if held.mount.id != mount.id || held.stat.mount_root == Some(false) {
+        return Err(format!(
+            "its mount point reaches mount {}, not mount {}",
+            held.mount.id, mount.id
+        ));
+    }
+    Ok(held.fd)
 }
 
 /// Screens the candidate and every match before any of them is resolved,
@@ -810,6 +832,7 @@ mod tests {
             fs_type: fs_type.to_owned(),
             source: "fixture".to_owned(),
             read_only: false,
+            idmapped: false,
         }
     }
 

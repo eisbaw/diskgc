@@ -268,6 +268,23 @@ pub struct MountSpec {
     /// modelled. Absent: `statx` reports `dev`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subvolume: Option<DevSpec>,
+    /// An idmapped mount (mountinfo shows `idmapped` among its per-mount
+    /// options): every owner and group `statx` reports through it is the
+    /// stored id mapped by this list, `stored` shown as `shown`; an id the
+    /// list does not name shows as 65534 (the overflow id, as Linux shows
+    /// an unmapped one). Listing permissions use the shown owner too. A
+    /// bind of it made by an event keeps it. Not on an overlay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub idmap: Vec<IdMapSpec>,
+    /// A btrfs on an anonymous device (`fs: btrfs`, `dev` of major 0): the
+    /// block devices it is stored on, in order, as `BTRFS_IOC_FS_INFO` on
+    /// a descriptor of it and `/sys/fs/btrfs/<fsid>/devices` list them
+    /// (`loop_devices`); a loop device among them (major 7) is one of
+    /// `loops:`. mountinfo's source names only the first. Partitions of a
+    /// loop device are not modelled. Not with `bind_of` (a bind shows the
+    /// filesystem's own).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<DevSpec>,
     /// The filesystem's UUID as `fs_uuid` reports it (the udev link
     /// `/dev/disk/by-uuid`); absent: none (tmpfs, no udev).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,6 +312,15 @@ pub struct MountSpec {
     /// they come back as `None`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub statx_missing: Vec<StatxField>,
+}
+
+/// One id of an idmapped mount ([`MountSpec::idmap`]): the owner or group
+/// `stored` on the filesystem, shown through the mount as `shown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IdMapSpec {
+    pub stored: u32,
+    pub shown: u32,
 }
 
 /// A `statx` field that can be missing from the answer.
@@ -893,6 +919,7 @@ pub enum Op {
     LoopBackingFile,
     LoopBackingFiles,
     LoopBackingIdentity,
+    LoopDevices,
     BootId,
     StateLock,
     StateRead,
@@ -951,6 +978,7 @@ impl Op {
             Self::LoopBackingFile => "loop_backing_file",
             Self::LoopBackingFiles => "loop_backing_files",
             Self::LoopBackingIdentity => "loop_backing_identity",
+            Self::LoopDevices => "loop_devices",
             Self::BootId => "boot_id",
             Self::StateLock => "state_lock",
             Self::StateRead => "state_read",

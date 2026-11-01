@@ -135,6 +135,9 @@ pub struct Fs {
     pub size: u64,
     pub other_used: u64,
     pub missing: BTreeSet<StatxField>,
+    /// A btrfs's member block devices ([`crate::spec::MountSpec::members`]);
+    /// empty for any other filesystem.
+    pub members: Vec<Dev>,
     pub root: u64,
     /// Private, so every change goes through `State::fs_mut` or
     /// [`Fs::add`], which drop the cached [`Links`].
@@ -162,6 +165,7 @@ impl Fs {
             size,
             other_used,
             missing: BTreeSet::new(),
+            members: Vec::new(),
             root,
             inodes: BTreeMap::from([(root, Inode::new(Kind::Dir(BTreeMap::new()), now))]),
             links: RefCell::new(None),
@@ -299,9 +303,28 @@ pub struct Mount {
     /// what `statx` reports for objects reached through this mount, while
     /// mountinfo shows [`Self::shown_dev`].
     pub subvolume: Option<Dev>,
+    /// An idmapped mount's ids, stored to shown
+    /// ([`crate::spec::MountSpec::idmap`]); empty: not idmapped.
+    pub idmap: Vec<(u32, u32)>,
 }
 
+/// The id Linux shows for an id the mapping of an idmapped mount does not
+/// name (`overflowuid`).
+pub const OVERFLOW_ID: u32 = 65534;
+
 impl Mount {
+    /// The owner or group `statx` reports through this mount for the
+    /// stored id `id`: itself, or as an idmapped mount maps it.
+    pub fn shown_id(&self, id: u32) -> u32 {
+        if self.idmap.is_empty() {
+            return id;
+        }
+        self.idmap
+            .iter()
+            .find(|(stored, _)| *stored == id)
+            .map_or(OVERFLOW_ID, |(_, shown)| *shown)
+    }
+
     /// The device mountinfo reports for this mount (the superblock's).
     pub fn shown_dev(&self) -> Dev {
         self.overlay.unwrap_or(self.dev)
@@ -755,6 +778,7 @@ impl State {
             dead: false,
             overlay: None,
             subvolume: None,
+            idmap: Vec::new(),
         });
         Ok(())
     }
@@ -827,6 +851,8 @@ impl State {
             dead: from.dead,
             overlay: from.overlay,
             subvolume: from.subvolume,
+            // A bind of an idmapped mount is idmapped alike.
+            idmap: from.idmap.clone(),
         });
         Ok(())
     }
@@ -862,6 +888,7 @@ impl State {
                     source: fs_type.clone(),
                     fs_type,
                     read_only: m.read_only,
+                    idmapped: !m.idmap.is_empty(),
                 }
             })
             .collect()
@@ -1110,8 +1137,8 @@ impl State {
             // Link counting walks the inode graph. A modelled filesystem
             // that cannot report nlink must not pay for a value it omits.
             nlink: (!fs.missing.contains(&StatxField::Nlink)).then(|| self.nlink(loc)),
-            uid: when(fs, StatxField::Uid, inode.uid),
-            gid: when(fs, StatxField::Gid, inode.gid),
+            uid: when(fs, StatxField::Uid, self.mount(loc.mnt).shown_id(inode.uid)),
+            gid: when(fs, StatxField::Gid, self.mount(loc.mnt).shown_id(inode.gid)),
             ino: when(fs, StatxField::Ino, loc.ino),
             size: when(fs, StatxField::Size, inode.size),
             blocks: when(fs, StatxField::Blocks, inode.allocated() / 512),

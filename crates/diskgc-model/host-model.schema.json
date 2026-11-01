@@ -869,6 +869,27 @@
         "refuses_deletes"
       ]
     },
+    "IdMapSpec": {
+      "description": "One id of an idmapped mount ([`MountSpec::idmap`]): the owner or group\n`stored` on the filesystem, shown through the mount as `shown`.",
+      "type": "object",
+      "properties": {
+        "shown": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "stored": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "stored",
+        "shown"
+      ]
+    },
     "LockModeSpec": {
       "description": "`shared` or `exclusive`.",
       "type": "string",
@@ -1037,12 +1058,26 @@
           "format": "uint64",
           "minimum": 0
         },
+        "idmap": {
+          "description": "An idmapped mount (mountinfo shows `idmapped` among its per-mount\noptions): every owner and group `statx` reports through it is the\nstored id mapped by this list, `stored` shown as `shown`; an id the\nlist does not name shows as 65534 (the overflow id, as Linux shows\nan unmapped one). Listing permissions use the shown owner too. A\nbind of it made by an event keeps it. Not on an overlay.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IdMapSpec"
+          }
+        },
         "loop_backing": {
           "description": "For a filesystem on a loop device (`dev` of major 7): the file the\ndevice reads and writes (`/sys/dev/block/7:N/loop/backing_file`, as\nprinted, ` (deleted)` included), a path of the model's tree or not.\nAbsent on such a device: reading it fails (`EACCES`). The image's\ncontents are not tied to that file's: deleting on the mount changes\nno byte of it in the model.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "members": {
+          "description": "A btrfs on an anonymous device (`fs: btrfs`, `dev` of major 0): the\nblock devices it is stored on, in order, as `BTRFS_IOC_FS_INFO` on\na descriptor of it and `/sys/fs/btrfs/<fsid>/devices` list them\n(`loop_devices`); a loop device among them (major 7) is one of\n`loops:`. mountinfo's source names only the first. Partitions of a\nloop device are not modelled. Not with `bind_of` (a bind shows the\nfilesystem's own).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Dev"
+          }
         },
         "other_used": {
           "description": "Space used by things outside the model; available space is `size -\nother_used -` the blocks of every live inode.",
@@ -1193,6 +1228,7 @@
         "loop_backing_file",
         "loop_backing_files",
         "loop_backing_identity",
+        "loop_devices",
         "boot_id",
         "state_lock",
         "state_read",
