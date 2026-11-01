@@ -1341,3 +1341,146 @@ fn watch_failed_samples_back_off() {
     }
     assert_eq!(deletions(&host), 0);
 }
+
+// ---- TASK-258: the open scenarios of docs/testing.md ----
+
+/// docs/testing.md `watch_cycle_deadline`: a cycle whose walk outlasts
+/// `--timeout` (the clock jumps 2 minutes after its first candidate's
+/// deletion, past the 60 s deadline counted from the triggering sample)
+/// ends `deadline`, class `retry`, and starts no deletion after the
+/// deadline. The model runs no child process: a running child's SIGTERM
+/// at the deadline is the container tests'
+/// (`deadline_mid_reclaim_reports_one_json_object` for `ensure`, the same
+/// executor).
+#[test]
+fn watch_cycle_deadline_starts_no_deletion_after_it() {
+    // Each candidate is a directory and its file: two `unlinkat`s. The
+    // jump follows the first candidate's second.
+    let events = "events:\n  - {at: {elapsed: 30s}, other_used: {mount: /tmp, bytes: 6G}}\n  \
+                  - {at: {op: unlinkat, nth: 2, when: after}, advance: 2m}\n  \
+                  - {at: {elapsed: 3m}, signal: term}\n";
+    let host = host(&yaml("5G", &old_candidates(10, "300M"), events));
+    let run = watch(&host, &reclaim("2G", "4G", "10s"));
+    assert_eq!(
+        run.ended,
+        Ok(Ended::Stopped(Signal::Term)),
+        "{:?}",
+        run.lines
+    );
+    assert_eq!(run.records.len(), 1, "{:?}", run.records);
+    let r = &run.records[0].1;
+    assert_eq!(r["status"], "deadline", "{r}");
+    assert_eq!(r["watch"]["backoff"]["class"], "retry", "{r}");
+    assert_eq!(r["actions"].as_array().map(Vec::len), Some(1), "{r}");
+    assert_eq!(deletions(&host), 2, "no deletion after the deadline");
+}
+
+/// docs/testing.md `watch_root_vanished_after_start_still_reclaims_other_tiers`:
+/// a tier's supplied root removed after start is one `missing` skip row
+/// of that tier (not the refusal `ensure` makes at start); the next tier
+/// deletes to the goal, status `met`.
+#[test]
+fn watch_root_vanished_after_start_still_reclaims_other_tiers() {
+    let config = "version: 1\nprofiles:\n  \
+                  - {name: proj-a, find: {roots: required, paths: [\"a*\"], type: dir}, action: delete, examples: {match: [/x/a0]}}\n  \
+                  - {name: tmp-b, find: {roots: [/tmp], paths: [\"b*\"], type: dir}, action: delete, examples: {match: [/tmp/b0]}}\n\
+                  groups:\n  - name: g\n    tiers:\n      \
+                  - {name: proj, select: \"profile:proj-a && filter:idle-1h\", roots: [/tmp/proj]}\n      \
+                  - {name: b, select: \"profile:tmp-b && filter:idle-1h\"}\n";
+    let mut tree = String::from(
+        "  /tmp/proj/a00: {.: {mtime: 2026-10-01T00:00:00Z}, f: {size: 100M, mtime: 2026-10-01T00:00:00Z}}\n",
+    );
+    for i in 0..5 {
+        tree +=
+            &format!("  /tmp/b{i:02}: {{.: {{mtime: {OLD}}}, f: {{size: 300M, mtime: {OLD}}}}}\n");
+    }
+    let events = "events:\n  - {at: {elapsed: 20s}, remove: /tmp/proj}\n  \
+                  - {at: {elapsed: 30s}, other_used: {mount: /tmp, bytes: 8G}}\n  \
+                  - {at: {elapsed: 5m}, signal: term}\n";
+    let host = host(&yaml("5G", &tree, events));
+    let selection = Selection {
+        select: None,
+        ..selection()
+    };
+    let file = ConfigFile::Read {
+        path: PathBuf::from("/home/u/.config/diskgc/config.yaml"),
+        bytes: config.as_bytes().to_vec(),
+    };
+    let run = watch_with(&host, &reclaim("1G", "2G", "10s"), &selection, &file);
+    assert_eq!(
+        run.ended,
+        Ok(Ended::Stopped(Signal::Term)),
+        "{:?}",
+        run.lines
+    );
+    assert_eq!(run.records.len(), 1, "{:?}", run.records);
+    let r = &run.records[0].1;
+    assert_eq!(r["status"], "met", "{r}");
+    let skipped = r["skipped"].as_array().expect("skipped");
+    let missing: Vec<&Value> = skipped
+        .iter()
+        .filter(|s| s["reason"] == "missing")
+        .collect();
+    assert_eq!(missing.len(), 1, "{r}");
+    assert_eq!(missing[0]["tier"], "proj", "{r}");
+    assert_eq!(missing[0]["candidate"], "/tmp/proj", "{r}");
+    let actions = r["actions"].as_array().expect("actions");
+    assert!(!actions.is_empty(), "{r}");
+    assert!(
+        actions.iter().all(|a| a["tier"] == "b"),
+        "only the other tier deletes: {r}"
+    );
+}
+
+/// docs/testing.md `watch_signals`, SIGINT: as SIGTERM in a cycle, the
+/// record says `interrupted`, `watch` stops (exit 0) on SIGINT, and the
+/// snapshot is written once, at the stop.
+#[test]
+fn watch_sigint_in_a_cycle_writes_an_interrupted_record_and_stops() {
+    let events = "events:\n  - {at: {elapsed: 30s}, other_used: {mount: /tmp, bytes: 9G}}\n  \
+                  - {at: {op: unlinkat, nth: 2, when: after}, signal: int}\n";
+    let host = host(&yaml("5G", &old_candidates(10, "300M"), events));
+    let run = watch(&host, &reclaim("2G", "4G", "10s"));
+    assert_eq!(run.ended, Ok(Ended::Stopped(Signal::Int)));
+    assert_eq!(run.records.len(), 1);
+    assert_eq!(run.records[0].1["status"], "interrupted");
+    assert_eq!(run.records[0].1["watch"]["backoff"], Value::Null);
+    assert_eq!(deletions(&host), 2, "no candidate started after the signal");
+    assert_eq!(host.trace_count(Op::StateWrite), 1, "the stop's write");
+    assert!(run.has("stopping on SIGINT"));
+}
+
+/// docs/testing.md `watch_signals`, during the host-lock wait: another
+/// process holds the host lock; SIGTERM while the cycle waits for it
+/// stops `watch` at once: an `interrupted` record, nothing deleted, the
+/// lock never taken, the snapshot written once.
+#[test]
+fn watch_sigterm_during_the_host_lock_wait_stops_at_once() {
+    let events = "events:\n  - {at: {elapsed: 30s}, other_used: {mount: /tmp, bytes: 9G}}\n  \
+                  - {at: {elapsed: 45s}, signal: term}\n";
+    let rest =
+        format!("{events}locks:\n  - {{path: /run/diskgc/lock, holder: 4242, mode: exclusive}}\n");
+    let tree = format!("{}  /usr/bin/diskgc: {{}}\n", old_candidates(3, "100M"));
+    let yaml = yaml("5G", &tree, &rest).replace(
+        "processes:\n",
+        "processes:\n  - {pid: 4242, exe: /usr/bin/diskgc, cwd: /}\n",
+    );
+    let host = host(&yaml);
+    let run = watch(&host, &reclaim("2G", "3G", "10s"));
+    assert_eq!(
+        run.ended,
+        Ok(Ended::Stopped(Signal::Term)),
+        "{:?}",
+        run.lines
+    );
+    assert_eq!(run.records.len(), 1, "{:?}", run.records);
+    let (at, r) = &run.records[0];
+    assert_eq!(r["status"], "interrupted", "{r}");
+    assert!(
+        *at < Duration::from_secs(46),
+        "the wait ended at the signal: {at:?}"
+    );
+    assert_eq!(deletions(&host), 0);
+    assert_eq!(host_locks(&host), 0, "the lock never taken");
+    assert_eq!(host.trace_count(Op::StateWrite), 1, "the stop's write");
+}

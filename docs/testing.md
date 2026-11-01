@@ -806,9 +806,13 @@ Model scenarios required by [safety.md](safety.md) and
     `a_failing_first_sample_is_the_first_cycle_and_the_goal_resolves_later`): `statvfs` failing for an hour gives
     `error` records (`cause: host`) at 0, 1, 3, 7, 15, 30, 45, 60
     minutes, not one per interval, and the process keeps running;
-  - `watch_cycle_deadline` (*open*): a tier slower than `--timeout`: a
-    `deadline` record, no deletion starts after the deadline, a running
-    child gets SIGTERM;
+  - `watch_cycle_deadline` (as
+    `watch_cycle_deadline_starts_no_deletion_after_it`, TASK-258; the
+    model runs no child, so a running child's SIGTERM at the deadline is
+    the container test `deadline_mid_reclaim_reports_one_json_object`,
+    `ensure`'s run of the same executor; `watch`'s own *open*): a tier
+    slower than `--timeout`: a `deadline` record, no deletion starts
+    after the deadline, a running child gets SIGTERM;
   - `watch_path_on_another_device_deletes_nothing` (as
     `watch_path_on_another_device_backs_off_retry_doubling_and_deletes_nothing`):
     a mount stacked on `PATH` after start: the sample still reads the
@@ -852,7 +856,8 @@ Model scenarios required by [safety.md](safety.md) and
     `ensure_as_a_user_reclaims_unlocked_when_the_per_user_lock_cannot_be_made`); an unwritable state directory and a failing first
     sample are not refusals: one log line and no snapshot, and a first
     cycle record (`error`, `host`) respectively, the process running;
-  - `watch_root_vanished_after_start_still_reclaims_other_tiers` (*open*): a
+  - `watch_root_vanished_after_start_still_reclaims_other_tiers` (as
+    written, TASK-258): a
     tier's supplied root removed after start: that tier is one `missing`
     skip row, the other tiers delete to the goal, status `met`;
   - `watch_signals` (SIGTERM in a cycle:
@@ -863,6 +868,14 @@ Model scenarios required by [safety.md](safety.md) and
     `a_second_signal_before_the_stops_write_skips_it`; during a child's
     grace, which the model does not run, the container test
     `watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock`;
+    TASK-258: SIGINT in a cycle as
+    `watch_sigint_in_a_cycle_writes_an_interrupted_record_and_stops`, a
+    signal during the host-lock wait as
+    `watch_sigterm_during_the_host_lock_wait_stops_at_once`, during a
+    back-off: the end of every back-off scenario; SIGHUP is not modelled
+    (the model delivers SIGINT and SIGTERM only; SIGHUP differs from them
+    only in `LinuxHost`'s handler and the stop's log line), so it is
+    *open* until the container test `watch_process_stops_on_each_signal`;
     the rest *open*): SIGTERM between samples, during a back-off, during
     the host-lock wait and in a cycle between two candidates: exit 0
     within one batch (50 ms) or at the next candidate boundary, a record
