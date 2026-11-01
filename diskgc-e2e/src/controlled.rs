@@ -707,7 +707,7 @@ impl<H: Host> Host for Controlled<H> {
         self.before("state_lock");
         self.host.state_lock(key)
     }
-    fn user_lock_path(&self) -> Option<std::path::PathBuf> {
+    fn user_lock_path(&self) -> Result<Option<std::path::PathBuf>, HostError> {
         self.before("user_lock_path");
         self.host.user_lock_path()
     }
