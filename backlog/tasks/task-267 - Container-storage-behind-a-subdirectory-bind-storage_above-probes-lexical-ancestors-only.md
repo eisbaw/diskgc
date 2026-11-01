@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-31T03:39:00Z'
-updated_date: '2026-11-01T09:42:00Z'
+updated_date: '2026-11-01T11:10:00Z'
 labels:
   - safety
   - irreversible
@@ -26,4 +26,6 @@ Full review 2026-10-31 on master 6f14dd7 (tmp/reviews/codex-full-6f14dd7.md; mpe
 Periodic full review #2 on master 794e0e1 (2026-11-01; Codex tmp/reviews/codex-full2-794e0e1.md + mped), static reading, not reproduced. mped BLOCKER, same class: a ROOT that is a bind of a directory inside container storage (e.g. /mnt/l = bind of ~/.local/share/containers/storage/overlay/<id>/diff) escapes storage_above, which walks the root's lexical ancestors and asks only the mount point's directory; translate the root through the mount's root field (TASK-260 place logic) and check reachable ancestors on that device; document if uncheckable (not refusing every btrfs subvolume root).
 
 2026-11-01: in progress in tmp/worktrees/t267 (branch t267-bind-places).
+
+2026-11-01: implemented in tmp/worktrees/t267 (t267-bind-places, e3bd4bb, not merged): storage_above also asks every directory above the root's place that the mount table shows (places::places_above). Red-first vectors walk/container-storage-{behind-a-subdirectory-bind,cargo-root-behind-a-subdirectory-bind}; real-kernel container test a_root_bound_from_inside_container_storage_is_refused (fails with the guard disabled). Limit documented: places no mount shows (btrfs top level, host dirs above a container volume) are not asked.
 <!-- SECTION:NOTES:END -->

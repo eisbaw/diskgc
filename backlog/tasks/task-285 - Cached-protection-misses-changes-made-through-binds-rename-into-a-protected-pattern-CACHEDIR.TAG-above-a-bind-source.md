@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-01T05:37:00Z'
-updated_date: '2026-11-01T09:42:00Z'
+updated_date: '2026-11-01T11:10:00Z'
 labels:
   - safety
   - irreversible
@@ -24,4 +24,6 @@ Periodic full review #2 on master 794e0e1 (2026-11-01; Codex tmp/reviews/codex-f
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-01: in progress in tmp/worktrees/t267 (branch t267-bind-places).
+
+2026-11-01: implemented in tmp/worktrees/t267 (e3bd4bb, not merged): Protection keeps the mountinfo read before the enumeration; DeletePolicy::skip enumerates again when places::ancestry of the candidate differs; tagged_ancestor also walks by place; a protect refresh keeps the old horizon (negated matches are older). Vectors config/protect-rename-above-a-bind-source, protect-cargo-tag-above-a-bind-source, negated-rename-above-a-bind-source-after-a-protect-refresh.
 <!-- SECTION:NOTES:END -->
