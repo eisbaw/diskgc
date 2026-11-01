@@ -3,10 +3,10 @@ id: TASK-267
 title: >-
   Container storage behind a subdirectory bind: storage_above probes lexical
   ancestors only
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-31T03:39:00Z'
-updated_date: '2026-11-01T11:10:00Z'
+updated_date: '2026-11-01T12:37:00Z'
 labels:
   - safety
   - irreversible
@@ -28,4 +28,6 @@ Periodic full review #2 on master 794e0e1 (2026-11-01; Codex tmp/reviews/codex-f
 2026-11-01: in progress in tmp/worktrees/t267 (branch t267-bind-places).
 
 2026-11-01: implemented in tmp/worktrees/t267 (t267-bind-places, e3bd4bb, not merged): storage_above also asks every directory above the root's place that the mount table shows (places::places_above). Red-first vectors walk/container-storage-{behind-a-subdirectory-bind,cargo-root-behind-a-subdirectory-bind}; real-kernel container test a_root_bound_from_inside_container_storage_is_refused (fails with the guard disabled). Limit documented: places no mount shows (btrfs top level, host dirs above a container volume) are not asked.
+
+2026-11-01: merged in the bind batch after one review round (verification note on the merge).
 <!-- SECTION:NOTES:END -->
