@@ -333,6 +333,8 @@ fn run<H: Delete>(
         let index = tallied.usable.then_some(&mut index.state);
         run.walk(index, &mut tallied, &mut report, log)
     };
+    // Whatever ended the run (the lock, a signal, the walk).
+    tallied.log_unused(log);
     // The snapshot, before the final sample: the sample and the exit code
     // see the space it takes (docs/architecture.md, Snapshot). A run that
     // waited for the host lock until its deadline writes none: the write

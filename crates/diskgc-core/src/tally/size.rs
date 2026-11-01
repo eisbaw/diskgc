@@ -317,6 +317,23 @@ pub(super) fn reach<H: Host>(
     Ok(Some((parent, stat)))
 }
 
+/// `max(mtime, ctime)` of the unit at `root` now, reached as a sizing walk
+/// reaches it (from its mount, no symlink followed, the same identity):
+/// a lower bound of the `newest_change` its sizing would find, since that
+/// walk counts the root's own times (TASK-251). `Ok(None)`: gone,
+/// replaced, or a mount point now; `Ok(Some(None))`: the kernel reported
+/// no times.
+pub(crate) fn root_change<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    root: &Path,
+    identity: Identity,
+    budget: &mut Budget,
+) -> Result<Option<Option<Timestamp>>, HostError> {
+    Ok(reach(host, mounts, root, identity, budget)?
+        .map(|(_, stat)| stat.mtime.zip(stat.ctime).map(|(m, c)| m.max(c))))
+}
+
 /// Whether a failed call inside a unit means this user may not read it:
 /// the deletion would refuse the unit (`unreadable`, fail closed,
 /// docs/safety.md), so the estimate is a refusal, never an empty tree.

@@ -688,9 +688,19 @@ Model scenarios required by [safety.md](safety.md) and
   `tests/index_reclaim.rs`: the reclaim takes the dry run's order where
   deep changes reorder the units, also beside an expanded block's
   members, sizes only the units its queue reaches, stops sizing at
-  `--tally-budget` with `tally_cut_short`, and a failure of the host
-  while sizing is an error of the run: `deferred_sizing_*`,
-  `a_host_error_in_the_walks_deferred_sizing_is_an_error_of_the_run`);
+  `--tally-budget` with `tally_cut_short` (the mount table read
+  charged), reads a root again where an earlier run stored the key
+  (a snapshot's tally or listing: Codex review), keeps the deferral
+  when preflight drops a root and says when no tier took it, and a
+  failure of the host while sizing is an error of the run, also after
+  a first batch was deleted: `deferred_sizing_*`,
+  `the_deferred_sizings_mount_table_read_is_charged_to_the_tally_budget`,
+  `an_unused_deferral_is_logged`,
+  `a_host_error_in_the_walks_deferred_sizing_is_an_error_of_the_run`,
+  `a_host_error_in_deferred_sizing_after_the_first_batch_stops_the_run`;
+  and the queue's merge itself, a property in `diskgc-core`
+  `executor::indexed::tier_queue`: with keys at most the sized keys,
+  ties and members, it gives the order of full sizing);
 - **background tally** (virtual clock, every port call costing 1 ms):
   the worker's active time is at
   most 5 % (plus one batch) of any window of 100 batches, no batch

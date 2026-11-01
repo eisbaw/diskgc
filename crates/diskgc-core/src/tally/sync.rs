@@ -197,13 +197,13 @@ fn pass2<H: Host>(
     let Some((first, stale)) = first_tier_stale(host, state, tiers, dev) else {
         return Ok(());
     };
-    if tiers[first].order == Order::Oldest {
-        report.deferred = Some(Deferred {
-            tier: first,
-            stale: stale.len(),
-        });
-        return Ok(());
-    }
+    let stale = match stale {
+        Stale::Count(stale) => {
+            report.deferred = Some(Deferred { tier: first, stale });
+            return Ok(());
+        }
+        Stale::Units(stale) => stale,
+    };
     report.first_tier = Some(first);
     report.untallied = stale.len();
     if stale.is_empty() {
@@ -240,14 +240,21 @@ fn pass2<H: Host>(
     Ok(())
 }
 
-/// The first tier with a discovered candidate, and its stale singles in the
-/// tier's order by the stored keys.
+/// The first tier's stale singles: under `best-fit`, the units pass 2
+/// sizes, in its order; under `oldest`, how many the walk will size
+/// (deferred: no list of them is kept).
+enum Stale {
+    Units(Vec<(MountKey, PathBuf)>),
+    Count(usize),
+}
+
+/// The first tier with a discovered candidate, and its stale singles.
 fn first_tier_stale<H: Host>(
     host: &H,
     state: &TallyState,
     tiers: &[SyncTier],
     dev: Dev,
-) -> Option<(usize, Vec<(MountKey, PathBuf)>)> {
+) -> Option<(usize, Stale)> {
     let now = host.now();
     tiers.iter().enumerate().find_map(|(i, tier)| {
         let sources: Vec<Source<'_>> = tier
@@ -270,21 +277,26 @@ fn first_tier_stale<H: Host>(
         if q.ready.is_empty() && q.hinted.is_empty() {
             return None;
         }
-        let mut entries: Vec<_> = q.ready.into_iter().chain(q.hinted).collect();
-        if tier.order == Order::BestFit {
-            // Largest stored estimate first, unknown last (stable: ties
-            // keep the `oldest` order).
-            entries.sort_by_key(|e| std::cmp::Reverse(e.estimate().map(|(bytes, _)| bytes)));
+        let stale_single = |e: &queue::QueueEntry| match &e.unit {
+            Queued::Single(s) => needs_sizing(s, now),
+            Queued::Block(_) => false,
+        };
+        if tier.order == Order::Oldest {
+            // Units with a refusal hint are not sized ahead by the walk.
+            return Some((
+                i,
+                Stale::Count(q.ready.iter().filter(|e| stale_single(e)).count()),
+            ));
         }
+        let mut entries: Vec<_> = q.ready.into_iter().chain(q.hinted).collect();
+        // Largest stored estimate first, unknown last (stable: ties keep
+        // the `oldest` order).
+        entries.sort_by_key(|e| std::cmp::Reverse(e.estimate().map(|(bytes, _)| bytes)));
         let stale = entries
             .into_iter()
-            .filter_map(|e| match &e.unit {
-                Queued::Single(s) => {
-                    needs_sizing(s, now).then(|| (e.mount.clone(), e.path.clone()))
-                }
-                Queued::Block(_) => None,
-            })
+            .filter(|e| stale_single(e))
+            .map(|e| (e.mount, e.path))
             .collect();
-        Some((i, stale))
+        Some((i, Stale::Units(stale)))
     })
 }

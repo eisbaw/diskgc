@@ -279,7 +279,9 @@ split step waits for a measured need (backlog).
   information. A reclaim takes the same order in the first tier with
   candidates when its index holds no blocks and no stored refusal hints
   and its tally was not cut short (ties by path, not by discovery's
-  order); later tiers are ordered by their stored keys or, for units
+  order; under `oldest` also only while no timestamp goes back during
+  the run and every root reports its times, The tally: Synchronous,
+  pass 2); later tiers are ordered by their stored keys or, for units
   this run's tally did not size, by the provisional key (`max(mtime,
   ctime)` of the unit's root), so their order can differ from the plan's
   too. Blocks (ranked by their oldest member, members by their root's
@@ -466,8 +468,10 @@ the order of work.
 - **Synchronous (in `ensure`): may load the machine; must be fast and
   useful.** It runs at full speed (no sleeps, normal priority), for at
   most `--tally-budget`, **before** taking the host lock (it is
-  read-only), over the tiers the run selects, in their policy order
-  (group, tier), in two passes:
+  read-only; but for a first tier ordered `oldest` its sizing, pass 2,
+  runs under the lock, as the reclaim walk reaches each unit, still
+  read-only and within the same budget), over the tiers the run selects,
+  in their policy order (group, tier), in two passes:
   1. **Breadth (discovery):** for every selected tier, list its sources'
      roots by their patterns and `statx` each candidate's root. Every
      candidate gets a unit with identity and a provisional key
@@ -486,26 +490,42 @@ the order of work.
      tier's queue reaches each one (TASK-251: 140,000 tiny rc
      directories on the development laptop would otherwise all be sized
      before the first deletion, whatever the goal needs). The order is
-     unchanged: a stale unit's stored key (the provisional key, or an
-     older tally's `newest_change`) is at most the `newest_change` sizing
-     finds, since the walk counts the root's own times and times only
-     grow, so the walk sizes the unit with the oldest stored key and
-     takes a sized unit only once no unsized one's stored key comes
-     before its new key (a clock stepped back can break that bound; the
-     order is then approximate, never a check). It sizes as the tally
-     does (read-only, the same walk, a refusal is this run's tally's),
-     keeps no paused walk, spends what pass 1 left of `--tally-budget`
-     (past it, the rest of the tier goes by stored keys and
-     `tally_cut_short` is set), and a failure of the host there is an
-     error of the run, as anywhere in the walk. Units with a refusal
-     hint are not sized ahead: they come after the tier's others
-     (Refusals). Later tiers keep their stored sizes and ages for their
-     order (units without any are ordered by the provisional key, after
-     sized ones under `best-fit`); the reclaim walk's own checks size
-     what it acts on. The same rule applies with and without a seed.
-     The tally then ends, even with budget left, so the reclaim starts
-     sooner. Blocks are not sized (their members have no names in the
-     index); the reclaim walk's checks size the members it expands.
+     the one full sizing gives when each unit's key in the queue is at
+     most the `newest_change` its sizing finds: the walk then sizes the
+     unit with the lowest key and takes a sized unit once no unsized
+     one's key comes before its new key. `max(mtime, ctime)` of the
+     unit's root is such a lower bound (the sizing walk counts the root's
+     own times), so a key from this run's listing of the root serves; a
+     key stored before (an earlier tally's `newest_change`, which a
+     removed future-dated file can leave too high, or a snapshot's
+     listing this run did not repeat) does not, and the walk reads that
+     unit's root again (one `statx`) before ordering the queue (Codex
+     review of TASK-251). The order is **exact** with keys from this run
+     and roots read now; it is **approximate**, never a check, when
+     timestamps go back during the run (a clock stepped back, a time set
+     into the past), or when a root reports no times (keyed as just
+     changed, as discovery keys it). The walk sizes as the tally does
+     (read-only, the same walk, a refusal is this run's tally's), keeps
+     no paused walk, and spends what pass 1 left of `--tally-budget`:
+     each stretch of it (the root reads, or one unit's sizing) is charged
+     from before it reads the mount table; the wait for the host lock and
+     the walk's own work between stretches are not; past the budget the
+     rest of the tier goes by the keys it has and `tally_cut_short` is
+     set. It also counts against the tier's own `timeout`. A failure of
+     the host there is an error of the run, as anywhere in the walk (The
+     reclaim walk: a failure of the host). Units with a refusal hint are
+     not sized ahead: they come after the tier's others (Refusals). The
+     walk's tier takes this sizing when its sources are among the
+     first tier's (preflight may drop a root on another filesystem), and
+     a later `oldest` tier with the same sources continues it; one line
+     says so when no tier took it. Other later tiers keep their stored
+     sizes and ages for their order (units without any are ordered by
+     the provisional key, after sized ones under `best-fit`); the
+     reclaim walk's own checks size what it acts on. The same rule
+     applies with and without a seed. The tally then ends, even with
+     budget left, so the reclaim starts sooner. Blocks are not sized
+     (their members have no names in the index); the reclaim walk's
+     checks size the members it expands.
 
   **Useful** means: when pass 1 has finished, every selected tier has a
   queue in its order and the reclaim walk can act on it; pass 2 only
@@ -805,9 +825,12 @@ reclaim(min, goal, filesystem, deadline):
   A first-tier candidate is walked three times before its deletion: the
   tally's sizing (before the lock under `best-fit`; under `oldest` by
   the walk as the queue reaches it, so the first deletion waits for the
-  sizing of the units found ahead of it, not of the whole tier), the
+  sizing of the units found ahead of it, not of the whole tier, and for
+  one root read of each unit whose key an earlier run stored), the
   candidate's own read-only tally, and the locked eligibility walk; the
-  second could reuse the first (a follow-up).
+  second could reuse the first (TASK-245). A signal is not checked
+  inside one unit's sizing walk (under the lock under `oldest`), only
+  between units, as for every walk of a candidate.
 - Every step checks the cooperative deadline
   ([safety.md](safety.md#deadlines)). `watch` calls the walk with
   `min = --min-free`, `goal = --target-free` and a deadline of `--timeout`
@@ -841,10 +864,11 @@ reclaim(min, goal, filesystem, deadline):
   reclaim until the next run, never an unsafe delete. This tally runs
   under the host lock, unlike the synchronous one, so other reclaims
   wait that much longer.
-- **A failure of the host during the synchronous tally** (`EIO`,
-  `EMFILE`, `ENOMEM`: an error of the run, not a skip;
+- **A failure of the host during the synchronous tally** before the
+  host lock (`EIO`, `EMFILE`, `ENOMEM`: an error of the run, not a skip;
   [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate),
-  Fail closed) ends the tally with one log line, and **no tier takes a
+  Fail closed), in its listing (pass 1) or its sizing of a `best-fit`
+  first tier, ends the tally with one log line, and **no tier takes a
   queue from the index in that run**: each tier is its own discovery
   alone, which meets a failure that persists and stops the tier with
   nothing of it reclaimed, as without the index. Otherwise a queued unit
@@ -853,6 +877,14 @@ reclaim(min, goal, filesystem, deadline):
   that completed). The rule is coarse on purpose (every tier, not only
   those whose roots failed): the others lose only speed. Not reported in
   the JSON beyond the run error discovery records (TASK-247).
+- **A failure of the host during the deferred sizing** of an `oldest`
+  first tier (its root reads or a unit's sizing, under the host lock as
+  the queue reaches it) is an **error of the run**, as any failure of the
+  walk's own checks: the run stops there (exit 3). It can come after
+  earlier candidates of the queue were deleted (the queue sizes 64 ahead
+  of judging them), each of which passed every live check; it is the
+  same kind of limit as the next one, and the queue rule above does not
+  apply: no queue is taken back once the walk has begun.
 - **Remaining limit: a failure that first appears after the tally.** A
   host failure on a branch the tally listed cleanly that first shows when
   the tier's discovery lists it after the queue (a disk going bad during

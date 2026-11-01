@@ -30,17 +30,16 @@
 //! (their units are not tallied either); for them the index changes
 //! nothing.
 
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{Acted, CandidateQueue, Protect, ProtectAt, Reclaim, SourceKind, Tier, sample};
+use super::{Acted, Protect, ProtectAt, Reclaim, SourceKind, Tier, sample};
 use crate::config::Order;
 use crate::engine::{Reason, Skip};
 use crate::fs_kind::{self, Beneath, Find, Found};
-use crate::host::{Delete, DevIno, Host, MountEntry, Timestamp};
+use crate::host::{Delete, DevIno, Host, MonoTime, MountEntry};
 use crate::index::queue::{self, AgeFilter, QueueEntry, Queued, Source, TierQuery};
 use crate::index::{Family, Finder, FinderSetId, MountKey, name_family};
 use crate::inuse::Checker;
@@ -48,11 +47,15 @@ use crate::outcome::Stop;
 use crate::report::Report;
 use crate::resolve::mount_for;
 use crate::snapshot::{Reclaimed, RunIndex};
-use crate::tally::Sizing;
 use crate::tally::budget::Budget;
 use crate::tally::listing::{SourceFind, TallySource, index_identity};
 use crate::tally::schedule::needs_sizing;
 use crate::tally::sync::{self, SyncTier};
+use crate::tally::{Sizing, size};
+
+mod tier_queue;
+
+use tier_queue::{Item, Settle, TierQueue};
 
 /// Candidates the queue finds again ahead of judging them
 /// ([`Reclaim::find_ahead`]). An in-use scan serves consecutive candidates
@@ -174,33 +177,85 @@ pub(super) struct SyncTallied {
 /// tally: Synchronous, pass 2): the synchronous tally's pass 2, deferred,
 /// so the first deletion waits for the oldest units' sizing only.
 ///
-/// The order stays the one pass 2 gave (exact for singles): a stale
-/// single's stored key, `max(mtime, ctime)` of its root or an older tally's
-/// `newest_change`, is at most its sized `newest_change` (the walk counts
-/// the root's own times, and times only grow), so a unit sized on the way
-/// is taken once no unsized unit's stored key comes before its new key
-/// ([`TierQueue::settle`]). Not sized: blocks (as in pass 2) and units
-/// with a refusal hint (they come after the tier's others anyway,
-/// Refusals). The sizing spends what pass 1 left of `--tally-budget`
-/// (`None`: no limit), so the tally's work stays within its budget; past
-/// it, the rest of the tier is taken by stored keys and the run's
-/// `tally_cut_short` is set.
+/// **Order.** A unit's key in the queue must be a lower bound of the key
+/// its sizing gives it ([`TierQueue::settle`]); then the queue gives out
+/// the units in the order full sizing would. `max(mtime, ctime)` of the
+/// unit's root is one, read now: the sizing walk counts the root's own
+/// times, and a later read of them is not older unless timestamps go
+/// back (a clock stepped back, a time set into the past whose ctime does
+/// not cover it). So a stale unit whose key does not come from this
+/// run's listing of its root (a key from an earlier tally, or from a
+/// snapshot's listing this run did not repeat; Codex review of TASK-251)
+/// has its root read again before the queue is ordered
+/// ([`Reclaim::refresh_bounds`]). A root whose times are unknown is keyed
+/// as just changed (as discovery keys it), which is no lower bound: its
+/// place is approximate.
+///
+/// **Budget.** The re-reads and the sizing spend what pass 1 left of
+/// `--tally-budget` (`None`: no limit), each stretch charged from before
+/// it reads the mount table, so the tally's work stays within its budget;
+/// the wait for the host lock and the steps between stretches are not
+/// charged. Past it, the rest of the tier is taken by the keys it has and
+/// the run's `tally_cut_short` is set. Every stretch is also bounded by
+/// the tier's deadline (the run's, or the tier's own `timeout`).
+///
+/// **Who holds it.** The run's [`SyncTallied`] until a tier takes it
+/// ([`Reclaim::walk_fs_index`]: an `oldest` tier whose sources are among
+/// the deferred tier's, so a root preflight dropped does not lose it);
+/// that tier gives it back when its queue ends, for a later tier with the
+/// same sources. Not sized: blocks (as in pass 2) and units with a refusal
+/// hint (they come after the tier's others anyway, Refusals).
 #[derive(Debug)]
 pub(super) struct DeferredSizing {
-    /// The tier's sources, as the walk's tier names them.
+    /// The tier's sources, as the tally bound them (before preflight).
     finders: Vec<Finder>,
     /// Its stale singles when the tally ended.
     stale: usize,
-    /// What is left of `--tally-budget` for sizing (`None`: no limit).
+    /// When the tally started: a never-tallied unit checked (listed) since
+    /// carries its root's times from this run's listing.
+    listed_since: MonoTime,
+    /// What is left of `--tally-budget` for this work (`None`: no limit).
     left: Option<Duration>,
-    /// The budget ended a sizing: the rest goes by stored keys.
+    /// The budget ended: the rest goes by the keys it has.
     spent: bool,
-    /// Singles sized, refused, and the time it took.
+    /// A tier took it.
+    used: bool,
+    /// Roots read again for their keys; singles sized, refused; the time.
+    refreshed: usize,
     sized: usize,
     refused: usize,
     took: Duration,
-    /// The mount table, read once at the first sizing.
+    /// The mount table, read once at the first stretch.
     mounts: Option<Vec<MountEntry>>,
+}
+
+impl SyncTallied {
+    /// One log line if the first tier's deferred sizing was never taken by
+    /// a tier (the run ended first, or no tier's sources matched): its
+    /// units' order then came from their stored keys alone.
+    pub(super) fn log_unused(&self, log: &mut dyn FnMut(&str)) {
+        if let Some(d) = self.deferred.as_ref().filter(|d| !d.used) {
+            log(&format!(
+                "index: no tier took the first tier's deferred sizing ({} stale unit(s) of {} \
+                 not sized in this run)",
+                d.stale,
+                d.finders
+                    .iter()
+                    .map(|f| format!("{} at {}", f.profile, f.root.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+}
+
+/// A stretch of the deferred tally work ([`DeferredSizing`], Budget).
+enum Window {
+    Open {
+        started: MonoTime,
+        until: Option<MonoTime>,
+    },
+    Spent,
 }
 
 /// Runs the synchronous tally over `tiers` on the filesystem `dev`, for at
@@ -309,8 +364,11 @@ pub(super) fn sync_tally<'t, H: Host>(
             .map(|s| s.finder.clone())
             .collect(),
         stale: d.stale,
+        listed_since: started,
         left: budget_end.map(|end| end.saturating_since(host.now())),
         spent: false,
+        used: false,
+        refreshed: 0,
         sized: 0,
         refused: 0,
         took: Duration::ZERO,
@@ -394,201 +452,9 @@ enum Origin {
     Member(BlockOf),
 }
 
-/// One item of a tier's queue: a unit of the index, or a member of an
-/// expanded block found now.
-enum Item {
-    Unit(QueueEntry),
-    Member(Box<Found>, BlockOf),
-}
-
-/// A unit of the `oldest` queue in the index's order
-/// ([`QueueEntry::cmp_order`]).
-#[derive(Debug)]
-struct ByOrder(QueueEntry);
-
-impl Ord for ByOrder {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.cmp_order(&other.0)
-    }
-}
-
-impl PartialOrd for ByOrder {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for ByOrder {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for ByOrder {}
-
-/// What sizing the next unit of the `oldest` queue came to
-/// ([`TierQueue::settle`]).
-#[derive(Debug)]
-enum Settle {
-    /// Its stored key is final (sized recently, a block, or no more
-    /// sizing in this run): it is taken as it is.
-    Final,
-    /// Decided: it waits under this key, its sized `newest_change`, or its
-    /// stored key when the sizing refused it or found it gone (the
-    /// re-match then gives its verdict: skipped as this run's tally
-    /// refused it, or `stale`).
-    Ready(QueueEntry),
-    /// The run stops.
-    Stop,
-}
-
-/// A tier's queue over the index (docs/architecture.md, Order within a
-/// tier): the units in the tier's order, then those with a stored refusal
-/// hint; an expanded block's members join it, under `oldest` by
-/// `max(mtime, ctime)` of their own root, under `best-fit` all before the
-/// next pick.
-struct TierQueue {
-    order: Order,
-    /// `oldest`: the units in the index's `oldest` order, by their stored
-    /// keys.
-    oldest: VecDeque<QueueEntry>,
-    /// `oldest`: the units sized on the way ([`Self::settle`]), by their
-    /// new keys, each until no unit left in `oldest` can come before it.
-    sized: BTreeSet<ByOrder>,
-    /// `best-fit`: the units by their estimates.
-    best_fit: CandidateQueue<QueueEntry>,
-    members: BTreeMap<(Timestamp, u64), (Found, BlockOf)>,
-    hinted: VecDeque<QueueEntry>,
-    /// Ties of members keep the order expansion found them in.
-    sequence: u64,
-    /// Identities queued as members, so a member is queued once.
-    queued: HashSet<DevIno>,
-}
-
-impl TierQueue {
-    fn new(order: Order, queue: queue::TierQueue) -> Self {
-        let (oldest, best_fit) = match order {
-            Order::Oldest => (
-                queue.ready.into(),
-                CandidateQueue::new(order, Vec::new(), QueueEntry::estimate),
-            ),
-            Order::BestFit => (
-                VecDeque::new(),
-                CandidateQueue::new(order, queue.ready, QueueEntry::estimate),
-            ),
-        };
-        Self {
-            order,
-            oldest,
-            sized: BTreeSet::new(),
-            best_fit,
-            members: BTreeMap::new(),
-            hinted: queue.hinted.into(),
-            sequence: 0,
-            queued: HashSet::new(),
-        }
-    }
-
-    fn push_member(&mut self, found: Found, block: BlockOf, now: Timestamp) {
-        if !self.queued.insert(found.identity.id) {
-            return;
-        }
-        // Unknown times sort as just changed: last, never first.
-        let key = found.seen.changed.unwrap_or(now);
-        self.sequence += 1;
-        self.members.insert((key, self.sequence), (found, block));
-    }
-
-    /// Whether the earliest unit sized on the way comes before the next
-    /// one left in `oldest`.
-    fn sized_first(&self) -> bool {
-        match (self.sized.first(), self.oldest.front()) {
-            (Some(sized), Some(unit)) => sized.0.cmp_order(unit).is_le(),
-            (sized, _) => sized.is_some(),
-        }
-    }
-
-    /// The next unit under `oldest`.
-    fn oldest_head(&self) -> Option<&QueueEntry> {
-        if self.sized_first() {
-            self.sized.first().map(|s| &s.0)
-        } else {
-            self.oldest.front()
-        }
-    }
-
-    /// Makes the next unit under `oldest` final, before [`Self::pop`]:
-    /// while the next unit left in `oldest` comes before every unit sized
-    /// on the way and before the next member, `size` decides on it by its
-    /// stored key (a lower bound of the key sizing gives it,
-    /// [`DeferredSizing`]); one sized moves to `sized` under its new key
-    /// and the next one is looked at. So the units come out in the order
-    /// their sized keys give, sizing only as many as that order needs.
-    /// `false`: the run stops.
-    fn settle(&mut self, mut size: impl FnMut(&QueueEntry) -> Settle) -> bool {
-        loop {
-            let Some(front) = self.oldest.front() else {
-                return true;
-            };
-            if self.sized_first() {
-                return true;
-            }
-            if self
-                .members
-                .first_key_value()
-                .is_some_and(|((key, _), _)| *key < front.order_key())
-            {
-                return true; // a member comes first whatever the front's size
-            }
-            match size(front) {
-                Settle::Final => return true,
-                Settle::Ready(entry) => {
-                    self.oldest.pop_front();
-                    self.sized.insert(ByOrder(entry));
-                }
-                Settle::Stop => return false,
-            }
-        }
-    }
-
-    fn pop(&mut self, need: u64) -> Option<Item> {
-        let member = |queue: &mut Self| {
-            queue
-                .members
-                .pop_first()
-                .map(|(_, (found, block))| Item::Member(Box::new(found), block))
-        };
-        match self.order {
-            Order::Oldest => {
-                let unit_first = match (self.oldest_head(), self.members.first_key_value()) {
-                    (Some(unit), Some(((key, _), _))) => unit.order_key() <= *key,
-                    (Some(_), None) => true,
-                    (None, _) => false,
-                };
-                if unit_first {
-                    let unit = if self.sized_first() {
-                        self.sized.pop_first().map(|s| s.0)
-                    } else {
-                        self.oldest.pop_front()
-                    };
-                    return unit.map(Item::Unit);
-                }
-                if let Some(item) = member(self) {
-                    return Some(item);
-                }
-            }
-            Order::BestFit => {
-                if let Some(item) = member(self) {
-                    return Some(item);
-                }
-                if let Some(unit) = self.best_fit.pop(need) {
-                    return Some(Item::Unit(unit));
-                }
-            }
-        }
-        self.hinted.pop_front().map(Item::Unit)
-    }
-}
+/// A member of an expanded block in the tier's queue: found now, and the
+/// block it came from.
+type Member = Box<(Found, BlockOf)>;
 
 /// Whether `path` is a member of a block of `family` sited at `site`
 /// (docs/architecture.md, The index: Granularity).
@@ -622,21 +488,33 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             .iter()
             .map(|root| finder(self.tier, root))
             .collect();
-        let mut deferred = self
-            .tallied
-            .deferred
-            .take_if(|d| self.tier.order == Order::Oldest && d.finders == finders && !d.spent);
-        let before = deferred.as_ref().map(|d| (d.sized, d.refused, d.took));
+        // Taken out of the run's state for this tier's queue, given back
+        // below (one owner at a time, DeferredSizing: Who holds it). The
+        // walk's sources are the tally's less what preflight dropped (a root
+        // on another filesystem): a subset, in any order.
+        let mut deferred = self.tallied.deferred.take_if(|d| {
+            self.tier.order == Order::Oldest
+                && !d.spent
+                && !finders.is_empty()
+                && finders.iter().all(|f| d.finders.contains(f))
+        });
+        if let Some(d) = deferred.as_mut() {
+            d.used = true;
+        }
+        let before = deferred
+            .as_ref()
+            .map(|d| (d.refreshed, d.sized, d.refused, d.took));
         let walked = self.walk_queue(find, judge, checker, handled, &finders, &mut deferred);
-        if let (Some(d), Some((sized, refused, took))) = (&deferred, before)
-            && (d.sized + d.refused > sized + refused || d.spent)
+        if let (Some(d), Some((refreshed, sized, refused, took))) = (&deferred, before)
+            && (d.refreshed + d.sized + d.refused > refreshed + sized + refused || d.spent)
         {
             (self.log)(&format!(
-                "{}: {} unit(s) sized as the queue reached them, {} refused, in {} ms ({} of \
-                 the first tier's {} stale unit(s) so far){}",
+                "{}: {} unit(s) sized as the queue reached them, {} refused, {} root(s) read \
+                 again for their keys, in {} ms ({} of the first tier's {} stale unit(s) so far){}",
                 self.tier.name,
                 d.sized - sized,
                 d.refused - refused,
+                d.refreshed - refreshed,
                 d.took.saturating_sub(took).as_millis(),
                 d.sized + d.refused,
                 d.stale,
@@ -690,7 +568,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         }
         // The idle filters are not applied to the queue: a unit they would
         // leave out is found by the tier's discovery and judged anyway.
-        let derived = queue::derive(
+        let mut derived = queue::derive(
             &state.index,
             &TierQuery {
                 dev: self.measured.dev,
@@ -700,6 +578,11 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         );
         if derived.ready.is_empty() && derived.hinted.is_empty() {
             return Walked::Discover;
+        }
+        if let Some(sizing) = deferred.as_mut()
+            && !self.refresh_bounds(&mut derived.ready, sizing)
+        {
+            return Walked::TierDone;
         }
         let blocks = derived
             .ready
@@ -713,7 +596,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             derived.ready.len() + derived.hinted.len(),
             derived.hinted.len(),
         ));
-        let mut queue = TierQueue::new(self.tier.order, derived);
+        let mut queue: TierQueue<Member> = TierQueue::new(self.tier.order, derived);
         let started = self.host.now();
         let sampled = sample(self.host, self.measured);
         self.record_overrun("statvfs", &self.measured.path, started, self.host.now());
@@ -769,7 +652,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     fn find_ahead(
         &mut self,
         find: &Find,
-        queue: &mut TierQueue,
+        queue: &mut TierQueue<Member>,
         ready: &mut VecDeque<(Found, Origin)>,
         handled: &mut Handled,
         need: u64,
@@ -795,7 +678,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 return true;
             };
             match item {
-                Item::Member(found, block) => ready.push_back((*found, Origin::Member(block))),
+                Item::Member(member) => {
+                    let (found, block) = *member;
+                    ready.push_back((found, Origin::Member(block)));
+                }
                 Item::Unit(entry) => match &entry.unit {
                     Queued::Block(_) => {
                         if !self.expand(find, &entry, queue, handled) {
@@ -816,13 +702,159 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         true
     }
 
+    /// Opens a stretch of the deferred tally work ([`DeferredSizing`],
+    /// Budget): from now, until what is left of `--tally-budget` or the
+    /// tier's deadline. `Spent` when nothing is left (the rest goes by the
+    /// keys it has; `tally_cut_short`).
+    fn open_window(&mut self, sizing: &mut DeferredSizing) -> Window {
+        let started = self.host.now();
+        if sizing.left.is_some_and(|left| left.is_zero()) {
+            self.deferred_budget_spent(sizing);
+            return Window::Spent;
+        }
+        let budget_end = sizing
+            .left
+            .map(|left| started.checked_add(left).expect("monotonic time overflow"));
+        let until = match (budget_end, self.deadline) {
+            (Some(b), Some(d)) => Some(b.min(d)),
+            (b, None) => b,
+            (None, d) => d,
+        };
+        Window::Open { started, until }
+    }
+
+    /// Charges a stretch that began at `started` (`path`: what it worked on,
+    /// for an overrun of the deadline).
+    fn close_window(&mut self, sizing: &mut DeferredSizing, started: MonoTime, path: &Path) {
+        let ended = self.host.now();
+        let took = ended.saturating_since(started);
+        sizing.took += took;
+        sizing.left = sizing.left.map(|left| left.saturating_sub(took));
+        self.record_overrun("tally", path, started, ended);
+    }
+
+    /// `--tally-budget` ended the deferred work: the rest by the keys it has.
+    fn deferred_budget_spent(&mut self, sizing: &mut DeferredSizing) {
+        sizing.spent = true;
+        self.report.tally_cut_short = true;
+    }
+
+    /// The mount table for the deferred work, read once, inside a stretch
+    /// (its time is charged). `None`: a failure of the host, recorded; the
+    /// run stops.
+    fn deferred_mounts(
+        &mut self,
+        sizing: &mut DeferredSizing,
+        path: &Path,
+    ) -> Option<Vec<MountEntry>> {
+        if let Some(mounts) = sizing.mounts.take() {
+            return Some(mounts);
+        }
+        match self.host.mountinfo() {
+            Ok(mounts) => Some(mounts),
+            Err(e) => {
+                self.host_failure(format!("mountinfo, to size {}: {e}", path.display()));
+                None
+            }
+        }
+    }
+
+    /// Makes every stale single's key in `ready` a lower bound of its sized
+    /// key before the queue is ordered ([`DeferredSizing`], Order): a unit
+    /// whose key does not come from this run's listing of its root (an
+    /// earlier tally's `newest_change`, or a snapshot's listing this run
+    /// did not repeat) gets `max(mtime, ctime)` of its root, read now, in
+    /// the queue's copy (the index keeps what it has). Then `ready` is
+    /// sorted again. A unit gone or replaced keeps its key: its sizing
+    /// finds it so and its re-match reports it. `false`: the run stops.
+    fn refresh_bounds(&mut self, ready: &mut [QueueEntry], sizing: &mut DeferredSizing) -> bool {
+        if sizing.spent {
+            return true;
+        }
+        let now = self.host.now();
+        let since = sizing.listed_since;
+        let to_read: Vec<usize> = ready
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| match &e.unit {
+                Queued::Single(s) => (needs_sizing(s, now)
+                    && (s.tally.is_some() || s.checked_at < since))
+                    .then_some(i),
+                Queued::Block(_) => None,
+            })
+            .collect();
+        let Some(&first) = to_read.first() else {
+            return true;
+        };
+        let first_path = ready[first].path.clone();
+        if self.stop_if_interrupted() {
+            return false;
+        }
+        let Window::Open { started, until } = self.open_window(sizing) else {
+            return true;
+        };
+        let Some(mounts) = self.deferred_mounts(sizing, &first_path) else {
+            self.close_window(sizing, started, &first_path);
+            return false;
+        };
+        let now_wall = self.host.wall_clock();
+        let mut budget = Budget::until(until);
+        let mut going = true;
+        for i in to_read {
+            if self.stop_if_interrupted() {
+                going = false;
+                break;
+            }
+            if budget.spent(self.host) {
+                if self.past_deadline() {
+                    self.stop(&Stop::DeadlinePassed {
+                        path: ready[i].path.clone(),
+                    });
+                    going = false;
+                } else {
+                    self.deferred_budget_spent(sizing);
+                }
+                break;
+            }
+            let entry = &mut ready[i];
+            let Queued::Single(single) = &mut entry.unit else {
+                unreachable!("only singles are read again")
+            };
+            match size::root_change(
+                self.host,
+                &mounts,
+                &entry.path,
+                single.identity,
+                &mut budget,
+            ) {
+                Ok(Some(change)) => {
+                    single.newest_change = change.unwrap_or(now_wall);
+                    sizing.refreshed += 1;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let path = entry.path.display().to_string();
+                    self.host_failure(format!("reading {path} again for its key: {e}"));
+                    going = false;
+                    break;
+                }
+            }
+        }
+        sizing.mounts = Some(mounts);
+        self.close_window(sizing, started, &first_path);
+        ready.sort_by(QueueEntry::cmp_order);
+        going
+    }
+
     /// The deferred sizing of `front`, the next unit left in the queue
     /// ([`DeferredSizing`], [`TierQueue::settle`]): a stale single is sized
-    /// now, read-only, in one go and keeping no cursor, until the deadline
-    /// or what is left of `--tally-budget`. A refusal is this run's own
-    /// tally's: the candidate is skipped once found again at its path
-    /// ([`Self::rematch`]). A failure of the host is an error of the run,
-    /// as for every check of the walk (docs/safety.md, Fail closed).
+    /// now, read-only, in one go and keeping no cursor, within a stretch of
+    /// the deferred budget that starts before the mount table is read. A
+    /// refusal is this run's own tally's: the candidate is skipped once
+    /// found again at its path ([`Self::rematch`]). A failure of the host
+    /// is an error of the run, as for every check of the walk
+    /// (docs/safety.md, Fail closed). A signal is not checked inside one
+    /// unit's sizing walk, only between units.
     fn size_deferred(&mut self, front: &QueueEntry, sizing: &mut DeferredSizing) -> Settle {
         let Queued::Single(single) = &front.unit else {
             return Settle::Final; // blocks are not sized (pass 2's rule)
@@ -839,24 +871,12 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             });
             return Settle::Stop;
         }
-        let mounts = match sizing.mounts.take() {
-            Some(mounts) => mounts,
-            None => match self.host.mountinfo() {
-                Ok(mounts) => mounts,
-                Err(e) => {
-                    self.host_failure(format!("mountinfo, to size {}: {e}", front.path.display()));
-                    return Settle::Stop;
-                }
-            },
+        let Window::Open { started, until } = self.open_window(sizing) else {
+            return Settle::Final;
         };
-        let started = self.host.now();
-        let budget_end = sizing
-            .left
-            .map(|left| started.checked_add(left).expect("monotonic time overflow"));
-        let until = match (budget_end, self.deadline) {
-            (Some(b), Some(d)) => Some(b.min(d)),
-            (b, None) => b,
-            (None, d) => d,
+        let Some(mounts) = self.deferred_mounts(sizing, &front.path) else {
+            self.close_window(sizing, started, &front.path);
+            return Settle::Stop;
         };
         let Some(state) = self.index.as_deref_mut() else {
             unreachable!("a queue from the index has an index")
@@ -868,12 +888,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             &front.path,
             &mut Budget::until(until),
         );
-        let ended = self.host.now();
         sizing.mounts = Some(mounts);
-        let took = ended.saturating_since(started);
-        sizing.took += took;
-        sizing.left = sizing.left.map(|left| left.saturating_sub(took));
-        self.record_overrun("tally", &front.path, started, ended);
+        self.close_window(sizing, started, &front.path);
         match sized {
             Err(e) => {
                 self.host_failure(format!("sizing {}: {e}", front.path.display()));
@@ -895,8 +911,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 Settle::Ready(front.clone())
             }
             // Gone or replaced (evicted by the sizing), or no longer a
-            // single: the re-match finds what is there now and reports the
-            // unit `stale`, as for any unit gone after the tally.
+            // single: kept in the queue so that its re-match finds what is
+            // there now and reports the unit `stale` (where pass 2 evicted
+            // it before the walk and the report said nothing).
             Ok(Sizing::Gone | Sizing::Missing) => Settle::Ready(front.clone()),
             Ok(Sizing::Paused | Sizing::NoRoom) => {
                 if self.past_deadline() {
@@ -906,9 +923,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     return Settle::Stop;
                 }
                 // `--tally-budget` ended (`NoRoom` cannot happen: no cursor
-                // is kept): the rest of the tier by its stored keys.
-                sizing.spent = true;
-                self.report.tally_cut_short = true;
+                // is kept): the rest of the tier by the keys it has.
+                self.deferred_budget_spent(sizing);
                 Settle::Final
             }
         }
@@ -1008,7 +1024,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         &mut self,
         find: &Find,
         entry: &QueueEntry,
-        queue: &mut TierQueue,
+        queue: &mut TierQueue<Member>,
         handled: &Handled,
     ) -> bool {
         let Queued::Block(block) = &entry.unit else {
@@ -1059,7 +1075,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 continue;
             }
             members += 1;
-            queue.push_member(found, of.clone(), now);
+            // Unknown times sort as just changed: last, never first.
+            let key = found.seen.changed.unwrap_or(now);
+            queue.push_member(found.identity.id, key, Box::new((found, of.clone())));
         }
         (self.log)(&format!(
             "{}: block at {} ({} recorded member(s)) expanded: {members} member(s) found{}",

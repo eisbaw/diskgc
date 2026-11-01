@@ -2034,11 +2034,14 @@ block's site, or from the tier's bound root where the site lies above
 it, under the same completion rule. A refusal on the way leaves the unit
 to the tier's own discovery, which runs after the index's queue. A
 failure of the host (Fail closed: an error of the run) in that run's
-synchronous tally keeps every tier off the index's queue, so a tier
+synchronous tally before the host lock (its listing, or its sizing of a
+`best-fit` first tier) keeps every tier off the index's queue, so a tier
 whose discovery stops reclaims nothing, as without the index; one that
 first appears after the tally (or under a root the tally did not list
-because a seed's listing was recent) can follow deletions of queued
-candidates, each of which passed every check
+because a seed's listing was recent), including in the sizing of an
+`oldest` first tier that the walk does as its queue reaches each unit
+(an error of the run that stops it there), can follow deletions of
+queued candidates, each of which passed every check
 ([architecture.md](architecture.md#the-reclaim-walk)). The identity from that reclaim-time `statx` or listing (device,
 inode, owner, type, birth time) is what steps 2 to 4 compare against;
 an identity stored by an earlier tally is never trusted as such.

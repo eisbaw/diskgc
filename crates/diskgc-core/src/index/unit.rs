@@ -104,6 +104,27 @@ pub struct Single {
     pub refusal: Option<Refusal>,
 }
 
+/// Units for tests outside the index (a queue's merge order).
+#[cfg(test)]
+pub(crate) mod test_units {
+    use super::{FinderSetId, Identity, Single};
+    use crate::host::{MonoTime, Timestamp};
+
+    impl Single {
+        /// A never-tallied single of no finder set.
+        pub(crate) fn for_test(identity: Identity, newest_change: Timestamp) -> Self {
+            Self {
+                identity,
+                finders: FinderSetId(0),
+                newest_change,
+                tally: None,
+                checked_at: MonoTime(std::time::Duration::ZERO),
+                refusal: None,
+            }
+        }
+    }
+}
+
 impl Single {
     pub fn finders(&self) -> FinderSetId {
         self.finders
