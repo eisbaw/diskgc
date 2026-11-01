@@ -1,4 +1,4 @@
-# The held /proc is mounted with hidepid: ensure refuses at start, its dry
+# The held /proc is mounted with hidepid: ensure refuses below the goal, its dry
 # run too (TASK-263), before the pytest contract is asked.
 profile_vector: 1
 profile: pytest-tmp

@@ -1094,12 +1094,19 @@ fn watch_is_refused_where_the_in_use_check_cannot_see_every_process() {
         ),
     ] {
         let model = yaml("5G", &old_candidates(3, "1G"), &format!("{facts}{stop}"));
-        let refused = host(&model);
-        let run = watch(&refused, &reclaim("6G", "7G", "10s"));
-        assert_eq!(run.ended, Err(2), "{facts}");
-        assert!(run.has("\"cause\":\"safety\""), "{facts}: {:?}", run.lines);
-        assert!(run.has(rule), "{facts}: {:?}", run.lines);
-        assert_eq!(deletions(&refused), 0, "{facts}");
+        // TASK-298: refused at start whether or not the space is there
+        // now (about 2 GiB available; 6G is below it, 1G above): a watcher
+        // that could never reclaim fails where its operator looks, at
+        // start, not on the day space runs short.
+        for goal in [reclaim("6G", "7G", "10s"), reclaim("1G", "2G", "10s")] {
+            let refused = host(&model);
+            let run = watch(&refused, &goal);
+            assert_eq!(run.ended, Err(2), "{facts}");
+            assert!(run.has("\"cause\":\"safety\""), "{facts}: {:?}", run.lines);
+            assert!(run.has(rule), "{facts}: {:?}", run.lines);
+            assert_eq!(deletions(&refused), 0, "{facts}");
+            assert_eq!(refused.trace_count(Op::Pids), 0, "{facts}");
+        }
         let tally = host(&model);
         assert_eq!(
             watch(&tally, &Mode::TallyOnly { min_free: None }).ended,
@@ -1127,6 +1134,43 @@ fn watch_is_refused_where_the_in_use_check_cannot_see_every_process() {
     let run = watch(&excepted, &reclaim("6G", "7G", "10s"));
     assert_eq!(run.ended, Ok(Ended::Stopped(Signal::Term)));
     assert!(deletions(&excepted) > 0, "{:?}", run.lines);
+}
+
+/// TASK-298: `ensure` asks the visibility rule when its reclaim would
+/// start; a watch asked it at start, and its cycles leave a change since
+/// to their scans, which read the facts again (docs/safety.md, In use:
+/// Visibility): facts that cannot be read in a cycle make its candidates
+/// `in_use_unknown` (`incomplete_process_list`), they do not refuse the
+/// cycle as a start check would. The start's read is the first; the
+/// cycle's scan's first read fails.
+#[test]
+fn a_watch_cycle_leaves_the_visibility_facts_to_its_scan() {
+    let events = "events:\n  - {at: {elapsed: 90s}, other_used: {mount: /tmp, bytes: 6656M}}\n  \
+                  - {at: {op: pid_namespace, nth: 2, when: before}, fail: EIO}\n  \
+                  - {at: {elapsed: 2m}, signal: term}\n";
+    let host = host(&yaml("4G", &old_candidates(10, "300M"), events));
+    let run = watch(&host, &reclaim("1G", "2G", "10s"));
+    assert_eq!(
+        run.ended,
+        Ok(Ended::Stopped(Signal::Term)),
+        "{:?}",
+        run.lines
+    );
+    let (_, record) = run.records.first().expect("a cycle record");
+    assert!(
+        !run.has("could not read its PID namespace facts"),
+        "{:?}",
+        run.lines
+    );
+    let skipped = record["skipped"].as_array().expect("skipped");
+    assert!(
+        !skipped.is_empty()
+            && skipped.iter().all(|s| s["reason"] == "in_use_unknown"
+                && s["unknown_cause"] == "incomplete_process_list"),
+        "{record:#}"
+    );
+    assert_eq!(deletions(&host), 0);
+    assert!(host.unfired_events().is_empty());
 }
 
 // ---- Signals ----

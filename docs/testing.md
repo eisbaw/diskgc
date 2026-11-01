@@ -1242,7 +1242,7 @@ reader):
 | `nix-shell-rc-reused-pid-refused` | the shell is gone; an unrelated `sleep` now has pid 4242 | `in_use` (reuse retains, never deletes) |
 | `nix-shell-rc-zombie-owner-refused` | process 4242 `zombie: true` | `in_use` |
 | `nix-shell-rc-nested-namespace-unknown` | `pid_namespace: test_container` (anywhere else ensure refuses at start); no process 4242 | `producer_unknown` |
-| `nix-shell-rc-hidepid-refused` | `proc_hidepid: true`; no process 4242 | refused at start, dry run too (exit 2, `safety`, TASK-263): a hidden `newgrp` shell would be unlisted |
+| `nix-shell-rc-hidepid-refused` | `proc_hidepid: true`; no process 4242 | refused below the goal, dry run too (exit 2, `safety`, TASK-263): a hidden `newgrp` shell would be unlisted |
 | `nix-shell-rc-hidepid-root-refused` | as above with `own_uid: 0` | the same (root does not lift the rule) |
 | `nix-shell-rc-unlisted-filesystem-unknown` | one candidate each on mounts of type `virtiofs`, `9p`, `overlay`, `zfs`; no owners | `producer_unknown` each (one file per type, so dropping one bites) |
 | `nix-shell-rc-unreadable-status-unknown` | owner gone; process 77 of the user has `nspid: unreadable` | `producer_unknown`, `unreadable` 77 |
@@ -1311,7 +1311,7 @@ and 1 are below the rank, 2 to 4 above. *proc*: a uid 1000 shell without
 | `pytest-tmp-lock-namespace-pid-refused` | A `{0}`, lock `9`; a process with `pid: 5000`, `nspid: [5000, 9]` | 0 `in_use`, `owner_pid` 5000 |
 | `pytest-tmp-lock-malformed-unknown` | A `{0..6}` whose `.lock` is: empty; `0042`; `42 43`; 17 bytes; `abc`; a directory; a symlink | 0 to 6 `producer_unknown` (row 3) |
 | `pytest-tmp-nested-namespace` | `pid_namespace: test_container`; B `{0..4}`, `pytest-0/.lock` holds `42` | 0 `producer_unknown` (row 5); 1 eligible (row 7: a pytest counts as running, the session is old); 2, 3, 4 `producer_unknown` (row 8) |
-| `pytest-tmp-hidepid-refused` | `proc_hidepid: true`; otherwise as above | refused at start, dry run too (exit 2, `safety`, TASK-263) |
+| `pytest-tmp-hidepid-refused` | `proc_hidepid: true`; otherwise as above | refused below the goal, dry run too (exit 2, `safety`, TASK-263) |
 | `pytest-tmp-fresh-session-not-idle` | B `{0}` made 10 minutes before the clock; no processes | 0 `not_idle` (below the built-in's floor) |
 | `pytest-tmp-listing-unreadable` | B `{0..4}`; a `fail: EACCES` event on the second listing of `pytest-of-tester` | 0 to 4 `unreadable` (row 2) |
 | `pytest-tmp-claude-root` | `/tmp/claude-1000/pytest-of-tester` `{0..4}`; a process with `TMPDIR=/tmp/claude-1000` | 0, 1 eligible; 2, 3, 4 `in_use` |
@@ -1499,8 +1499,8 @@ the initial namespace the dead one is reclaimed and the live one `in_use`),
 `ensure_is_refused_under_hidepid` (diskgc in a nested namespace whose
 `/proc` has `hidepid=invisible`; a shell of tester's uid and another
 group, as after `newgrp`, owns a directory; tester cannot list it, root
-can; `ensure`, its dry run and root's `--allow-root` run are refused at
-start, exit 2, `cause: safety`, naming `hidepid` (TASK-263; safety.md, In
+can; `ensure` below the goal, its dry run and root's `--allow-root` run
+are refused, exit 2, `cause: safety`, naming `hidepid` (TASK-263; safety.md, In
 use, Visibility: a process list that cannot be complete). Rootless Podman cannot mount
 a `hidepid` `/proc` for the initial namespace, so diskgc runs in a nested
 one, which the test-container exception lets only `hidepid` refuse. From the initial namespace without
@@ -2657,7 +2657,8 @@ itself, and `development_package_refuses_in_its_own_pid_namespace` shows
 that it refuses there);
 `release_candidate_refuses_in_its_own_pid_namespace` shows that the
 release build has none (a nested namespace, with and without `hidepid`:
-refused at start; from the container's: plans). What that exposes, and how it is
+refused below the goal, the dry run whatever the space, and a met goal
+exits 0, TASK-298; from the container's: plans). What that exposes, and how it is
 confined: every host process is visible in the container (its pid,
 `status` and command name; that is what Owner PID reads). The runner
 refuses rootful Podman, and these containers get `--uidmap 0:1:65536`

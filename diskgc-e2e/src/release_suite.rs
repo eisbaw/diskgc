@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::cargo_harness::reclaimable;
 use crate::cargo_under_test::{Cargo, SMOKE, Toolchain};
+use crate::ensure_suite::report;
 use crate::holder::Holder;
 use crate::oracle::{Fixture, Oracle};
 use crate::owner_pid_suite::{HIDEPID, NOT_INITIAL, Namespace, expect_refused};
@@ -426,10 +427,13 @@ pub fn candidate_runs_watch_tally_only(ctx: &Ctx) -> TestResult {
 /// TASK-263: the release-candidate build has no test-container exception
 /// (docs/safety.md, In use: Visibility, a process list that cannot be complete). In a
 /// PID namespace of its own (`unshare -p`, as a container), and under
-/// `hidepid`, `ensure` refuses at start, its dry run too: exit 2, `cause:
-/// safety`, naming the rule; nothing planned, nothing deleted (the oracle
-/// judges every run). Positive control: the same dry run from the
-/// container's namespace, the host's (`--pid=host`), plans.
+/// `hidepid`, `ensure` below `--min-free` is refused, its dry run too
+/// whatever the space: exit 2, `cause: safety`, naming the rule; nothing
+/// planned, nothing deleted (the oracle judges every run). TASK-298: with
+/// the space already there (`--min-free 1M`) the same reclaiming `ensure`
+/// is the usual no-op, exit 0 `met`, as a CI pre-job hook in a container
+/// needs. Positive control: the same dry run from the container's
+/// namespace, the host's (`--pid=host`), plans.
 pub fn candidate_refuses_in_its_own_pid_namespace(ctx: &Ctx) -> TestResult {
     ctx.scratch.mkdirs("release-pidns/project", 0o755, TESTER)?;
     let keep = ctx.scratch.write_file(
@@ -456,15 +460,42 @@ pub fn candidate_refuses_in_its_own_pid_namespace(ctx: &Ctx) -> TestResult {
     ];
     let mut dry_run = vec!["--dry-run"];
     dry_run.extend(reclaim);
+    // The same call with a goal the scratch filesystem already meets.
+    let met = [
+        "--json",
+        "--no-index",
+        "--min-free",
+        "1M",
+        "--select",
+        "profile:cargo-target",
+        "--roots",
+        &roots,
+        &roots,
+    ];
+    let mut met_dry_run = vec!["--dry-run"];
+    met_dry_run.extend(met);
     let binary = binary_path(ctx, "diskgc-release");
     for (hidepid, rule) in [(false, NOT_INITIAL), (true, HIDEPID)] {
         let namespace = Namespace::start(hidepid)?;
         let oracle = Oracle::arm(Fixture::new())?;
         let plan = namespace.binary_as_tester(ctx, &binary, &dry_run)?;
         let run = namespace.binary_as_tester(ctx, &binary, &reclaim)?;
-        oracle.judge_runs(&[&plan, &run])?.assert_clean()?;
+        let met_plan = namespace.binary_as_tester(ctx, &binary, &met_dry_run)?;
+        let met_run = namespace.binary_as_tester(ctx, &binary, &met)?;
+        oracle
+            .judge_runs(&[&plan, &run, &met_plan, &met_run])?
+            .assert_clean()?;
         expect_refused(&plan, rule)?;
         expect_refused(&run, rule)?;
+        expect_refused(&met_plan, rule)?;
+        met_run.expect_code(0)?;
+        let report = report(&met_run)?;
+        ensure!(
+            report["status"] == "met"
+                && report["errors"].as_array().is_some_and(Vec::is_empty)
+                && report["actions"].as_array().is_some_and(Vec::is_empty),
+            "{rule}: a met run in its own namespace is not the usual no-op: {report}"
+        );
         drop(namespace);
     }
     let mut control = vec!["ensure"];

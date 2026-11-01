@@ -1,7 +1,7 @@
 # diskgc in a PID namespace other than the initial one cannot see sibling
 # namespaces: no PID answer permits (Owner PID step 3). Only a development
 # build inside a marked test container gets this far (`test_container`):
-# anywhere else ensure refuses at start (TASK-263,
+# anywhere else ensure refuses below the goal (TASK-263,
 # inuse/pid-namespace-nested-refused.yaml), and the test-container
 # exception is the in-use check's alone, never Owner PID's.
 profile_vector: 1

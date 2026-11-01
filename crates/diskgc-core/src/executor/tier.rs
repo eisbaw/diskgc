@@ -170,6 +170,15 @@ impl Tier {
         self.action.to_string()
     }
 
+    /// Whether this tier relies on diskgc's own in-use check: the `fs`
+    /// kind (its `delete` and its command actions, rechecked against a
+    /// scan before they start) and `cargo-target`. The Docker kinds leave
+    /// liveness to their daemon, and are not refused where the scan cannot
+    /// see every process (docs/safety.md, In use: Visibility).
+    pub fn relies_on_in_use_check(&self) -> bool {
+        matches!(self.source, SourceKind::Fs(_) | SourceKind::CargoTarget)
+    }
+
     /// Whether a source of this tier (its own or a union term) has a
     /// liveness contract: its in-use scans then also read what Owner PID
     /// needs (one more `status` read per process, docs/safety.md, Cost).

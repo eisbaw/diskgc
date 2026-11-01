@@ -1,6 +1,6 @@
 # A held /proc mounted with hidepid can hide the user's own processes (a
 # newgrp shell). Owner PID would permit nothing (step 4), but the in-use
-# check cannot see such a process either: ensure refuses at start, its dry
+# check cannot see such a process either: ensure refuses below the goal, its dry
 # run too (TASK-263; inuse/hidepid-refused.yaml). Owner PID's own hidepid
 # precondition stays, covered by the core's unit tests
 # (a_failed_precondition_names_its_rule_hidepid_first).

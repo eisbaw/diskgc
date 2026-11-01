@@ -1474,8 +1474,9 @@ Sandboxing and Capabilities), so only seccomp-based options remain
 there; they are the shipped list in both units. Checked against
 `systemd-analyze syscall-filter` and systemd.exec of systemd 260.
 Operator-added `ProtectProc=` or `PrivatePIDs=` is **refused**: a
-reclaiming `watch` (and `ensure`) exits 2 at start naming the rule, so
-the unit fails where its operator looks instead of running blind
+reclaiming `watch` exits 2 at start naming the rule (an `ensure` once
+it would reclaim), so the unit fails where its operator looks instead
+of running blind
 ([safety.md](safety.md#in-use), Visibility: a process list that cannot be complete;
 TASK-263).
 

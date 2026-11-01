@@ -1,6 +1,6 @@
 # TASK-263: diskgc in a PID namespace other than the initial one (a
 # container, PrivatePIDs=) cannot see the processes outside it, which may
-# use the candidate: ensure refuses at start, its dry run too (exit 2,
+# use the candidate: ensure refuses below the goal, its dry run too (exit 2,
 # safety), naming the rule. Before, the scan saw only its own namespace and
 # the unused-looking candidate was deleted.
 profile_vector: 1

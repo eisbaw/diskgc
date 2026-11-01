@@ -120,7 +120,13 @@ process runs, even if that Cargo works in an unrelated directory; see
   report are unchanged. A later run needing to reclaim exits 2 (`cause:
   provisioning`) if it is still so. Missing is no fault for a user (The
   lock, below): the met run makes no lock and says nothing. This readiness check does not
-  take a `flock`.
+  take a `flock`. The same where diskgc cannot see every process (under
+  `hidepid`, in a PID namespace of its own, as in a container): there
+  only a run below `--min-free` is refused (exit 2, `cause: safety`),
+  in this order: the pre-release sandbox gate (a development build),
+  the first sample, then the rule, before the tally and the lock; the
+  dry run is refused whatever the space ([safety.md](safety.md#in-use),
+  Visibility: a process list that cannot be complete).
 - **The lock** a reclaim takes (the rule and its limits:
   [safety.md](safety.md#host-lock)): the host lock `/run/diskgc/lock`
   when it is provisioned; without it, for a user (never root), that
@@ -996,7 +1002,7 @@ or planning error also exits 3, reports its partial plan and errors, and
 uses `avail_after_bytes: null` when its final sample failed. The JSON
 `status` of each: 2 `usage_error` (also for a refusal to
 run as root, or to run `--allow-root` other than as root or without
-`CAP_SYS_PTRACE`, [safety.md](safety.md#privileges), to run under
+`CAP_SYS_PTRACE`, [safety.md](safety.md#privileges), to reclaim under
 `hidepid` or outside the initial PID namespace,
 [safety.md](safety.md#in-use), a lock a needed
 reclaim cannot take, with `cause: provisioning`,
@@ -2495,13 +2501,14 @@ line says it was reproduced.
   (reproduced on master before the fix, in the model). 0.1.0: yes; its
   cached matches had the same
   blind spot, which its own documentation named (static reading).
-- TASK-263 (pending Mark's confirmation): `ensure` (its dry run too) and
-  a reclaiming `watch` whose tiers rely on the in-use check (`fs`,
-  `cargo-target`) refuse to start (exit 2, `cause: safety`) under
-  `hidepid` or in a PID namespace other than the initial one, so in a
-  container: the in-use check cannot see every process there. A CI hook
-  that ran 0.1.0 inside its job container must run diskgc on the runner
-  host instead. 0.1.0: yes; it ran there and judged candidates by the
+- TASK-263 (pending Mark's confirmation): `ensure` below `--min-free`
+  (its dry run whatever the space; TASK-298) and a reclaiming `watch`
+  whose tiers rely on the in-use check (`fs`, `cargo-target`) are refused
+  (exit 2, `cause: safety`) under `hidepid` or in a PID namespace other
+  than the initial one, so in a container: the in-use check cannot see
+  every process there. An `ensure` whose space is already there still
+  exits 0 (`met`). A CI hook that ran 0.1.0 inside its job container
+  must run diskgc on the runner host to reclaim. 0.1.0: yes; it ran there and judged candidates by the
   processes it could see, so a Cargo target whose program ran outside the
   container (Cargo holds no lock while it runs) could be deleted (static
   reading).
@@ -2714,7 +2721,8 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   capable or non-dumpable ones such as `sudo`, `systemd --user`,
   `ssh-agent`); their use of a candidate is not seen
   ([safety.md](safety.md#in-use), Visibility). Under `hidepid` it hides
-  more, and diskgc refuses to start `ensure` or a reclaiming `watch`.
+  more, and diskgc refuses to reclaim (a met `ensure` still exits 0) or
+  to start a reclaiming `watch`.
 - **In-use blind spots under review (TASK-169).** Kernel-held references
   without a `/proc` descriptor or mapping (io_uring registered files,
   overlay upper and work directories; a loop device's backing file is

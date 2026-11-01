@@ -1237,16 +1237,24 @@ namespace's nsfs inode, and the held mount's own `mountinfo` line names no
 rule fails and a selected tier relies on the in-use check (the `fs` kind,
 its command actions included, which are rechecked against a scan before
 they start, and `cargo-target`; not the Docker kinds, whose daemon decides
-what is in use), `ensure` (its dry run too: a plan shows what a reclaim
-would do, and a reclaim would not start) and a reclaiming `watch` refuse
-at start, before anything is measured: exit 2, `cause: safety`, naming
-the rule and where to run instead; facts that cannot be read are exit 3
-(`host`). A reclaim asks the [Pre-release sandbox
+what is in use), diskgc refuses whenever it would judge a candidate:
+exit 2, `cause: safety`, naming the rule and where to run instead;
+facts that cannot be read are exit 3 (`host`). So `ensure` is refused
+when its first sample is below `--min-free`, before the tally and the
+lock; at or above it the run is the usual no-op (exit 0, `met`, no
+lock, no candidate judged and no other process read: the PRD's "exits 0
+without taking the lock when space is already there", so a CI pre-job
+hook in a container passes when nothing needs freeing; TASK-298). Its dry run is refused at start,
+before anything is measured, whatever the space: a plan judges every
+candidate, also when the goal is met. A reclaiming `watch` is refused
+at start (Watch start, step 4), whatever the space: a watcher that
+could never reclaim fails where its operator looks, not on the day the
+space runs short. A reclaim asks the [Pre-release sandbox
 gate](#pre-release-sandbox-gate) first, so outside a test container a
-development build names the gate, in its own PID namespace too; and the
-call's own errors (a missing root or `PATH`) are named before this rule.
-`watch --tally-only`, `check`, `survey` and `profiles` judge no candidate
-and are not refused. Every scan reads the facts again, before its first
+development build names the gate, in its own PID namespace too, met
+goal or not; and the call's own errors (a missing root or `PATH`) are
+named before this rule. `watch --tally-only`, `check`, `survey` and
+`profiles` judge no candidate and are not refused. Every scan reads the facts again, before its first
 listing and after its last read, and confirms them once for both this
 rule and Owner PID: a failed read, a change between the two (a `/proc`
 remounted with `hidepid` under a running `watch`) or a failed rule makes
@@ -2217,9 +2225,9 @@ schema only with its first producer.
 
 - Outside the initial PID namespace, under `hidepid`, or on a filesystem
   not on the local list, no PID-based answer permits a deletion; those
-  candidates are kept as `producer_unknown`. Since TASK-263 `ensure` and
-  a reclaiming `watch` refuse to start under `hidepid` or outside the
-  initial PID namespace ([In use](#in-use), Visibility: a process list that cannot be
+  candidates are kept as `producer_unknown`. Since TASK-263 `ensure`
+  refuses to reclaim, and a reclaiming `watch` to start, under `hidepid`
+  or outside the initial PID namespace ([In use](#in-use), Visibility: a process list that cannot be
   complete), so these preconditions decide only where that rule's
   test-container exception lets a run start, and as a second guard.
   There, in its own PID namespace, diskgc reclaims no `nix-shell` rc
@@ -4155,7 +4163,7 @@ How it holds:
 
 ## Privileges
 
-- Visibility of the process list, checked at start too, root or not:
+- Visibility of the process list, checked before a reclaim, root or not:
   [In use](#in-use), Visibility: a process list that cannot be complete.
 - diskgc refuses to run as root (uid 0) unless `--allow-root` is given;
   the laptop service runs as the owner, CI as the runner user. `profiles

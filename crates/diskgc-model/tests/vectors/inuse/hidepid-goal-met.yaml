@@ -1,0 +1,31 @@
+# TASK-298: under hidepid with --min-free already met, ensure is the usual
+# no-op (exit 0, `met`, no lock): the reclaim it would refuse never starts,
+# so a CI pre-job hook in a hardened unit passes when nothing needs freeing.
+# The dry run is still refused: it judges every candidate whether or not
+# the goal is met, and that judgement needs the whole process list.
+profile_vector: 1
+user_profiles:
+  - {"name": "scratch-probe", "find": {"roots": ["/tmp"], "paths": ["scratch-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/scratch-a"]}}
+profile: scratch-probe
+path: /tmp
+min_free: 1G
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  proc_hidepid: true
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/scratch-a: {data: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: safety, contains: "the held /proc is mounted with hidepid, so the in-use check cannot see every process"}]
+  reclaim_exit: 0
+  report: {status: met}
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/scratch-a/data]

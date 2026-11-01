@@ -330,9 +330,10 @@ pub struct Platform<'a> {
 
 /// Runs `ensure` (or its dry run) from what [`load`] checked; every error
 /// is in the report. Every refusal before the executor (privileges, a
-/// static check for the user, the in-use check's visibility, a supplied
-/// root missing) is exit 2, or 3 for a host read, and deletes nothing
-/// ([`refused`]). `log` receives the
+/// static check for the user, a supplied root missing, a dry run's in-use
+/// check visibility) is exit 2, or 3 for a host read, and deletes nothing
+/// ([`refused`]); a reclaim's visibility is the executor's, below the
+/// goal. `log` receives the
 /// diagnostics (`error: ...`), `progress` the executor's progress lines.
 /// `loaded` is [`load`] of `options.selection()`; `options` gives the goal.
 pub fn ensure<H: Delete>(
@@ -391,12 +392,13 @@ fn run<H: Delete>(
     let prepared = prepare(host, loaded, platform)?;
     prepared.refuse_missing_roots(host)?;
     // The in-use check's visibility (TASK-263), where a tier relies on that
-    // check. A reclaim asks the pre-release sandbox gate first: where it is
-    // closed the executor names the gate (exit 2), wherever diskgc runs,
-    // its own PID namespace included. A dry run is refused where its
-    // reclaim would be. The call's own errors come before the
-    // environment's: a missing root (above) or `PATH` is named first.
-    if prepared.uses_in_use_scan() && (options.dry_run || host.may_delete().is_ok()) {
+    // check, for a dry run here, before anything is measured: a plan judges
+    // every candidate whether or not the goal is met. A reclaim asks it in
+    // the executor, after the gate and only when its first sample is below
+    // `--min-free` (TASK-298): a met goal is the usual no-op. The call's own
+    // errors come before the environment's: a missing root (above) or
+    // `PATH` is named first.
+    if options.dry_run && prepared.uses_in_use_scan() {
         executor::reach_path(host, &options.path).map_err(|failure| match failure {
             executor::MeasureFailure::Usage(why) => (ErrorCause::Usage, why),
             executor::MeasureFailure::Host(why) => (ErrorCause::Host, why),
@@ -440,18 +442,13 @@ pub struct Prepared {
 }
 
 impl Prepared {
-    /// Whether a tier relies on diskgc's own in-use check: the `fs` kind
-    /// (its `delete` and its command actions, rechecked against a scan
-    /// before they start) and `cargo-target`. The Docker kinds leave
-    /// liveness to their daemon, and are not refused where the scan
-    /// cannot see every process (docs/safety.md, In use: Visibility).
+    /// Whether a tier relies on diskgc's own in-use check
+    /// ([`Tier::relies_on_in_use_check`]).
     pub fn uses_in_use_scan(&self) -> bool {
-        self.tiers().0.iter().any(|tier| {
-            matches!(
-                tier.source,
-                executor::SourceKind::Fs(_) | executor::SourceKind::CargoTarget
-            )
-        })
+        self.tiers()
+            .0
+            .iter()
+            .any(|tier| tier.relies_on_in_use_check())
     }
 
     /// The tiers a run takes, in policy order, with their own timeouts

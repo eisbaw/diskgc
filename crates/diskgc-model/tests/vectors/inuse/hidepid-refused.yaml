@@ -1,6 +1,6 @@
 # TASK-263: a held /proc mounted with hidepid (ProtectProc=invisible) hides
 # processes the in-use check must see (a newgrp shell of the user; for root,
-# one an LSM keeps from it): ensure refuses at start, its dry run too
+# one an LSM keeps from it): ensure refuses below the goal, its dry run too
 # (exit 2, safety), whoever runs it.
 profile_vector: 1
 user_profiles:

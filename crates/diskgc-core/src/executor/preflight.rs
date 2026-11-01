@@ -123,11 +123,12 @@ pub fn privileges<H: Host>(host: &H, allow_root: bool) -> Result<u32, PrivilegeE
 }
 
 /// The in-use check's visibility (docs/safety.md, In use: Visibility),
-/// checked once at the start of every `ensure` (its dry run included: a
-/// plan shows what a reclaim would do, and a reclaim would not start) and
-/// of a reclaiming `watch`, before anything is measured: under `hidepid`,
-/// or in a PID namespace other than the initial one, the in-use scan would
-/// miss processes silently, so the run is refused (`safety`, exit 2),
+/// asked wherever diskgc would judge a candidate: by `ensure` once its
+/// first sample is below `--min-free` (a met goal is the usual no-op,
+/// TASK-298), by its dry run and a reclaiming `watch` at start, whatever
+/// the space. Under `hidepid`, or in a PID namespace other than the
+/// initial one, the in-use scan would miss processes silently, so the run
+/// is refused (`safety`, exit 2),
 /// naming the rule ([`crate::inuse::visibility`], its one home; the scan
 /// checks it again on every scan). Facts that cannot be read are a failure
 /// of the host (`host`, exit 3). TASK-263.

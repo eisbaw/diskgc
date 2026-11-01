@@ -2,7 +2,7 @@
 # with hidepid: root does not lift the rule. Whether its capabilities reach
 # a hidden process depends on that process's user namespace (Owner PID step
 # 4), and an LSM may keep one from it, which hidepid then hides instead of
-# showing it unreadable: ensure refuses at start (TASK-263).
+# showing it unreadable: ensure refuses below the goal (TASK-263).
 profile_vector: 1
 allow_root: true
 config: |

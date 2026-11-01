@@ -867,6 +867,156 @@ fn above_min_free_warns_about_missing_or_unusable_lock_without_taking_it() {
     }
 }
 
+// ---- The goal before the process list's visibility (TASK-298) ----
+
+/// The facts that take processes out of the listing (docs/safety.md, In
+/// use: Visibility, a process list that cannot be complete).
+const INCOMPLETE_PROCESS_LISTS: [(&str, &str); 2] = [
+    (
+        "proc_hidepid: true\n",
+        "the held /proc is mounted with hidepid",
+    ),
+    (
+        "pid_namespace: nested\n",
+        "diskgc is not in the initial PID namespace",
+    ),
+];
+
+/// Every call that reads a process, the PID namespace facts, a loop
+/// device or takes or makes a lock.
+fn reads_processes_or_locks(op: Op) -> bool {
+    matches!(
+        op,
+        Op::Pids
+            | Op::ProcIdentity
+            | Op::ProcIdentityReleased
+            | Op::ProcFds
+            | Op::ProcLinks
+            | Op::ProcMaps
+            | Op::ProcEnviron
+            | Op::ProcStatus
+            | Op::ProcNspid
+            | Op::ProcUids
+            | Op::ProcCmdline
+            | Op::ProcRootLookup
+            | Op::PidAlive
+            | Op::PidNamespace
+            | Op::BoundUnixSockets
+            | Op::LoopBackingFiles
+            | Op::LoopBackingFile
+            | Op::LoopBackingIdentity
+            | Op::Flock
+            | Op::InheritLock
+            | Op::UserLock
+            | Op::StateLock
+            | Op::StateWrite
+    )
+}
+
+/// PRD: `ensure` exits 0 without taking the lock when the space is already
+/// there, also where diskgc cannot see every process: the met run is the
+/// usual no-op, call for call the same as with every process visible, and
+/// reads no process, no namespace fact and no lock on the way (premises
+/// a to c of TASK-298: the sample needs no process, nothing between it and
+/// the exit reads one, no lock is taken or made).
+#[test]
+fn a_met_goal_is_the_usual_no_op_where_the_process_list_is_incomplete() {
+    let visible = host(&yaml(true, ""));
+    let expected = ensure(&visible, &cargo("1G", None));
+    assert_eq!(expected.status, Status::Met, "{expected:#?}");
+    let expected_ops: Vec<Op> = visible.trace().iter().map(|c| c.op).collect();
+    for (facts, _) in INCOMPLETE_PROCESS_LISTS {
+        let hidden = host(&format!("{facts}{}", yaml(true, "")));
+        let report = ensure(&hidden, &cargo("1G", None));
+        assert_eq!(report.status, Status::Met, "{facts}: {report:#?}");
+        assert_eq!(report.exit_code(), 0, "{facts}");
+        assert!(report.errors.is_empty(), "{facts}: {report:#?}");
+        assert_eq!(report.avail_after_bytes, report.avail_before_bytes);
+        let ops: Vec<Op> = hidden.trace().iter().map(|c| c.op).collect();
+        assert_eq!(ops, expected_ops, "{facts}: the met run differs");
+        assert!(ops.contains(&Op::Statvfs), "{facts}: sampled");
+        let read: Vec<Op> = ops
+            .into_iter()
+            .filter(|op| reads_processes_or_locks(*op))
+            .collect();
+        assert!(read.is_empty(), "{facts}: {read:?}");
+    }
+}
+
+/// Below the goal the reclaim would start, and is refused there (exit 2,
+/// `cause: safety`, naming the rule), after the first sample (the report
+/// says what was available) and before the tally, the lock and any
+/// candidate: nothing listed, locked or deleted.
+#[test]
+fn below_the_goal_an_incomplete_process_list_refuses_the_reclaim() {
+    for (facts, rule) in INCOMPLETE_PROCESS_LISTS {
+        let host = host(&format!("{facts}{}", yaml(true, "")));
+        let report = ensure(&host, &cargo("12G", None));
+        assert_eq!(report.status, Status::UsageError, "{facts}: {report:#?}");
+        assert_eq!(report.exit_code(), 2, "{facts}");
+        assert_eq!(report.errors.len(), 1, "{facts}: {report:#?}");
+        assert_eq!(report.errors[0].cause, ErrorCause::Safety, "{facts}");
+        assert!(
+            report.errors[0].message.contains(rule)
+                && report.errors[0]
+                    .message
+                    .contains("run diskgc where it sees every process"),
+            "{facts}: {}",
+            report.errors[0].message
+        );
+        assert!(
+            report
+                .avail_before_bytes
+                .is_some_and(|avail| avail < 12 * GIB),
+            "{facts}: sampled below the goal: {report:#?}"
+        );
+        assert!(report.actions.is_empty() && report.skipped.is_empty());
+        let trace = host.trace();
+        let sampled = trace.iter().position(|c| c.op == Op::Statvfs);
+        let asked = trace.iter().position(|c| c.op == Op::PidNamespace);
+        assert!(
+            sampled.is_some() && asked.is_some() && sampled < asked,
+            "{facts}: the sample comes first: {trace:#?}"
+        );
+        for op in [
+            Op::Pids,
+            Op::Flock,
+            Op::UserLock,
+            Op::Unlinkat,
+            Op::StateRead,
+        ] {
+            assert!(calls(&host, op).is_empty(), "{facts}: {op} called");
+        }
+        assert!(
+            calls(&host, Op::ReadDir).is_empty(),
+            "{facts}: a root was listed (the tally): {trace:#?}"
+        );
+    }
+}
+
+/// Below the goal, facts that cannot be read are a failure of the host
+/// (exit 3, `cause: host`), not a refusal; at the goal they are never
+/// read.
+#[test]
+fn below_the_goal_unreadable_namespace_facts_are_a_host_error() {
+    let fail = "events:\n  - {at: {op: pid_namespace, nth: 1, when: before}, fail: EIO}\n";
+    let host = host(&format!("{fail}{}", yaml(true, "")));
+    let report = ensure(&host, &cargo("12G", None));
+    assert_eq!(report.status, Status::Error, "{report:#?}");
+    assert_eq!(report.exit_code(), 3);
+    assert_eq!(report.errors.len(), 1, "{report:#?}");
+    assert_eq!(report.errors[0].cause, ErrorCause::Host);
+    assert!(
+        report.errors[0]
+            .message
+            .contains("could not read its PID namespace facts"),
+        "{}",
+        report.errors[0].message
+    );
+    assert!(calls(&host, Op::Flock).is_empty() && calls(&host, Op::Pids).is_empty());
+    assert!(host.unfired_events().is_empty());
+}
+
 /// AC #2: root below `--min-free` with no `/run/diskgc/lock`: exit 2, the
 /// message carries both tmpfiles lines, nothing is deleted or locked. (A
 /// user falls back to a per-user lock instead, TASK-277: user_lock.rs.)
