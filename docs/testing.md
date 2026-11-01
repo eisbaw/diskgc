@@ -681,7 +681,16 @@ Model scenarios required by [safety.md](safety.md) and
   `tests/tally.rs`: `sync_tally_discovers_every_tier_then_sizes_only_the_first`,
   `sync_tally_skips_a_recent_listing_and_sizes_only_stale_units`,
   `sync_tally_sizes_the_first_tier_that_found_something`,
-  `sync_tally_budget_ends_in_either_pass`);
+  `sync_tally_budget_ends_in_either_pass`, all on `best-fit` tiers);
+  under `oldest` pass 2 walks no tree and the reclaim walk sizes the
+  first tier's stale units as its queue reaches them (TASK-251;
+  `sync_tally_leaves_an_oldest_first_tiers_sizing_to_the_walk`, and in
+  `tests/index_reclaim.rs`: the reclaim takes the dry run's order where
+  deep changes reorder the units, also beside an expanded block's
+  members, sizes only the units its queue reaches, stops sizing at
+  `--tally-budget` with `tally_cut_short`, and a failure of the host
+  while sizing is an error of the run: `deferred_sizing_*`,
+  `a_host_error_in_the_walks_deferred_sizing_is_an_error_of_the_run`);
 - **background tally** (virtual clock, every port call costing 1 ms):
   the worker's active time is at
   most 5 % (plus one batch) of any window of 100 batches, no batch
@@ -2939,7 +2948,7 @@ seeded data on size-limited tmpfs mounts and a host-shaped process load
 | `just` recipe | What |
 |---|---|
 | `walk-up [NAME]` | container and tmux session `walk-diskgc-NAME` (default `podman`), with the tester's shell |
-| `walk-reset [NAME]` | regenerate the data from `WALK_SEED`; `WALK_TMP_BULK=N` adds N bulk `/tmp` leftovers |
+| `walk-reset [NAME]` | regenerate the data from `WALK_SEED`; `WALK_TMP_BULK=N` adds N bulk `/tmp` leftovers, or `WALK_TMP_LAPTOP=RC,SESSIONS,ROOTS` the 2026-11-01 laptop `/tmp` shape (`140372,6424,54600`, bytes scaled down; `WALK_TMP_SIZE=3g` at `walk-up`) |
 | `walk-install NAME BIN TAG` | copy a diskgc binary into the container as `/usr/local/bin/diskgc-TAG` |
 | `walk-down [NAME]` | remove the container and its tmux session |
 

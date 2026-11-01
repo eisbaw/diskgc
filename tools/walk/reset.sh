@@ -2,7 +2,8 @@
 # Inside the walk container, as root: stop the data's live processes, wipe
 # the tester's home and /tmp (both container-private tmpfs mounts), and
 # generate them again from the seed (WALK_SEED, default 1; WALK_TMP_BULK
-# adds that many bulk /tmp leftovers, default 0, see gen.py). Then start the
+# adds that many bulk /tmp leftovers, default 0; WALK_TMP_LAPTOP=RC,SESSIONS,ROOTS
+# the 2026-11-01 laptop /tmp shape, default none; see gen.py). Then start the
 # live work a developer's machine has: a Cargo build in progress (holding
 # its target's locks), a binary running from its own target, a live pytest
 # session, and the owner shells of one nix-shell and one nix-develop dir.
@@ -42,7 +43,7 @@ hold "exec sleep $HOLD_S"   # a nix-shell's shell
 hold "exec sleep $HOLD_S"   # a nix develop's shell
 sleep 1
 set -- $(cut -d' ' -f1 "$holders")
-as_tester "/usr/local/bin/python3 /opt/walk/gen.py --home /home/tester --tmp /tmp --seed ${WALK_SEED:-1} --tmp-bulk ${WALK_TMP_BULK:-0} --live-pid $1 --live-pid $2"
+as_tester "/usr/local/bin/python3 /opt/walk/gen.py --home /home/tester --tmp /tmp --seed ${WALK_SEED:-1} --tmp-bulk ${WALK_TMP_BULK:-0} --tmp-laptop ${WALK_TMP_LAPTOP:-0,0,0} --live-pid $1 --live-pid $2"
 
 # Real Cargo for the live cases: a web app built and running from its
 # target, and an agent's build stuck in a build script, holding the locks.

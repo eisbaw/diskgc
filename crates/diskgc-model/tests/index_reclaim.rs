@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::host;
+use diskgc_core::config::Order;
 use diskgc_core::engine::Reason;
 use diskgc_core::executor::{self, ProtectedKind, ProtectedSource, Request, Tier};
 use diskgc_core::fs_kind::Find;
@@ -27,7 +28,7 @@ use diskgc_core::profile::{EntryType, Library, Where, parse_profiles};
 use diskgc_core::report::Report;
 use diskgc_core::snapshot::RunIndex;
 use diskgc_core::tally::TallyState;
-use diskgc_core::units::parse_size;
+use diskgc_core::units::{Size, parse_size};
 use diskgc_model::ModelHost;
 use diskgc_model::spec::Op;
 
@@ -882,22 +883,18 @@ fn a_host_error_in_the_tally_keeps_the_tier_off_its_queue() {
     );
 }
 
-/// The same rule when the failure comes from the tally's sizing (pass 2)
-/// rather than its listing: an `EIO` while sizing a stale unit ends the
-/// tally with an error, and no tier takes a queue. The `EIO` is transient
-/// here, so the tier's own discovery and each candidate's live walk read
-/// fine and reclaim both candidates.
+/// The same rule when the failure comes from the tally's sizing (pass 2,
+/// which sizes a `best-fit` first tier) rather than its listing: an `EIO`
+/// while sizing a stale unit ends the tally with an error, and no tier
+/// takes a queue. The `EIO` is transient here, so the tier's own discovery
+/// and each candidate's live walk read fine and reclaim both candidates.
 #[test]
 fn a_host_error_in_the_tallys_sizing_keeps_the_tier_off_its_queue() {
-    let tree = format!(
-        "  /tmp/a-bad: {{.: {{mtime: {OLD}}}, sub: {{.: {{mtime: {OLD}}}, f: {{size: 1K, mtime: {OLD}}}}}}}\n  \
-         /tmp/a-plain: {d}\n",
-        d = old_dir()
-    );
-    let events = "events:\n  - {at: {op: read_dir, path: /tmp/a-bad/sub, nth: 1, when: before}, fail: EIO}\n";
-    let host = host(&yaml(&tree, events));
+    let host = host(&yaml(&bad_and_plain(), SIZING_EIO));
     let mut state = TallyState::new(Index::new(BUDGET_BYTES));
-    let (report, lines) = run(&host, &request(tier("profile:tmp-a")), &mut state);
+    let mut tier = tier("profile:tmp-a");
+    tier.order = Order::BestFit;
+    let (report, lines) = run(&host, &request(tier), &mut state);
     assert!(host.unfired_events().is_empty());
     assert!(
         lines
@@ -913,6 +910,48 @@ fn a_host_error_in_the_tallys_sizing_keeps_the_tier_off_its_queue() {
     deleted.sort();
     assert_eq!(deleted, ["/tmp/a-bad", "/tmp/a-plain"], "{report:#?}");
     assert!(report.errors.is_empty(), "{report:#?}");
+}
+
+/// `/tmp/a-bad` (its `sub` holding a 1 KiB file) and `/tmp/a-plain`, old.
+fn bad_and_plain() -> String {
+    format!(
+        "  /tmp/a-bad: {{.: {{mtime: {OLD}}}, sub: {{.: {{mtime: {OLD}}}, f: {{size: 1K, mtime: {OLD}}}}}}}\n  \
+         /tmp/a-plain: {d}\n",
+        d = old_dir()
+    )
+}
+
+/// An `EIO` at the first listing of `/tmp/a-bad/sub`: the first sizing walk
+/// of `/tmp/a-bad`.
+const SIZING_EIO: &str =
+    "events:\n  - {at: {op: read_dir, path: /tmp/a-bad/sub, nth: 1, when: before}, fail: EIO}\n";
+
+/// TASK-251: under `oldest` the first tier's sizing is the walk's, under
+/// the host lock, as its queue reaches each unit; the same `EIO` there is
+/// an error of the run, as any failure of the host during the walk (docs/
+/// safety.md, Fail closed): the run stops before `/tmp/a-bad`, the first
+/// unit, is judged, and deletes nothing. Stricter than pass 2's rule above
+/// for a transient failure (there the tier fell back to its discovery and
+/// reclaimed both); a persistent one ends both runs in an error.
+#[test]
+fn a_host_error_in_the_walks_deferred_sizing_is_an_error_of_the_run() {
+    let host = host(&yaml(&bad_and_plain(), SIZING_EIO));
+    let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+    let (report, lines) = run(&host, &request(tier("profile:tmp-a")), &mut state);
+    assert!(host.unfired_events().is_empty());
+    assert!(
+        lines.iter().any(|l| l.contains("index: synchronous tally")
+            && l.contains("sizing of the first tier's 2 stale unit(s) left to the reclaim walk")),
+        "{lines:#?}"
+    );
+    assert!(report.actions.is_empty(), "{report:#?}");
+    assert_eq!(report.errors.len(), 1, "{report:#?}");
+    assert!(
+        report.errors[0].message.contains("sizing /tmp/a-bad")
+            && report.errors[0].message.contains("EIO"),
+        "{report:#?}"
+    );
+    assert!(exists(&host, "/tmp/a-bad/sub/f") && exists(&host, "/tmp/a-plain/f"));
 }
 
 /// TASK-252 (Codex review of TASK-31, finding 1): a directory diskgc can
@@ -1131,9 +1170,10 @@ fn a_block_of_only_multiply_linked_members_stays_in_the_index() {
 }
 
 /// TASK-252 (found by the index-authority property once it generated
-/// unreadable directories): the run's synchronous tally sizes an unsized
-/// unit `/tmp/p/d` below the unreadable `/tmp/p` (reached by name, as a
-/// snapshot's unit is) and refuses it, `d` being unreadable too. A refusal
+/// unreadable directories): the run's tally sizes an unsized unit
+/// `/tmp/p/d` below the unreadable `/tmp/p` (reached by name, as a
+/// snapshot's unit is) and refuses it, `d` being unreadable too (under
+/// `oldest` the walk's deferred sizing does, TASK-251: the same tally). A refusal
 /// of this run's tally skips the candidate re-matched at its path; this
 /// unit's re-match is refused on the way, so it is left to the tier's
 /// discovery, which reports `/tmp/p` only, as a run without the unit does.
@@ -1160,10 +1200,11 @@ fn a_tally_refusal_of_a_unit_discovery_cannot_reach_is_not_reported() {
     state.set_discovered_at(right, host.now());
     let (report, lines) = run(&host, &request(tier), &mut state);
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("1 unit(s) from the index (0 block(s), 1 with a refusal hint)")),
-        "the tally sized and refused the unit: {lines:#?}"
+        lines.iter().any(|l| l.contains("1 unit(s) from the index"))
+            && lines
+                .iter()
+                .any(|l| l.contains("0 unit(s) sized as the queue reached them, 1 refused")),
+        "the walk's deferred sizing sized and refused the unit: {lines:#?}"
     );
     assert!(report.actions.is_empty(), "{report:#?}");
     assert_eq!(skip_of(&report, "/tmp/p"), Some(Reason::Unreadable));
@@ -1331,4 +1372,229 @@ fn one_removed_protect_match_costs_one_enumeration_not_one_per_candidate() {
         two, five,
         "listings of /tmp: 2 candidates {two}, 5 candidates {five}"
     );
+}
+
+/// TASK-251: four candidates whose roots' times put them in one order and
+/// whose trees' newest changes in another (`/tmp/a-1` and `/tmp/a-3` hold a
+/// change newer than their root, `a-3` two levels down). Under `oldest` the
+/// synchronous tally leaves their sizing to the walk, which sizes each as
+/// the queue reaches it: the reclaim still takes them in the order of their
+/// sized `newest_change`, the order the dry run's plan (which judges every
+/// candidate in full) gives, not the order of their roots.
+#[test]
+fn deferred_sizing_takes_the_units_in_the_order_of_their_sized_keys() {
+    let day = |d: u32| format!("2026-10-0{d}T00:00:00Z");
+    let tree = format!(
+        "  /tmp/a-1: {{.: {{mtime: {t1}}}, f: {{size: 10K, mtime: {t5}}}}}\n  \
+         /tmp/a-2: {{.: {{mtime: {t2}}}, f: {{size: 10K, mtime: {t2}}}}}\n  \
+         /tmp/a-3: {{.: {{mtime: {t3}}}, deep: {{.: {{mtime: {t3}}}, g: {{size: 10K, mtime: {t6}}}}}}}\n  \
+         /tmp/a-4: {{.: {{mtime: {t4}}}, f: {{size: 10K, mtime: {t4}}}}}\n",
+        t1 = day(1),
+        t2 = day(2),
+        t3 = day(3),
+        t4 = day(4),
+        t5 = day(5),
+        t6 = day(6),
+    );
+    let want = ["/tmp/a-2", "/tmp/a-4", "/tmp/a-1", "/tmp/a-3"];
+    let planned = host(&yaml(&tree, ""));
+    let uid = executor::privileges(&planned, false).unwrap_or_else(|e| panic!("{e}"));
+    let plan = executor::dry_run(
+        &planned,
+        &request(tier("profile:tmp-a")),
+        &[uid],
+        &mut |_| {},
+    );
+    let plan: Vec<String> = plan
+        .plan
+        .iter()
+        .filter_map(|p| p.candidate.as_ref().map(|c| c.display().to_string()))
+        .collect();
+    assert_eq!(plan, want, "the dry run's order");
+    let host = host(&yaml(&tree, ""));
+    let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+    let (report, lines) = run(&host, &request(tier("profile:tmp-a")), &mut state);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l
+                .contains("sizing of the first tier's 4 stale unit(s) left to the reclaim walk")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("4 unit(s) sized as the queue reached them")),
+        "{lines:#?}"
+    );
+    assert_eq!(actions(&report), want, "{report:#?}");
+    assert!(!report.tally_cut_short);
+}
+
+/// TASK-251: a hundred old candidates and a goal one candidate meets. The
+/// walk sizes the units its queue reaches, the 64 it finds ahead of
+/// judging the first (`FOUND_AHEAD_MAX`), and deletes one; the other 36
+/// are never sized in this run (the synchronous tally sized none).
+#[test]
+fn deferred_sizing_sizes_only_what_the_queue_reaches() {
+    let mut tree = String::new();
+    for n in 0..100 {
+        tree.push_str(&format!("  /tmp/a-{n:03}: {}\n", old_dir()));
+    }
+    let measured = host(&yaml(&tree, ""));
+    let uid = executor::privileges(&measured, false).unwrap_or_else(|e| panic!("{e}"));
+    let avail = executor::dry_run(
+        &measured,
+        &request(tier("profile:tmp-a")),
+        &[uid],
+        &mut |_| {},
+    )
+    .avail_before_bytes
+    .expect("measured");
+    let host = host(&yaml(&tree, ""));
+    let mut request = request(tier("profile:tmp-a"));
+    request.min_free = Size::Bytes(avail + (5 << 10));
+    let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+    let (report, lines) = run(&host, &request, &mut state);
+    assert_eq!(actions(&report), ["/tmp/a-000"], "{report:#?}");
+    assert!(
+        lines.iter().any(
+            |l| l.contains("64 unit(s) sized as the queue reached them, 0 refused")
+                && l.contains("(64 of the first tier's 100 stale unit(s) so far)")
+        ),
+        "{lines:#?}"
+    );
+    let mut sized = 0;
+    let mut not_sized = 0;
+    state.index.for_each_unit(|_, _, unit| match unit {
+        UnitRef::Single(s) if s.tally.is_some() => sized += 1,
+        UnitRef::Single(_) => not_sized += 1,
+        UnitRef::Block(_) => panic!("no blocks"),
+    });
+    assert_eq!((sized, not_sized), (63, 36));
+}
+
+/// The `--tally-budget` of [`deferred_sizing_stops_at_the_tally_budget`],
+/// in model milliseconds (1 ms per port call): past the synchronous
+/// tally's discovery of ten units (32 ms), short of their sizing (3 of
+/// them fit when this was written).
+const BUDGET_MS: u64 = 60;
+
+/// TASK-251: the walk's deferred sizing spends what discovery left of
+/// `--tally-budget`, so the tally's work stays within it. Every port call
+/// takes 1 ms; the budget ends after a few of the ten units are sized.
+/// The rest are taken by their stored keys (the same order here), every
+/// candidate is reclaimed, and the report says the tally was cut short.
+#[test]
+fn deferred_sizing_stops_at_the_tally_budget() {
+    let mut tree = String::new();
+    for n in 0..10 {
+        tree.push_str(&format!("  /tmp/a-{n}: {}\n", old_dir()));
+    }
+    let host = host(&yaml(&tree, "call_cost: 1ms\n"));
+    let mut request = request(tier("profile:tmp-a"));
+    request.tally_budget = Some(Duration::from_millis(BUDGET_MS));
+    let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+    let (report, lines) = run(&host, &request, &mut state);
+    assert!(
+        lines.iter().any(|l| l.contains("index: synchronous tally")
+            && l.contains("left to the reclaim walk")
+            && !l.contains("stopped")),
+        "discovery fits the budget: {lines:#?}"
+    );
+    let sized = lines
+        .iter()
+        .find(|l| l.contains("--tally-budget ended: the rest by stored keys"))
+        .unwrap_or_else(|| panic!("the budget ends the deferred sizing: {lines:#?}"));
+    assert!(
+        !sized.contains(" 0 unit(s) sized") && !sized.contains("10 unit(s) sized"),
+        "some, not all: {sized}"
+    );
+    assert!(report.tally_cut_short, "{report:#?}");
+    let mut deleted = actions(&report);
+    deleted.sort();
+    assert_eq!(deleted.len(), 10, "{report:#?}");
+}
+
+/// TASK-251: deferred sizing beside an expanded block. A family block at
+/// `/tmp/p` stands for `a-1` (changed day 2) and `a-2` (day 4); the singles
+/// `/tmp/q/a-3` (its root from day 1, a change inside from day 3) and
+/// `/tmp/q/a-4` (day 5) were never sized. The walk sizes `a-3` before the
+/// block (its stored key, day 1, comes first), expands the block at its
+/// oldest member's key, and merges members and sized units by key: the
+/// order of the dry run's plan, a-1, a-3, a-2, a-4. `a-4` is sized only
+/// once no member comes before its stored key.
+#[test]
+fn deferred_sizing_merges_with_an_expanded_blocks_members() {
+    let day = |d: u32| format!("2026-10-0{d}T00:00:00Z");
+    let dir = |d: u32| {
+        format!(
+            "{{.: {{mtime: {t}}}, f: {{size: 10K, mtime: {t}}}}}",
+            t = day(d)
+        )
+    };
+    let tree = format!(
+        "  /tmp/p/a-1: {a1}\n  /tmp/p/a-2: {a2}\n  \
+         /tmp/q/a-3: {{.: {{mtime: {t1}}}, f: {{size: 10K, mtime: {t3}}}}}\n  /tmp/q/a-4: {a4}\n",
+        a1 = dir(2),
+        a2 = dir(4),
+        a4 = dir(5),
+        t1 = day(1),
+        t3 = day(3),
+    );
+    let want = ["/tmp/p/a-1", "/tmp/q/a-3", "/tmp/p/a-2", "/tmp/q/a-4"];
+    let planned = host(&yaml(&tree, ""));
+    let uid = executor::privileges(&planned, false).unwrap_or_else(|e| panic!("{e}"));
+    let plan = executor::dry_run(
+        &planned,
+        &request(tier("profile:two-level-a")),
+        &[uid],
+        &mut |_| {},
+    );
+    let plan: Vec<String> = plan
+        .plan
+        .iter()
+        .filter_map(|p| p.candidate.as_ref().map(|c| c.display().to_string()))
+        .collect();
+    assert_eq!(plan, want, "the dry run's order");
+
+    let host = host(&yaml(&tree, ""));
+    let tier = tier("profile:two-level-a");
+    let right = finder(&tier, "/tmp");
+    let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+    put(&host, &mut state, &right, &["/tmp/p/a-1", "/tmp/p/a-2"]);
+    let before = state.index.accounted_bytes();
+    state
+        .index
+        .collapse_to(&host, before - 1)
+        .expect("collapsed");
+    assert_eq!(blocks(&state), [(PathBuf::from("/tmp/p"), 2, false)]);
+    for path in ["/tmp/q/a-3", "/tmp/q/a-4"] {
+        state
+            .index
+            .insert(
+                &host,
+                &tmp_mount(),
+                Path::new(path),
+                &right,
+                discovered(&host, path),
+            )
+            .expect("inserted");
+    }
+    state.set_discovered_at(right, host.now());
+    let (report, lines) = run(&host, &request(tier), &mut state);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l
+                .contains("sizing of the first tier's 2 stale unit(s) left to the reclaim walk")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("block at /tmp/p (2 recorded member(s)) expanded: 2")),
+        "{lines:#?}"
+    );
+    assert_eq!(actions(&report), want, "{report:#?}");
 }

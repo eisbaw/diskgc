@@ -813,9 +813,11 @@ struct Reclaim<'a, 'l, H: Delete> {
     /// The run's index, which the reclaim walk takes its queue from
     /// ([`indexed`]); `None` for a tier that discovers only.
     index: Option<&'a mut TallyState>,
-    /// The candidates this invocation's synchronous tally refused: skipped
-    /// for the run ([`indexed::SyncTallied::refused`]).
-    tally_refused: &'a BTreeMap<PathBuf, Reason>,
+    /// What this invocation's synchronous tally left the walk: the
+    /// candidates it refused, skipped for the run
+    /// ([`indexed::SyncTallied::refused`]), and the first tier's deferred
+    /// sizing ([`indexed::SyncTallied::deferred`]).
+    tallied: &'a mut indexed::SyncTallied,
     /// When the run started (the first event of `ensure`, on the `Host`
     /// port's monotonic clock): the time to the first deletion is
     /// measured from here (docs/architecture.md, The reclaim walk).

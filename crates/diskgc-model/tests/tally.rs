@@ -27,7 +27,7 @@ use diskgc_core::tally::budget::Budget;
 use diskgc_core::tally::listing::{ListingCursor, SourceFind, TallySource};
 use diskgc_core::tally::pace::{BATCH_OPS_MAX, BATCH_TIME_MAX};
 use diskgc_core::tally::recount::Complete;
-use diskgc_core::tally::sync::{SyncTier, synchronous};
+use diskgc_core::tally::sync::{Deferred, SyncTier, synchronous};
 use diskgc_core::tally::{Rounded, Sizing, TallyState};
 use diskgc_model::ModelHost;
 use diskgc_model::spec::Op;
@@ -693,17 +693,63 @@ fn sync_model(extra: &str) -> ModelHost {
     ))
 }
 
+/// Two tiers ordered `best-fit`: pass 2 sizes the first one's stale units
+/// (under `oldest` it leaves them to the reclaim walk:
+/// [`sync_tally_leaves_an_oldest_first_tiers_sizing_to_the_walk`]).
 fn tiers() -> Vec<SyncTier> {
+    tiers_ordered(Order::BestFit)
+}
+
+fn tiers_ordered(order: Order) -> Vec<SyncTier> {
     vec![
         SyncTier {
             sources: vec![source("a", "/tmp/a")],
-            order: Order::Oldest,
+            order,
         },
         SyncTier {
             sources: vec![source("b", "/tmp/b")],
-            order: Order::Oldest,
+            order,
         },
     ]
+}
+
+/// TASK-251: under `oldest` pass 2 sizes nothing; it reports the first
+/// tier and its stale units, which the reclaim walk sizes as its queue
+/// reaches them (tests/index_reclaim.rs, `deferred_sizing_*`). No tree
+/// below a candidate is read.
+#[test]
+fn sync_tally_leaves_an_oldest_first_tiers_sizing_to_the_walk() {
+    let host = sync_model("");
+    let mut state = state();
+    let report = synchronous(
+        &host,
+        &mut state,
+        &tiers_ordered(Order::Oldest),
+        TMP_DEV,
+        None,
+    )
+    .unwrap();
+    assert!(report.pass1_done && report.stopped.is_none(), "{report:?}");
+    assert_eq!(report.listed.len(), 2);
+    assert_eq!(
+        (report.first_tier, report.sized, report.untallied),
+        (None, 0, 0)
+    );
+    assert_eq!(report.deferred, Some(Deferred { tier: 0, stale: 3 }));
+    let below = |p: &Path, root: &str| p.starts_with(root) && p != Path::new(root);
+    assert!(
+        !host.trace().iter().any(|c| c.op == Op::ReadDir
+            && c.path
+                .as_deref()
+                .is_some_and(|p| below(p, "/tmp/a") || below(p, "/tmp/b"))),
+        "no unit walked"
+    );
+    state.index.for_each_unit(|_, path, unit| {
+        let UnitRef::Single(s) = unit else {
+            panic!("no blocks here")
+        };
+        assert!(s.tally.is_none(), "{} sized", path.display());
+    });
 }
 
 /// docs/testing.md `sync_tally_discovers_every_tier_before_sizing` and

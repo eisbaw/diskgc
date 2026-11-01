@@ -95,7 +95,9 @@ impl QueueEntry {
         }
     }
 
-    fn cmp_order(&self, other: &Self) -> Ordering {
+    /// The `oldest` order of [`TierQueue::ready`]: the key, then mount,
+    /// path and family (a total order over a tier's units).
+    pub fn cmp_order(&self, other: &Self) -> Ordering {
         self.order_key()
             .cmp(&other.order_key())
             .then_with(|| self.mount.cmp(&other.mount))

@@ -477,18 +477,35 @@ the order of work.
   2. **Depth (sizing), first tier only** (Mark, 2026-10-25): tally the
      trees (size, `newest_change`) of the **first** selected tier's
      stale units, that is never tallied or tallied more than 60 minutes
-     ago, in the tier's order by the provisional key (`oldest`: oldest
-     first; `best-fit`: the stored estimate, largest first, unknown
-     last). A unit refused (a hint) within the 60 minutes counts as
+     ago. A unit refused (a hint) within the 60 minutes counts as
      sized. The first tier is the earliest in policy order with a
-     discovered candidate: the one that will act first. Later tiers keep
-     their stored sizes and ages for their order (units without any
-     are ordered by the provisional key, after sized ones under
-     `best-fit`); the reclaim walk's own checks size what it acts on.
-     The same rule applies with and without a seed. The tally then
-     ends, even with budget left, so the reclaim starts sooner. Blocks
-     are not sized (their members have no names in the index); the
-     reclaim walk's checks size the members it expands.
+     discovered candidate: the one that will act first. Under
+     `best-fit` the tally sizes them before the host lock, by the stored
+     estimate, largest first, unknown last: the first pick compares
+     every estimate. Under `oldest` the reclaim walk sizes them, as the
+     tier's queue reaches each one (TASK-251: 140,000 tiny rc
+     directories on the development laptop would otherwise all be sized
+     before the first deletion, whatever the goal needs). The order is
+     unchanged: a stale unit's stored key (the provisional key, or an
+     older tally's `newest_change`) is at most the `newest_change` sizing
+     finds, since the walk counts the root's own times and times only
+     grow, so the walk sizes the unit with the oldest stored key and
+     takes a sized unit only once no unsized one's stored key comes
+     before its new key (a clock stepped back can break that bound; the
+     order is then approximate, never a check). It sizes as the tally
+     does (read-only, the same walk, a refusal is this run's tally's),
+     keeps no paused walk, spends what pass 1 left of `--tally-budget`
+     (past it, the rest of the tier goes by stored keys and
+     `tally_cut_short` is set), and a failure of the host there is an
+     error of the run, as anywhere in the walk. Units with a refusal
+     hint are not sized ahead: they come after the tier's others
+     (Refusals). Later tiers keep their stored sizes and ages for their
+     order (units without any are ordered by the provisional key, after
+     sized ones under `best-fit`); the reclaim walk's own checks size
+     what it acts on. The same rule applies with and without a seed.
+     The tally then ends, even with budget left, so the reclaim starts
+     sooner. Blocks are not sized (their members have no names in the
+     index); the reclaim walk's checks size the members it expands.
 
   **Useful** means: when pass 1 has finished, every selected tier has a
   queue in its order and the reclaim walk can act on it; pass 2 only
@@ -684,7 +701,9 @@ reclaim(min, goal, filesystem, deadline):
       if avail >= goal: end (met)
       candidate := next from queue
                    (a block at the head is expanded first: its members,
-                   found and statx'ed now, join the queue)
+                   found and statx'ed now, join the queue; under `oldest`
+                   the first tier's stale unit at the head is sized first,
+                   The tally: Synchronous, pass 2)
                    or: break                            # queue done
       re-match: the tier's discovery restricted to the unit's path finds
         it there; else skip (stale)
@@ -783,8 +802,10 @@ reclaim(min, goal, filesystem, deadline):
   run: `first deletion: <ms> ms after the run started (<candidate>)`.
   Command-line and configuration loading before the executor are not in
   it; a run that deletes nothing logs nothing. Not in the JSON report.
-  The first-tier candidates are walked three times before the first
-  deletion: the synchronous tally's sizing (before the lock), the
+  A first-tier candidate is walked three times before its deletion: the
+  tally's sizing (before the lock under `best-fit`; under `oldest` by
+  the walk as the queue reaches it, so the first deletion waits for the
+  sizing of the units found ahead of it, not of the whole tier), the
   candidate's own read-only tally, and the locked eligibility walk; the
   second could reuse the first (a follow-up).
 - Every step checks the cooperative deadline

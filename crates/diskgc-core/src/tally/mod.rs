@@ -13,7 +13,9 @@
 //!   while the host lock is held, idle priorities.
 //! - [`sync`] (in `ensure`): may load the machine. Full speed within its
 //!   deadline (`--tally-budget`), in two passes: discovery of every
-//!   selected tier, then sizing of the first tier's stale units.
+//!   selected tier, then sizing of the first tier's stale units (under
+//!   `oldest` left to the reclaim walk, which sizes each as it reaches it:
+//!   [`TallyState::size_unit_whole`]).
 //!
 //! Composed bottom-up:
 //!
@@ -140,6 +142,14 @@ pub enum Sizing {
     NoRoom,
 }
 
+/// Whether a sizing walk the budget pauses is kept to resume
+/// ([`TallyState::size_unit`]) or dropped ([`TallyState::size_unit_whole`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeepPaused {
+    Yes,
+    No,
+}
+
 impl TallyState {
     pub fn new(index: Index) -> Self {
         Self {
@@ -246,6 +256,35 @@ impl TallyState {
         path: &std::path::Path,
         budget: &mut Budget,
     ) -> Result<Sizing, HostError> {
+        self.size(host, mounts, mount, path, budget, KeepPaused::Yes)
+    }
+
+    /// Sizes the single at `path` (on `mount`) in one go within `budget`,
+    /// as [`Self::size_unit`] but keeping no cursor: a walk the budget
+    /// pauses is dropped (`Paused`, nothing recorded). So it never
+    /// collapses the index, whose units the reclaim walk's queue holds as
+    /// copies while it sizes them as it reaches them (docs/architecture.md,
+    /// The tally: Synchronous, pass 2 under `oldest`).
+    pub fn size_unit_whole<H: Host>(
+        &mut self,
+        host: &H,
+        mounts: &[crate::host::MountEntry],
+        mount: &MountKey,
+        path: &std::path::Path,
+        budget: &mut Budget,
+    ) -> Result<Sizing, HostError> {
+        self.size(host, mounts, mount, path, budget, KeepPaused::No)
+    }
+
+    fn size<H: Host>(
+        &mut self,
+        host: &H,
+        mounts: &[crate::host::MountEntry],
+        mount: &MountKey,
+        path: &std::path::Path,
+        budget: &mut Budget,
+        keep: KeepPaused,
+    ) -> Result<Sizing, HostError> {
         let Some(identity) = self.index.single(mount, path).map(|s| s.identity) else {
             return Ok(Sizing::Missing);
         };
@@ -264,6 +303,10 @@ impl TallyState {
         let now = host.now();
         let outcome = match step {
             Step::Paused => {
+                if keep == KeepPaused::No {
+                    self.account_cursors();
+                    return Ok(Sizing::Paused);
+                }
                 if !self.keep_cursor(host, cursor)? {
                     return Ok(Sizing::NoRoom);
                 }

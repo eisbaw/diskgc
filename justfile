@@ -248,9 +248,10 @@ walk-up NAME="podman":
     bash tools/walk/up.sh {{NAME}}
 
 # Regenerate walk environment NAME's data in place from WALK_SEED (default 1),
-# with WALK_TMP_BULK bulk /tmp leftovers (default 0).
+# with WALK_TMP_BULK bulk /tmp leftovers (default 0) or WALK_TMP_LAPTOP=RC,SESSIONS,ROOTS
+# the 2026-11-01 laptop /tmp shape (tools/walk/gen.py).
 walk-reset NAME="podman":
-    podman exec -e WALK_SEED="${WALK_SEED:-1}" -e WALK_TMP_BULK="${WALK_TMP_BULK:-0}" walk-diskgc-{{NAME}} sh /opt/walk/reset.sh
+    podman exec -e WALK_SEED="${WALK_SEED:-1}" -e WALK_TMP_BULK="${WALK_TMP_BULK:-0}" -e WALK_TMP_LAPTOP="${WALK_TMP_LAPTOP:-0,0,0}" walk-diskgc-{{NAME}} sh /opt/walk/reset.sh
 
 # Copy diskgc binary BIN into walk environment NAME as diskgc-TAG.
 walk-install NAME BIN TAG:

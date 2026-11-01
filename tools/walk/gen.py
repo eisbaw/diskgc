@@ -30,7 +30,21 @@ whose pid no process could have, so a pid above it tests nothing (TASK-158).
 That walk's real producers (real nix develop, nix-shell and pytest runs,
 some SIGKILLed) are not folded in; live producers are reset.sh's job.
 
-Usage: gen.py --home DIR --tmp DIR [--seed N] [--scale F] [--tmp-bulk N] [--live-pid PID]...
+With --tmp-laptop RC,SESSIONS,ROOTS, /tmp also gets the shape of the
+development laptop's /tmp on 2026-11-01 (TASK-251), counts kept and bytes
+scaled down: RC rc dirs of dead owners (3/4 nix-shell with an rc and an
+env-vars file of one page each, 1/4 nix-develop with an rc file; about
+7 KiB each, the host's 140,372 held 0.87 GiB), and ROOTS ended
+nix-shell.XXXXXX roots, the first SESSIONS/3 of them holding three ended
+pytest sessions of about 128 KiB each (the host's 6,424 held 12.25 GiB,
+about 2 MiB each), the rest empty (the host had about 54,600 such roots;
+pytest-tmp's discovery lists every one). The host's shape:
+--tmp-laptop 140372,6424,54600 (about 1.7 GiB on the tmpfs; give the walk
+WALK_TMP_SIZE=3g). No backdating: a rootless container cannot set ctime,
+so every entry is as old as the run that made it.
+
+Usage: gen.py --home DIR --tmp DIR [--seed N] [--scale F] [--tmp-bulk N]
+              [--tmp-laptop RC,SESSIONS,ROOTS] [--live-pid PID]...
 """
 import argparse
 import os
@@ -56,6 +70,10 @@ AGENT_WORKTREES = 4  # under HOME/src/app/.claude/worktrees, 60-140 MiB each
 TMP_BULK_MAX = 8_000  # the TASK-65 walk used 4,000; 8,000 adds 300 MiB to the 1 GiB walk /tmp
 BULK_PER_ROOT = 80  # one ended nix-shell.XXXXXX root (3 sessions) per 80 leftovers
 DEAD_PID_TRIES_MAX = 1000
+LAPTOP_RC_MAX = 200_000  # the 2026-11-01 host had 140,372 (TASK-251)
+LAPTOP_ROOTS_MAX = 80_000  # and about 54,600 nix-shell.XXXXXX roots
+LAPTOP_SESSION_BYTES = 128 * 1024  # the host's sessions averaged about 2 MiB; scaled 1/16
+PAGE = 4096
 
 
 class Writer:
@@ -229,6 +247,60 @@ def tmp_bulk(root, seed, count, pid_max, scale, written):
     return w.total
 
 
+def tmp_laptop(root, seed, shape, pid_max, scale, written):
+    """The development laptop's /tmp of 2026-11-01 (see --tmp-laptop in the
+    module doc): shape is (rc dirs, pytest sessions, nix-shell.XXXXXX roots).
+
+    Its own Random, like tmp_bulk. Owner pids come from pid_max's top half
+    and must be dead now (diskgc's nix-shell contract permits only those);
+    a live one drawn is skipped. A page is what tmpfs allocates for any
+    non-empty file, so each rc file is one page whatever its text."""
+    rc_dirs, sessions, roots = shape
+    w = Writer(random.Random(seed ^ 0x251), scale)
+    w.total = written
+    session_bytes = int(LAPTOP_SESSION_BYTES * scale)
+    need = rc_dirs * 2 * PAGE + sessions * session_bytes
+    st = os.statvfs(root)
+    assert need < st.f_bavail * st.f_frsize, (
+        f"--tmp-laptop needs {need / MIB:.0f} MiB, {root} has {st.f_bavail * st.f_frsize / MIB:.0f} MiB free")
+    user = os.environ.get("USER", "tester")
+    drawn = w.rng.sample(range(pid_max // 2, pid_max), rc_dirs + rc_dirs // 8 + 16)
+    pids = [p for p in drawn if not os.path.exists(f"/proc/{p}")][:rc_dirs]
+    assert len(pids) == rc_dirs, f"only {len(pids)} of {len(drawn)} drawn owner pids are dead"
+    for i, pid in enumerate(pids):
+        suffix = pid * 2246822519 % 4294967291  # a fixed scramble, like nix-shell's random part
+        if i % 4:
+            d = f"{root}/nix-shell-{pid}-{suffix}"
+            w.file(f"{d}/rc", 0, "export x=1\n")
+            w.file(f"{d}/env-vars", 0, "declare -x y=2\n")
+        else:
+            w.file(f"{root}/nix-develop-{pid}-{suffix}/rc", 0, "export x=1\n")
+    alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    names = set()
+    while len(names) < roots:
+        names.add("".join(w.rng.choice(alnum) for _ in range(6)))
+    left = sessions
+    for name in sorted(names):
+        r = f"{root}/nix-shell.{name}"
+        os.makedirs(r)
+        for n in range(min(3, left)):
+            session = f"{r}/pytest-of-{user}/pytest-{n}"
+            for test in ("test_a0", "test_b0"):
+                w.file(f"{session}/{test}/data.bin", session_bytes // 2)
+        left -= min(3, left)
+    assert left == 0, f"{sessions} sessions need at least {-(-sessions // 3)} roots, got {roots}"
+    return w.total
+
+
+def laptop_shape(text):
+    """Parses --tmp-laptop RC,SESSIONS,ROOTS."""
+    rc_dirs, sessions, roots = (int(part) for part in text.split(","))
+    assert 0 <= rc_dirs <= LAPTOP_RC_MAX, f"--tmp-laptop rc dirs must be in [0, {LAPTOP_RC_MAX}]"
+    assert 0 <= roots <= LAPTOP_ROOTS_MAX, f"--tmp-laptop roots must be in [0, {LAPTOP_ROOTS_MAX}]"
+    assert 0 <= sessions <= 3 * roots, "--tmp-laptop sessions: at most three per root"
+    return rc_dirs, sessions, roots
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--home", required=True)
@@ -236,17 +308,21 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--scale", type=float, default=1.0)
     ap.add_argument("--tmp-bulk", type=int, default=0)
+    ap.add_argument("--tmp-laptop", type=laptop_shape, default=(0, 0, 0))
     ap.add_argument("--live-pid", type=int, action="append", default=[])
     a = ap.parse_args()
     assert 0 < a.scale <= 2, "--scale must be in (0, 2]"
     assert len(a.live_pid) == 2, "two live owner pids: one nix-shell, one nix-develop"
     assert 0 <= a.tmp_bulk <= TMP_BULK_MAX, f"--tmp-bulk must be in [0, {TMP_BULK_MAX}]"
+    # One shape at a time: their owner pids come from the same range.
+    assert not (a.tmp_bulk and any(a.tmp_laptop)), "--tmp-bulk and --tmp-laptop exclude each other"
     pid_max = read_pid_max()
     assert all(0 < p < pid_max for p in a.live_pid), f"live pids must be below pid_max {pid_max}"
     w = Writer(random.Random(a.seed), a.scale)
     home(w, a.home)
     tmp(w, a.tmp, a.live_pid, pid_max)
     total = tmp_bulk(a.tmp, a.seed, a.tmp_bulk, pid_max, a.scale, w.total)
+    total = tmp_laptop(a.tmp, a.seed, a.tmp_laptop, pid_max, a.scale, total)
     print(f"gen: seed {a.seed}, {total / MIB:.0f} MiB written under {a.home} and {a.tmp}")
 
 

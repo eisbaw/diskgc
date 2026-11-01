@@ -13,10 +13,15 @@
 //! 2. **Depth (sizing), first tier only** (Mark, 2026-10-25): the first
 //!    selected tier with a discovered candidate (the one that will act
 //!    first) has its stale singles sized, never sized or sized (tallied or
-//!    refused) [`super::schedule::RETALLY_PERIOD`] or more ago ([`needs_sizing`]), in the tier's order by the stored keys
-//!    (`oldest`: oldest first; `best-fit`: the stored estimate, largest
-//!    first, unknown last). Later tiers keep what they have. Then the tally
-//!    ends, even with budget left.
+//!    refused) [`super::schedule::RETALLY_PERIOD`] or more ago
+//!    ([`needs_sizing`]). Under `best-fit` here, largest stored estimate
+//!    first, unknown last: its first pick compares every estimate. Under
+//!    `oldest` not here (TASK-251): the reclaim walk sizes them as the
+//!    tier's queue reaches them, oldest stored key first, within what is
+//!    left of the budget ([`SyncReport::deferred`];
+//!    `executor::indexed`), so the first deletion waits for the sizing of
+//!    the oldest units only, never of the whole tier. Later tiers keep
+//!    what they have. Then the tally ends, even with budget left.
 //!
 //! **Useful** means pass 1 finished: every selected tier has a queue in
 //! its order ([`SyncReport::pass1_done`]). Only the sources pass 1 listed
@@ -28,6 +33,7 @@
 //! members are sized by the reclaim walk's checks when it expands them.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use super::budget::Budget;
 use super::listing::TallySource;
@@ -63,6 +69,10 @@ pub struct SyncReport {
     pub pass1_done: bool,
     /// The tier pass 2 sized (an index into the tiers), if any.
     pub first_tier: Option<usize>,
+    /// The first tier when its order is `oldest`: pass 2 left its stale
+    /// singles to the reclaim walk, which sizes each as the tier's queue
+    /// reaches it (an index into the tiers, and how many were stale).
+    pub deferred: Option<Deferred>,
     /// Singles pass 2 sized.
     pub sized: usize,
     /// Stale singles of the first tier pass 2 did not size (the deadline).
@@ -77,6 +87,17 @@ pub struct SyncReport {
     pub stopped: Option<Stop>,
     /// Filesystem operations of the sizing (pass 2), as counted.
     pub sizing_ops: usize,
+    /// How long pass 1 (discovery) took; pass 2 is the rest.
+    pub pass1_took: Duration,
+}
+
+/// The first tier's sizing, left by pass 2 to the reclaim walk (`oldest`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deferred {
+    /// The tier (an index into the tiers).
+    pub tier: usize,
+    /// Its stale singles when the tally ended.
+    pub stale: usize,
 }
 
 /// Runs the synchronous tally over `tiers` (policy order) on the
@@ -92,6 +113,7 @@ pub fn synchronous<H: Host>(
 ) -> Result<SyncReport, HostError> {
     let mut report = SyncReport::default();
     let mut listings: Vec<(Finder, Listed)> = Vec::new();
+    let started = host.now();
     let pass1 = pass1(host, state, tiers, deadline, &mut report, &mut listings);
     let round: Vec<Complete<'_>> = listings
         .iter()
@@ -103,6 +125,7 @@ pub fn synchronous<H: Host>(
         })
         .collect();
     report.recount = state.recount(&round);
+    report.pass1_took = host.now().saturating_since(started);
     pass1?;
     if !report.pass1_done {
         return Ok(report);
@@ -174,6 +197,13 @@ fn pass2<H: Host>(
     let Some((first, stale)) = first_tier_stale(host, state, tiers, dev) else {
         return Ok(());
     };
+    if tiers[first].order == Order::Oldest {
+        report.deferred = Some(Deferred {
+            tier: first,
+            stale: stale.len(),
+        });
+        return Ok(());
+    }
     report.first_tier = Some(first);
     report.untallied = stale.len();
     if stale.is_empty() {

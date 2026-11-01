@@ -23,8 +23,6 @@
 //!    run that tallied either leaves a snapshot or says why not (PRD: each
 //!    `ensure` that tallies leaves a snapshot).
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::command_action::{self, Preflight, Ready};
@@ -271,7 +269,7 @@ fn run<H: Delete>(
         min_text
     ));
     // Read-only, before the host lock (docs/architecture.md, The tally).
-    let tallied = indexed::sync_tally(
+    let mut tallied = indexed::sync_tally(
         host,
         index,
         tiers.iter().map(|(tier, _)| tier),
@@ -333,7 +331,7 @@ fn run<H: Delete>(
             }
         }
         let index = tallied.usable.then_some(&mut index.state);
-        run.walk(index, &tallied.refused, &mut report, log)
+        run.walk(index, &mut tallied, &mut report, log)
     };
     // The snapshot, before the final sample: the sample and the exit code
     // see the space it takes (docs/architecture.md, Snapshot). A run that
@@ -456,7 +454,7 @@ impl<H: Delete> Tallied<'_, H> {
     fn walk(
         &self,
         index: Option<&mut TallyState>,
-        tally_refused: &BTreeMap<PathBuf, Reason>,
+        tallied: &mut indexed::SyncTallied,
         report: &mut Report,
         log: &mut dyn FnMut(&str),
     ) -> Ending {
@@ -468,7 +466,7 @@ impl<H: Delete> Tallied<'_, H> {
             Ok(prepared) => prepared,
             Err(ending) => return ending,
         };
-        self.reclaim(prepared, protection, index, tally_refused, report, log)
+        self.reclaim(prepared, protection, index, tallied, report, log)
     }
 
     /// The sample under the lock (someone else, the reclaim we waited for,
@@ -581,7 +579,7 @@ impl<H: Delete> Tallied<'_, H> {
         prepared: Vec<Option<PreparedTier>>,
         mut protection: Protection,
         mut index: Option<&mut TallyState>,
-        tally_refused: &BTreeMap<PathBuf, Reason>,
+        tallied: &mut indexed::SyncTallied,
         report: &mut Report,
         log: &mut dyn FnMut(&str),
     ) -> Ending {
@@ -650,7 +648,7 @@ impl<H: Delete> Tallied<'_, H> {
                 run_stopped: false,
                 in_use_unknown_in_a_row: 0,
                 index: index.as_deref_mut(),
-                tally_refused,
+                tallied: &mut *tallied,
                 run_started: self.run_started,
                 second_signal: if self.request.watch.is_some() {
                     SecondSignal::LeaveRunning

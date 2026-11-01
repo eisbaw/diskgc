@@ -142,7 +142,9 @@ process runs, even if that Cargo works in an unrelated directory; see
   the synchronous tally that builds the run's index before the host lock
   (`fs` tiers of one source without `!profile:`; their candidates are
   then taken in the index's order, each found again and judged in full,
-  [architecture.md](architecture.md#the-reclaim-walk)), and, per tier,
+  [architecture.md](architecture.md#the-reclaim-walk)), including its
+  sizing of a first tier ordered `oldest`, which the reclaim walk does
+  under the host lock as the tier's queue reaches each candidate, and, per tier,
   the tally that orders what that tier's own discovery finds under the
   host lock (every Cargo-target tier, union and `!profile:` tier, and
   what an indexed tier's queue did not take): candidates it leaves
@@ -1138,9 +1140,10 @@ is `host`.
   index (its stderr says where the index started and what its
   synchronous tally did).
 - `tally_cut_short` is true only after a reclaim's tally (the
-  synchronous one before the host lock, or a tier's under it) actually
-  stops at `--tally-budget` with at least one candidate left untallied
-  (or, for the synchronous one, a source not yet listed). It is false
+  synchronous one before the host lock, its sizing of an `oldest` first
+  tier as the walk reaches each candidate, or a tier's under the lock)
+  actually stops at `--tally-budget` with at least one candidate left
+  untallied (or, for the synchronous one, a source not yet listed). It is false
   for dry runs, runs that stop before tallying, and tallies that complete;
   false does not say that every possible candidate was discovered.
 - Paths are JSON strings; bytes of a path that are not UTF-8 are shown as

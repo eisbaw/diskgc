@@ -52,7 +52,7 @@ podman run -d "${pid_mode[@]}" --name "$name" --hostname walk --network=none --p
   --mount "type=tmpfs,destination=/home/tester,tmpfs-size=$home_size,tmpfs-mode=0755" \
   --mount "type=tmpfs,destination=/tmp,tmpfs-size=$tmp_size,tmpfs-mode=1777" \
   -v "$pkg:/opt/diskgc-pkg:ro" -v "$here:/opt/walk:ro" -v "$repo/docs:/opt/diskgc-src/docs:ro" \
-  -e WALK_SEED="${WALK_SEED:-1}" -e WALK_TMP_BULK="${WALK_TMP_BULK:-0}" -e WALK_BURNERS="${WALK_BURNERS:-2}" \
+  -e WALK_SEED="${WALK_SEED:-1}" -e WALK_TMP_BULK="${WALK_TMP_BULK:-0}" -e WALK_TMP_LAPTOP="${WALK_TMP_LAPTOP:-0,0,0}" -e WALK_BURNERS="${WALK_BURNERS:-2}" \
   "$image" sleep 604800 >/dev/null
 # uid-slot.sh read the labels before this run; a walk-up started meanwhile
 # may have taken the same slot. Both racers then see each other and both
