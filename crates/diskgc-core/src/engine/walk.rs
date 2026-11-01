@@ -39,13 +39,11 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::host::{
-    Base, Dev, DirListing, Errno, FileType, Host, HostError, MonoTime, Stat, Timestamp,
-};
+use crate::host::{Base, DirListing, Errno, FileType, Host, HostError, MonoTime, Stat, Timestamp};
 use crate::resolve::{ResolveError, Unsafe};
 
 use super::frames::{OpenFailed, OpenFailure, Stack};
-use super::{Candidate, Entry, Identity, Reason, Skip, WalkRecord, deadline_passed};
+use super::{Candidate, Entry, Identity, Reason, Skip, Volume, WalkRecord, deadline_passed};
 
 /// The keep marker (docs/reference.md, Protection marker).
 pub const KEEP_MARKER: &str = ".diskgc-keep";
@@ -330,22 +328,25 @@ pub fn walk<H: Host>(
         }
         Err(e) => return Err(host_failure(path(), "stat", &e)),
     };
-    // The candidate's own device, which every directory below must show
-    // (no nested subvolume, TASK-286); a directory candidate on another
-    // device than its parent directory is itself the top of one.
+    // The candidate's own subvolume, which every directory below must be
+    // in (no nested subvolume, TASK-286, TASK-307); a directory candidate
+    // in another than its parent directory is itself the top of one.
     if stat.file_type == Some(FileType::Directory) {
         let parent = match host.statx(Base::Dir(candidate.parent), Path::new("")) {
             Ok(parent) => parent,
             Err(e) => return Err(host_failure(path(), "stat", &e)),
         };
-        if parent.dev != stat.dev {
-            return Err(super::nested_subvolume(path(), stat.dev, parent.dev).into());
-        }
+        super::same_subvolume(
+            &path(),
+            Volume::of(&stat),
+            Volume::of(&parent),
+            Some(candidate.fs_type()),
+        )?;
     }
     let mut walker = Walker {
         host,
         candidate,
-        dev: stat.dev,
+        volume: Volume::of(&stat),
         rules,
         deadline,
         mount_points,
@@ -407,9 +408,9 @@ pub fn walk<H: Host>(
 struct Walker<'w, H: Host> {
     host: &'w H,
     candidate: &'w Candidate<'w, H::Fd>,
-    /// The candidate's own `st_dev`: a directory below on another one is a
-    /// nested subvolume ([`super::nested_subvolume`]).
-    dev: Dev,
+    /// The candidate's own subvolume: a directory below in another one is
+    /// a nested subvolume ([`super::same_subvolume`]).
+    volume: Volume,
     rules: &'w Rules<'w>,
     deadline: Option<MonoTime>,
     mount_points: Vec<PathBuf>,
@@ -526,8 +527,13 @@ impl<H: Host> Walker<'_, H> {
                 ),
             ));
         }
-        if identity.file_type == FileType::Directory && stat.dev != self.dev {
-            return Err(super::nested_subvolume(path(), stat.dev, self.dev));
+        if identity.file_type == FileType::Directory {
+            super::same_subvolume(
+                &path(),
+                Volume::of(stat),
+                self.volume,
+                Some(self.candidate.fs_type()),
+            )?;
         }
         if name == KEEP_MARKER {
             return Err(skip(Reason::KeepMarker, "inside the candidate".to_owned()));

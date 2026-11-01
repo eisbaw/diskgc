@@ -687,7 +687,11 @@ Immediately before acting, diskgc walks the candidate's whole tree
   A field the kernel does not report (type, inode, owner, mount id) is
   `unsupported_fs`; an entry replaced while the walk runs is `changed`; a
   mount inside (an entry on another mount, or `EXDEV` descending) is
-  `contains_mount`.
+  `contains_mount`, and so is a nested subvolume (another device or
+  `stx_subvol`), while on bcachefs a kernel that reports no `stx_subvol`
+  makes every directory `unsupported_fs`
+  ([architecture.md](architecture.md#filesystem-matching), Subvolume
+  boundaries; TASK-307).
 - **Bounded:** a candidate of more entries than a fixed budget
   (`DEFAULT_MAX_ENTRIES` in the engine) is skipped (`too_many_entries`) as
   soon as a listing would exceed what is left of that budget, so neither

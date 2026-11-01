@@ -5,10 +5,16 @@
 use diskgc_core::host::{Dev, FileType, Stat, Timestamp};
 use rustix::fs::{StatxAttributes, StatxFlags, StatxTimestamp};
 
+/// `STATX_SUBVOL` (Linux 6.10, `include/uapi/linux/stat.h`), which rustix
+/// does not name. A kernel before 6.10 ignores the request bit and leaves
+/// it out of `stx_mask`; so does a filesystem without subvolumes.
+const STATX_SUBVOL: StatxFlags = StatxFlags::from_bits_retain(0x8000);
+
 /// What every `statx` of the port asks for.
 pub(crate) const STATX_MASK: StatxFlags = StatxFlags::BASIC_STATS
     .union(StatxFlags::BTIME)
-    .union(StatxFlags::MNT_ID);
+    .union(StatxFlags::MNT_ID)
+    .union(STATX_SUBVOL);
 
 fn timestamp(t: StatxTimestamp) -> Timestamp {
     Timestamp {
@@ -45,6 +51,7 @@ pub(crate) fn stat_from_statx(x: &rustix::fs::Statx) -> Stat {
         btime: answered(StatxFlags::BTIME).then(|| timestamp(x.stx_btime)),
         mnt_id: answered(StatxFlags::MNT_ID).then_some(x.stx_mnt_id),
         mount_root: attribute(StatxAttributes::MOUNT_ROOT),
+        subvol: answered(STATX_SUBVOL).then_some(x.stx_subvol),
     }
 }
 
@@ -88,7 +95,10 @@ mod tests {
         let mut x = real_statx();
         x.stx_mask &=
             !(StatxFlags::MNT_ID.bits() | StatxFlags::BTIME.bits() | StatxFlags::INO.bits());
+        x.stx_mask &= !STATX_SUBVOL.bits();
+        x.stx_subvol = 256;
         let stat = stat_from_statx(&x);
+        assert_eq!(stat.subvol, None, "an unanswered stx_subvol is not trusted");
         assert_eq!(stat.mnt_id, None);
         assert_eq!(stat.btime, None);
         assert_eq!(stat.ino, None);

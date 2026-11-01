@@ -70,6 +70,9 @@ pub struct Inode {
     /// The nested btrfs subvolume it belongs to
     /// ([`crate::spec::DirAttrs::subvolume`]): the device `statx` reports.
     pub subvolume: Option<Dev>,
+    /// The nested bcachefs subvolume it belongs to
+    /// ([`crate::spec::DirAttrs::subvol`]): the `stx_subvol` reported.
+    pub subvol: Option<u64>,
 }
 
 impl Inode {
@@ -89,6 +92,7 @@ impl Inode {
             ctime: now,
             btime: now,
             subvolume: None,
+            subvol: None,
         }
     }
 
@@ -686,6 +690,48 @@ impl State {
         }
     }
 
+    /// Marks `top` and everything below it on its filesystem as the nested
+    /// bcachefs subvolume `id` ([`crate::spec::DirAttrs::subvol`]).
+    pub fn mark_subvol(&mut self, top: Loc, id: u64) {
+        let mut todo = vec![top.ino];
+        let mut seen = BTreeSet::new();
+        while let Some(ino) = todo.pop() {
+            if !seen.insert(ino) {
+                continue;
+            }
+            let loc = Loc { mnt: top.mnt, ino };
+            if let Some(entries) = self.inode(loc).entries() {
+                todo.extend(entries.values().copied());
+            }
+            self.fs_mut(top.mnt)
+                .inodes
+                .get_mut(&ino)
+                .expect("a live inode")
+                .subvol = Some(id);
+        }
+    }
+
+    /// The `stx_subvol` a `statx` of `loc` reports: on `btrfs` and
+    /// `bcachefs` only, as Linux 6.10 and later fill it, and not where the
+    /// filesystem lists [`StatxField::Subvol`] missing (an older kernel).
+    /// btrfs: an id per subvolume device (each btrfs subvolume has its
+    /// own); bcachefs: its nested subvolume's id, else 1, the
+    /// filesystem's own.
+    fn stat_subvol(&self, loc: Loc) -> Option<u64> {
+        let fs = self.fs(loc.mnt);
+        if fs.missing.contains(&StatxField::Subvol) {
+            return None;
+        }
+        match fs.fs_type.as_str() {
+            "btrfs" => {
+                let dev = self.stat_dev(loc);
+                Some(0x1_0000_0000 | (u64::from(dev.major) << 20) | u64::from(dev.minor))
+            }
+            "bcachefs" => Some(self.inode(loc).subvol.unwrap_or(1)),
+            _ => None,
+        }
+    }
+
     /// The topmost mount covering `loc`, if any (a later mount on the same
     /// directory covers an earlier one).
     fn mounted_on(&self, loc: Loc) -> Option<&Mount> {
@@ -1154,6 +1200,7 @@ impl State {
                 StatxField::MountRoot,
                 loc.ino == self.mount(loc.mnt).root,
             ),
+            subvol: self.stat_subvol(loc),
         }
     }
 
@@ -1341,6 +1388,7 @@ impl State {
         let now = self.wall_now();
         let mut inode = Inode::new(kind, now);
         inode.subvolume = self.inode(dir).subvolume;
+        inode.subvol = self.inode(dir).subvol;
         let ino = self.fs_mut(dir.mnt).add(inode);
         self.link(dir, name, ino)?;
         Ok(Loc { mnt: dir.mnt, ino })

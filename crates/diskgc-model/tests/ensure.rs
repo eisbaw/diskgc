@@ -1558,6 +1558,216 @@ fn a_nested_subvolume_inside_a_cargo_profile_entry_refuses_the_target() {
     );
 }
 
+/// A bcachefs at `/work` (TASK-307): its subvolumes keep the
+/// filesystem's device and differ only by `stx_subvol` (the `subvol:`
+/// directory attribute). `extra` is added to the mount's line (as
+/// `statx_missing: [subvol]`, a kernel before Linux 6.10).
+fn bcachefs_yaml(extra: &str, tree: &str) -> String {
+    format!(
+        r#"host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {{id: 1, at: /, fs: ext4, dev: "254:1", size: 100G}}
+  - {{id: 3, at: /run, fs: tmpfs, dev: "0:30", size: 1G, parent: 1}}
+  - {{id: 40, at: /work, fs: bcachefs, dev: "254:2", size: 100G, other_used: 80G, parent: 1{extra}}}
+tree:
+  /run/diskgc/lock: {{uid: 0, gid: 0}}
+{tree}"#
+    )
+}
+
+/// `ensure --min-free MIN /work` with `policy`'s groups.
+fn work_policy(host: &ModelHost, policy: &str, min: &str) -> Report {
+    let (tiers, timeouts) = configured(policy);
+    let mut request = request("profile:cargo-target", &["/work"], "/work", min, None);
+    request.tier = tiers[0].clone();
+    let mut lines = Vec::new();
+    let report =
+        executor::ensure_grouped(host, &request, &tiers, &timeouts, &[1000], &mut |line| {
+            lines.push(line.to_owned())
+        });
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    report
+}
+
+/// The skip of `candidate`, which must have `reason` and say `says`.
+fn skip_saying(report: &Report, candidate: &str, reason: Reason, says: &str) {
+    let skip = report
+        .skipped
+        .iter()
+        .find(|s| s.candidate.as_deref() == Some(Path::new(candidate)))
+        .unwrap_or_else(|| panic!("{candidate} is not skipped: {report:#?}"));
+    assert_eq!(skip.reason, reason, "{report:#?}");
+    let detail = skip.detail.as_deref().unwrap_or_default();
+    assert!(detail.contains(says), "{detail}");
+}
+
+/// TASK-307 (the vm-real-kernel check): a bcachefs subvolume nested inside
+/// a candidate shows the candidate's own device, so the TASK-286 rule
+/// (another device) missed it and the walk emptied it and removed its
+/// top. Another `stx_subvol` is the boundary too: `contains_mount`,
+/// nothing deleted.
+#[test]
+fn a_nested_bcachefs_subvolume_inside_a_candidate_refuses_it() {
+    let old = "mtime: 2026-10-01T00:00:00Z";
+    let tree = format!(
+        "  /work/cache:\n    c-a:\n      .: {{{old}}}\n      data: {{size: 4G, {old}}}\n      inner:\n        .: {{{old}, subvol: 2}}\n        f: {{size: 4G, {old}}}\n"
+    );
+    let host = host(&bcachefs_yaml("", &tree));
+    let report = work_policy(&host, &cache_dirs("/work/cache"), "30G");
+    skip_saying(
+        &report,
+        "/work/cache/c-a",
+        Reason::ContainsMount,
+        "/work/cache/c-a/inner",
+    );
+    skip_saying(
+        &report,
+        "/work/cache/c-a",
+        Reason::ContainsMount,
+        "subvolume 2",
+    );
+    assert!(
+        0 == unlinked_below(&host, "/work/cache/c-a"),
+        "{:#?}",
+        host.trace()
+    );
+}
+
+/// TASK-307: the top of a nested bcachefs subvolume matched as a candidate
+/// is refused (discovery and walk), never emptied and removed.
+#[test]
+fn a_candidate_that_is_a_bcachefs_subvolume_top_is_refused() {
+    let tree = "  /work/cache:\n    c-a:\n      .: {mtime: 2026-10-01T00:00:00Z, subvol: 2}\n      f: {size: 4G, mtime: 2026-10-01T00:00:00Z}\n";
+    let host = host(&bcachefs_yaml("", tree));
+    let report = work_policy(&host, &cache_dirs("/work/cache"), "30G");
+    skip_saying(
+        &report,
+        "/work/cache/c-a",
+        Reason::ContainsMount,
+        "subvolume 2",
+    );
+    assert!(
+        0 == unlinked_below(&host, "/work/cache/c-a"),
+        "{:#?}",
+        host.trace()
+    );
+}
+
+/// TASK-307: a candidate inside a nested bcachefs subvolume is reclaimed
+/// like any other; only the subvolume's top is out of reach.
+#[test]
+fn a_candidate_inside_a_bcachefs_subvolume_is_reclaimed() {
+    let tree = "  /work/sub:\n    .: {subvol: 3}\n    cache:\n      c-b:\n        .: {mtime: 2026-10-01T00:00:00Z}\n        f: {size: 4G, mtime: 2026-10-01T00:00:00Z}\n";
+    let host = host(&bcachefs_yaml("", tree));
+    let report = work_policy(&host, &cache_dirs("/work/sub/cache"), "18G");
+    assert_eq!(report.status, Status::Met, "{report:#?}");
+    let acted: Vec<&Path> = report
+        .actions
+        .iter()
+        .map(|a| a.candidate.as_path())
+        .collect();
+    assert_eq!(acted, [Path::new("/work/sub/cache/c-b")], "{report:#?}");
+}
+
+/// TASK-307: where the kernel does not report `stx_subvol` (before Linux
+/// 6.10), a bcachefs subvolume cannot be told from a directory at all:
+/// every directory candidate there is refused (`unsupported_fs`, naming
+/// `STATX_SUBVOL`), nothing deleted. Fail closed, never a guess.
+#[test]
+fn without_stx_subvol_a_bcachefs_directory_candidate_is_refused() {
+    let tree = "  /work/cache:\n    c-a:\n      .: {mtime: 2026-10-01T00:00:00Z}\n      f: {size: 4G, mtime: 2026-10-01T00:00:00Z}\n";
+    let host = host(&bcachefs_yaml(", statx_missing: [subvol]", tree));
+    let report = work_policy(&host, &cache_dirs("/work/cache"), "30G");
+    skip_saying(
+        &report,
+        "/work/cache/c-a",
+        Reason::UnsupportedFs,
+        "STATX_SUBVOL",
+    );
+    assert!(
+        0 == unlinked_below(&host, "/work/cache/c-a"),
+        "{:#?}",
+        host.trace()
+    );
+}
+
+/// TASK-307: btrfs subvolumes have a device each, so a btrfs without
+/// `stx_subvol` (before Linux 6.10) keeps the TASK-286 rule alone: a
+/// nested subvolume is refused by its device, a plain candidate reclaimed.
+#[test]
+fn without_stx_subvol_btrfs_keeps_the_device_rule() {
+    let tree = "  /work/cache:\n    c-a:\n      .: {mtime: 2026-10-01T00:00:00Z}\n      f: {size: 4G, mtime: 2026-10-01T00:00:00Z}\n    c-b:\n      .: {mtime: 2026-10-01T00:00:00Z}\n      snap:\n        .: {mtime: 2026-10-01T00:00:00Z, subvolume: \"0:50\"}\n        f: {size: 4G, mtime: 2026-10-01T00:00:00Z}\n";
+    let yaml = btrfs_yaml("", tree).replace(
+        "fs: btrfs, dev: \"0:40\",",
+        "fs: btrfs, statx_missing: [subvol], dev: \"0:40\",",
+    );
+    let host = host(&yaml);
+    let report = btrfs_policy(&host, &cache_dirs("/work/cache"), "100%");
+    nested_subvolume_skip(&report, "/work/cache/c-b", "/work/cache/c-b/snap");
+    let acted: Vec<&Path> = report
+        .actions
+        .iter()
+        .map(|a| a.candidate.as_path())
+        .collect();
+    assert_eq!(acted, [Path::new("/work/cache/c-a")], "{report:#?}");
+}
+
+/// TASK-307: a nested bcachefs subvolume inside a Cargo profile
+/// directory's entry refuses the target, as on btrfs.
+#[test]
+fn a_nested_bcachefs_subvolume_inside_a_cargo_profile_entry_refuses_the_target() {
+    let at = "2026-10-01T00:00:00Z";
+    let profile = format!(
+        "{{.: {{mtime: {at}}}, .cargo-lock: {{mtime: {at}}}, .fingerprint: {{.: {{mtime: {at}}}, p-1: {{.: {{mtime: {at}}}, bin-p: {{mtime: {at}}}}}}}, deps: {{.: {{mtime: {at}}}, p-1: {{size: 4G, mtime: {at}}}, snap: {{.: {{mtime: {at}, subvol: 2}}, f: {{size: 4G, mtime: {at}}}}}}}}}"
+    );
+    let tree = format!(
+        "  /work/src/old/Cargo.toml: {{}}\n  /work/src/old/target:\n    CACHEDIR.TAG: {{cachedir_tag: true}}\n    debug: {profile}\n"
+    );
+    let host = host(&bcachefs_yaml("", &tree));
+    let report = ensure(
+        &host,
+        &request("profile:cargo-target", &["/work/src"], "/work", "30G", None),
+    );
+    skip_saying(
+        &report,
+        "/work/src/old/target",
+        Reason::ContainsMount,
+        "subvolume 2",
+    );
+    assert!(
+        0 == unlinked_below(&host, "/work/src/old/target/debug/deps/snap"),
+        "{:#?}",
+        host.trace()
+    );
+}
+
+/// TASK-307: the top of a nested bcachefs subvolume is never a Cargo
+/// target (discovery), as on btrfs.
+#[test]
+fn a_cargo_target_that_is_a_bcachefs_subvolume_top_is_refused() {
+    let at = "2026-10-01T00:00:00Z";
+    let tree = format!(
+        "  /work/src/old/Cargo.toml: {{}}\n  /work/src/old/target:\n    .: {{subvol: 2}}\n    CACHEDIR.TAG: {{cachedir_tag: true}}\n    debug: {{.: {{mtime: {at}}}, .cargo-lock: {{mtime: {at}}}, deps: {{.: {{mtime: {at}}}, p-1: {{size: 4G, mtime: {at}}}}}}}\n"
+    );
+    let host = host(&bcachefs_yaml("", &tree));
+    let report = ensure(
+        &host,
+        &request("profile:cargo-target", &["/work/src"], "/work", "30G", None),
+    );
+    skip_saying(
+        &report,
+        "/work/src/old/target",
+        Reason::ContainsMount,
+        "subvolume 2",
+    );
+    assert!(
+        0 == unlinked_below(&host, "/work/src/old/target"),
+        "{:#?}",
+        host.trace()
+    );
+}
+
 /// TASK-286 review (Codex 2): on bcachefs the superblock device does not
 /// identify the filesystem alone, so "the same filesystem" also needs its
 /// id (`f_fsid`) read from both held descriptors; read and equal, the run

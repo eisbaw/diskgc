@@ -130,25 +130,120 @@ impl<'a, F> Candidate<'a, F> {
 
 pub use crate::places::space::{AUTOFS, NETWORK_FS_TYPES, may_be_networked, networked_why};
 
-/// `contains_mount` for a directory at `path` on device `dev` inside one on
-/// `parent_dev` with no mount between (TASK-286): the top of a nested btrfs
-/// subvolume or snapshot, which `rmdir` deletes once it is empty (Linux
-/// 4.18, unprivileged), or a directory of another filesystem shown without
-/// a mount of its own. Directories only: overlayfs without `xino` shows a
-/// file of a lower layer under that layer's device. The discovery of a
-/// candidate, the eligibility walk and the Cargo inspection all refuse it,
-/// as the tally does not enter it ([`crate::tally`]).
-pub fn nested_subvolume(
-    path: PathBuf,
-    dev: crate::host::Dev,
-    parent_dev: crate::host::Dev,
-) -> Skip {
-    let detail = format!(
-        "{} is a directory on device {dev} inside one on device {parent_dev} without a mount \
-         between (a nested subvolume or snapshot): not touched",
-        path.display()
-    );
-    Skip::new(Reason::ContainsMount, path, detail)
+/// Where a directory lies among subvolumes: its `statx` device and, where
+/// the kernel reports it, its `stx_subvol` (TASK-286, TASK-307).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Volume {
+    pub dev: crate::host::Dev,
+    pub subvol: Option<u64>,
+}
+
+impl Volume {
+    pub fn of(stat: &crate::host::Stat) -> Self {
+        Self {
+            dev: stat.dev,
+            subvol: stat.subvol,
+        }
+    }
+}
+
+/// Filesystem types whose subvolumes keep the filesystem's own `st_dev`,
+/// so that only `stx_subvol` (Linux 6.10 on) tells them apart (TASK-307:
+/// measured on bcachefs 1.39.6, the out-of-tree module on Linux 6.18;
+/// btrfs gives each subvolume an anonymous device and reports
+/// `stx_subvol` too).
+pub const SUBVOLUMES_SHARE_DEV: &[&str] = &["bcachefs"];
+
+/// Filesystem types with subvolumes, whose `stx_subvol` is compared. Not
+/// for any other: overlayfs passes a layer's `stx_subvol` through (its
+/// `getattr` copies the real inode's), so a merged directory and a
+/// lower-only one can differ in it on an overlay over btrfs and ext4,
+/// while `rmdir` through an overlay never removes a subvolume.
+pub const SUBVOLUME_FILESYSTEMS: &[&str] = &["btrfs", "bcachefs"];
+
+/// Whether the directory at `path` (`inner`), reached from the directory
+/// `outer` with no mount between, lies in `outer`'s subvolume
+/// (docs/architecture.md, Filesystem matching: Subvolume boundaries). It
+/// does not when its device differs (a nested btrfs subvolume or
+/// snapshot, TASK-286, or a directory of another filesystem shown without
+/// a mount of its own) or its `stx_subvol` differs (a nested bcachefs one,
+/// which keeps the device, TASK-307): `contains_mount`, as `rmdir` deletes
+/// an empty subvolume's top (Linux 4.18, unprivileged). One reported and
+/// the other not is no proof of the same: `contains_mount` too. The
+/// `stx_subvol` rules apply on a filesystem of [`SUBVOLUME_FILESYSTEMS`],
+/// or when `fs_type` is not known (the safe side). Neither
+/// reported on a filesystem of [`SUBVOLUMES_SHARE_DEV`] (`fs_type`, the
+/// mount's; `None` where the caller has none, the walk then deciding) is
+/// `unsupported_fs`: a nested subvolume cannot be told from a directory
+/// there, so nothing is taken (fail closed). Directories only: overlayfs
+/// without `xino` shows a file of a lower layer under that layer's device.
+/// The discovery of a candidate, the eligibility walk and the Cargo
+/// inspection and discovery all ask it, as the tally does not enter such a
+/// directory ([`enters_same_subvolume`]).
+pub fn same_subvolume(
+    path: &Path,
+    inner: Volume,
+    outer: Volume,
+    fs_type: Option<&str>,
+) -> Result<(), Skip> {
+    let nested = |what: String| {
+        Err(Skip::new(
+            Reason::ContainsMount,
+            path.to_owned(),
+            format!(
+                "{} is a directory {what} without a mount between (a nested subvolume or \
+                 snapshot): not touched",
+                path.display()
+            ),
+        ))
+    };
+    if inner.dev != outer.dev {
+        return nested(format!(
+            "on device {} inside one on device {}",
+            inner.dev, outer.dev
+        ));
+    }
+    if fs_type.is_some_and(|t| !SUBVOLUME_FILESYSTEMS.contains(&t)) {
+        return Ok(());
+    }
+    match (inner.subvol, outer.subvol) {
+        (Some(a), Some(b)) if a != b => {
+            nested(format!("in subvolume {a} inside one in subvolume {b}"))
+        }
+        (Some(_), Some(_)) => Ok(()),
+        (Some(a), None) => nested(format!(
+            "in subvolume {a} inside one whose subvolume the kernel did not report"
+        )),
+        (None, Some(b)) => nested(format!(
+            "whose subvolume the kernel did not report inside one in subvolume {b}"
+        )),
+        (None, None) => match fs_type.filter(|t| SUBVOLUMES_SHARE_DEV.contains(t)) {
+            Some(fs_type) => Err(Skip::new(
+                Reason::UnsupportedFs,
+                path.to_owned(),
+                format!(
+                    "{} is on {fs_type}, whose subvolumes keep the filesystem's device, and \
+                     the kernel did not report its subvolume (STATX_SUBVOL, Linux 6.10 on): a \
+                     nested subvolume or snapshot cannot be told from a directory there, so \
+                     no directory on it is taken",
+                    path.display()
+                ),
+            )),
+            None => Ok(()),
+        },
+    }
+}
+
+/// Whether the tally may enter `inner` below `outer`: the same subvolume
+/// by [`same_subvolume`]'s device and `stx_subvol` rules (the tally sizes,
+/// it never refuses, so a filesystem type is not asked).
+pub fn enters_same_subvolume(inner: Volume, outer: Volume) -> bool {
+    inner.dev == outer.dev
+        && match (inner.subvol, outer.subvol) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => true,
+            _ => false,
+        }
 }
 
 /// Work a resumable discovery walk reports to its pause callback
@@ -870,6 +965,64 @@ mod tests {
     use super::*;
     use crate::host::Dev;
 
+    /// TASK-307: the subvolume boundary by device and `stx_subvol`; a side
+    /// that does not report `stx_subvol` proves nothing, and bcachefs
+    /// without it fails closed while other filesystems keep the device
+    /// rule.
+    #[test]
+    fn the_subvolume_boundary_fails_closed() {
+        let dev = Dev {
+            major: 0,
+            minor: 40,
+        };
+        let at = |subvol| Volume { dev, subvol };
+        let path = Path::new("/w/c/d");
+        let reason = |inner, outer, fs: &str| {
+            same_subvolume(path, inner, outer, Some(fs)).map_err(|skip| skip.reason)
+        };
+        assert_eq!(reason(at(Some(1)), at(Some(1)), "bcachefs"), Ok(()));
+        assert_eq!(
+            reason(at(Some(2)), at(Some(1)), "bcachefs"),
+            Err(Reason::ContainsMount)
+        );
+        assert_eq!(
+            reason(at(Some(2)), at(None), "btrfs"),
+            Err(Reason::ContainsMount)
+        );
+        assert_eq!(
+            reason(at(None), at(Some(2)), "btrfs"),
+            Err(Reason::ContainsMount)
+        );
+        assert_eq!(
+            reason(at(None), at(None), "bcachefs"),
+            Err(Reason::UnsupportedFs)
+        );
+        assert_eq!(reason(at(None), at(None), "btrfs"), Ok(()));
+        assert_eq!(reason(at(None), at(None), "ext4"), Ok(()));
+        // An overlay passes a layer's stx_subvol through: not compared.
+        assert_eq!(reason(at(Some(2)), at(None), "overlay"), Ok(()));
+        assert_eq!(reason(at(Some(2)), at(Some(1)), "overlay"), Ok(()));
+        let unknown = same_subvolume(path, at(Some(2)), at(None), None).map_err(|s| s.reason);
+        assert_eq!(unknown, Err(Reason::ContainsMount));
+        let other = Volume {
+            dev: Dev {
+                major: 0,
+                minor: 41,
+            },
+            subvol: Some(1),
+        };
+        assert_eq!(
+            reason(other, at(Some(1)), "btrfs"),
+            Err(Reason::ContainsMount)
+        );
+        assert_eq!(same_subvolume(path, at(None), at(None), None), Ok(()));
+        assert!(enters_same_subvolume(at(Some(1)), at(Some(1))));
+        assert!(enters_same_subvolume(at(None), at(None)));
+        assert!(!enters_same_subvolume(at(Some(2)), at(Some(1))));
+        assert!(!enters_same_subvolume(at(None), at(Some(1))));
+        assert!(!enters_same_subvolume(other, at(Some(1))));
+    }
+
     /// `changed` details name identities as a user reads them, never as
     /// Debug text (TASK-140), and two identities that differ in any
     /// compared field read differently.
@@ -917,6 +1070,7 @@ mod tests {
             btime: Some(Timestamp { secs: 10, nanos: 5 }),
             mnt_id: Some(30),
             mount_root: Some(false),
+            subvol: None,
         }
     }
 

@@ -401,6 +401,15 @@
             }
           ]
         },
+        "subvol": {
+          "description": "The top of a nested bcachefs subvolume or snapshot (not mounted),\nwith this subvolume id: `statx` reports it as `stx_subvol` for the\ntop and its subtree and keeps the filesystem's device, as bcachefs\ndoes (TASK-307: unlike btrfs, no device of its own). On a\n`bcachefs` mount only; the filesystem's own subvolume is 1. A\nnested one overrides it below its own top; entries created later\ninside it take it too; an `rmdir` of its empty top succeeds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "subvolume": {
           "description": "The top of a nested btrfs subvolume or snapshot (not mounted):\n`statx` reports this device for it and everything in its subtree\n(TASK-286 review), while mountinfo shows nothing there. A nested one\ninside it overrides it below its own top. On a `btrfs` mount only.\nEntries created later inside it take it too; an `rmdir` of its\nempty top succeeds, as Linux 4.18 and later allow.",
           "anyOf": [
@@ -1551,21 +1560,30 @@
     },
     "StatxField": {
       "description": "A `statx` field that can be missing from the answer.",
-      "type": "string",
-      "enum": [
-        "type",
-        "mode",
-        "nlink",
-        "uid",
-        "gid",
-        "ino",
-        "size",
-        "blocks",
-        "mtime",
-        "ctime",
-        "btime",
-        "mnt_id",
-        "mount_root"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "type",
+            "mode",
+            "nlink",
+            "uid",
+            "gid",
+            "ino",
+            "size",
+            "blocks",
+            "mtime",
+            "ctime",
+            "btime",
+            "mnt_id",
+            "mount_root"
+          ]
+        },
+        {
+          "description": "`stx_subvol` (`STATX_SUBVOL`, Linux 6.10 on): reported on `btrfs`\nand `bcachefs` mounts only, as Linux does; listed here for a kernel\nbefore 6.10.",
+          "type": "string",
+          "const": "subvol"
+        }
       ]
     },
     "UnreadableTag": {

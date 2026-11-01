@@ -673,6 +673,7 @@ pub(crate) mod tests {
             btime: None,
             mnt_id,
             mount_root,
+            subvol: None,
         }
     }
 

@@ -336,6 +336,18 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
             }
             state.mark_subvolume(*loc, dev);
         }
+        if let Some(id) = attrs.subvol {
+            if state.fs(loc.mnt).fs_type != "bcachefs" || id == 1 {
+                return Err(LoadError::new(
+                    "tree",
+                    format!(
+                        "a directory's subvol {id} needs a bcachefs mount and an id other \
+                         than 1, the filesystem's own"
+                    ),
+                ));
+            }
+            state.mark_subvol(*loc, id);
+        }
     }
     let events = load_events(&state, model)?;
     Ok((state, events))

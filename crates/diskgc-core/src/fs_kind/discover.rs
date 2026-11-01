@@ -985,22 +985,23 @@ impl<H: Host> Walk<'_, H> {
             self.out.candidates.push((at.to_owned(), Err(skip)));
             return Ok(true);
         }
-        // A directory on another device than its own directory without a
-        // mount between: the top of a nested btrfs subvolume or snapshot
-        // (TASK-286), which `rmdir` deletes once empty (Linux 4.18). Never
-        // a candidate; what lies inside one is taken like anything on its
-        // mount (the eligibility walk refuses one inside a candidate). Not
-        // for files: overlayfs without `xino` can show a file of a lower
-        // layer under that layer's device.
-        if stat.file_type == Some(FileType::Directory) && stat.dev != dir.stat.dev {
-            self.out.candidates.push((
-                at.to_owned(),
-                Err(crate::engine::nested_subvolume(
-                    at.to_owned(),
-                    stat.dev,
-                    dir.stat.dev,
-                )),
-            ));
+        // A directory in another subvolume than its own directory without
+        // a mount between: the top of a nested btrfs or bcachefs subvolume
+        // or snapshot (TASK-286, TASK-307), which `rmdir` deletes once
+        // empty (Linux 4.18); on bcachefs without `stx_subvol`, any
+        // directory (fail closed). Never a candidate; what lies inside one
+        // is taken like anything on its mount (the eligibility walk refuses
+        // one inside a candidate). Not for files: overlayfs without `xino`
+        // can show a file of a lower layer under that layer's device.
+        if stat.file_type == Some(FileType::Directory)
+            && let Err(skip) = crate::engine::same_subvolume(
+                at,
+                crate::engine::Volume::of(stat),
+                crate::engine::Volume::of(&dir.stat),
+                Some(&dir.mount.fs_type),
+            )
+        {
+            self.out.candidates.push((at.to_owned(), Err(skip)));
             return Ok(true);
         }
         if self.record_structural {

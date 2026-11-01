@@ -995,13 +995,27 @@ decides:
 **Subvolume boundaries.** A directory on another `st_dev` than the one
 it is in, with no mount between, is the top of a nested (unmounted)
 btrfs subvolume or snapshot, which `rmdir` deletes once it is empty
-(Linux 4.18, unprivileged). diskgc never removes one: such a directory
-matched as a candidate, met by the eligibility walk anywhere inside a
-candidate or a Cargo profile entry, or met by the Cargo inspection inside
-a target is `contains_mount` (the whole candidate is kept), as the tally
-does not enter one. What lies inside one is taken like anything on its
-mount. Directories only: overlayfs without `xino` shows a file of a lower
-layer under that layer's device, never a directory.
+(Linux 4.18, unprivileged). A bcachefs subvolume keeps the filesystem's
+`st_dev` (measured: bcachefs 1.39.6, the out-of-tree module on Linux
+6.18; TASK-307), so the boundary is also a directory whose `stx_subvol`
+(`STATX_SUBVOL`, Linux 6.10 on, reported by btrfs and bcachefs) differs
+from the one it is in, or is reported on one side only; compared on
+btrfs and bcachefs mounts only (an overlay passes a layer's through, and
+an `rmdir` through it never removes a subvolume). diskgc never
+removes one: such a directory matched as a candidate (or as a Cargo
+target), met by the eligibility walk anywhere inside a candidate or a
+Cargo profile entry, or met by the Cargo inspection inside a target is
+`contains_mount` (the whole candidate is kept), as the tally does not
+enter one. On a filesystem whose subvolumes keep its device (bcachefs)
+where the kernel reports no `stx_subvol` (before Linux 6.10), a nested
+subvolume cannot be told from a directory: every directory candidate
+there, and every directory a walk meets, is `unsupported_fs` (fail
+closed; files are still taken, as no file is a subvolume). btrfs without
+`stx_subvol` keeps the device rule alone. What lies inside a subvolume is
+taken like anything on its mount. Directories only: overlayfs without
+`xino` shows a file of a lower layer under that layer's device, never a
+directory. Tested on a real kernel by `vm-real-kernel` (btrfs and
+bcachefs, [testing.md](testing.md)).
 
 Deleting needs the same filesystem proved. Writing diskgc's own state
 needs the opposite proved: the snapshot is guarded (Snapshot: Never at the

@@ -1927,8 +1927,9 @@ architecture.md, Filesystem matching):
    `tester`'s overlay candidates reclaim. As root, the snap's overlay
    identity matches exactly on the overlay, while a candidate off it is
    `in_use_unknown`.
-7. bcachefs on a loop device: a candidate holding a nested subvolume is
-   expected to be `contains_mount`, as on btrfs.
+7. bcachefs on a loop device (the out-of-tree module): a nested
+   subvolume keeps its parent's `st_dev`, and a candidate holding one is
+   `contains_mount` by its `stx_subvol` (TASK-307).
 
 Root cases are dry-run first (the plan's verdicts), then reclaimed.
 Every command, exit code, JSON report, stderr and ioctl strace is kept

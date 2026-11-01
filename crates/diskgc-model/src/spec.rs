@@ -348,6 +348,10 @@ pub enum StatxField {
     Btime,
     MntId,
     MountRoot,
+    /// `stx_subvol` (`STATX_SUBVOL`, Linux 6.10 on): reported on `btrfs`
+    /// and `bcachefs` mounts only, as Linux does; listed here for a kernel
+    /// before 6.10.
+    Subvol,
 }
 
 /// A tree node. A mapping of scalars is a file (its attributes; `{}` is an
@@ -443,6 +447,15 @@ pub struct DirAttrs {
     /// empty top succeeds, as Linux 4.18 and later allow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subvolume: Option<DevSpec>,
+    /// The top of a nested bcachefs subvolume or snapshot (not mounted),
+    /// with this subvolume id: `statx` reports it as `stx_subvol` for the
+    /// top and its subtree and keeps the filesystem's device, as bcachefs
+    /// does (TASK-307: unlike btrfs, no device of its own). On a
+    /// `bcachefs` mount only; the filesystem's own subvolume is 1. A
+    /// nested one overrides it below its own top; entries created later
+    /// inside it take it too; an `rmdir` of its empty top succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subvol: Option<u64>,
 }
 
 /// A `flock` held by a process.

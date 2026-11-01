@@ -363,6 +363,12 @@ pub struct Stat {
     pub mnt_id: Option<u64>,
     /// `STATX_ATTR_MOUNT_ROOT`: the object is the root of its mount.
     pub mount_root: Option<bool>,
+    /// `stx_subvol` (`STATX_SUBVOL`, Linux 6.10 on): the id of the
+    /// subvolume the object belongs to, on a filesystem that has them
+    /// (btrfs, bcachefs). The subvolume boundary compares it beside the
+    /// device (docs/architecture.md, Filesystem matching: Subvolume
+    /// boundaries; TASK-307).
+    pub subvol: Option<u64>,
 }
 
 impl Stat {

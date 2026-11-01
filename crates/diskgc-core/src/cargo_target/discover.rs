@@ -24,11 +24,11 @@ use super::{
 };
 use crate::engine::container_storage::{Above, check_listing, in_listing};
 use crate::engine::{
-    self, CACHEDIR_TAG, DEFAULT_MAX_ENTRIES, Identity, KEEP_MARKER, Reason, Seen, Skip, WalkStop,
-    Work, is_cargo_lock_name, is_private_tmp, networked_why, path_in_private_tmp,
+    self, CACHEDIR_TAG, DEFAULT_MAX_ENTRIES, Identity, KEEP_MARKER, Reason, Seen, Skip, Volume,
+    WalkStop, Work, is_cargo_lock_name, is_private_tmp, networked_why, path_in_private_tmp,
 };
 use crate::host::{
-    Access, Base, Dev, DevIno, DirListing, FileType, Host, HostError, MonoTime, MountEntry, Stat,
+    Access, Base, DevIno, DirListing, FileType, Host, HostError, MonoTime, MountEntry, Stat,
 };
 use crate::places;
 use crate::resolve::{
@@ -336,7 +336,7 @@ fn subdir<H: Host>(
     host: &H,
     dir: &H::Fd,
     mounts: &[MountEntry],
-    (mount_id, dev): (u64, Option<Dev>),
+    (mount_id, within): (u64, Option<Volume>),
     name: &OsString,
     path: &Path,
 ) -> Judged<Option<Stat>> {
@@ -366,17 +366,29 @@ fn subdir<H: Host>(
             format!("on mount {mnt_id}, not the target's mount {mount_id}"),
         )));
     }
-    if let Some(dev) = dev
+    if let Some(within) = within
         && file_type == FileType::Directory
-        && stat.dev != dev
+        && let Err(skip) = crate::engine::same_subvolume(
+            path,
+            Volume::of(&stat),
+            within,
+            fs_type_of(mounts, mount_id),
+        )
     {
-        return Ok(Err(crate::engine::nested_subvolume(
-            path.to_owned(),
-            stat.dev,
-            dev,
-        )));
+        return Ok(Err(skip));
     }
     Ok(Ok((file_type == FileType::Directory).then_some(stat)))
+}
+
+/// The filesystem type of mount `mount_id` in `mounts` (`None` when the
+/// table does not list it: [`crate::engine::same_subvolume`] then judges by
+/// device and `stx_subvol` alone, and the eligibility walk, which knows its
+/// candidate's mount, fails closed for it).
+fn fs_type_of(mounts: &[MountEntry], mount_id: u64) -> Option<&str> {
+    mounts
+        .iter()
+        .find(|mount| mount.id == mount_id)
+        .map(|mount| mount.fs_type.as_str())
 }
 
 fn mounted(path: &Path) -> Skip {
@@ -505,11 +517,11 @@ fn inspect_in<H: Host>(
     if let Err(skip) = check_listing(path, &names) {
         return Ok(Err(skip));
     }
-    // Every directory inspected below must be on the target's own device:
-    // one that is not is a nested subvolume (TASK-286), as the tally and
-    // the eligibility walk see it.
-    let dev = match host.statx(Base::Dir(target), Path::new("")) {
-        Ok(stat) => stat.dev,
+    // Every directory inspected below must be in the target's own
+    // subvolume: one that is not is a nested subvolume (TASK-286,
+    // TASK-307), as the tally and the eligibility walk see it.
+    let volume = match host.statx(Base::Dir(target), Path::new("")) {
+        Ok(stat) => Volume::of(&stat),
         Err(e) => return failure(path.to_owned(), "stat", &e),
     };
     let mut inspected = Inspected {
@@ -530,7 +542,7 @@ fn inspect_in<H: Host>(
             host,
             target,
             mounts,
-            (mount_id, Some(dev)),
+            (mount_id, Some(volume)),
             name,
             &at
         ))
@@ -570,7 +582,7 @@ fn inspect_in<H: Host>(
                 host,
                 &fd,
                 mounts,
-                (mount_id, Some(dev)),
+                (mount_id, Some(volume)),
                 child,
                 &child_at
             ))
@@ -705,6 +717,8 @@ struct Frame {
     depth: usize,
     /// Its identity when entered.
     id: Option<DevIno>,
+    /// Its `stx_subvol` when entered, if reported (TASK-307).
+    subvol: Option<u64>,
     /// Its inode, if reported: the parent inode of a target found in it.
     ino: Option<u64>,
     /// Its entries, sorted, once listed and judged not to be a target
@@ -720,6 +734,7 @@ impl Frame {
             name: None,
             depth: 0,
             id: None,
+            subvol: None,
             ino,
             names: None,
             next: 0,
@@ -936,9 +951,14 @@ impl DiscoverCursor {
                     }
                     let parent = depth.checked_sub(1).map(|p| &self.frames[p]);
                     let parent_ino = parent.and_then(|p| p.ino);
-                    let parent_dev = parent.and_then(|p| p.id).map(|id| id.dev);
+                    let parent_volume = parent.and_then(|p| {
+                        p.id.map(|id| Volume {
+                            dev: id.dev,
+                            subvol: p.subvol,
+                        })
+                    });
                     let at_depth = self.frames[depth].depth;
-                    match walk.visit(&open[depth], &path, at_depth, (parent_ino, parent_dev))? {
+                    match walk.visit(&open[depth], &path, at_depth, (parent_ino, parent_volume))? {
                         Some(names) => {
                             // Charged one operation per name listed.
                             pause(Work::Listed(names.len()));
@@ -993,6 +1013,7 @@ impl DiscoverCursor {
                             name: Some(name),
                             depth: child_depth,
                             id: stat.dev_ino(),
+                            subvol: stat.subvol,
                             ino: stat.ino,
                             names: None,
                             next: 0,
@@ -1039,7 +1060,7 @@ impl<H: Host> Walk<'_, H> {
         fd: &H::Fd,
         path: &Path,
         depth: usize,
-        (parent_ino, parent_dev): (Option<u64>, Option<Dev>),
+        (parent_ino, parent_volume): (Option<u64>, Option<Volume>),
     ) -> Result<Option<Vec<OsString>>, Stop> {
         let names = match list(self.host, fd, path, self.deadline)? {
             Ok(names) => names,
@@ -1056,7 +1077,7 @@ impl<H: Host> Walk<'_, H> {
             return Ok(None);
         }
         if names.iter().any(|n| n == CACHEDIR_TAG) {
-            match self.target_at(fd, path, parent_ino, parent_dev)? {
+            match self.target_at(fd, path, parent_ino, parent_volume)? {
                 Ok(true) => return Ok(None),
                 Ok(false) => {}
                 Err(skip) => {
@@ -1080,7 +1101,7 @@ impl<H: Host> Walk<'_, H> {
         fd: &H::Fd,
         path: &Path,
         parent_ino: Option<u64>,
-        parent_dev: Option<Dev>,
+        parent_volume: Option<Volume>,
     ) -> Judged<bool> {
         let tag = path.join(CACHEDIR_TAG);
         if is_mount_point(self.mounts, &tag) {
@@ -1131,15 +1152,17 @@ impl<H: Host> Walk<'_, H> {
             Ok(identity) => identity,
             Err(skip) => return Ok(Err(skip)),
         };
-        // The top of a nested subvolume is never a target (TASK-286).
-        if let Some(parent_dev) = parent_dev
-            && identity.id.dev != parent_dev
+        // The top of a nested subvolume is never a target (TASK-286,
+        // TASK-307).
+        if let Some(parent_volume) = parent_volume
+            && let Err(skip) = crate::engine::same_subvolume(
+                path,
+                Volume::of(&stat),
+                parent_volume,
+                fs_type_of(self.mounts, self.mount_id),
+            )
         {
-            return Ok(Err(crate::engine::nested_subvolume(
-                path.to_owned(),
-                identity.id.dev,
-                parent_dev,
-            )));
+            return Ok(Err(skip));
         }
         if self.seen.insert(identity.id) {
             self.found.targets.push(Target {

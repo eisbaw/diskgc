@@ -5525,6 +5525,7 @@ mod tests {
                 btime: None,
                 mnt_id: None,
                 mount_root: None,
+                subvol: None,
             },
         };
         let stat = |exiting: bool| {

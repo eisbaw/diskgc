@@ -108,6 +108,9 @@ pub struct Cursor {
     mount: MountKey,
     root: PathBuf,
     identity: Identity,
+    /// The root's `stx_subvol` when last reached, if reported: a directory
+    /// below in another subvolume is not entered (TASK-307).
+    subvol: Option<u64>,
     /// Empty until the root was counted; then the root and the directories
     /// below it the walk is in.
     levels: Vec<Level>,
@@ -133,6 +136,7 @@ impl Cursor {
             mount,
             root,
             identity,
+            subvol: None,
             levels: Vec::new(),
             entries: 0,
             bytes: 0,
@@ -193,6 +197,7 @@ impl Cursor {
         let Some((parent, stat)) = reach(host, mounts, &self.root, self.identity, budget)? else {
             return Ok(Step::Gone);
         };
+        self.subvol = stat.subvol;
         if self.levels.is_empty() {
             if self.count(&stat) > entries_max {
                 return Ok(Step::Refused(Reason::TooManyEntries));
@@ -468,7 +473,13 @@ impl<H: Host> Walk<'_, H> {
                 return Ok(Step::Refused(Reason::TooManyEntries));
             }
             let enter = stat.file_type == Some(FileType::Directory)
-                && stat.dev == cursor.identity.dev
+                && crate::engine::enters_same_subvolume(
+                    crate::engine::Volume::of(&stat),
+                    crate::engine::Volume {
+                        dev: cursor.identity.dev,
+                        subvol: cursor.subvol,
+                    },
+                )
                 && cursor.levels.len() < LEVELS_MAX;
             if !enter {
                 continue;

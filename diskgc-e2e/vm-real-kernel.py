@@ -59,13 +59,13 @@ def run(command: str, user: str = ROOT, timeout: int = 300) -> str:
     return out
 
 
-def diskgc(tag: str, user: str, args: str, strace: bool = False) -> tuple[int, str, str]:
+def diskgc(tag: str, user: str, args: str, strace: bool = False, trace: str = "ioctl") -> tuple[int, str, str]:
     """diskgc ARGS as USER in the container; returns exit code, stdout, stderr."""
     err = f"{EV}/{tag}.stderr"
-    trace = f"{EV}/{tag}.strace"
+    trace_file = f"{EV}/{tag}.strace"
     # --seccomp-bpf stops only at ioctl; plain -f stops at every syscall and
     # slows the in-use scan past its freshness bound (in_use_unknown: busy).
-    prefix = f"strace --seccomp-bpf -f -qq -e trace=ioctl -o {trace} " if strace else ""
+    prefix = f"strace --seccomp-bpf -f -qq -v -e trace={trace} -o {trace_file} " if strace else ""
     command = f"{prefix}{DISKGC} {args}"
     began = time.monotonic()
     code, out = cx(f"{command} 2>{err}", user)
@@ -75,7 +75,7 @@ def diskgc(tag: str, user: str, args: str, strace: bool = False) -> tuple[int, s
     stderr = run(f"cat {err}")
     save(f"{tag}.stderr", stderr)
     if strace:
-        save(f"{tag}.strace", run(f"cat {trace}"))
+        save(f"{tag}.strace", run(f"cat {trace_file}"))
     return code, out, stderr
 
 
@@ -87,14 +87,26 @@ def report(out: str, code: int, status: str) -> dict[str, Any]:
 
 
 def ensure(tag: str, user: str, config: str, path: str, extra: str = "",
-           min_free: str = UNREACHABLE, strace: bool = False) -> tuple[int, str, str]:
+           min_free: str = UNREACHABLE, strace: bool = False, trace: str = "ioctl") -> tuple[int, str, str]:
     allow_root = "--allow-root " if user == ROOT else ""
     return diskgc(
         tag, user,
         f"ensure {allow_root}--json --config {config} --select profile:{PROFILE} "
         f"--min-free {min_free} {extra} {path}",
-        strace,
+        strace, trace,
     )
+
+
+def subvols_seen(tag: str, names: list[str]) -> dict[str, set[str]]:
+    """The stx_subvol values diskgc's statx calls returned for each of
+    NAMES (the last path component a call named), from its strace."""
+    import re
+    seen: dict[str, set[str]] = {name: set() for name in names}
+    for line in (evidence_dir / f"{tag}.strace").read_text().splitlines():
+        call = re.search(r'statx\(\d+, "([^"]*)",.*stx_subvol=(0x[0-9a-f]+|\d+)', line)
+        if call and call.group(1).rsplit("/", 1)[-1] in seen:
+            seen[call.group(1).rsplit("/", 1)[-1]].add(call.group(2))
+    return seen
 
 
 def outcomes(result: dict[str, Any]) -> dict[str, tuple[str, str | None]]:
@@ -356,6 +368,15 @@ btrfs -q subvolume create scratch-subvol && echo y > scratch-subvol/f
     # Filesystem matching: every btrfs subvolume of one btrfs); a candidate
     # holding a nested subvolume or snapshot, or being one, is contains_mount
     # (Filesystem matching, Subvolume boundaries).
+    # Does btrfs report stx_subvol, consistently with its devices (TASK-307)?
+    code, out, _ = ensure("s1-statx", TESTER, cfg, "/mnt/home", "--dry-run", strace=True, trace="statx")
+    report(out, 0, "dry_run")
+    btrfs_subvols = subvols_seen("s1-statx", ["scratch-nested", "inner", "scratch-subvol", "scratch-a"])
+    save("s1-stx-subvol.txt", f"{btrfs_subvols}\n")
+    assert all(len(v) == 1 for v in btrfs_subvols.values()), btrfs_subvols
+    assert btrfs_subvols["scratch-nested"] == btrfs_subvols["scratch-a"], btrfs_subvols
+    assert btrfs_subvols["inner"] != btrfs_subvols["scratch-nested"], btrfs_subvols
+    assert btrfs_subvols["scratch-subvol"] != btrfs_subvols["scratch-a"], btrfs_subvols
     before = tree("/mnt/scratch", "/mnt/home")
     code, out, stderr = ensure("s1-reclaim", TESTER, cfg, "/mnt/home", strace=True)
     result = report(out, 1, "exhausted")
@@ -366,7 +387,7 @@ btrfs -q subvolume create scratch-subvol && echo y > scratch-subvol/f
     for name in ("scratch-nested", "scratch-subvol", "scratch-snap"):
         assert kept.get(f"/mnt/scratch/{name}", ("",))[0] == "contains_mount", (name, kept)
     passed("1a btrfs sibling subvolume", "scratch-a reclaimed from PATH /mnt/home; nested subvolume, "
-           "subvolume and snapshot kept contains_mount")
+           f"subvolume and snapshot kept contains_mount; stx_subvol reported {btrfs_subvols}")
 
     # One snapshot key for every subvolume (architecture.md, The tally,
     # Snapshot: uuid-<FSID> by BTRFS_IOC_FS_INFO); a second watch on a
@@ -679,11 +700,9 @@ mount -o ro,loop /live/var/lib/snapd/snaps/core_1.snap /live/snap/core/1
 
 # ---- 7. bcachefs (the out-of-tree module), one subvolume case ----
 # architecture.md, Filesystem matching, Subvolume boundaries: diskgc never
-# removes a nested subvolume, told by a directory on another st_dev with no
-# mount between. The section names btrfs; this holds bcachefs, whose
-# subvolumes Filesystem matching also covers, to the same rule. On the
-# measured module a nested subvolume shows its parent's st_dev, so the rule
-# does not see it (TASK-304 finding; STATX_SUBVOL would).
+# removes a nested subvolume. A bcachefs one keeps its parent's st_dev, so
+# the boundary there is its stx_subvol (TASK-307; before the fix this
+# candidate was deleted, subvolume included).
 def scenario_bcachefs() -> None:
     if "bcachefs" not in run("cat /proc/filesystems"):
         summary.append("UNAVAILABLE 7 bcachefs: not in the guest kernel's /proc/filesystems")
@@ -706,6 +725,10 @@ echo "$L"
     save("s7-bcachefs.txt", f"{loop}\nsubvolume create as tester: exit {made[0]} {made[1]}\n{devs}"
          + run("bcachefs version; findmnt -n -o TARGET,SOURCE,FSTYPE,MAJ:MIN /mnt/bcfs"))
     cfg = config("s7", ["/mnt/bcfs"])
+    code, out, _ = ensure("s7-statx", TESTER, cfg, "/mnt/bcfs", "--dry-run", strace=True, trace="statx")
+    report(out, 0, "dry_run")
+    bc_subvols = subvols_seen("s7-statx", ["scratch-nested", "inner", "scratch-a"])
+    save("s7-stx-subvol.txt", f"{bc_subvols}\n")
     before = tree("/mnt/bcfs")
     code, out, _ = ensure("s7-user", TESTER, cfg, "/mnt/bcfs")
     result = report(out, 1, "exhausted")
@@ -713,8 +736,9 @@ echo "$L"
     nested = outcomes(result).get("/mnt/bcfs/scratch-nested")
     assert acted(result) == {"/mnt/bcfs/scratch-a"}, (result["actions"], result["skipped"])
     assert nested is not None and nested[0] == "contains_mount", (nested, devs)
-    passed("7 bcachefs", f"scratch-a reclaimed, scratch-nested (a subvolume inside) kept contains_mount; "
-           f"st_dev {' vs '.join(devs.split()[0::2])}")
+    passed("7 bcachefs", f"scratch-a reclaimed, scratch-nested (a subvolume inside) kept contains_mount "
+           f"({row_of(result, '/mnt/bcfs/scratch-nested')['detail']}); st_dev {' vs '.join(devs.split()[0::2])}; "
+           f"stx_subvol {bc_subvols}")
 
 
 # ---- 5. udisksctl loop-setup by a user outside disk ----
