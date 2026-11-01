@@ -1,0 +1,33 @@
+# `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
+# TASK-263 review (mped B1): a development build in a PID namespace of its
+# own (a Nix build sandbox, a container without the e2e build's exception)
+# and outside a test container: a reclaim names the sandbox gate, which it
+# asks first; the dry run, which never asks the gate, names the visibility
+# rule. Nothing is unlinked.
+profile_vector: 1
+user_profiles:
+  - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
+profile: zephyr-tmp-probe
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  sandbox_gate: closed
+  pid_namespace: nested
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /tmp/zephyr-a: {f: {size: 4K}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: safety, contains: "diskgc is not in the initial PID namespace"}]
+  reclaim_exit: 2
+  errors: [{cause: usage, contains: sandbox gate}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/zephyr-a/f]

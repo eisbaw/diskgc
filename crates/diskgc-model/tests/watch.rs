@@ -857,6 +857,17 @@ fn watch_is_refused_where_the_in_use_check_cannot_see_every_process() {
             "{facts}"
         );
     }
+    // mped B1: outside a test container the gate is named first, in a
+    // PID namespace of its own too.
+    let gated = host(&yaml(
+        "5G",
+        &old_candidates(3, "1G"),
+        &format!("pid_namespace: nested\nsandbox_gate: closed\n{stop}"),
+    ));
+    let run = watch(&gated, &reclaim("6G", "7G", "10s"));
+    assert_eq!(run.ended, Err(2));
+    assert!(run.has("sandbox gate"), "{:?}", run.lines);
+    assert!(!run.has("initial PID namespace"), "{:?}", run.lines);
     let model = yaml(
         "5G",
         &old_candidates(3, "1G"),

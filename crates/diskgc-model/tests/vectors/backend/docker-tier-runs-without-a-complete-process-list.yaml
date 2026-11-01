@@ -1,0 +1,37 @@
+# TASK-263 review (policy refinement): a Docker tier leaves liveness to its
+# daemon and does not rely on diskgc's own in-use check, so diskgc in a
+# PID namespace of its own (a container) and under hidepid still prunes
+# the bound engine's cache, as in docker-build-cache-prunes-the-bound-engine.
+profile_vector: 1
+profile: docker-build-cache
+path: /var/lib/docker
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  pid_namespace: nested
+  proc_hidepid: true
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /var/lib/docker, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /usr/bin/docker: {mode: "0755"}
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /var/lib/docker/buildkit: {.: {}}
+    /var/lib/docker/containerd/daemon: {.: {}, io.containerd.content.v1.content: {.: {}}}
+  docker:
+    version: '{"Platform":{"Name":"Docker Engine - Community"},"Version":"29.8.2"}'
+    client_version: '{"Version":"29.8.2"}'
+    context_show: "default\n"
+    context_endpoint: '"unix:///var/run/docker.sock"'
+    info: '{"ID":"fake-daemon-1","DockerRootDir":"/var/lib/docker","Driver":"overlayfs","DriverStatus":[["driver-type","io.containerd.snapshotter.v1"]],"Containerd":{"Address":"/run/docker/containerd/containerd.sock"}}'
+expect:
+  plan:
+    - {candidate: /var/lib/docker/buildkit}
+  reclaim_exit: 1
+  actions: [/var/lib/docker/buildkit]
+  removed: []
+  skipped: []
+  preserved: [/var/lib/docker/buildkit]
+  commands:
+    - {cwd: /, argv: [/usr/bin/docker, "--host=unix:///var/run/docker.sock", builder, prune, --all, --force]}

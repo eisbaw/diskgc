@@ -448,3 +448,29 @@ fn no_loop_device_costs_one_listing() {
     assert_eq!(host.trace_count(Op::LoopBackingFile), 0);
     assert!(host.loop_backing_files().expect("listing").is_empty());
 }
+
+/// mped N2: the test-container exception exists only where the gate lets
+/// the e2e build delete, so the model refuses it with the gate closed.
+#[test]
+fn a_test_container_namespace_needs_the_gate_open() {
+    let Err(error) = ModelHost::from_yaml(&yaml(
+        "pid_namespace: test_container\nsandbox_gate: closed",
+        "",
+    )) else {
+        panic!("a test container with the gate closed loaded");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("test_container needs the sandbox gate open"),
+        "{error}"
+    );
+    assert!(
+        ModelHost::from_yaml(&yaml(
+            "pid_namespace: test_container\nsandbox_gate: refuses_deletes",
+            "",
+        ))
+        .is_ok(),
+        "may_delete answers open there"
+    );
+}
