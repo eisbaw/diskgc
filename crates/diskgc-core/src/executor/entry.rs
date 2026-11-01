@@ -640,7 +640,10 @@ impl<H: Delete> Tallied<'_, H> {
                 deadline: tier_deadline,
                 tally_budget: self.request.tally_budget,
                 backend,
-                protection: &protection,
+                // Its own copy: a check that enumerates again replaces it
+                // for the tier's later candidates; the next tier
+                // enumerates anew.
+                protection: protection.clone(),
                 report: &mut *report,
                 log: &mut *log,
                 deadline_hit: false,

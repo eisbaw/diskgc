@@ -67,7 +67,7 @@ use plan::{
 // The overlap verdict alone, public so the model tests can pin what it
 // must refuse whatever discovery would hand it (a covered mount).
 pub use policy::overlaps_checked;
-use policy::{excluded_by, overlaps_checked_until, policy_skip, policy_verdict, scan_protections};
+use policy::{Refresh, judge_negated, judge_protect, policy_skip, scan_protections};
 use preflight::{
     Measured, measure_failure, measure_until, nothing_searched, preflight_roots, roots_text,
     say_lock_readiness,
@@ -800,8 +800,9 @@ struct Reclaim<'a, 'l, H: Delete> {
     /// What the tier acts through, checked under the host lock before any
     /// tier ran ([`entry::Backend`]).
     backend: Backend,
-    /// The tier's `protect` matches ([`DeletePolicy`]).
-    protection: &'a Protection,
+    /// The tier's `protect` matches ([`DeletePolicy`]), replaced by what a
+    /// check enumerates again ([`Reclaim::protected`]).
+    protection: Protection,
     report: &'a mut Report,
     log: &'a mut (dyn FnMut(&str) + 'l),
     deadline_hit: bool,
@@ -888,38 +889,35 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     /// [`Reclaim::protected`]'s decision: `Some(detail)` when `candidate`
-    /// overlaps a match.
+    /// overlaps a match. Matches enumerated again replace the tier's, so
+    /// one removed match costs one enumeration, not one per candidate.
     fn protect_verdict(
-        &self,
+        &mut self,
         candidate: &Path,
         at: ProtectAt,
     ) -> Result<Option<&'static str>, String> {
-        if self.tier.protections.is_empty() {
-            return Ok(None);
-        }
-        match overlaps_checked_until(
+        // Judged against the tier's matches again under the lock and after
+        // the walk ([`DeletePolicy`]): enumerating them here too would only
+        // repeat the tier's enumeration per candidate. A command or Docker
+        // prune acts on what it finds when it runs.
+        let refresh = if at == ProtectAt::FirstScreen || self.unlinks_only_walked_entries() {
+            Refresh::OnError
+        } else {
+            Refresh::Always
+        };
+        let (protected, fresh) = judge_protect(
             self.host,
+            &self.tier.protections,
+            &self.protection,
             candidate,
-            &self.protection.matches,
             self.deadline,
-        ) {
-            Ok(true) => return Ok(Some(at.detail(false))),
-            // Judged against the tier's matches again under the lock and
-            // after the walk ([`DeletePolicy`]): enumerating them here too
-            // would only repeat the tier's enumeration per candidate.
-            Ok(false) if at == ProtectAt::FirstScreen || self.unlinks_only_walked_entries() => {
-                return Ok(None);
-            }
-            Ok(false) => {}
-            // An enumerated match removed or moved since: the enumeration
-            // below decides.
-            Err(_) => {}
+            refresh,
+        )?;
+        let detail = protected.then(|| at.detail(fresh.is_some()));
+        if let Some(fresh) = fresh {
+            self.protection = fresh;
         }
-        let matches = scan_protections(self.host, &self.tier.protections, self.deadline)?;
-        Ok(
-            overlaps_checked_until(self.host, candidate, &matches, self.deadline)?
-                .then(|| at.detail(true)),
-        )
+        Ok(detail)
     }
 
     /// `candidate` `None`: the backend as a whole was skipped.
@@ -1356,7 +1354,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 path: self.measured.path.clone(),
             });
         }
-        let negated_matches = match scanned {
+        let mut negated_matches = match scanned {
             Ok(matches) => matches,
             Err(error) => return self.run_error(error),
         };
@@ -1386,11 +1384,13 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 Protect::Stopped => return,
             }
             let started = self.host.now();
-            let exclusion = excluded_by(
+            let exclusion = judge_negated(
                 self.host,
                 &self.tier.negated,
                 &negated_matches,
                 &target.path,
+                self.deadline,
+                Refresh::OnError,
             );
             self.record_overrun("exclude", &target.path, started, self.host.now());
             if self.past_deadline() {
@@ -1399,7 +1399,12 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 });
             }
             let excluded = match exclusion {
-                Ok(excluded) => excluded,
+                Ok((excluded, fresh)) => {
+                    if let Some(fresh) = fresh {
+                        negated_matches = fresh;
+                    }
+                    excluded
+                }
                 Err(error) => return self.run_error(error),
             };
             if let Some(profile) = excluded {
@@ -1538,10 +1543,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 &mut |path, at| {
                     DeletePolicy {
                         protections: &self.tier.protections,
-                        protected: &self.protection.matches,
+                        protection: &self.protection,
                         negated: &self.tier.negated,
                         negated_matches: &negated_matches,
-                        enumerated: self.protection.enumerated,
                     }
                     .skip(self.host, self.deadline, path, at)
                 },
@@ -1785,10 +1789,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     &mut |_, path, at| {
                         DeletePolicy {
                             protections: &self.tier.protections,
-                            protected: &self.protection.matches,
+                            protection: &self.protection,
                             negated: &[],
                             negated_matches: &[],
-                            enumerated: self.protection.enumerated,
                         }
                         .skip(self.host, self.deadline, path, at)
                     },
@@ -1904,7 +1907,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 path: self.measured.path.clone(),
             });
         }
-        let negated_matches = match scanned {
+        let mut negated_matches = match scanned {
             Ok(matches) => matches,
             Err(error) => return self.run_error(error),
         };
@@ -1974,11 +1977,13 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             for (index, found) in &candidate.found_by {
                 let source = &sources[*index];
                 let started = self.host.now();
-                let exclusion = excluded_by(
+                let exclusion = judge_negated(
                     self.host,
                     source.negated,
                     &negated_matches[*index],
                     &found.path,
+                    self.deadline,
+                    Refresh::OnError,
                 );
                 self.record_overrun("exclude", &found.path, started, self.host.now());
                 if self.past_deadline() {
@@ -1987,7 +1992,12 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     });
                 }
                 let excluded = match exclusion {
-                    Ok(excluded) => excluded,
+                    Ok((excluded, fresh)) => {
+                        if let Some(fresh) = fresh {
+                            negated_matches[*index] = fresh;
+                        }
+                        excluded
+                    }
                     Err(error) => return self.run_error(error),
                 };
                 if let Some(profile) = excluded {
@@ -2159,10 +2169,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                             let index = contributors[selected].0;
                             DeletePolicy {
                                 protections: &self.tier.protections,
-                                protected: &self.protection.matches,
+                                protection: &self.protection,
                                 negated: sources[index].negated,
                                 negated_matches: &negated_matches[index],
-                                enumerated: self.protection.enumerated,
                             }
                             .skip(self.host, self.deadline, path, at)
                         },

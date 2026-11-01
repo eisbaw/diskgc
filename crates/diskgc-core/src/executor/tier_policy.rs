@@ -25,8 +25,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{NegatedSource, ProtectedSource, policy_skip, policy_verdict, scan_protections};
-use crate::engine::Skip;
+use super::policy::{Refresh, judge_negated, judge_protect, policy_failed};
+use super::{NegatedSource, ProtectedSource, scan_protections};
+use crate::engine::{Reason, Skip};
 use crate::host::{Host, MonoTime, Timestamp};
 use crate::outcome::{PolicyAt, Stop};
 
@@ -87,20 +88,21 @@ impl Protection {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct DeletePolicy<'p> {
     pub protections: &'p [ProtectedSource],
-    pub protected: &'p [PathBuf],
+    pub protection: &'p Protection,
     pub negated: &'p [NegatedSource],
-    /// One list per `negated` source, enumerated after `enumerated`.
+    /// One list per `negated` source, enumerated after `protection` was.
     pub negated_matches: &'p [Vec<PathBuf>],
-    /// When the earliest of these enumerations began.
-    pub enumerated: Instant,
 }
 
 impl DeletePolicy<'_> {
-    /// `path` judged against the enumerated matches; after the walk, if it
-    /// saw a change made since they were enumerated (or cannot tell), or
-    /// when an enumerated match cannot be proven any more, against matches
-    /// enumerated now (`policy_skip`). Uncertain discovery or identity
-    /// there stops the run.
+    /// `path` judged against the enumerated matches ([`judge_protect`],
+    /// [`judge_negated`]): against matches enumerated now when one of them
+    /// cannot be proven any more (a `cargo clean` of a protected target
+    /// says nothing about this candidate), and, after the walk, whenever
+    /// it saw a change made since they were enumerated (or cannot tell).
+    /// Uncertain discovery or identity there stops the run. What it
+    /// enumerates again is not kept: the reclaim's next first screen
+    /// refreshes the tier's matches if it needs to.
     pub fn skip<H: Host>(
         &self,
         host: &H,
@@ -113,24 +115,50 @@ impl DeletePolicy<'_> {
             self.negated_matches.len(),
             "one match list per negated source"
         );
-        if let PolicyAt::AfterWalk { newest_change } = at
-            && changed_since(self.enumerated, Instant::now(host), newest_change)
-        {
-            return policy_skip(host, self.protections, self.negated, deadline, path);
-        }
-        // A match enumerated earlier whose identity cannot be proven now
-        // (removed or moved since: a `cargo clean` of a protected target)
-        // says nothing about this candidate: judge it against matches
-        // enumerated now, as before TASK-200, rather than stop the run.
-        policy_verdict(
+        let refresh = match at {
+            PolicyAt::AfterWalk { newest_change }
+                if changed_since(
+                    self.protection.enumerated,
+                    Instant::now(host),
+                    newest_change,
+                ) =>
+            {
+                Refresh::Always
+            }
+            _ => Refresh::OnError,
+        };
+        let (protected, _) = judge_protect(
             host,
-            self.protected,
+            self.protections,
+            self.protection,
+            path,
+            deadline,
+            refresh,
+        )
+        .map_err(|error| policy_failed(path, "protect overlap", error))?;
+        if protected {
+            return Ok(Some(Skip::new(
+                Reason::Protected,
+                path.to_owned(),
+                "overlaps a protected match at final action check".to_owned(),
+            )));
+        }
+        let (excluded, _) = judge_negated(
+            host,
             self.negated,
             self.negated_matches,
-            deadline,
             path,
+            deadline,
+            refresh,
         )
-        .or_else(|_| policy_skip(host, self.protections, self.negated, deadline, path))
+        .map_err(|error| policy_failed(path, "!profile overlap", error))?;
+        Ok(excluded.map(|profile| {
+            Skip::new(
+                Reason::Excluded,
+                path.to_owned(),
+                format!("overlaps !profile:{profile} at final action check"),
+            )
+        }))
     }
 }
 

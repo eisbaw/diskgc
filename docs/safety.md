@@ -443,12 +443,20 @@ Immediately before acting, diskgc walks the candidate's whole tree
   judged before its lock, under it before the walk, and after the walk
   immediately before the deletion (a Cargo target: before each part).
   At each of these checks, from the first screen of a candidate onwards,
-  a `protect` match of the enumeration that cannot be proved any more (it
-  was removed or moved since, as by a `cargo clean` of a protected
-  target) says nothing about the candidate: the check enumerates the
-  matches again and judges against those, and only an error there stops
-  the run (TASK-200; the first screen, from discovery or the index's
-  queue, stopped the run until TASK-269).
+  and in the dry run's plan alike, a `protect` or negated match of the
+  enumeration that cannot be proved any more (it was removed or moved
+  since, as by a `cargo clean` of a protected target) says nothing about
+  the candidate: the check enumerates those matches again and judges
+  against them, and only an error there stops the run (TASK-200; the
+  first screen, from discovery or the index's queue, and every negated
+  check before the last stopped the run until TASK-269). The matches a
+  first screen or the check before reclaim enumerated again replace the
+  tier's for its later candidates, so one removal costs one enumeration
+  more, not one per candidate; the check after the walk does not keep
+  what it enumerates. A candidate inside an enumerated match by name
+  needs no proof, so a removed match still keeps a candidate it named
+  until it is enumerated again. A dry-run row whose protect check fails is
+  not shown, as one past the deadline is not.
   Which enumeration a check uses depends on the action (decided 2026-10-25
   for TASK-200 on Mark's delegation):
   - **`delete` and the Cargo protocol** judge against the tier's

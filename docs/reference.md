@@ -2375,10 +2375,10 @@ development package stays sandbox gated.
   ([safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)).
   In 0.1.0 such an overlay escaped the overlay refusal (reproduced in the
   model and in a container).
-- TASK-269: a `protect` match removed after the tier enumerated it (a
-  `cargo clean` of a protected target) no longer stops the run (exit 3)
-  at a candidate's first check: the matches are enumerated again, then
-  the candidate is judged.
+- TASK-269: a `protect` or `!profile` match removed after the tier
+  enumerated it (a `cargo clean` of a protected target) no longer stops
+  the run or the dry run (exit 3) at a candidate's first check: the
+  matches are enumerated again, then the candidate is judged.
 
 **Open limits** (in 0.1.0 and on master; static readings, not
 reproduced): TASK-267, container storage behind a subdirectory bind is

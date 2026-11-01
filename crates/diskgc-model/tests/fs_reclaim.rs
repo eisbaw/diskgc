@@ -3976,3 +3976,45 @@ fn a_protected_match_removed_before_the_first_screen_does_not_stop_the_run() {
         );
     }
 }
+
+/// TASK-269 review (Codex 5, mped S3): a `!profile:` match removed after
+/// the tier enumerated it, before a candidate's first exclusion check,
+/// stopped the run (exit 3) in `ensure` and in the dry run alike. Now the
+/// check enumerates the negated matches again and judges against those.
+fn negated_match_removed_host() -> ModelHost {
+    let tree = format!(
+        "  /tmp/pytest-of-u0: {}\n  /tmp/union-shared-clear: {{.: {{mtime: {OLD}}}, late-guard: {{size: 1K, mtime: {OLD}}}}}\n",
+        old_dir("1M")
+    );
+    let event = "events:\n  - {at: {op: statx, path: /tmp/union-shared-clear/late-guard, nth: 1, \
+                 when: after}, remove: /tmp/union-shared-clear/late-guard}\n";
+    host(&yaml("", &tree, event))
+}
+
+const NEGATED_SELECT: &str = "profile:pytest-of-dir && !profile:union-exclude-child";
+
+#[test]
+fn a_negated_match_removed_before_the_first_screen_does_not_stop_the_dry_run() {
+    let planning = negated_match_removed_host();
+    let plan = dry_run(&planning, &tmp(NEGATED_SELECT));
+    assert!(planning.unfired_events().is_empty());
+    assert!(plan.errors.is_empty(), "{plan:#?}");
+    assert_eq!(
+        plan.plan
+            .iter()
+            .filter(|row| row.reason.is_none())
+            .map(|row| row.candidate.clone())
+            .collect::<Vec<_>>(),
+        [Some(PathBuf::from("/tmp/pytest-of-u0"))],
+        "{plan:#?}"
+    );
+}
+
+#[test]
+fn a_negated_match_removed_before_the_first_screen_does_not_stop_the_run() {
+    let reclaiming = negated_match_removed_host();
+    let report = ensure(&reclaiming, &tmp(NEGATED_SELECT));
+    assert!(reclaiming.unfired_events().is_empty());
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert_eq!(actions(&report), ["/tmp/pytest-of-u0"], "{report:#?}");
+}

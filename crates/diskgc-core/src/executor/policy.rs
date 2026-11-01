@@ -15,6 +15,7 @@ use crate::select;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use super::tier_policy::Protection;
 use super::{NegatedSource, ProtectedKind, ProtectedSource, scan_negated};
 
 /// Discover the complete raw match set. An unreadable or unsafe branch can
@@ -444,13 +445,107 @@ pub(super) fn ancestor_identities(
         .collect()
 }
 
-pub(super) fn excluded_by<H: Host>(
+/// When a judgement enumerates the matches again (docs/safety.md, Not
+/// protected, not excluded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Refresh {
+    /// Only when the enumerated matches cannot settle it: one of them cannot
+    /// be proven any more (removed or moved since: a `cargo clean` of a
+    /// protected target), so the verdict on them errs.
+    OnError,
+    /// Also when they show no overlap: before an action that acts on what
+    /// it finds when it runs, or after a walk that may have seen a match
+    /// made since the enumeration.
+    Always,
+}
+
+/// A verdict a match set gives: an overlap settles it, whatever matches
+/// were enumerated since.
+pub(super) trait Verdict {
+    fn overlaps(&self) -> bool;
+}
+
+impl Verdict for bool {
+    fn overlaps(&self) -> bool {
+        *self
+    }
+}
+
+/// The negated profile a candidate overlaps, if any.
+impl Verdict for Option<String> {
+    fn overlaps(&self) -> bool {
+        self.is_some()
+    }
+}
+
+/// The one `protect` / `!profile:` judgement every check makes (TASK-269):
+/// `verdict` on the `enumerated` matches; on matches enumerated now
+/// (`enumerate`) when that errs or, under [`Refresh::Always`], shows no
+/// overlap. The fresh matches come back (`Some`) so the caller can keep
+/// them in place of the old ones and later checks need not enumerate
+/// again. Only an error on the fresh matches, or of their enumeration, is
+/// an error: a match gone since says nothing about this candidate.
+pub(super) fn judge<M: ?Sized, O: std::borrow::Borrow<M>, V: Verdict>(
+    enumerated: &M,
+    refresh: Refresh,
+    verdict: impl Fn(&M) -> Result<V, String>,
+    enumerate: impl FnOnce() -> Result<O, String>,
+) -> Result<(V, Option<O>), String> {
+    match verdict(enumerated) {
+        Ok(found) if found.overlaps() || refresh == Refresh::OnError => return Ok((found, None)),
+        Ok(_) | Err(_) => {}
+    }
+    let fresh = enumerate()?;
+    let found = verdict(fresh.borrow())?;
+    Ok((found, Some(fresh)))
+}
+
+/// [`judge`] for `protect`: overlap with `enumerated`'s matches, or with
+/// [`Protection::enumerate`]'s.
+pub(super) fn judge_protect<H: Host>(
+    host: &H,
+    protections: &[ProtectedSource],
+    enumerated: &Protection,
+    candidate: &Path,
+    deadline: Option<MonoTime>,
+    refresh: Refresh,
+) -> Result<(bool, Option<Protection>), String> {
+    if protections.is_empty() {
+        return Ok((false, None));
+    }
+    judge(
+        enumerated,
+        refresh,
+        |protection: &Protection| {
+            overlaps_checked_until(host, candidate, &protection.matches, deadline)
+        },
+        || Protection::enumerate(host, protections, deadline),
+    )
+}
+
+/// One match list per `!profile:` source of a term, in source order.
+pub(super) type NegatedMatches = Vec<Vec<PathBuf>>;
+
+/// [`judge`] for a term's `!profile:` sources (one match list each): the
+/// first source `candidate` overlaps, by [`scan_negated`]'s matches when
+/// `enumerated` cannot settle it.
+pub(super) fn judge_negated<H: Host>(
     host: &H,
     sources: &[NegatedSource],
-    matches: &[Vec<PathBuf>],
+    enumerated: &[Vec<PathBuf>],
     candidate: &Path,
-) -> Result<Option<String>, String> {
-    excluded_by_until(host, sources, matches, candidate, None)
+    deadline: Option<MonoTime>,
+    refresh: Refresh,
+) -> Result<(Option<String>, Option<NegatedMatches>), String> {
+    if sources.is_empty() {
+        return Ok((None, None));
+    }
+    judge(
+        enumerated,
+        refresh,
+        |matches: &[Vec<PathBuf>]| excluded_by_until(host, sources, matches, candidate, deadline),
+        || scan_negated(host, sources, deadline),
+    )
 }
 
 pub(super) fn excluded_by_until<H: Host>(
@@ -489,23 +584,6 @@ pub(super) fn policy_skip<H: Host>(
     let negated_matches = scan_negated(host, negated, deadline)
         .map_err(|error| policy_failed(path, "!profile recheck", error))?;
     excluded_verdict(host, negated, &negated_matches, deadline, path)
-}
-
-/// `path` judged against enumerated `protect` and `!profile:` matches (one
-/// list per `negated` source) at the final action check. Uncertain identity
-/// stops the run.
-pub(super) fn policy_verdict<H: Host>(
-    host: &H,
-    protected: &[PathBuf],
-    negated: &[NegatedSource],
-    negated_matches: &[Vec<PathBuf>],
-    deadline: Option<MonoTime>,
-    path: &Path,
-) -> Result<Option<Skip>, Stop> {
-    if let Some(skip) = protected_verdict(host, protected, deadline, path)? {
-        return Ok(Some(skip));
-    }
-    excluded_verdict(host, negated, negated_matches, deadline, path)
 }
 
 pub(super) fn protected_verdict<H: Host>(

@@ -1286,3 +1286,49 @@ fn a_protected_match_removed_before_the_first_screen_from_the_index_does_not_sto
         "judged from the index's queue"
     );
 }
+
+/// Listings of `/tmp` in a run whose `protect` match goes right after the
+/// tier enumerated it, with `n` old candidates from the index's queue.
+fn tmp_listings_after_a_removed_match(n: usize) -> usize {
+    let mut tree =
+        format!("  /tmp/stash: {{.: {{mtime: {OLD}}}, precious: {{size: 1K, mtime: {OLD}}}}}\n");
+    for i in 0..n {
+        tree.push_str(&format!("  /tmp/a-{i}: {}\n", old_dir()));
+    }
+    let events = "events:\n  - {at: {op: statx, path: /tmp/stash/precious, nth: 1, when: after}, \
+                  remove: /tmp/stash/precious}\n";
+    let host = host(&yaml(&tree, events));
+    let mut tier = tier("profile:tmp-a && filter:idle-1d");
+    tier.protections.push(ProtectedSource {
+        profile: "precious".to_owned(),
+        roots: vec![PathBuf::from("/tmp")],
+        kind: ProtectedKind::Fs(Box::new(Find::new(
+            &["*/precious".to_owned()],
+            EntryType::Any,
+            &Where::default(),
+            1000,
+        ))),
+    });
+    let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+    let (report, _) = run(&host, &request(tier), &mut state);
+    assert!(host.unfired_events().is_empty());
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert_eq!(actions(&report).len(), n, "{report:#?}");
+    host.trace()
+        .iter()
+        .filter(|call| call.op == Op::ReadDir && call.path.as_deref() == Some(Path::new("/tmp")))
+        .count()
+}
+
+/// TASK-269 review (mped S1): the matches a check enumerated again replace
+/// the tier's, so one removed match costs one enumeration again, not one
+/// (or three) per later candidate.
+#[test]
+fn one_removed_protect_match_costs_one_enumeration_not_one_per_candidate() {
+    let two = tmp_listings_after_a_removed_match(2);
+    let five = tmp_listings_after_a_removed_match(5);
+    assert_eq!(
+        two, five,
+        "listings of /tmp: 2 candidates {two}, 5 candidates {five}"
+    );
+}

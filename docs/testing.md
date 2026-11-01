@@ -566,6 +566,13 @@ Model scenarios required by [safety.md](safety.md) and
   `a_protected_match_removed_before_the_first_screen_from_the_index_does_not_stop_the_run`,
   `tests/ensure.rs`
   `a_protected_match_removed_before_a_cargo_targets_first_screen_does_not_stop_the_run`);
+  the same for a `!profile:` match, in `ensure` and the dry run, on the
+  union walk and for a Cargo target
+  (`a_negated_match_removed_before_the_first_screen_does_not_stop_the_{run,dry_run}`,
+  `a_negated_match_removed_before_a_cargo_targets_first_screen_does_not_stop_the_{run,dry_run}`);
+  and one removal costs one enumeration again, not one per later
+  candidate (`tests/index_reclaim.rs`
+  `one_removed_protect_match_costs_one_enumeration_not_one_per_candidate`);
 - a stale index (deep modification, a new `.diskgc-keep`, a new Cargo
   target inside a `tmp-entry` candidate, a new protected match after the
   tally): the deletion-time checks refuse what they must, each candidate

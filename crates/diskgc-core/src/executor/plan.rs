@@ -18,11 +18,12 @@ use std::time::Duration;
 
 use super::{
     CandidateQueue, FsUnionSourceRef, Measured, NegatedKind, NegatedSource, NotesOncePerRun,
-    Request, SourceKind, Tier, bounded_tier_timeout, deadline_of, deadline_passed, discover,
-    excluded, excluded_by, final_sample, held, is_misconfigured, is_misconfigured_source,
-    measure_failure, measure_until, misconfigured_roots, nothing_searched, oldest_first, other_fs,
-    overlaps_checked, preflight_roots, record_deadline_overrun, record_error, roots_text, rules,
-    run_error, safety_error, say_lock_readiness, scan_protections, stop_error, timed_report, usage,
+    Protection, Refresh, Request, SourceKind, Tier, bounded_tier_timeout, deadline_of,
+    deadline_passed, discover, excluded, final_sample, held, is_misconfigured,
+    is_misconfigured_source, judge_negated, judge_protect, measure_failure, measure_until,
+    misconfigured_roots, nothing_searched, oldest_first, other_fs, preflight_roots,
+    record_deadline_overrun, record_error, roots_text, rules, run_error, safety_error,
+    say_lock_readiness, stop_error, timed_report, usage,
 };
 
 /// Plans what [`ensure`] would do, deleting nothing and taking no lock
@@ -120,7 +121,7 @@ fn dry_run_inner<H: Host>(
     let tier = roots.filtered_tier(tier);
     let tier = &tier;
     let started = host.now();
-    let protections = scan_protections(host, &tier.protections, deadline);
+    let protections = Protection::enumerate(host, &tier.protections, deadline);
     record_deadline_overrun(
         host,
         &mut report,
@@ -132,7 +133,7 @@ fn dry_run_inner<H: Host>(
     if deadline_passed(host, deadline) {
         return deadline_before_plan(host, &measured, deadline, report, log, tier);
     }
-    let protection_matches = match protections {
+    let mut protection = match protections {
         Ok(matches) => matches,
         Err(error) => {
             record_error(&mut report, log, run_error(tier, error));
@@ -165,8 +166,15 @@ fn dry_run_inner<H: Host>(
                     tier.name,
                     candidate.display()
                 ));
-                let protected = match overlaps_checked(host, &candidate, &protection_matches) {
-                    Ok(protected) => protected,
+                let protected = match judge_protect(
+                    host,
+                    &tier.protections,
+                    &protection,
+                    &candidate,
+                    deadline,
+                    Refresh::OnError,
+                ) {
+                    Ok((protected, _)) => protected,
                     Err(error) => {
                         record_error(&mut report, log, run_error(tier, error));
                         report.status = Status::Error;
@@ -313,7 +321,7 @@ fn dry_run_inner<H: Host>(
         .chain(skipped)
         .collect();
     // Without protect matches nothing can overlap one: no check, no I/O.
-    let checks = if protection_matches.is_empty() {
+    let checks = if protection.matches.is_empty() {
         0
     } else {
         report.plan.len()
@@ -328,13 +336,31 @@ fn dry_run_inner<H: Host>(
             break;
         }
         let started = host.now();
-        let overlap = overlaps_checked(host, &candidate, &protection_matches);
+        let overlap = judge_protect(
+            host,
+            &tier.protections,
+            &protection,
+            &candidate,
+            deadline,
+            Refresh::OnError,
+        );
         record_deadline_overrun(host, &mut report, deadline, started, "protect", &candidate);
         let protected = match overlap {
-            Ok(protected) => protected,
+            Ok((protected, fresh)) => {
+                if let Some(fresh) = fresh {
+                    protection = fresh;
+                }
+                protected
+            }
             Err(error) => {
                 record_error(&mut report, log, run_error(tier, error));
                 report.status = Status::Error;
+                // As past the deadline: a row not yet checked against the
+                // protect matches is not shown eligible (mped S2).
+                let unchecked = report.plan.split_off(index);
+                report
+                    .plan
+                    .extend(unchecked.into_iter().filter(|e| e.reason.is_some()));
                 report.plan.extend(root_skips);
                 return report;
             }
@@ -622,7 +648,7 @@ pub(super) fn plan_cargo<H: Host>(
             for skip in &misconfigured {
                 record_error(report, log, safety_error(tier, excluded(skip)));
             }
-            let negated_matches = match scan_negated(host, &tier.negated, deadline) {
+            let mut negated_matches = match scan_negated(host, &tier.negated, deadline) {
                 Ok(matches) => matches,
                 Err(error) => {
                     record_error(report, log, run_error(tier, error));
@@ -642,18 +668,29 @@ pub(super) fn plan_cargo<H: Host>(
                 if host.interrupted().is_some() {
                     break;
                 }
-                let excluded =
-                    match excluded_by(host, &tier.negated, &negated_matches, &target.path) {
-                        Ok(excluded) => excluded,
-                        Err(error) => {
-                            record_error(report, log, run_error(tier, error));
-                            return Planned {
-                                eligible,
-                                skipped,
-                                stopped,
-                            };
+                let excluded = match judge_negated(
+                    host,
+                    &tier.negated,
+                    &negated_matches,
+                    &target.path,
+                    deadline,
+                    Refresh::OnError,
+                ) {
+                    Ok((excluded, fresh)) => {
+                        if let Some(fresh) = fresh {
+                            negated_matches = fresh;
                         }
-                    };
+                        excluded
+                    }
+                    Err(error) => {
+                        record_error(report, log, run_error(tier, error));
+                        return Planned {
+                            eligible,
+                            skipped,
+                            stopped,
+                        };
+                    }
+                };
                 if let Some(profile) = excluded {
                     let skip = Skip::new(
                         Reason::Excluded,
@@ -1202,7 +1239,7 @@ pub(super) fn plan_fs_union<H: Host>(
     if !misconfigured.is_empty() {
         return planned;
     }
-    let negated_matches = match scan_union_negated(host, &sources, deadline) {
+    let mut negated_matches = match scan_union_negated(host, &sources, deadline) {
         Ok(matches) => matches,
         Err(error) => {
             record_error(report, log, run_error(tier, error));
@@ -1243,14 +1280,25 @@ pub(super) fn plan_fs_union<H: Host>(
         let mut checkout_marker = None;
         for (index, found) in &candidate.found_by {
             let source = &sources[*index];
-            let excluded =
-                match excluded_by(host, source.negated, &negated_matches[*index], &found.path) {
-                    Ok(excluded) => excluded,
-                    Err(error) => {
-                        record_error(report, log, run_error(tier, error));
-                        return planned;
+            let excluded = match judge_negated(
+                host,
+                source.negated,
+                &negated_matches[*index],
+                &found.path,
+                deadline,
+                Refresh::OnError,
+            ) {
+                Ok((excluded, fresh)) => {
+                    if let Some(fresh) = fresh {
+                        negated_matches[*index] = fresh;
                     }
-                };
+                    excluded
+                }
+                Err(error) => {
+                    record_error(report, log, run_error(tier, error));
+                    return planned;
+                }
+            };
             if let Some(profile) = excluded {
                 first_skip.get_or_insert((
                     *index,

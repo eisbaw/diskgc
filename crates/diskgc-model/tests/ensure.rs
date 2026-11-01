@@ -3046,6 +3046,70 @@ fn a_protected_match_removed_before_a_cargo_targets_first_screen_does_not_stop_t
     );
 }
 
+/// TASK-269 review (Codex 5, mped S3), kind `cargo-target`: a `!profile:`
+/// match (`keep-me` in the new target's `deps/`) removed right after the
+/// tier enumerated it stopped the run (exit 3) at the first exclusion
+/// check, in `ensure` and the dry run alike; now the check enumerates the
+/// negated matches again, and the old target is judged on its own.
+fn cargo_negated_removed() -> (ModelHost, Request) {
+    let keep = "/home/mark/src/new/target/debug/deps/keep-me";
+    let extra = format!(
+        "  {keep}: {{}}\nevents:\n  - {{at: {{op: statx, path: {keep}, nth: 1, when: after}}, \
+         remove: {keep}}}\n"
+    );
+    let config = config::parse(
+        Path::new("/tmp/negate.yaml"),
+        br#"version: 1
+profiles:
+  - name: keep-me
+    find: {roots: [/home/mark/src], paths: ["*/target/debug/deps/keep-me"], type: file}
+    action: delete
+    examples: {match: [/home/mark/src/app/target/debug/deps/keep-me]}
+"#,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let mut request = cargo("11G", None);
+    request.tier = Tier::select(
+        "profile:cargo-target && !profile:keep-me",
+        &config.library,
+        Some(&[SRC.to_owned()]),
+        1000,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    (host(&yaml(true, &extra)), request)
+}
+
+#[test]
+fn a_negated_match_removed_before_a_cargo_targets_first_screen_does_not_stop_the_dry_run() {
+    let (host, request) = cargo_negated_removed();
+    let report = dry_run(&host, &request);
+    assert!(host.unfired_events().is_empty());
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert_eq!(plan_reason(&report, OLD), Some(None), "{report:#?}");
+    // Judged first, against the enumerated match it holds by name: an
+    // overlap by name needs no proof, so the stale match still excludes it.
+    assert_eq!(
+        plan_reason(&report, NEW),
+        Some(Some(Reason::Excluded)),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn a_negated_match_removed_before_a_cargo_targets_first_screen_does_not_stop_the_run() {
+    let (host, request) = cargo_negated_removed();
+    let report = ensure(&host, &request);
+    assert!(host.unfired_events().is_empty());
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert!(
+        report
+            .actions
+            .iter()
+            .any(|action| action.candidate == Path::new(OLD)),
+        "{report:#?}"
+    );
+}
+
 /// TASK-210/211/209 (the 0.1 Debian walk): a grouped run on /home whose
 /// /tmp tiers have no root there. Each tier reports the foreign /tmp root
 /// once (a union's two /tmp sources included), the human summary names

@@ -41,9 +41,9 @@ host:
     /proj/target/debug/deps/app: {size: 1M}
     /cache/upper/cruft: {blob: {size: 4K}}
 expect:
-  # The dry run lists the candidate unjudged before its protect check
-  # fails, as for any protect error of the plan (status error, exit 3).
-  plan: [{candidate: /cache/upper/cruft}]
+  # A row not yet checked against the protect matches is not shown when
+  # its check fails, as past the deadline (status error, exit 3).
+  plan: []
   dry_run_exit: 3
   dry_run_errors: [{cause: operation, contains: "overlay mount /proj/target/debug/deps/view lies inside the match /proj/target (by path"}]
   reclaim_exit: 3
