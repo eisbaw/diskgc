@@ -850,6 +850,15 @@ processes:
             minor: 42,
         };
         assert_eq!(host.fs_uuid(dev).expect("fs_uuid"), None);
+        assert_eq!(
+            host.loop_backing_file(dev).expect("loop_backing_file"),
+            None
+        );
+        assert!(
+            host.loop_backing_files()
+                .expect("loop_backing_files")
+                .is_empty()
+        );
         host.boot_id().expect("boot_id");
         let key = diskgc_core::host::FsKey::dev(dev);
         let lock = host.state_lock(&key).expect("state_lock");

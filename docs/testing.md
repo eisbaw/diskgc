@@ -1485,7 +1485,7 @@ the initial namespace the dead one is reclaimed and the live one `in_use`),
 group, as after `newgrp`, owns a directory; tester cannot list it, root
 can; `ensure`, its dry run and root's `--allow-root` run are refused at
 start, exit 2, `cause: safety`, naming `hidepid` (TASK-263; safety.md, In
-use: A process list that cannot be complete). Rootless Podman cannot mount
+use, Visibility: a process list that cannot be complete). Rootless Podman cannot mount
 a `hidepid` `/proc` for the initial namespace, so diskgc runs in a nested
 one, which the test-container exception lets only `hidepid` refuse. From the initial namespace without
 `hidepid` the shell is listed and its fd table is denied to tester, so In
@@ -2612,7 +2612,7 @@ listed in `HOST_PID_NAMESPACE_TESTS` (`suite.rs`) also get
 `--pid=host`: Owner PID permits only in the initial PID namespace, so a
 test that shows a reclaim, or contrasts a nested namespace with the
 initial one, needs diskgc there; and the release-candidate build plans
-or reclaims only there (TASK-263; safety.md, In use: A process list that
+or reclaims only there (TASK-263; safety.md, In use: Visibility, a process list that
 cannot be complete), so its tests that do are listed too, and the release
 runner (whose under-test directory holds `bin/diskgc-release-default`)
 gives every container the host's PID namespace and runs them one at a

@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: 2026-10-25 01:14
-updated_date: '2026-11-01T09:42:00Z'
+updated_date: '2026-11-01T11:07:00Z'
 labels:
   - hardening
   - safety
@@ -42,4 +42,6 @@ To confirm 1-3: container tests (io_uring register+close, then ensure --dry-run:
 Periodic full review #2 on master 794e0e1 (2026-11-01; Codex tmp/reviews/codex-full2-794e0e1.md + mped), static reading, not reproduced. mped: a candidate holding the backing file of a live loop device (udisksctl loop-setup) passes the in-use check and is unlinked; data gone when the device detaches. Now cheap: Host::loop_backing_file exists (TASK-268); list /sys/block/loop*/loop/backing_file at each in-use scan and add their (dev, ino) to the uses.
 
 2026-11-01: in progress in tmp/worktrees/t263 (branch t263-inuse-visibility).
+
+2026-11-01 loop item implemented on t263-inuse-visibility (with TASK-263), unmerged. Each in-use scan lists /sys/block/loop<N> (dev, loop/backing_file; Host::loop_backing_files, read-only), resolves each backing text with the safe resolve and adds its (dev, ino) as a use (in_use, detail names the device). ' (deleted)' backing -> every candidate in_use_unknown until detached (not narrowed: identity unknown, a hard link could be anywhere; narrowing via LOOP_GET_STATUS64 needs the block device, root/disk only). Text naming nothing the walk can reach (missing, EACCES, symlink/network/FUSE on the way, relative) -> re-read once (renames), then noted, not blocking; limit: devices set up in another mount namespace print that namespace's path. Listing/read failures are run errors. Model-only (no rootless loop attach): inuse_visibility, vectors inuse/loop-backing-file-*, generated property; LinuxHost listing test read-only on the dev host (no bound loops here). Items 1 (io_uring, overlay upper/work), 2, 3, 5 (now refused at start by TASK-263), 6, 7 remain open.
 <!-- SECTION:NOTES:END -->

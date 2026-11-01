@@ -351,7 +351,7 @@ pub fn candidate_refuses_a_reclaiming_watch(ctx: &Ctx) -> TestResult {
 }
 
 /// TASK-263: the release-candidate build has no test-container exception
-/// (docs/safety.md, In use: A process list that cannot be complete). In a
+/// (docs/safety.md, In use: Visibility, a process list that cannot be complete). In a
 /// PID namespace of its own (`unshare -p`, as a container), and under
 /// `hidepid`, `ensure` refuses at start, its dry run too: exit 2, `cause:
 /// safety`, naming the rule; nothing planned, nothing deleted (the oracle

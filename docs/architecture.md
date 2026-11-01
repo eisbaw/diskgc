@@ -1126,7 +1126,7 @@ is accepted until measured otherwise.
   processes). `ensure` and a reclaiming `watch` also need the initial PID
   namespace and a `/proc` without `hidepid`, so they run on the host, not
   in a container or a unit with `PrivatePIDs=` or `ProtectProc=`
-  ([safety.md](safety.md#in-use), A process list that cannot be
+  ([safety.md](safety.md#in-use), Visibility: a process list that cannot be
   complete). Its in-use scan also needs a hard `RLIMIT_NOFILE` above the
   number of processes it can see; it raises its soft limit itself
   ([reference.md](reference.md#ensure), Open-file limit).
@@ -1388,7 +1388,7 @@ there; they are the shipped list in both units. Checked against
 Operator-added `ProtectProc=` or `PrivatePIDs=` is **refused**: a
 reclaiming `watch` (and `ensure`) exits 2 at start naming the rule, so
 the unit fails where its operator looks instead of running blind
-([safety.md](safety.md#in-use), A process list that cannot be complete;
+([safety.md](safety.md#in-use), Visibility: a process list that cannot be complete;
 TASK-263).
 
 | Option | Verdict | Why, by what diskgc reads and writes |

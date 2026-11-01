@@ -1182,7 +1182,7 @@ so their use of *your* files is not seen; nor is the use of the user's own
 processes noted above as unreadable (setuid, more capable, non-dumpable).
 Fine for one-user machines and runners; weaker on shared hosts.
 
-**A process list that cannot be complete** (TASK-263). Two settings take
+**Visibility: a process list that cannot be complete** (TASK-263). Two settings take
 processes out of the listing itself, where neither the rules above nor a
 note can see them:
 
@@ -2092,7 +2092,7 @@ schema only with its first producer.
   not on the local list, no PID-based answer permits a deletion; those
   candidates are kept as `producer_unknown`. Since TASK-263 `ensure` and
   a reclaiming `watch` refuse to start under `hidepid` or outside the
-  initial PID namespace ([In use](#in-use), A process list that cannot be
+  initial PID namespace ([In use](#in-use), Visibility: a process list that cannot be
   complete), so these preconditions decide only where that rule's
   test-container exception lets a run start, and as a second guard.
   There, in its own PID namespace, diskgc reclaims no `nix-shell` rc
@@ -4029,7 +4029,7 @@ How it holds:
 - `ensure` (its dry run too) and a reclaiming `watch` refuse to start
   under `hidepid` or outside the initial PID namespace, as root or not
   (exit 2, `safety`): the in-use check would miss processes there
-  ([In use](#in-use), A process list that cannot be complete).
+  ([In use](#in-use), Visibility: a process list that cannot be complete).
 - diskgc refuses to run as root (uid 0) unless `--allow-root` is given;
   the laptop service runs as the owner, CI as the runner user. `profiles
   list` and `show` are exempt: they only read the configuration and

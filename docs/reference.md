@@ -2588,7 +2588,7 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
 - **diskgc in its own PID namespace** (most containers, `PrivatePIDs=`)
   refuses to run `ensure`, its dry run and a reclaiming `watch` (exit 2,
   `safety`): the in-use check cannot see the processes outside it
-  ([safety.md](safety.md#in-use), A process list that cannot be
+  ([safety.md](safety.md#in-use), Visibility: a process list that cannot be
   complete). Run it on the host. (In 0.1.0 it ran, and kept every
   `nix-shell-rc` and most `pytest-tmp` candidates as `producer_unknown`,
   but judged Cargo targets by the processes of its own namespace only.)
