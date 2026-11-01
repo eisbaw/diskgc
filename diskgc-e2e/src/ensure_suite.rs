@@ -120,6 +120,80 @@ pub fn configured_protect_marks_overlapping_fs_candidates_in_dry_run(ctx: &Ctx) 
     judged.assert_clean()
 }
 
+/// TASK-268 on a real kernel: an overlay mounted inside a protected Cargo
+/// target, whose upper directory holds the candidate. Cargo discovery does
+/// not enter the target, and the overlay is on neither the candidate's nor
+/// the match's mount chain, so before TASK-268 the reclaiming run deleted
+/// `/tmp/cache/upper/cruft`, which the protected target shows at
+/// `deps/view/cruft`. Now the overlap is unprovable: exit 3, and the oracle
+/// (nothing eligible) sees no deletion.
+pub fn protect_refuses_an_overlay_mounted_inside_a_protected_cargo_target(ctx: &Ctx) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdirs("ovp/proj/target/debug/deps/view", 0o755, TESTER)?;
+    s.write_file("ovp/proj/Cargo.toml", b"", 0o644, TESTER)?;
+    s.write_file(
+        "ovp/proj/target/CACHEDIR.TAG",
+        b"Signature: 8a477f597d28d172789f06886806bc55\n",
+        0o644,
+        TESTER,
+    )?;
+    s.write_file("ovp/proj/target/debug/.cargo-lock", b"", 0o644, TESTER)?;
+    s.mkdirs("ovp/cache/upper/cruft", 0o755, TESTER)?;
+    s.write_file("ovp/cache/upper/cruft/blob", &[7; 8192], 0o644, TESTER)?;
+    for rel in ["ovp/lower", "ovp/work"] {
+        s.mkdir(rel, 0o755, TESTER)?;
+    }
+    s.mount_overlay(
+        "ovp/lower",
+        "ovp/cache/upper",
+        "ovp/work",
+        "ovp/proj/target/debug/deps/view",
+    )?;
+    let shown = s.path("ovp/proj/target/debug/deps/view/cruft/blob");
+    ensure!(
+        shown.exists(),
+        "the overlay does not show the upper's entry at {}",
+        shown.display()
+    );
+    ctx.home.write_file(
+        "diskgc-overlay-protect.yaml",
+        b"version: 1\nprofiles:\n  - name: cache-cruft\n    find: {roots: [/tmp/ovp/cache/upper], paths: [cruft], type: dir}\n    action: delete\n    examples: {match: [/tmp/ovp/cache/upper/cruft]}\nprotect:\n  - {profile: cargo-target, roots: [/tmp/ovp/proj]}\n",
+        0o600,
+        TESTER,
+    )?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--config",
+            "/home/tester/diskgc-overlay-protect.yaml",
+            "--select",
+            "profile:cache-cruft",
+            "--min-free",
+            "100%",
+            "--timeout",
+            "10s",
+            "/tmp",
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(3)?;
+    let result = report(&run)?;
+    let wanted = "overlay mount /tmp/ovp/proj/target/debug/deps/view lies inside the match \
+                  /tmp/ovp/proj/target";
+    ensure!(
+        result["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(wanted)))),
+        "no error naming the overlay: {result}"
+    );
+    ensure!(shown.exists(), "{} was deleted", shown.display());
+    judged.assert_clean()
+}
+
 /// The configured CLI path must execute both groups in policy order, with
 /// each candidate deletion checked by the independent filesystem oracle.
 pub fn configured_groups_reclaim_in_order(ctx: &Ctx) -> TestResult {

@@ -1478,6 +1478,12 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::configured_protect_marks_overlapping_fs_candidates_in_dry_run,
     },
     Test {
+        name: "protect_refuses_an_overlay_mounted_inside_a_protected_cargo_target",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::protect_refuses_an_overlay_mounted_inside_a_protected_cargo_target,
+    },
+    Test {
         name: "ensure_above_min_free_exits_0_without_the_host_lock",
         tier: Tier::Fast,
         expect: Expect::Pass,

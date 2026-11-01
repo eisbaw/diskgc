@@ -549,7 +549,10 @@ Model scenarios required by [safety.md](safety.md) and
   through `ensure`, an overlay inside a protected or negated Cargo target
   whose upper directory holds the candidate deletes nothing, where it
   deleted the candidate inside the target before TASK-268
-  (`vectors/config/overlay-mounted-inside-a-{protected,negated}-match`); a
+  (`vectors/config/overlay-mounted-inside-a-{protected,negated}-match`;
+  on a real kernel overlay, the container test
+  `protect_refuses_an_overlay_mounted_inside_a_protected_cargo_target`,
+  whose oracle saw the deletion with the rule disabled); a
   negated profile's root on another filesystem is searched
   (`a_negated_match_on_another_filesystem_is_searched`); a covered mount
   still listed in the table cannot prove no overlap
