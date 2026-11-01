@@ -976,6 +976,13 @@
           "description": "Space used by things outside the model; available space is `size -\nother_used -` the blocks of every live inode.",
           "$ref": "#/$defs/Bytes"
         },
+        "overlay_upper": {
+          "description": "An overlayfs mount (`fs: overlay`) whose upper directory is this\npath, on a mount declared earlier (missing directories are\ncreated): the mount shows that directory's tree, under its own\n`dev` in `statx` and mountinfo (root field `/`), so neither place nor\nidentity relates the two names of one entry, and an unlink through\neither removes it from both. Its space is the upper's filesystem's\n(`size` is not used). Lower layers, whiteouts and copy-up are not\nmodelled, and mountinfo shows no `upperdir=` (diskgc reads none).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "parent": {
           "description": "The mount this one is mounted on (stacked mounts: the mount at the\nsame point it covers). Required except for the mount at `/`.",
           "type": [

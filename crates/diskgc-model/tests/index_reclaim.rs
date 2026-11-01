@@ -1247,3 +1247,42 @@ fn a_tier_with_roots_on_two_mounts_of_one_filesystem_takes_no_queue() {
         );
     }
 }
+
+/// TASK-269, the index path: a `protect` match the run enumerated is gone
+/// (a protected tree cleaned meanwhile) by the time the reclaim walk takes
+/// a candidate from the index's queue. Its identity cannot be proven any
+/// more, which says nothing about the candidate: the first overlap screen
+/// enumerates the matches again and judges against those, as every later
+/// check does (TASK-200), instead of stopping the run (exit 3).
+#[test]
+fn a_protected_match_removed_before_the_first_screen_from_the_index_does_not_stop_the_run() {
+    let tree = format!(
+        "  /tmp/a-plain: {d}\n  /tmp/stash: {{.: {{mtime: {OLD}}}, precious: {{size: 1K, mtime: {OLD}}}}}\n",
+        d = old_dir()
+    );
+    // The enumeration's statx of the match, under the host lock, is the
+    // last call before the queue's first candidate is screened.
+    let events = "events:\n  - {at: {op: statx, path: /tmp/stash/precious, nth: 1, when: after}, \
+                  remove: /tmp/stash/precious}\n";
+    let host = host(&yaml(&tree, events));
+    let mut tier = tier("profile:tmp-a && filter:idle-1d");
+    tier.protections.push(ProtectedSource {
+        profile: "precious".to_owned(),
+        roots: vec![PathBuf::from("/tmp")],
+        kind: ProtectedKind::Fs(Box::new(Find::new(
+            &["*/precious".to_owned()],
+            EntryType::Any,
+            &Where::default(),
+            1000,
+        ))),
+    });
+    let mut state = TallyState::new(Index::new(BUDGET_BYTES));
+    let (report, lines) = run(&host, &request(tier), &mut state);
+    assert!(host.unfired_events().is_empty());
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert_eq!(actions(&report), ["/tmp/a-plain"], "{report:#?}");
+    assert!(
+        from_queue(&lines, "/tmp/a-plain"),
+        "judged from the index's queue"
+    );
+}

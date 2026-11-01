@@ -5,7 +5,7 @@
 //! actions.
 
 use crate::cargo_target::{self, Stop};
-use crate::engine::{Reason, Skip};
+use crate::engine::{Reason, Skip, may_be_networked};
 use crate::fs_kind;
 use crate::host::{Dev, DevIno, Host, HostError, MonoTime, MountEntry};
 use crate::resolve::{
@@ -173,6 +173,18 @@ pub(super) fn screen_overlap_mounts(
 /// proved apart from the other side (docs/safety.md, Not protected, not
 /// excluded). Called only when there are matches. `fuse-overlayfs` is a
 /// FUSE type, refused by the mount screen already.
+///
+/// The same holds for an overlay mounted at or below a match (TASK-268):
+/// its upper or lower directory may be the candidate, on any filesystem,
+/// and deleting it changes what the match shows. So does a filesystem the
+/// mount screen refuses (FUSE, network, automount): its data may be stored
+/// in directories of a local filesystem (`bindfs`, `fuse-overlayfs`, an NFS
+/// export of this host). Neither is on the candidate's or the match's own
+/// mount chain, which the screen checks, so every such mount in the table
+/// is placed ([`nested_in`]) and one inside a match is an error, for every
+/// candidate: mountinfo does not say where its data is (the overlay's
+/// `upperdir=` and `lowerdir=` are not parsed: they are paths in the
+/// mounter's namespace at mount time).
 fn refuse_overlay(
     mounts: &[MountEntry],
     candidate: &Path,
@@ -181,7 +193,7 @@ fn refuse_overlay(
     for path in std::iter::once(candidate).chain(matches.iter().map(PathBuf::as_path)) {
         let mount = mount_for(mounts, path)
             .map_err(|why| format!("cannot prove overlap at {}: {why}", path.display()))?;
-        if mount.fs_type == "overlay" {
+        if mount.fs_type == OVERLAY {
             return Err(format!(
                 "cannot prove overlap at {}: it is on overlay mount {}, whose upper and lower \
                  directories may hold a protected or negated match under another name",
@@ -190,7 +202,66 @@ fn refuse_overlay(
             ));
         }
     }
+    let stored_elsewhere: Vec<&MountEntry> = mounts
+        .iter()
+        .filter(|mount| mount.fs_type == OVERLAY || may_be_networked(&mount.fs_type))
+        .collect();
+    if stored_elsewhere.is_empty() {
+        return Ok(());
+    }
+    let by_id: HashMap<u64, &MountEntry> = mounts.iter().map(|mount| (mount.id, mount)).collect();
+    let places = matches
+        .iter()
+        .map(|matched| place_of(mounts, matched))
+        .collect::<Result<Vec<_>, _>>()?;
+    for mount in stored_elsewhere {
+        if let Some(matched) = nested_in(&by_id, mount, matches, &places, candidate)? {
+            return Err(format!(
+                "cannot prove overlap at {}: {} mount {} lies inside the match {} (by path or \
+                 by its place on a mount of the match's filesystem), and {}",
+                candidate.display(),
+                mount.fs_type,
+                mount.mount_point.display(),
+                matched.display(),
+                if mount.fs_type == OVERLAY {
+                    "its upper and lower directories may be anywhere, the candidate included"
+                } else {
+                    "its data may be stored in directories elsewhere, the candidate included"
+                }
+            ));
+        }
+    }
     Ok(())
+}
+
+/// The type name overlayfs has in mountinfo.
+const OVERLAY: &str = "overlay";
+
+/// The match `mount` lies at or below, if any: its mount point at or below
+/// the match's path, or one of the places its point is attached at down
+/// its parent chain ([`attachments`]) inside the match's place on the same
+/// device (`places`: each match's, in order), which finds it through a
+/// bind of the match or of one of its ancestors. A chain that cannot be
+/// placed is an error (`candidate`: what was being proved).
+fn nested_in<'m>(
+    by_id: &HashMap<u64, &MountEntry>,
+    mount: &MountEntry,
+    matches: &'m [PathBuf],
+    places: &[(Dev, PathBuf)],
+    candidate: &Path,
+) -> Result<Option<&'m Path>, String> {
+    let mut attached_at = Vec::new();
+    attachments(by_id, mount, candidate, &mut attached_at)?;
+    Ok(matches
+        .iter()
+        .zip(places)
+        .find(|(matched, (dev, place))| {
+            mount.mount_point.starts_with(matched)
+                || attached_at
+                    .iter()
+                    .any(|(on, at)| on == dev && at.starts_with(place))
+        })
+        .map(|(matched, _)| matched.as_path()))
 }
 
 /// Whether the candidate and a match are the same place in one filesystem

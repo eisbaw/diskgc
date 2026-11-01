@@ -2368,12 +2368,20 @@ development package stays sandbox gated.
 - TASK-277: without the provisioned host lock `/run/diskgc/lock`, a
   non-root reclaim takes a per-user lock (Install, item 2); 0.1.0 exits 2
   (`cause: provisioning`).
+- TASK-268: an overlay, or a FUSE or network filesystem, mounted inside a
+  `protect` or `!profile` match (a Cargo target, or through a bind) stops
+  the run while it is mounted: its backing directories may hold the
+  candidate ([safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)).
+  In 0.1.0 such an overlay escaped the overlay refusal (a static reading,
+  reproduced in the model).
+- TASK-269: a `protect` match removed after the tier enumerated it (a
+  `cargo clean` of a protected target) no longer stops the run (exit 3)
+  at a candidate's first check: the matches are enumerated again, then
+  the candidate is judged.
 
 **Open limits** (in 0.1.0 and on master; static readings, not
 reproduced): TASK-267, container storage behind a subdirectory bind is
-not recognised (the check probes lexical ancestors only); TASK-268, an
-overlay mounted inside a protected or negated match escapes the overlay
-refusal.
+not recognised (the check probes lexical ancestors only).
 
 **What it does.** One command frees space, two read-only ones explain
 it:

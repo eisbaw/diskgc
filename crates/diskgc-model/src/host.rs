@@ -2043,7 +2043,11 @@ impl Host for ModelHost {
             }
             let loc = inner.loc_of(ofd);
             refuse_dead_mount(&inner.state, loc, "fstatfs", &shown);
-            let fs = inner.state.fs(loc.mnt).fs_type.clone();
+            let fs = if inner.state.mount(loc.mnt).overlay.is_some() {
+                "overlay".to_owned()
+            } else {
+                inner.state.fs(loc.mnt).fs_type.clone()
+            };
             let magic = crate::state::fs_magic(&fs);
             (Ok(magic), None, format!("{fs} {magic:#x}"))
         })
@@ -2241,7 +2245,7 @@ impl Host for ModelHost {
                         "the lock file must be a regular file of diskgc's user",
                     ));
                 }
-                let dev = inner.state.mount(loc.mnt).dev;
+                let dev = inner.state.mount(loc.mnt).shown_dev();
                 let ofd =
                     inner
                         .state

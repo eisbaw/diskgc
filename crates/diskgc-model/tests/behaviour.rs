@@ -107,6 +107,60 @@ fn subdir_bind_shows_that_directory_and_its_mountinfo_root() {
     );
 }
 
+/// `overlay_upper`: an overlay at `/proj/view` (its own device 0:60) whose
+/// upper directory is `/tmp/a` (TASK-268).
+fn overlay_yaml() -> String {
+    tmp_yaml("").replace(
+        "tree:\n",
+        "  - {id: 31, at: /proj/view, fs: overlay, dev: \"0:60\", size: 1G, parent: 1, \
+         overlay_upper: /tmp/a}\ntree:\n",
+    )
+}
+
+/// overlayfs shows its upper directory under its own device and as its own
+/// filesystem (root field `/`), so neither the table nor `statx` relates
+/// the two names; an unlink through the upper directory removes the entry
+/// from the merged view too (TASK-268).
+#[test]
+fn overlay_shows_its_upper_directory_under_its_own_device() {
+    let host = host(&overlay_yaml());
+    let upper = host.stat_path(Path::new("/tmp/a/f")).expect("upper");
+    let merged = host.stat_path(Path::new("/proj/view/f")).expect("merged");
+    assert_eq!(upper.ino, merged.ino);
+    assert_ne!(upper.dev, merged.dev);
+    assert_eq!(merged.dev.to_string(), "0:60");
+    let overlay = host.mountinfo().unwrap().last().unwrap().clone();
+    assert_eq!(overlay.fs_type, "overlay");
+    assert_eq!(overlay.fs_root, Path::new("/"));
+    assert_eq!(overlay.dev, merged.dev);
+    assert_ne!(
+        dir(&host, "/tmp").mount.dev,
+        dir(&host, "/proj/view").mount.dev
+    );
+    let model = parse_yaml(&overlay_yaml()).expect("model");
+    let (mut state, _) = diskgc_model::load::load(&model).expect("state");
+    let upper = state.lookup(Path::new("/tmp/a")).expect("upper");
+    assert!(state.unlinkat(upper, OsStr::new("f"), false).is_ok());
+    assert!(state.lookup(Path::new("/proj/view/f")).is_err());
+    assert!(state.lookup(Path::new("/proj/view/sub")).is_ok());
+
+    for (from, to, wanted) in [
+        (
+            "fs: overlay",
+            "fs: tmpfs",
+            "overlay_upper needs fs: overlay",
+        ),
+        ("\"0:60\"", "\"0:42\"", "is another filesystem's"),
+        (
+            "overlay_upper: /tmp/a",
+            "overlay_upper: /tmp",
+            "is a mount point",
+        ),
+    ] {
+        assert_error_contains(&overlay_yaml().replace(from, to), wanted);
+    }
+}
+
 fn assert_error_contains(yaml: &str, wanted: &str) {
     match ModelHost::from_yaml(yaml) {
         Ok(_) => panic!("loaded, but should not:\n{yaml}"),

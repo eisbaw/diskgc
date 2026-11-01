@@ -1371,8 +1371,9 @@ fn protect_covers_a_filesystem_mounted_on_a_private_bind_of_its_subdirectory() {
 
 /// Codex on 4aa035c: overlayfs shows its upper directory under its own
 /// device, and an unlink through it removes the upper entry, so neither a
-/// place nor an identity relates `/merged/gen/x` to `/upper/gen`. The model
-/// does not know an overlay's layers; the verdict refuses by type alone:
+/// place nor an identity relates `/merged/gen/x` to `/upper/gen`. This
+/// overlay has no `overlay_upper` (no layer of it is modelled); the verdict
+/// refuses by type alone:
 /// with any match, a candidate or match on an overlay cannot be proved
 /// apart, an error (fail closed). Without matches nothing changes.
 #[test]
@@ -1429,6 +1430,78 @@ fn an_overlay_on_either_side_cannot_prove_no_overlap() {
         "{report:#?}"
     );
     nothing_locked_or_deleted(&host);
+}
+
+/// TASK-268: an overlay mounted inside a match, whose upper directory is
+/// on another filesystem, shows the candidate inside the match; so may a
+/// FUSE filesystem (`bindfs`). Neither is on the candidate's or the
+/// match's own mount chain. Each is found inside the match by its place
+/// too, through a bind of the match's filesystem (`/alias` binds `/proj`'s
+/// root) in either direction, and then no candidate can be proved apart:
+/// mountinfo does not say where their data is. One inside no match changes
+/// nothing, and the FUSE server (dead here) is never reached. The vectors
+/// `config/overlay-mounted-inside-a-{protected,negated}-match` run the
+/// same through `ensure` and show the deletion it prevents.
+#[test]
+fn a_mount_storing_elsewhere_inside_a_match_cannot_prove_no_overlap() {
+    let host = host(
+        r#"host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  - {id: 2, at: /proj, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  - {id: 3, at: /cache, fs: ext4, dev: "254:3", size: 10G, parent: 1}
+  - {id: 4, at: /alias, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2}
+  - {id: 60, at: /alias/target/view, fs: overlay, dev: "0:60", size: 1G, parent: 4, overlay_upper: /cache/upper}
+  - {id: 61, at: /proj/other/b, fs: fuse.bindfs, dev: "0:61", size: 1G, parent: 2, dead: true}
+  - {id: 62, at: /mnt/o, fs: overlay, dev: "0:62", size: 1G, parent: 1, overlay_upper: /cache/up2}
+tree:
+  /proj/target/f: {}
+  /proj/third/f: {}
+  /cache/upper/cruft/blob: {}
+  /cache/free/y: {}
+"#,
+    );
+    // Mounted on the bind only (as on a private bind): the match's tree as
+    // `/alias/target` shows it holds the upper directory's entries.
+    assert!(
+        host.stat_path(Path::new("/alias/target/view/cruft/blob"))
+            .is_some()
+    );
+    assert!(
+        host.stat_path(Path::new("/proj/target/view/cruft"))
+            .is_none()
+    );
+    let verdict = |candidate: &str, matched: &str| {
+        executor::overlaps_checked(&host, Path::new(candidate), &[PathBuf::from(matched)])
+    };
+    for (candidate, matched, wanted) in [
+        (
+            "/cache/upper/cruft",
+            "/proj/target",
+            "overlay mount /alias/target/view lies inside the match /proj/target",
+        ),
+        // Every candidate: the upper directory could be anywhere.
+        (
+            "/cache/free/y",
+            "/proj/target",
+            "overlay mount /alias/target/view lies inside the match /proj/target",
+        ),
+        (
+            "/cache/free/y",
+            "/alias/other",
+            "fuse.bindfs mount /proj/other/b lies inside the match /alias/other",
+        ),
+    ] {
+        let error = verdict(candidate, matched).expect_err(wanted);
+        assert!(
+            error.contains(&format!("cannot prove overlap at {candidate}: {wanted}")),
+            "{error}"
+        );
+    }
+    // The unrelated overlay /mnt/o and the mounts inside other matches.
+    assert_eq!(verdict("/cache/free/y", "/proj/third"), Ok(false));
+    assert_eq!(verdict("/proj/third/f", "/proj/third"), Ok(true));
 }
 
 /// A negated profile's root on another filesystem than PATH's was dropped

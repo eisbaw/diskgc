@@ -1,0 +1,50 @@
+# TASK-268, `!profile:` instead of `protect`: the tier's own negated Cargo
+# source matches /proj/target (it takes the tier's roots), and an overlay
+# at /proj/target/debug/deps/view has the upper directory /cache/upper,
+# where the tier's positive source finds /cache/upper/cruft. The overlap
+# with the negated match is unprovable: an error of the run (exit 3), and
+# nothing is deleted from inside the negated target.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: cache-cruft
+      find: {roots: required, paths: [cruft], type: dir}
+      action: delete
+      examples: {root: /cache/upper, match: [/cache/upper/cruft]}
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: "profile:cache-cruft && !profile:cargo-target", roots: [/cache/upper, /proj]}
+path: /cache
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /proj, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /cache, fs: ext4, dev: "254:3", size: 10G, parent: 1}
+    - {id: 60, at: /proj/target/debug/deps/view, fs: overlay, dev: "0:60", size: 1G, parent: 2, overlay_upper: /cache/upper}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /proj/Cargo.toml: {}
+    /proj/target/CACHEDIR.TAG: {cachedir_tag: true}
+    /proj/target/debug/.cargo-lock: {}
+    /proj/target/debug/deps/app: {size: 1M}
+    /cache/upper/cruft: {blob: {size: 4K}}
+expect:
+  # /proj is a tier root on another filesystem than PATH's: searched for
+  # the negated source only.
+  plan: [{candidate: /proj, reason: other_fs}]
+  dry_run_exit: 3
+  dry_run_errors: [{cause: operation, contains: "cannot prove overlap at /cache/upper/cruft: overlay mount /proj/target/debug/deps/view lies inside the match /proj/target (by path"}]
+  reclaim_exit: 3
+  errors: [{cause: operation, contains: "cannot prove overlap at /cache/upper/cruft: overlay mount /proj/target/debug/deps/view lies inside the match /proj/target (by path"}]
+  actions: []
+  removed: []
+  skipped: [{candidate: /proj, reason: other_fs}]
+  preserved:
+    - /cache/upper/cruft/blob
+    - /proj/target/debug/deps/view/cruft/blob
+    - /proj/target/debug/deps/app

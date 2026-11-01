@@ -3939,3 +3939,40 @@ fn a_protected_match_removed_after_the_enumeration_does_not_stop_the_run() {
     assert!(report.errors.is_empty(), "{report:#?}");
     assert_eq!(actions(&report), ["/tmp/pytest-of-u0"], "{report:#?}");
 }
+
+/// TASK-269, the discovery path: a `protect` match gone before a
+/// candidate's first overlap screen (right after the tier's enumeration
+/// statted it) stopped the run (exit 3), where every later check
+/// enumerates again (TASK-200). One check at every stage now: the first
+/// screen enumerates again too, and the candidate is reclaimed. The
+/// candidate is made after the run's synchronous tally (at the host lock),
+/// so the index's queue does not hold it and the tier's own discovery
+/// finds it (the index path: `index_reclaim.rs`
+/// `a_protected_match_removed_before_the_first_screen_from_the_index_does_not_stop_the_run`);
+/// a `!profile:` term takes the union walk, which has its own first
+/// screen.
+#[test]
+fn a_protected_match_removed_before_the_first_screen_does_not_stop_the_run() {
+    let tree =
+        format!("  /tmp/stash: {{.: {{mtime: {OLD}}}, keep-me: {{size: 1K, mtime: {OLD}}}}}\n");
+    let events = "events:\n  \
+                  - {at: {op: flock, path: /run/diskgc/lock, when: after}, create: /tmp/pytest-of-u0/f}\n  \
+                  - {at: {op: statx, path: /tmp/stash/keep-me, nth: 1, when: after}, \
+                  remove: /tmp/stash/keep-me}\n";
+    for select in [
+        "profile:pytest-of-dir",
+        "profile:pytest-of-dir && !profile:union-exclude-child",
+    ] {
+        let host = host(&yaml("", &tree, events));
+        let mut request = tmp(select);
+        request.tier.protections = protect_keep_me();
+        let report = ensure(&host, &request);
+        assert!(host.unfired_events().is_empty(), "{select}");
+        assert!(report.errors.is_empty(), "{select}: {report:#?}");
+        assert_eq!(
+            actions(&report),
+            ["/tmp/pytest-of-u0"],
+            "{select}: {report:#?}"
+        );
+    }
+}

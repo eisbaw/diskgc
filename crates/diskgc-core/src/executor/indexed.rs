@@ -33,7 +33,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{Acted, CandidateQueue, Reclaim, SourceKind, Tier, overlaps_checked, sample};
+use super::{Acted, CandidateQueue, Protect, ProtectAt, Reclaim, SourceKind, Tier, sample};
 use crate::config::Order;
 use crate::engine::{Reason, Skip};
 use crate::fs_kind::{self, Beneath, Find, Found};
@@ -783,32 +783,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             avail,
             reclaimed: false,
         };
-        let started = self.host.now();
-        let overlap = overlaps_checked(self.host, &found.path, &self.protection.matches);
-        self.record_overrun("protect", &found.path, started, self.host.now());
-        if self.past_deadline() {
-            self.stop(&Stop::DeadlinePassed {
-                path: found.path.clone(),
-            });
-            return Acted::Stop;
-        }
-        match overlap {
-            Ok(false) => {}
-            Ok(true) => {
-                self.skip(
-                    &found.path,
-                    &Skip::new(
-                        Reason::Protected,
-                        found.path.clone(),
-                        "overlaps a protected match".to_owned(),
-                    ),
-                );
-                return next;
-            }
-            Err(error) => {
-                self.run_error(error);
-                return Acted::Stop;
-            }
+        match self.protected(&found.path, ProtectAt::FirstScreen) {
+            Protect::Clear => {}
+            Protect::Skipped => return next,
+            Protect::Stopped => return Acted::Stop,
         }
         let started = self.host.now();
         let tallied = fs_kind::tally(self.host, judge, found, self.deadline);

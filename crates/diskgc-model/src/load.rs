@@ -250,6 +250,27 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
             return Err(LoadError::new(at, "mount ids are unique and not 0"));
         }
         let dev = spec.dev.0;
+        if state.mounts.iter().any(|mount| mount.overlay == Some(dev)) {
+            return Err(LoadError::new(
+                &at,
+                format!("device {dev} is an overlay's, mounted earlier"),
+            ));
+        }
+        if spec.overlay_upper.is_some() {
+            if spec.fs != "overlay" || spec.bind_of.is_some() || !spec.statx_missing.is_empty() {
+                return Err(LoadError::new(
+                    &at,
+                    "overlay_upper needs fs: overlay, without bind_of or statx_missing \
+                     (those are the upper's filesystem's)",
+                ));
+            }
+            if state.fss.contains_key(&dev) {
+                return Err(LoadError::new(
+                    &at,
+                    format!("an overlay's device {dev} is another filesystem's"),
+                ));
+            }
+        }
         match (state.fss.get(&dev), spec.bind_of) {
             (None, None) => {}
             (None, Some(source)) => {
@@ -318,6 +339,21 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
                 Some(mount_point(state, parent, rel).map_err(|m| LoadError::new(&at, m))?)
             }
         };
+        if let Some(upper) = &spec.overlay_upper {
+            let upper = overlay_upper(state, &paths, upper).map_err(|m| LoadError::new(&at, m))?;
+            state.mounts.push(Mount {
+                id: spec.id,
+                parent: spec.parent,
+                dev: state.mount(upper.mnt).dev,
+                on,
+                root: upper.ino,
+                read_only: spec.read_only,
+                dead: spec.dead,
+                overlay: Some(dev),
+            });
+            paths.insert(spec.id, spec.at.clone());
+            continue;
+        }
         let root = match (spec.bind_of, &spec.bind_root) {
             (None, Some(_)) => return Err(LoadError::new(&at, "bind_root requires bind_of")),
             (Some(source), Some(path)) => {
@@ -340,6 +376,7 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
             root,
             read_only: spec.read_only,
             dead: spec.dead,
+            overlay: None,
         });
         paths.insert(spec.id, spec.at.clone());
     }
@@ -347,6 +384,37 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
         return Err(LoadError::new("mounts", "there must be a mount at /"));
     }
     Ok(())
+}
+
+/// The upper directory `path` of an overlay: on the deepest mount declared
+/// so far whose point is a prefix of it, created if missing, never a
+/// directory another mount covers (the deepest mount would be that one).
+fn overlay_upper(
+    state: &mut State,
+    paths: &BTreeMap<u64, PathBuf>,
+    path: &Path,
+) -> Result<Loc, String> {
+    require_normal("overlay_upper", path).map_err(|e| e.to_string())?;
+    let (mount, point) = paths
+        .iter()
+        .filter(|(_, point)| path.starts_with(point))
+        .max_by_key(|(_, point)| point.components().count())
+        .ok_or_else(|| format!("overlay_upper {} is on no mount", path.display()))?;
+    let rel = path.strip_prefix(point).expect("a prefix");
+    if rel.as_os_str().is_empty() {
+        return Err(format!(
+            "overlay_upper {} is a mount point, not a directory on one",
+            path.display()
+        ));
+    }
+    let upper = mount_point(state, *mount, rel)?;
+    if state.mounts.iter().any(|m| m.on == Some(upper)) {
+        return Err(format!(
+            "overlay_upper {} is covered by a mount",
+            path.display()
+        ));
+    }
+    Ok(upper)
 }
 
 /// The directory `path` (from its filesystem's root, as mountinfo's root

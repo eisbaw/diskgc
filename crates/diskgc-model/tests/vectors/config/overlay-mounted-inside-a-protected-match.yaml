@@ -1,0 +1,57 @@
+# TASK-268 (Codex full review, 2026-10-31): an overlay mounted inside a
+# protected match, whose upper directory is elsewhere, cannot be proved
+# apart from a candidate. Static configuration, no events: `protect`
+# covers the Cargo target /proj/target; an overlay at
+# /proj/target/debug/deps/view has the upper directory /cache/upper; the
+# tier selects /cache/upper/cruft. Cargo discovery does not descend into
+# deps/view, the candidate and the match are on ext4 (the mount screen and
+# the overlay refusal on their own mounts pass), and their places differ
+# by device; deleting the upper directory's entry deletes
+# /proj/target/debug/deps/view/cruft, inside the protected target. The
+# overlap is unprovable, so the run stops (exit 3) and nothing is deleted.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: cache-cruft
+      find: {roots: [/cache/upper], paths: [cruft], type: dir}
+      action: delete
+      examples: {match: [/cache/upper/cruft]}
+  protect:
+    - {profile: cargo-target, roots: [/proj]}
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:cache-cruft}
+path: /cache
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /proj, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /cache, fs: ext4, dev: "254:3", size: 10G, parent: 1}
+    - {id: 60, at: /proj/target/debug/deps/view, fs: overlay, dev: "0:60", size: 1G, parent: 2, overlay_upper: /cache/upper}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /proj/Cargo.toml: {}
+    /proj/target/CACHEDIR.TAG: {cachedir_tag: true}
+    /proj/target/debug/.cargo-lock: {}
+    /proj/target/debug/deps/app: {size: 1M}
+    /cache/upper/cruft: {blob: {size: 4K}}
+expect:
+  # The dry run lists the candidate unjudged before its protect check
+  # fails, as for any protect error of the plan (status error, exit 3).
+  plan: [{candidate: /cache/upper/cruft}]
+  dry_run_exit: 3
+  dry_run_errors: [{cause: operation, contains: "cannot prove overlap at /cache/upper/cruft: overlay mount /proj/target/debug/deps/view lies inside the match /proj/target (by path"}]
+  reclaim_exit: 3
+  errors: [{cause: operation, contains: "cannot prove overlap at /cache/upper/cruft: overlay mount /proj/target/debug/deps/view lies inside the match /proj/target (by path"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved:
+    - /cache/upper/cruft/blob
+    - /proj/target/debug/deps/view/cruft/blob
+    - /proj/target/debug/deps/app

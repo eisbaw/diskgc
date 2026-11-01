@@ -756,6 +756,40 @@ fn held<H: Host>(
     )
 }
 
+/// Where a candidate meets the `protect` check ([`Reclaim::protected`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProtectAt {
+    /// As the tier's walk or the index's queue takes it, before its tally.
+    FirstScreen,
+    /// Immediately before entering its kind's reclaim protocol (under the
+    /// lock and after the walk, a delete asks [`DeletePolicy`] instead).
+    BeforeReclaim,
+}
+
+impl ProtectAt {
+    /// A protected skip's detail: `fresh` when judged against matches
+    /// enumerated for this check.
+    fn detail(self, fresh: bool) -> &'static str {
+        match (self, fresh) {
+            (ProtectAt::FirstScreen, false) => "overlaps a protected match",
+            (ProtectAt::FirstScreen, true) => "overlaps a protected match enumerated again",
+            (ProtectAt::BeforeReclaim, false) => "overlaps a protected match found before reclaim",
+            (ProtectAt::BeforeReclaim, true) => "overlaps a protected match at deletion recheck",
+        }
+    }
+}
+
+/// What [`Reclaim::protected`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protect {
+    /// Not protected: the candidate goes on.
+    Clear,
+    /// Protected: skipped (reported).
+    Skipped,
+    /// The run stops: an uncertain check (reported) or the deadline.
+    Stopped,
+}
+
 /// One reclaim of the tier, under the host lock.
 struct Reclaim<'a, 'l, H: Delete> {
     host: &'a H,
@@ -819,23 +853,49 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         }
     }
 
-    /// Recheck immediately before entering a kind's reclaim protocol. A
-    /// changed or unreadable protected tree stops the entire run.
-    fn protected_before_reclaim(&mut self, candidate: &Path) -> bool {
+    /// The `protect` check of `candidate` at `at`, the one used at every
+    /// stage (TASK-269): against the tier's enumerated matches; against
+    /// matches enumerated now when an enumerated one cannot be proven any
+    /// more (removed or moved since: a `cargo clean` of a protected target
+    /// says nothing about this candidate, TASK-200), and before the reclaim
+    /// of an action that acts on what it finds when it runs (a command, a
+    /// Docker prune). A protected candidate is skipped; an uncertain
+    /// enumeration or overlap, or the deadline, stops the run.
+    fn protected(&mut self, candidate: &Path, at: ProtectAt) -> Protect {
         let started = self.host.now();
-        let blocked = self.protected_before_reclaim_inner(candidate);
+        let verdict = self.protect_verdict(candidate, at);
         self.record_overrun("protect", candidate, started, self.host.now());
         if self.past_deadline() {
-            self.deadline_hit = true;
-            self.run_stopped = true;
-            return true;
+            self.stop(&Stop::DeadlinePassed {
+                path: candidate.to_owned(),
+            });
+            return Protect::Stopped;
         }
-        blocked
+        match verdict {
+            Ok(None) => Protect::Clear,
+            Ok(Some(detail)) => {
+                self.skip(
+                    candidate,
+                    &Skip::new(Reason::Protected, candidate.to_owned(), detail.to_owned()),
+                );
+                Protect::Skipped
+            }
+            Err(error) => {
+                self.run_error(error);
+                Protect::Stopped
+            }
+        }
     }
 
-    fn protected_before_reclaim_inner(&mut self, candidate: &Path) -> bool {
+    /// [`Reclaim::protected`]'s decision: `Some(detail)` when `candidate`
+    /// overlaps a match.
+    fn protect_verdict(
+        &self,
+        candidate: &Path,
+        at: ProtectAt,
+    ) -> Result<Option<&'static str>, String> {
         if self.tier.protections.is_empty() {
-            return false;
+            return Ok(None);
         }
         match overlaps_checked_until(
             self.host,
@@ -843,57 +903,25 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             &self.protection.matches,
             self.deadline,
         ) {
-            Ok(true) => {
-                self.skip(
-                    candidate,
-                    &Skip::new(
-                        Reason::Protected,
-                        candidate.to_owned(),
-                        "overlaps a protected match found before reclaim".to_owned(),
-                    ),
-                );
-                return true;
+            Ok(true) => return Ok(Some(at.detail(false))),
+            // Judged against the tier's matches again under the lock and
+            // after the walk ([`DeletePolicy`]): enumerating them here too
+            // would only repeat the tier's enumeration per candidate.
+            Ok(false) if at == ProtectAt::FirstScreen || self.unlinks_only_walked_entries() => {
+                return Ok(None);
             }
-            Ok(false) => {
-                if self.unlinks_only_walked_entries() {
-                    // Judged against the tier's matches again under the
-                    // lock and after the walk ([`DeletePolicy`]):
-                    // enumerating them here too would only repeat the
-                    // tier's enumeration per candidate.
-                    return false;
-                }
-            }
+            Ok(false) => {}
             // An enumerated match removed or moved since: the enumeration
-            // below decides (TASK-200).
+            // below decides.
             Err(_) => {}
         }
-        match scan_protections(self.host, &self.tier.protections, self.deadline) {
-            Ok(matches) => {
-                match overlaps_checked_until(self.host, candidate, &matches, self.deadline) {
-                    Ok(true) => {
-                        self.skip(
-                            candidate,
-                            &Skip::new(
-                                Reason::Protected,
-                                candidate.to_owned(),
-                                "overlaps a protected match at deletion recheck".to_owned(),
-                            ),
-                        );
-                        true
-                    }
-                    Ok(false) => false,
-                    Err(error) => {
-                        self.run_error(error);
-                        true
-                    }
-                }
-            }
-            Err(error) => {
-                self.run_error(error);
-                true
-            }
-        }
+        let matches = scan_protections(self.host, &self.tier.protections, self.deadline)?;
+        Ok(
+            overlaps_checked_until(self.host, candidate, &matches, self.deadline)?
+                .then(|| at.detail(true)),
+        )
     }
+
     /// `candidate` `None`: the backend as a whole was skipped.
     fn skip_docker(&mut self, candidate: Option<&Path>, reason: Reason, detail: &str) {
         (self.log)(&format!(
@@ -911,7 +939,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             return;
         }
         let candidate = docker_candidate(self.tier, &bound);
-        if self.protected_before_reclaim(&candidate) {
+        if self.protected(&candidate, ProtectAt::BeforeReclaim) != Protect::Clear {
             return;
         }
         if self.stop_if_interrupted() {
@@ -967,7 +995,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 return;
             }
         }
-        if self.protected_before_reclaim(&candidate) {
+        if self.protected(&candidate, ProtectAt::BeforeReclaim) != Protect::Clear {
             return;
         }
         if self.stop_if_interrupted() {
@@ -1352,28 +1380,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             if self.stop_if_interrupted() {
                 return;
             }
-            let started = self.host.now();
-            let overlap = overlaps_checked(self.host, &target.path, &self.protection.matches);
-            self.record_overrun("protect", &target.path, started, self.host.now());
-            if self.past_deadline() {
-                return self.stop(&Stop::DeadlinePassed {
-                    path: target.path.clone(),
-                });
-            }
-            let protected = match overlap {
-                Ok(protected) => protected,
-                Err(error) => return self.run_error(error),
-            };
-            if protected {
-                self.skip(
-                    &target.path,
-                    &Skip::new(
-                        Reason::Protected,
-                        target.path.clone(),
-                        "overlaps a protected match".to_owned(),
-                    ),
-                );
-                continue;
+            match self.protected(&target.path, ProtectAt::FirstScreen) {
+                Protect::Clear => {}
+                Protect::Skipped => continue,
+                Protect::Stopped => return,
             }
             let started = self.host.now();
             let exclusion = excluded_by(
@@ -1466,11 +1476,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             let (target, tally) = queue
                 .pop(self.measured.target.saturating_sub(avail))
                 .expect("nonempty candidate queue");
-            if self.protected_before_reclaim(&target.path) {
-                if self.run_stopped {
-                    return;
-                }
-                continue;
+            match self.protected(&target.path, ProtectAt::BeforeReclaim) {
+                Protect::Clear => {}
+                Protect::Skipped => continue,
+                Protect::Stopped => return,
             }
             if self.stop_if_interrupted() {
                 return;
@@ -1627,26 +1636,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             if handled.covers(path, candidate) {
                 continue;
             }
-            let started = self.host.now();
-            let overlap = overlaps_checked(self.host, path, &self.protection.matches);
-            self.record_overrun("protect", path, started, self.host.now());
-            if self.past_deadline() {
-                return self.stop(&Stop::DeadlinePassed { path: path.clone() });
-            }
-            let protected = match overlap {
-                Ok(protected) => protected,
-                Err(error) => return self.run_error(error),
-            };
-            if protected {
-                self.skip(
-                    path,
-                    &Skip::new(
-                        Reason::Protected,
-                        path.clone(),
-                        "overlaps a protected match".to_owned(),
-                    ),
-                );
-                continue;
+            match self.protected(path, ProtectAt::FirstScreen) {
+                Protect::Clear => {}
+                Protect::Skipped => continue,
+                Protect::Stopped => return,
             }
             let found = match candidate {
                 Ok(found) => found,
@@ -1728,14 +1721,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         checker: &mut Checker<'_>,
     ) -> Acted {
         let action = &self.tier.action;
-        if self.protected_before_reclaim(&found.path) {
-            if self.run_stopped {
-                return Acted::Stop;
+        match self.protected(&found.path, ProtectAt::BeforeReclaim) {
+            Protect::Clear => {}
+            Protect::Skipped => {
+                return Acted::Next {
+                    avail,
+                    reclaimed: false,
+                };
             }
-            return Acted::Next {
-                avail,
-                reclaimed: false,
-            };
+            Protect::Stopped => return Acted::Stop,
         }
         if self.stop_if_interrupted() {
             return Acted::Stop;
@@ -1932,26 +1926,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let mut untallied: Vec<&FsUnionCandidate> = Vec::new();
         for candidate in &candidates {
             let path = &candidate.found_by[0].1.path;
-            let started = self.host.now();
-            let overlap = overlaps_checked(self.host, path, &self.protection.matches);
-            self.record_overrun("protect", path, started, self.host.now());
-            if self.past_deadline() {
-                return self.stop(&Stop::DeadlinePassed { path: path.clone() });
-            }
-            let protected = match overlap {
-                Ok(protected) => protected,
-                Err(error) => return self.run_error(error),
-            };
-            if protected {
-                self.skip(
-                    path,
-                    &Skip::new(
-                        Reason::Protected,
-                        path.clone(),
-                        "overlaps a protected match".to_owned(),
-                    ),
-                );
-                continue;
+            match self.protected(path, ProtectAt::FirstScreen) {
+                Protect::Clear => {}
+                Protect::Skipped => continue,
+                Protect::Stopped => return,
             }
             if !untallied.is_empty() {
                 untallied.push(candidate);
@@ -2112,11 +2090,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 .pop(self.measured.target.saturating_sub(avail))
                 .expect("nonempty candidate queue");
             let path = &candidate.found_by[0].1.path;
-            if self.protected_before_reclaim(path) {
-                if self.run_stopped {
-                    return;
-                }
-                continue;
+            match self.protected(path, ProtectAt::BeforeReclaim) {
+                Protect::Clear => {}
+                Protect::Skipped => continue,
+                Protect::Stopped => return,
             }
             if self.stop_if_interrupted() {
                 return;

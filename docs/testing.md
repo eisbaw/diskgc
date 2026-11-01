@@ -391,7 +391,11 @@ How the format reads (the schema documents every key):
   exposes that filesystem's root through a distinct mount ID, or with
   `bind_root: /dir` that directory of it (a path from the filesystem's
   root, mountinfo's root field; missing directories are created).
-  Filesystem metadata must match.
+  Filesystem metadata must match. `fs: overlay` with `overlay_upper:
+  /path` (a directory on an earlier mount) shows that directory's tree
+  under the overlay's own `dev` and root field `/`, so an unlink on either
+  side removes the entry from both; lower layers, whiteouts and copy-up
+  are not modelled.
 - **Processes:** `exe`, `cwd`, `root`, `environ`, `fds` (`deleted: true`
   for a deleted-but-open file), `maps`, and `proc: denied|failed` for the
   `/proc` read errors; a pid that exits is `Gone`. What `status` shows,
@@ -536,11 +540,29 @@ Model scenarios required by [safety.md](safety.md) and
   with any match, a candidate or match on an `overlay` mount is an error
   and a reclaim through it deletes nothing
   (`an_overlay_on_either_side_cannot_prove_no_overlap`,
-  `a_reclaim_through_an_overlay_with_a_protect_match_deletes_nothing`); a
+  `a_reclaim_through_an_overlay_with_a_protect_match_deletes_nothing`);
+  an overlay (the model's `overlay_upper`: its upper directory shown
+  under the overlay's own device) or a FUSE filesystem mounted inside a
+  match, by path or through a bind, is an error for every candidate, and
+  one inside no match changes nothing
+  (`a_mount_storing_elsewhere_inside_a_match_cannot_prove_no_overlap`);
+  through `ensure`, an overlay inside a protected or negated Cargo target
+  whose upper directory holds the candidate deletes nothing, where it
+  deleted the candidate inside the target before TASK-268
+  (`vectors/config/overlay-mounted-inside-a-{protected,negated}-match`); a
   negated profile's root on another filesystem is searched
   (`a_negated_match_on_another_filesystem_is_searched`); a covered mount
   still listed in the table cannot prove no overlap
   (`a_covered_mount_in_the_table_cannot_prove_no_overlap`);
+- a `protect` match removed after the tier enumerated it, before a
+  candidate's first overlap screen, does not stop the run: the screen
+  enumerates again (TASK-269), from discovery, the union walk, the
+  index's queue and for a Cargo target (`tests/fs_reclaim.rs`
+  `a_protected_match_removed_before_the_first_screen_does_not_stop_the_run`,
+  `tests/index_reclaim.rs`
+  `a_protected_match_removed_before_the_first_screen_from_the_index_does_not_stop_the_run`,
+  `tests/ensure.rs`
+  `a_protected_match_removed_before_a_cargo_targets_first_screen_does_not_stop_the_run`);
 - a stale index (deep modification, a new `.diskgc-keep`, a new Cargo
   target inside a `tmp-entry` candidate, a new protected match after the
   tally): the deletion-time checks refuse what they must, each candidate

@@ -3020,6 +3020,32 @@ fn a_protected_match_made_in_a_cargo_target_is_seen_or_never_unlinked() {
     );
 }
 
+/// TASK-269, kind `cargo-target`: a `protect` match gone right after the
+/// tier enumerated it, before the targets' first overlap screen, stopped
+/// the run (exit 3); the first screen enumerates again now, as every later
+/// check does (TASK-200), and the old target is reclaimed.
+#[test]
+fn a_protected_match_removed_before_a_cargo_targets_first_screen_does_not_stop_the_run() {
+    let keep = "/home/mark/src/new/target/debug/deps/keep-me";
+    let extra = format!(
+        "  {keep}: {{}}\nevents:\n  - {{at: {{op: statx, path: {keep}, nth: 1, when: after}}, \
+         remove: {keep}}}\n"
+    );
+    let host = host(&yaml(true, &extra));
+    let mut request = cargo("11G", None);
+    request.tier.protections = protect_keep_me_in_deps();
+    let report = ensure(&host, &request);
+    assert!(host.unfired_events().is_empty());
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert!(
+        report
+            .actions
+            .iter()
+            .any(|action| action.candidate == Path::new(OLD)),
+        "{report:#?}"
+    );
+}
+
 /// TASK-210/211/209 (the 0.1 Debian walk): a grouped run on /home whose
 /// /tmp tiers have no root there. Each tier reports the foreign /tmp root
 /// once (a union's two /tmp sources included), the human summary names

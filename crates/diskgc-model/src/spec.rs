@@ -229,6 +229,16 @@ pub struct MountSpec {
     /// `/`). Missing directories are created, as for a mount point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_root: Option<PathBuf>,
+    /// An overlayfs mount (`fs: overlay`) whose upper directory is this
+    /// path, on a mount declared earlier (missing directories are
+    /// created): the mount shows that directory's tree, under its own
+    /// `dev` in `statx` and mountinfo (root field `/`), so neither place nor
+    /// identity relates the two names of one entry, and an unlink through
+    /// either removes it from both. Its space is the upper's filesystem's
+    /// (`size` is not used). Lower layers, whiteouts and copy-up are not
+    /// modelled, and mountinfo shows no `upperdir=` (diskgc reads none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_upper: Option<PathBuf>,
     /// The filesystem's UUID as `fs_uuid` reports it (the udev link
     /// `/dev/disk/by-uuid`); absent: none (tmpfs, no udev).
     #[serde(default, skip_serializing_if = "Option::is_none")]

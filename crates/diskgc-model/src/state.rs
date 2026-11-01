@@ -254,6 +254,17 @@ pub struct Mount {
     pub read_only: bool,
     /// Its server never answers ([`crate::spec::MountSpec::dead`]).
     pub dead: bool,
+    /// An overlay showing an upper directory of filesystem `dev`
+    /// ([`crate::spec::MountSpec::overlay_upper`]): the device it reports
+    /// instead. `dev` stays the filesystem that holds its inodes.
+    pub overlay: Option<Dev>,
+}
+
+impl Mount {
+    /// The device `statx` and mountinfo report for objects on this mount.
+    pub fn shown_dev(&self) -> Dev {
+        self.overlay.unwrap_or(self.dev)
+    }
 }
 
 /// An open file description: what `open` creates and `flock` locks. Shared
@@ -587,7 +598,12 @@ impl State {
     /// Mounts a fresh filesystem on the existing directory `spec.at` (an
     /// event): the new mount's parent is the mount that directory is on.
     pub fn mount_on(&mut self, spec: &crate::spec::MountEventSpec) -> Result<(), Fault> {
-        if self.fss.contains_key(&spec.dev.0) || self.mounts.iter().any(|m| m.id == spec.id) {
+        if self.fss.contains_key(&spec.dev.0)
+            || self
+                .mounts
+                .iter()
+                .any(|m| m.id == spec.id || m.overlay == Some(spec.dev.0))
+        {
             return Err(Fault::Model(format!(
                 "mount: id {} or device {} already exists",
                 spec.id, spec.dev.0
@@ -612,6 +628,7 @@ impl State {
             root,
             read_only: false,
             dead: false,
+            overlay: None,
         });
         Ok(())
     }
@@ -621,21 +638,31 @@ impl State {
             .iter()
             .map(|m| {
                 let fs = &self.fss[&m.dev];
+                let fs_type = if m.overlay.is_some() {
+                    "overlay".to_owned()
+                } else {
+                    fs.fs_type.clone()
+                };
                 MountEntry {
                     id: m.id,
                     parent_id: m.parent.unwrap_or(0),
-                    dev: m.dev,
-                    // An unlinked bind source. Linux shows its old path with
+                    dev: m.shown_dev(),
+                    // An overlay is its own filesystem, shown from its root.
+                    // An unlinked bind source: Linux shows its old path with
                     // `//deleted` appended; the model has forgotten the path,
                     // so it shows a placeholder no protected path lies under.
-                    fs_root: Self::fs_path(fs, m.root)
-                        .unwrap_or_else(|| PathBuf::from("/(deleted)")),
+                    fs_root: if m.overlay.is_some() {
+                        Some(PathBuf::from("/"))
+                    } else {
+                        Self::fs_path(fs, m.root)
+                    }
+                    .unwrap_or_else(|| PathBuf::from("/(deleted)")),
                     mount_point: m
                         .on
                         .map_or(Some(PathBuf::from("/")), |on| self.path_of(on))
                         .unwrap_or_else(|| PathBuf::from("/(detached)")),
-                    fs_type: fs.fs_type.clone(),
-                    source: fs.fs_type.clone(),
+                    source: fs_type.clone(),
+                    fs_type,
                     read_only: m.read_only,
                 }
             })
@@ -812,7 +839,7 @@ impl State {
             (!fs.missing.contains(&field)).then_some(value)
         }
         Stat {
-            dev: fs.dev,
+            dev: self.mount(loc.mnt).shown_dev(),
             file_type: when(fs, StatxField::Type, inode.file_type()),
             perm: when(fs, StatxField::Mode, inode.perm),
             // Link counting walks the inode graph. A modelled filesystem

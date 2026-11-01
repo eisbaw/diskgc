@@ -393,8 +393,26 @@ Immediately before acting, diskgc walks the candidate's whole tree
   identity relates `/merged/gen/x` to a protected `/upper/gen`, nor
   `/upper/gen/x` to a protected `/merged/gen` (`fuse-overlayfs` is FUSE,
   refused by the mount screen; upper and lower directories are not parsed
-  from the mount options). The candidate and every match are resolved on
-  the mount the table names after the place check, so its "no overlap"
+  from the mount options); and, while there is any match, any mount at or
+  below a match whose data may be stored in directories of another
+  filesystem: an `overlay`, or a type the mount screen refuses (every FUSE
+  type, `bindfs` and `fuse-overlayfs` included, the network types and
+  `autofs`). Such a mount lies below a match when its mount point is at or
+  below the match's path, or a place on its parent chain lies inside the
+  match's place on the same device (through a bind, either way). That is
+  an error for every candidate while the mount is there (TASK-268: an
+  overlay at `/proj/target/debug/deps/view` with the upper directory
+  `/cache/upper` shows `/cache/upper/cruft` inside a protected Cargo
+  target, which discovery does not enter, and deleting it there changes
+  the target). The table does not say where such data is: an overlay's
+  `upperdir=` and `lowerdir=` options are paths in the mounter's namespace
+  at mount time and are not parsed, and a FUSE server or an NFS export of
+  this host shows nothing of its backing directories. An `fs` match
+  holding any mount already stops at enumeration (`contains_mount`); this
+  rule covers Cargo targets and mounts reached through a bind. Limit:
+  other kernel stacking filesystems (`ecryptfs`, `shiftfs`, `aufs`) are
+  taken as local, as an unknown type is (No network filesystems). The
+  candidate and every match are resolved on the mount the table names after the place check, so its "no overlap"
   rests on live mounts (a covered mount, still listed, fails there). A
   negated profile's roots are searched on every filesystem, not only
   `PATH`'s: its matches only exclude (TASK-260). Limits: the translation
@@ -410,6 +428,13 @@ Immediately before acting, diskgc walks the candidate's whole tree
   the run (`protect`) or excludes the tier (negated). Each candidate is
   judged before its lock, under it before the walk, and after the walk
   immediately before the deletion (a Cargo target: before each part).
+  At each of these checks, from the first screen of a candidate onwards,
+  a `protect` match of the enumeration that cannot be proved any more (it
+  was removed or moved since, as by a `cargo clean` of a protected
+  target) says nothing about the candidate: the check enumerates the
+  matches again and judges against those, and only an error there stops
+  the run (TASK-200; the first screen, from discovery or the index's
+  queue, stopped the run until TASK-269).
   Which enumeration a check uses depends on the action (decided 2026-10-25
   for TASK-200 on Mark's delegation):
   - **`delete` and the Cargo protocol** judge against the tier's
