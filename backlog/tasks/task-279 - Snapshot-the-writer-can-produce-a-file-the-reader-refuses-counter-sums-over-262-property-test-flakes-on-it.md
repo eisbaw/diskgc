@@ -3,10 +3,10 @@ id: TASK-279
 title: >-
   Snapshot: the writer can produce a file the reader refuses (counter sums over
   2^62); property test flakes on it
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-31T22:27:00Z'
-updated_date: '2026-11-01T04:10:00Z'
+updated_date: '2026-11-01T05:25:00Z'
 labels:
   - index
   - test
@@ -24,4 +24,6 @@ Found by the TASK-60 implementer (cold just check, 2026-10-31): crates/diskgc-mo
 
 <!-- SECTION:NOTES:BEGIN -->
 t272 branch 1b9c3dc: format::check_limits in snapshot::encode (paths and 2^62 sums, the reader's own checks); property goes through the writer; seed committed in tests/snapshot_props.proptest-regressions (also in flake workspaceTestSrc). Awaiting review round.
+
+2026-11-01: merged in the watch contract batch after one review round (verification note on the merge).
 <!-- SECTION:NOTES:END -->

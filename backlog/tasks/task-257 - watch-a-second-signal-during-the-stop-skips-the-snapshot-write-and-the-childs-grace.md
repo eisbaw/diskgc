@@ -3,10 +3,10 @@ id: TASK-257
 title: >-
   watch: a second signal during the stop skips the snapshot write and the
   child's grace
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-31T00:59:00Z'
-updated_date: '2026-11-01T04:10:00Z'
+updated_date: '2026-11-01T05:25:00Z'
 labels:
   - watch
   - contract
@@ -30,4 +30,6 @@ From TASK-32: docs/reference.md (Watch signals) says a second SIGTERM, SIGINT or
 
 <!-- SECTION:NOTES:BEGIN -->
 t272 branch 4be0390: Host::second_signal (LinuxHost counts under watch's handlers only), state_write -> StateWritten::Cancelled before the link, watch stop skips the write, LinuxHost run_command leaves the child running on a second signal during its grace. Model tests for AC1, container watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock for AC2 (PASS, bite FAIL with second_signal forced false). Awaiting review round.
+
+2026-11-01: merged in the watch contract batch after one review round (verification note on the merge).
 <!-- SECTION:NOTES:END -->
