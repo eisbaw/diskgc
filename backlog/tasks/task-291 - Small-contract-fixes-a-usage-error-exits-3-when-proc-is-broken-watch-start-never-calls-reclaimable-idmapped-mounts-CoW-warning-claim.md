@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-01T05:37:00Z'
-updated_date: '2026-11-01T11:11:00Z'
+updated_date: '2026-11-01T16:40:00Z'
 labels:
   - contract
 dependencies: []
@@ -25,4 +25,6 @@ Periodic full review #2 on master 794e0e1 (2026-11-01; Codex tmp/reviews/codex-f
 2026-11-01: in progress in tmp/worktrees/t267 (branch t267-bind-places).
 
 2026-11-01 correction: the 'in progress in tmp/worktrees/t267' note above was put here by mistake (the orchestrator's brief named TASK-291 but meant TASK-290, contains_mount). This task's own items are untouched.
+
+Periodic full review #3 on master fc33d98 (2026-11-01; Codex tmp/reviews/codex-full3.md + mped), static reading. mped SHOULD 6 again: main.rs UsageError arm runs startup() for every first word except check/profiles; a typo can come back as exit 3. Report usage errors before startup().
 <!-- SECTION:NOTES:END -->
