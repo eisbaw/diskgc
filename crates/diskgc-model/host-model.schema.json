@@ -977,7 +977,7 @@
           "$ref": "#/$defs/Bytes"
         },
         "overlay_upper": {
-          "description": "An overlayfs mount (`fs: overlay`) whose upper directory is this\npath, on a mount declared earlier (missing directories are\ncreated): the mount shows that directory's tree, under its own\n`dev` in `statx` and mountinfo (root field `/`), so neither place nor\nidentity relates the two names of one entry, and an unlink through\neither removes it from both. Its space is the upper's filesystem's\n(`size` is not used). Lower layers, whiteouts and copy-up are not\nmodelled, and mountinfo shows no `upperdir=` (diskgc reads none).",
+          "description": "An overlayfs mount (`fs: overlay`) whose upper directory is this\npath, on a mount declared earlier (missing directories are\ncreated): the mount shows that directory's tree, under its own\n`dev` in `statx` and mountinfo (root field `/`), so neither place nor\nidentity relates the two names of one entry, and an unlink through\neither removes it from both. Its space is the upper's filesystem's\n(`size` is not used). Lower layers, whiteouts and copy-up are not\nmodelled, and mountinfo shows no `upperdir=` (diskgc reads none).\nOnly `statx`, mountinfo and `fstatfs` report the overlay: a memory\nmap shows the upper filesystem's device (as Linux shows the\nlayer's), and processes' open files and directories are matched by\nthe object itself, whichever name opened it.",
           "type": [
             "string",
             "null"

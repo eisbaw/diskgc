@@ -237,6 +237,10 @@ pub struct MountSpec {
     /// either removes it from both. Its space is the upper's filesystem's
     /// (`size` is not used). Lower layers, whiteouts and copy-up are not
     /// modelled, and mountinfo shows no `upperdir=` (diskgc reads none).
+    /// Only `statx`, mountinfo and `fstatfs` report the overlay: a memory
+    /// map shows the upper filesystem's device (as Linux shows the
+    /// layer's), and processes' open files and directories are matched by
+    /// the object itself, whichever name opened it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay_upper: Option<PathBuf>,
     /// The filesystem's UUID as `fs_uuid` reports it (the udev link

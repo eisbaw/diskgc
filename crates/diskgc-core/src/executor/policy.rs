@@ -167,24 +167,10 @@ pub(super) fn screen_overlap_mounts(
     Ok(())
 }
 
-/// Overlayfs shows its upper and lower directories under its own device,
-/// and unlinking through it unlinks upper entries: no place or identity
-/// relates the two, so a candidate or match on an overlay mount cannot be
-/// proved apart from the other side (docs/safety.md, Not protected, not
-/// excluded). Called only when there are matches. `fuse-overlayfs` is a
-/// FUSE type, refused by the mount screen already.
-///
-/// The same holds for an overlay mounted at or below a match (TASK-268):
-/// its upper or lower directory may be the candidate, on any filesystem,
-/// and deleting it changes what the match shows. So does a filesystem the
-/// mount screen refuses (FUSE, network, automount): its data may be stored
-/// in directories of a local filesystem (`bindfs`, `fuse-overlayfs`, an NFS
-/// export of this host). Neither is on the candidate's or the match's own
-/// mount chain, which the screen checks, so every such mount in the table
-/// is placed ([`nested_in`]) and one inside a match is an error, for every
-/// candidate: mountinfo does not say where its data is (the overlay's
-/// `upperdir=` and `lowerdir=` are not parsed: they are paths in the
-/// mounter's namespace at mount time).
+/// The overlay rules of docs/safety.md, Not protected, not excluded: with
+/// any match, a candidate or match on an overlay mount, or a mount that
+/// stores its data in another filesystem's directories ([`stored_elsewhere`])
+/// at or below a match ([`nested_in`], TASK-268), cannot be proved apart.
 fn refuse_overlay(
     mounts: &[MountEntry],
     candidate: &Path,
@@ -202,11 +188,11 @@ fn refuse_overlay(
             ));
         }
     }
-    let stored_elsewhere: Vec<&MountEntry> = mounts
+    let nested: Vec<&MountEntry> = mounts
         .iter()
-        .filter(|mount| mount.fs_type == OVERLAY || may_be_networked(&mount.fs_type))
+        .filter(|mount| stored_elsewhere(&mount.fs_type))
         .collect();
-    if stored_elsewhere.is_empty() {
+    if nested.is_empty() {
         return Ok(());
     }
     let by_id: HashMap<u64, &MountEntry> = mounts.iter().map(|mount| (mount.id, mount)).collect();
@@ -214,20 +200,21 @@ fn refuse_overlay(
         .iter()
         .map(|matched| place_of(mounts, matched))
         .collect::<Result<Vec<_>, _>>()?;
-    for mount in stored_elsewhere {
+    for mount in nested {
         if let Some(matched) = nested_in(&by_id, mount, matches, &places, candidate)? {
             return Err(format!(
-                "cannot prove overlap at {}: {} mount {} lies inside the match {} (by path or \
-                 by its place on a mount of the match's filesystem), and {}",
-                candidate.display(),
+                "{} mount {} lies inside the match {} (by path or by its place on a mount of \
+                 the match's filesystem), and {} may be anywhere: no candidate can be proved \
+                 apart from the match while it is mounted (cannot prove overlap at {})",
                 mount.fs_type,
                 mount.mount_point.display(),
                 matched.display(),
                 if mount.fs_type == OVERLAY {
-                    "its upper and lower directories may be anywhere, the candidate included"
+                    "its upper and lower directories"
                 } else {
-                    "its data may be stored in directories elsewhere, the candidate included"
-                }
+                    "the directories its data is stored in"
+                },
+                candidate.display(),
             ));
         }
     }
@@ -236,6 +223,23 @@ fn refuse_overlay(
 
 /// The type name overlayfs has in mountinfo.
 const OVERLAY: &str = "overlay";
+
+/// Kernel filesystems that stack on directories of other filesystems and
+/// write through to them: eCryptfs (its ciphertext directory), aufs (its
+/// branches), shiftfs (the directory it shifts). Refused only when mounted
+/// at or below a match; on the candidate's or match's own mount they are
+/// taken as local (docs/safety.md, limits), or an eCryptfs-encrypted home
+/// would stop every run.
+const STACKED_ON_DIRECTORIES: &[&str] = &["ecryptfs", "aufs", "shiftfs"];
+
+/// Whether a filesystem of `fs_type` may store its data in directories of
+/// another filesystem, which mountinfo does not name: overlayfs, the
+/// [`STACKED_ON_DIRECTORIES`], and every type the mount screen refuses
+/// (FUSE such as `bindfs` or `fuse-overlayfs`, an NFS export of this host,
+/// an automount point).
+fn stored_elsewhere(fs_type: &str) -> bool {
+    fs_type == OVERLAY || STACKED_ON_DIRECTORIES.contains(&fs_type) || may_be_networked(fs_type)
+}
 
 /// The match `mount` lies at or below, if any: its mount point at or below
 /// the match's path, or one of the places its point is attached at down
@@ -256,6 +260,10 @@ fn nested_in<'m>(
         .iter()
         .zip(places)
         .find(|(matched, (dev, place))| {
+            // By path as well as by place: a mount whose parent the table
+            // does not list (another namespace's, or a root outside the
+            // process's) has no attachment to compare, yet lies below
+            // the match's path.
             mount.mount_point.starts_with(matched)
                 || attached_at
                     .iter()
@@ -541,5 +549,83 @@ pub(super) fn policy_failed(path: &Path, what: &'static str, detail: String) -> 
     Stop::Failed {
         path: path.to_owned(),
         error: HostError::invalid(what, path.display(), detail),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refuse_overlay;
+    use crate::host::{Dev, MountEntry};
+    use std::path::{Path, PathBuf};
+
+    fn mount(id: u64, parent_id: u64, point: &str, minor: u32, fs_type: &str) -> MountEntry {
+        MountEntry {
+            id,
+            parent_id,
+            dev: Dev { major: 0, minor },
+            fs_root: PathBuf::from("/"),
+            mount_point: PathBuf::from(point),
+            fs_type: fs_type.to_owned(),
+            source: "fixture".to_owned(),
+            read_only: false,
+        }
+    }
+
+    fn table(nested: MountEntry) -> Vec<MountEntry> {
+        vec![
+            mount(1, 1, "/", 1, "ext4"),
+            mount(2, 1, "/proj", 2, "ext4"),
+            mount(3, 1, "/cache", 3, "ext4"),
+            nested,
+        ]
+    }
+
+    fn refused(mounts: &[MountEntry]) -> Option<String> {
+        refuse_overlay(
+            mounts,
+            Path::new("/cache/upper/cruft"),
+            &[PathBuf::from("/proj/target")],
+        )
+        .err()
+    }
+
+    /// TASK-268 review (Codex 2, mped S5): eCryptfs, aufs and shiftfs write
+    /// through to directories elsewhere; nested in a match they are refused
+    /// like an overlay. On the candidate's own mount they are not (an
+    /// eCryptfs home would stop every run): a stated limit.
+    #[test]
+    fn a_stacking_filesystem_inside_a_match_is_refused_but_not_one_holding_the_candidate() {
+        for fs_type in ["ecryptfs", "aufs", "shiftfs", "overlay", "fuse.bindfs"] {
+            let mounts = table(mount(60, 2, "/proj/target/debug/deps/view", 60, fs_type));
+            let error = refused(&mounts).unwrap_or_else(|| panic!("{fs_type} not refused"));
+            assert!(
+                error.starts_with(&format!(
+                    "{fs_type} mount /proj/target/debug/deps/view lies inside the match /proj/target"
+                )),
+                "{error}"
+            );
+            assert!(
+                error.ends_with("(cannot prove overlap at /cache/upper/cruft)"),
+                "{error}"
+            );
+        }
+        for fs_type in ["ecryptfs", "aufs", "shiftfs"] {
+            let mounts = table(mount(60, 3, "/cache/upper", 60, fs_type));
+            assert_eq!(refused(&mounts), None, "{fs_type} under the candidate");
+        }
+        assert_eq!(
+            refused(&table(mount(60, 2, "/proj/other", 60, "ecryptfs"))),
+            None
+        );
+    }
+
+    /// NIT-2: a nested mount whose parent the table does not list (another
+    /// namespace's) has no attachment chain; its path alone places it.
+    #[test]
+    fn a_nested_mount_with_an_unlisted_parent_is_placed_by_its_path() {
+        let mounts = table(mount(60, 99, "/proj/target/view", 60, "overlay"));
+        assert!(refused(&mounts).is_some());
+        let elsewhere = table(mount(60, 99, "/elsewhere/view", 60, "overlay"));
+        assert_eq!(refused(&elsewhere), None);
     }
 }

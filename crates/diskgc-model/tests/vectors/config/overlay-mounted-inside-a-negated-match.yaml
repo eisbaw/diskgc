@@ -38,9 +38,9 @@ expect:
   # the negated source only.
   plan: [{candidate: /proj, reason: other_fs}]
   dry_run_exit: 3
-  dry_run_errors: [{cause: operation, contains: "cannot prove overlap at /cache/upper/cruft: overlay mount /proj/target/debug/deps/view lies inside the match /proj/target (by path"}]
+  dry_run_errors: [{cause: operation, contains: "overlay mount /proj/target/debug/deps/view lies inside the match /proj/target (by path"}]
   reclaim_exit: 3
-  errors: [{cause: operation, contains: "cannot prove overlap at /cache/upper/cruft: overlay mount /proj/target/debug/deps/view lies inside the match /proj/target (by path"}]
+  errors: [{cause: operation, contains: "overlay mount /proj/target/debug/deps/view lies inside the match /proj/target (by path"}]
   actions: []
   removed: []
   skipped: [{candidate: /proj, reason: other_fs}]

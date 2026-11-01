@@ -1495,7 +1495,8 @@ tree:
     ] {
         let error = verdict(candidate, matched).expect_err(wanted);
         assert!(
-            error.contains(&format!("cannot prove overlap at {candidate}: {wanted}")),
+            error.starts_with(wanted)
+                && error.ends_with(&format!("(cannot prove overlap at {candidate})")),
             "{error}"
         );
     }

@@ -395,24 +395,38 @@ Immediately before acting, diskgc walks the candidate's whole tree
   refused by the mount screen; upper and lower directories are not parsed
   from the mount options); and, while there is any match, any mount at or
   below a match whose data may be stored in directories of another
-  filesystem: an `overlay`, or a type the mount screen refuses (every FUSE
-  type, `bindfs` and `fuse-overlayfs` included, the network types and
-  `autofs`). Such a mount lies below a match when its mount point is at or
-  below the match's path, or a place on its parent chain lies inside the
-  match's place on the same device (through a bind, either way). That is
-  an error for every candidate while the mount is there (TASK-268: an
-  overlay at `/proj/target/debug/deps/view` with the upper directory
-  `/cache/upper` shows `/cache/upper/cruft` inside a protected Cargo
-  target, which discovery does not enter, and deleting it there changes
-  the target). The table does not say where such data is: an overlay's
-  `upperdir=` and `lowerdir=` options are paths in the mounter's namespace
-  at mount time and are not parsed, and a FUSE server or an NFS export of
-  this host shows nothing of its backing directories. An `fs` match
-  holding any mount already stops at enumeration (`contains_mount`); this
-  rule covers Cargo targets and mounts reached through a bind. Limit:
-  other kernel stacking filesystems (`ecryptfs`, `shiftfs`, `aufs`) are
-  taken as local, as an unknown type is (No network filesystems). The
-  candidate and every match are resolved on the mount the table names after the place check, so its "no overlap"
+  filesystem: an `overlay`; the kernel stacking filesystems that write
+  through to a directory elsewhere, `ecryptfs` (its ciphertext
+  directory), `aufs` (its branches) and `shiftfs`; and every type the
+  mount screen refuses (every FUSE type, `bindfs` and `fuse-overlayfs`
+  included, the network types and `autofs`). Such a mount lies below a
+  match when its mount point is at or below the match's path, or a place
+  on its parent chain lies inside the match's place on the same device
+  (through a bind, either way). That is an error for every candidate
+  while the mount is there (TASK-268: an overlay at
+  `/proj/target/debug/deps/view` with the upper directory `/cache/upper`
+  shows `/cache/upper/cruft` inside a protected Cargo target, which
+  discovery does not enter, and deleting it there changes the target).
+  The table does not say where such data is: an overlay's `upperdir=` and
+  `lowerdir=` options are paths in the mounter's namespace at mount time
+  and are not parsed, and a FUSE server, a stacking filesystem's options
+  or an NFS export of this host name nothing a place can be compared
+  with. A `protect` match of kind `fs` holding any mount already stops the
+  run at enumeration (`contains_mount`; a negated one excludes the tier);
+  this rule covers Cargo targets, which discovery does not enter, and
+  mounts reached through a bind. Limits: `ecryptfs`, `aufs` and `shiftfs`
+  are refused only nested in a match, not as the candidate's or a match's
+  own mount, where they are taken as local, as an unknown type is (No
+  network filesystems): refusing them there would stop every run on an
+  eCryptfs-encrypted home, and the hole needs a profile rooted in the
+  lower or ciphertext tree (`~/.Private`, an aufs branch) whose match a
+  candidate in the plaintext view then reaches, or the reverse, an
+  unlikely configuration. Only the mount table of diskgc's own mount
+  namespace is read: a mount made in another namespace (a container's,
+  a sandboxed application's) over a directory inside a match is not seen,
+  and neither is what it stores elsewhere. The candidate and every match
+  are resolved on the mount the table names after the place check, so
+  its "no overlap"
   rests on live mounts (a covered mount, still listed, fails there). A
   negated profile's roots are searched on every filesystem, not only
   `PATH`'s: its matches only exclude (TASK-260). Limits: the translation
