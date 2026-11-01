@@ -3,10 +3,10 @@ id: TASK-287
 title: >-
   watch snapshot guard frozen at start: one failed first sample disables
   --min-free protection of snapshot writes
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-01T05:37:00Z'
-updated_date: '2026-11-01T19:50:00Z'
+updated_date: '2026-11-01T21:37:00Z'
 labels:
   - watch
   - correctness
@@ -24,4 +24,6 @@ Periodic full review #2 on master 794e0e1 (2026-11-01; Codex tmp/reviews/codex-f
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-01: in progress in tmp/worktrees/t287 (branch t287-small-fixes).
+
+2026-11-01: merged in the small-fix batch after one review round.
 <!-- SECTION:NOTES:END -->

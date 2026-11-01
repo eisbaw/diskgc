@@ -3,10 +3,10 @@ id: TASK-291
 title: >-
   Small contract fixes: a usage error exits 3 when /proc is broken; watch::start
   never calls reclaimable; idmapped mounts; CoW warning claim
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-01T05:37:00Z'
-updated_date: '2026-11-01T19:50:00Z'
+updated_date: '2026-11-01T21:38:00Z'
 labels:
   - contract
 dependencies: []
@@ -29,4 +29,6 @@ Periodic full review #2 on master 794e0e1 (2026-11-01; Codex tmp/reviews/codex-f
 Periodic full review #3 on master fc33d98 (2026-11-01; Codex tmp/reviews/codex-full3.md + mped), static reading. mped SHOULD 6 again: main.rs UsageError arm runs startup() for every first word except check/profiles; a typo can come back as exit 3. Report usage errors before startup().
 
 2026-11-01: in progress in tmp/worktrees/t287 (branch t287-small-fixes).
+
+2026-11-01: merged in the small-fix batch after one review round.
 <!-- SECTION:NOTES:END -->
