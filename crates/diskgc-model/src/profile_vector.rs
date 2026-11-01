@@ -337,7 +337,7 @@ impl ProfileVector {
         // The binary's order: the configuration and `--select` first,
         // then the run on the host.
         let loaded = match invocation::load(
-            &options.selection(),
+            options.selection(),
             &self.config_file(),
             &platform,
             &mut |_| {},
@@ -350,7 +350,7 @@ impl ProfileVector {
         Ok(invocation::ensure(
             host,
             &options,
-            &loaded,
+            loaded,
             &platform,
             &mut |_| {},
             &mut |_| {},

@@ -1200,8 +1200,9 @@ impl Host for Gated {
         lock: &diskgc_core::host::Locked<Self::Fd>,
         key: &diskgc_core::host::FsKey,
         bytes: &[u8],
+        cancel: &dyn Fn() -> bool,
     ) -> Result<diskgc_core::host::StateWritten, HostError> {
-        self.0.state_write(lock, key, bytes)
+        self.0.state_write(lock, key, bytes, cancel)
     }
 }
 

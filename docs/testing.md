@@ -823,9 +823,13 @@ Model scenarios required by [safety.md](safety.md) and
     the minimum: `watch_start_refusals`; the usage errors: the binary's
     `watch_usage_errors_say_why`; an invalid configuration exit 2 before
     the host starts, which would fail with exit 3: the binary's
-    `watch_checks_the_configuration_before_the_host_starts`, and
-    `ensure_checks_the_configuration_before_the_host_starts` for
-    `ensure`; the refusal after start and its JSON object: the binary's
+    `watch_checks_the_configuration_before_the_host_starts`, and a valid
+    one the host fails to read (`/proc` unavailable) exit 3 `host`:
+    `watch_with_a_valid_config_and_no_proc_is_exit_3_host`,
+    `ensure_with_a_valid_config_and_no_proc_is_exit_3_host` and
+    diskgc-linux's `a_config_read_that_fails_on_proc_is_the_hosts`
+    (`ensure_checks_the_configuration_before_the_host_starts` for
+    `ensure`'s invalid configuration); the refusal after start and its JSON object: the binary's
     `a_late_refusal_prints_the_usage_error_object_and_exits_2`;
     `second_watch_exits_2` and
     `a_signal_during_the_start_wait_exits_0_writing_nothing`; the rest
@@ -865,7 +869,10 @@ Model scenarios required by [safety.md](safety.md) and
     between samples: every scenario's end; a second signal during the
     stop's snapshot write and before it:
     `a_second_signal_during_the_stops_snapshot_write_leaves_the_old_one`,
-    `a_second_signal_before_the_stops_write_skips_it`; during a child's
+    `a_second_signal_before_the_stops_write_skips_it` (the port's
+    cancellation at each step on the real kernel: diskgc-linux's
+    `a_cancelled_state_write_leaves_the_old_snapshot_and_names_nothing`);
+    during a child's
     grace, which the model does not run, the container test
     `watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock`;
     TASK-258: SIGINT in a cycle as
@@ -879,7 +886,8 @@ Model scenarios required by [safety.md](safety.md) and
     the rest *open*): SIGTERM between samples, during a back-off, during
     the host-lock wait and in a cycle between two candidates: exit 0
     within one batch (50 ms) or at the next candidate boundary, a record
-    with status `interrupted` for the cycle case only, no candidate
+    with status `interrupted` for the cycle and the host-lock wait (part
+    of a cycle) only, no candidate
     started after the signal, the snapshot written once; the same for
     SIGINT and SIGHUP; a second signal during the snapshot write: exit 0
     and the old snapshot unchanged; a signal during the start wait: exit

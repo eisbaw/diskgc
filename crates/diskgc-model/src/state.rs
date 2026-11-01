@@ -387,9 +387,8 @@ pub struct WalkRules {
 pub struct State {
     /// First delivered signal, retained for the run.
     pub interrupted: Option<diskgc_core::report::Signal>,
-    /// Signals delivered so far: from the second on, `watch` stops at once
-    /// (`Host::second_signal`). The model counts for every command; on
-    /// Linux only `watch`'s handlers count.
+    /// Signals delivered so far (`Host::second_signal` from the second
+    /// on), counted for every command, as `LinuxHost`'s handler does.
     pub signals: u32,
     /// In mount order.
     pub mounts: Vec<Mount>,

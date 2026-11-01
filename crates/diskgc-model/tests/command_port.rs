@@ -19,6 +19,7 @@ fn request(host: &impl Host) -> CommandRun {
         environment: vec![(OsString::from("DISKGC_PATH"), OsString::from("/tmp/a"))],
         output_prefix: "tier/test-profile".to_owned(),
         deadline: host.now().checked_add(Duration::from_secs(1)).unwrap(),
+        second_signal: diskgc_core::host::SecondSignal::WaitOutGrace,
     }
 }
 

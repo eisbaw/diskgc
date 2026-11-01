@@ -43,7 +43,7 @@ use diskgc_core::report::{self, ErrorCause, ErrorEntry, Report, Status};
 use diskgc_core::units::{parse_duration, parse_size};
 use diskgc_core::watch::Mode;
 use diskgc_linux::LinuxHost;
-use diskgc_linux::host::{read_config_file, read_root_config_file};
+use diskgc_linux::host::{ConfigReadError, read_config_file, read_root_config_file};
 
 mod watch;
 
@@ -650,18 +650,33 @@ const _: () = assert!(
 /// bytes, or the paths tried when the search found none (a given file that
 /// is missing is an error, never a fallback). Parsing it, under
 /// [`CATALOG`], and whether a missing one is an error, are the command's.
-fn read_config(flag: Option<&OsStr>, strict_modes: bool) -> Result<ConfigFile, String> {
+/// The error's cause: `config` for the file (exit 2), `host` for a read
+/// the host failed (`/proc`, I/O: exit 3, [`ConfigReadError`]).
+fn read_config(flag: Option<&OsStr>, strict_modes: bool) -> ConfigRead {
+    let read: ConfigReader = if strict_modes {
+        &read_root_config_file
+    } else {
+        &read_config_file
+    };
+    read_config_with(flag, read)
+}
+
+/// The configuration file as found and read, or why not, with the cause
+/// (`config` or `host`).
+type ConfigRead = Result<ConfigFile, (ErrorCause, String)>;
+
+/// How a configuration file's bytes are read: [`read_config_file`] or
+/// [`read_root_config_file`] (a test gives its own).
+type ConfigReader<'a> = &'a dyn Fn(&Path, usize) -> Result<Vec<u8>, ConfigReadError>;
+
+/// [`read_config`] with its reader given.
+fn read_config_with(flag: Option<&OsStr>, read: ConfigReader<'_>) -> ConfigRead {
     let env = Env {
         diskgc_config: std::env::var_os("DISKGC_CONFIG"),
         xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
         home: std::env::var_os("HOME"),
     };
-    let lookup = config::lookup(flag, &env)?;
-    let read = if strict_modes {
-        read_root_config_file
-    } else {
-        read_config_file
-    };
+    let lookup = config::lookup(flag, &env).map_err(|why| (ErrorCause::Config, why))?;
     for path in lookup.paths() {
         match read(path, MAX_CONFIG_BYTES) {
             Ok(bytes) => {
@@ -670,8 +685,20 @@ fn read_config(flag: Option<&OsStr>, strict_modes: bool) -> Result<ConfigFile, S
                     bytes,
                 });
             }
-            Err(e) if matches!(lookup, Lookup::Search(_)) && is_absent(&e) => continue,
-            Err(e) => return Err(format!("config {}: {e}", path.display())),
+            Err(ConfigReadError::File(e))
+                if matches!(lookup, Lookup::Search(_)) && is_absent(&e) =>
+            {
+                continue;
+            }
+            Err(ConfigReadError::File(e)) => {
+                return Err((
+                    ErrorCause::Config,
+                    format!("config {}: {e}", path.display()),
+                ));
+            }
+            Err(ConfigReadError::Host(e)) => {
+                return Err((ErrorCause::Host, format!("config {}: {e}", path.display())));
+            }
         }
     }
     Ok(ConfigFile::NotFound {
@@ -685,7 +712,7 @@ fn load_config(
     flag: Option<&OsStr>,
     use_: ConfigUse,
 ) -> Result<Result<Config, Vec<PathBuf>>, String> {
-    match read_config(flag, false)? {
+    match read_config(flag, false).map_err(|(_, why)| why)? {
         ConfigFile::Read { path, bytes } => CATALOG.config(&path, &bytes, use_).map(Ok),
         ConfigFile::NotFound { tried } => Ok(Err(tried)),
     }
@@ -728,15 +755,29 @@ fn draw_seed() -> Result<u64, String> {
 /// starts, so a bad configuration is exit 2 even where the kernel or
 /// `/proc` checks would fail (docs/reference.md, Exit codes (`ensure`)).
 fn ensure(args: &EnsureArgs) -> Report {
-    ensure_with(args, &startup)
+    ensure_with(args, &Start::MACHINE)
 }
 
-/// [`ensure`] with its host startup given (a test seam: the order of the
-/// start is what the tests hold).
-fn ensure_with(
-    args: &EnsureArgs,
-    startup: &dyn Fn() -> Result<LinuxHost, StartupFailure>,
-) -> Report {
+/// What `ensure` and `watch` read from the machine to start, in their
+/// order: the configuration file, then the host's startup checks. Given
+/// so the tests can hold that order and its classification.
+struct Start<'a> {
+    /// The configuration file ([`read_config`]).
+    read_config: &'a dyn Fn(Option<&OsStr>, bool) -> ConfigRead,
+    /// The host's startup ([`startup_in`]).
+    startup: &'a dyn Fn(Option<PathBuf>) -> Result<LinuxHost, StartupFailure>,
+}
+
+impl Start<'_> {
+    /// This machine's.
+    const MACHINE: Start<'static> = Start {
+        read_config: &read_config,
+        startup: &startup_in,
+    };
+}
+
+/// [`ensure`] with what it reads from the machine to start given.
+fn ensure_with(args: &EnsureArgs, start: &Start<'_>) -> Report {
     // Every error is logged where it is recorded: here for those found
     // before the composition runs, by the composition for its own. Each
     // starts from the options' report, so it says what was asked for (the
@@ -754,24 +795,24 @@ fn ensure_with(
             format!("install signal handlers: {error}"),
         );
     }
-    let config = match read_config(args.config.as_deref(), args.options.allow_root) {
+    let config = match (start.read_config)(args.config.as_deref(), args.options.allow_root) {
         Ok(config) => config,
-        Err(why) => return fail(Status::UsageError, ErrorCause::Config, why),
+        Err((cause, why)) => return fail(invocation::refusal_status(cause), cause, why),
     };
     let platform = Platform {
         catalog: CATALOG,
         draw_seed: &draw_seed,
         builtins: &builtins,
     };
-    let loaded = match invocation::load(&args.options.selection(), &config, &platform, &mut log) {
+    let loaded = match invocation::load(args.options.selection(), &config, &platform, &mut log) {
         Ok(loaded) => loaded,
         Err((cause, why)) => return invocation::refused(&args.options, cause, why, &mut log),
     };
-    let host = match startup() {
+    let host = match (start.startup)(env_state_dir()) {
         Ok(host) => host,
         Err(failure) => return fail(failure.status(), failure.cause(), failure.message()),
     };
-    invocation::ensure(&host, &args.options, &loaded, &platform, &mut log, &mut log)
+    invocation::ensure(&host, &args.options, loaded, &platform, &mut log, &mut log)
 }
 
 /// The embedded built-in profiles, before [`CATALOG`] narrows them; an
@@ -1293,18 +1334,23 @@ mod tests {
         ])
         .expect("parses");
         let started = std::cell::Cell::new(0);
-        let broken = || {
+        let broken = |_: Option<PathBuf>| {
             started.set(started.get() + 1);
             Err(StartupFailure::Host(
                 "open /proc: EACCES (a test)".to_owned(),
             ))
         };
-        let report = ensure_with(&a, &broken);
+        let start = Start {
+            read_config: &read_config,
+            startup: &broken,
+        };
+        let report = ensure_with(&a, &start);
         assert_eq!(report.status, Status::UsageError, "{}", report.to_json());
         assert_eq!(report.errors[0].cause, ErrorCause::Config);
         assert!(
-            report.errors[0].message.contains("profile:missing")
-                || report.errors[0].message.contains("missing"),
+            report.errors[0]
+                .message
+                .contains("invalid selection `profile:missing`"),
             "{}",
             report.to_json()
         );
@@ -1328,10 +1374,55 @@ mod tests {
             "/tmp",
         ])
         .expect("parses");
-        let report = ensure_with(&a, &broken);
+        let report = ensure_with(&a, &start);
         assert_eq!(report.status, Status::Error, "{}", report.to_json());
         assert_eq!(report.errors[0].cause, ErrorCause::Host);
         assert_eq!(started.get(), 1);
+    }
+
+    /// A reader of the configuration file as `/proc` unavailable makes it:
+    /// the checked file's reopen fails (diskgc-linux's
+    /// `a_config_read_that_fails_on_proc_is_the_hosts` pins that the real
+    /// reader says so), through the real lookup.
+    pub(super) fn read_config_without_proc(flag: Option<&OsStr>, _: bool) -> ConfigRead {
+        read_config_with(flag, &|path, _| {
+            Err(ConfigReadError::Host(diskgc_core::host::HostError::errno(
+                "reopen through /proc",
+                path.display(),
+                Errno::ENOENT,
+            )))
+        })
+    }
+
+    /// TASK-272 review (Codex 1): a valid configuration that cannot be
+    /// read because `/proc` is unavailable is the host's failure, exit 3
+    /// (`error`, cause `host`) as before the configuration moved first; only
+    /// a file read and found wanting is exit 2.
+    #[test]
+    fn ensure_with_a_valid_config_and_no_proc_is_exit_3_host() {
+        let good = ConfigFixture::new("ensure-no-proc", "version: 1\n");
+        let a = ensure_args(&[
+            "--dry-run",
+            "--config",
+            &good.path(),
+            "--min-free",
+            "1G",
+            "/tmp",
+        ])
+        .expect("parses");
+        let start = Start {
+            read_config: &read_config_without_proc,
+            startup: &|_| panic!("the host starts after the configuration is read"),
+        };
+        let report = ensure_with(&a, &start);
+        assert_eq!(report.status, Status::Error, "{}", report.to_json());
+        assert_eq!(report.exit_code(), 3);
+        assert_eq!(report.errors[0].cause, ErrorCause::Host);
+        assert!(
+            report.errors[0].message.contains("reopen through /proc"),
+            "{}",
+            report.to_json()
+        );
     }
 
     fn ensure_args(list: &[&str]) -> Result<EnsureArgs, String> {

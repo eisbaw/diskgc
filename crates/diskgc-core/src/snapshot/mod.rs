@@ -408,7 +408,20 @@ impl RunIndex {
         };
         let stats = self.state.index.stats();
         let units = stats.singles + stats.blocks;
-        write_held(host, units, held, guard, &bytes, &last_check, log);
+        // `ensure` writes only before a signal (`last_check`); a second
+        // one changes nothing for it.
+        write_held(
+            host,
+            units,
+            held,
+            guard,
+            &bytes,
+            WriteChecks {
+                last_check: &last_check,
+                cancel: &|_| false,
+            },
+            log,
+        );
     }
 
     /// The run that seeded this index ends without a snapshot, for `why`:
@@ -463,6 +476,10 @@ pub fn encode<H: Host>(host: &H, state: &TallyState, key: &FsKey) -> Result<Vec<
     format::check_limits(&snapshot)
         .map_err(|why| format!("every later run would refuse it: {why}"))?;
     let bytes = format::encode(&snapshot);
+    debug_assert!(
+        format::decode(&bytes).is_ok(),
+        "check_limits passed what the reader refuses"
+    );
     let size = u64::try_from(bytes.len()).expect("fits u64");
     if size > MAX_SNAPSHOT_BYTES {
         return Err(format!(
@@ -473,8 +490,8 @@ pub fn encode<H: Host>(host: &H, state: &TallyState, key: &FsKey) -> Result<Vec<
 }
 
 /// Writes `bytes` (an index of `units` units, [`encode`]d) as the snapshot under the held
-/// single-writer lock, unless the space [`Guard`] says no or `last_check`
-/// names a reason right before the write. Every skip or failure is one log
+/// single-writer lock, unless the space [`Guard`] says no or the caller's
+/// [`WriteChecks`] stop it. Every skip or failure is one log
 /// line; nothing else changes (docs/architecture.md, Snapshot). What the
 /// file takes is its size rounded up to whole blocks, and one more block
 /// for the new directory entry.
@@ -484,9 +501,10 @@ pub fn write_held<H: Host>(
     held: Held<'_, H::Fd>,
     guard: Guard,
     bytes: &[u8],
-    last_check: &dyn Fn(&H) -> Option<&'static str>,
+    checks: WriteChecks<'_, H>,
     log: &mut dyn FnMut(&str),
 ) {
+    let WriteChecks { last_check, cancel } = checks;
     let name = held.key.snapshot_name();
     let skipped = |why: &str| format!("index: snapshot {name} not written: {why}");
     let size = u64::try_from(bytes.len()).expect("fits u64");
@@ -511,16 +529,26 @@ pub fn write_held<H: Host>(
     if let Some(why) = last_check(host) {
         return log(&skipped(why));
     }
-    match host.state_write(held.locked, held.key, bytes) {
+    match host.state_write(held.locked, held.key, bytes, &|| cancel(host)) {
         Ok(StateWritten::Replaced) => log(&format!(
             "index: snapshot {name} written: {units} unit(s), {}",
             format_bytes(size)
         )),
         Ok(StateWritten::Cancelled) => log(&skipped(
-            "a second signal arrived before it was linked in; the old one is unchanged",
+            "a second signal arrived while it was written; it was not linked in, the old one \
+             is unchanged",
         )),
         Err(e) => log(&skipped(&e.to_string())),
     }
+}
+
+/// What a caller of [`write_held`] checks besides the space guard.
+pub struct WriteChecks<'a, H> {
+    /// A reason not to write, asked right before the write.
+    pub last_check: &'a dyn Fn(&H) -> Option<&'static str>,
+    /// Asked by the port during the write, before the link
+    /// ([`Host::state_write`]): only `watch`'s says so, on a second signal.
+    pub cancel: &'a dyn Fn(&H) -> bool,
 }
 
 /// `snapshot` if this run may use it (docs/architecture.md, Snapshot:

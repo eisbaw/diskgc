@@ -87,7 +87,7 @@ use crate::engine::{Checkouts, Reason, Rules, Skip};
 use crate::fs_kind::{self, Find};
 use crate::host::{
     Cause, CommandExit, CommandInvocation, CommandRun, Delete, Dev, Host, HostError, MonoTime,
-    MountEntry, Space, Timestamp,
+    MountEntry, SecondSignal, Space, Timestamp,
 };
 use crate::hostlock::{self, HeldLock, LockError, ReclaimLock};
 use crate::inuse::{Checker, REUSE_LIMIT};
@@ -820,6 +820,9 @@ struct Reclaim<'a, 'l, H: Delete> {
     /// port's monotonic clock): the time to the first deletion is
     /// measured from here (docs/architecture.md, The reclaim walk).
     run_started: MonoTime,
+    /// What a second signal does to a running child's grace: `watch`'s
+    /// policy or `ensure`'s ([`SecondSignal`]).
+    second_signal: SecondSignal,
 }
 
 /// After this many candidates in a row of one tier end `in_use_unknown`
@@ -1044,6 +1047,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             docker_info: Some(bound.info.clone()),
             output_prefix: format!("{}/{}", self.tier.name, self.tier.profile),
             deadline: self.deadline.unwrap_or(MonoTime(Duration::MAX)),
+            second_signal: self.second_signal,
         };
         let started = self.host.now();
         let invocation = self.host.run_command(&cwd.fd, &run);
@@ -1826,6 +1830,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                             output_prefix: format!("{}/{}", self.tier.name, self.tier.profile),
                         }],
                         deadline: self.deadline,
+                        second_signal: self.second_signal,
                     },
                     &mut |path| {
                         policy_skip(self.host, &self.tier.protections, &[], self.deadline, path)
@@ -2201,6 +2206,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                             mount: &self.measured.at.mount.mount_point,
                             sources: command_sources,
                             deadline: self.deadline,
+                            second_signal: self.second_signal,
                         },
                         &mut |selected, path| {
                             let source = &sources[contributors[selected].0];

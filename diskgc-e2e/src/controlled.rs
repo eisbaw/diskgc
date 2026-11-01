@@ -695,9 +695,10 @@ impl<H: Host> Host for Controlled<H> {
         lock: &diskgc_core::host::Locked<Self::Fd>,
         key: &diskgc_core::host::FsKey,
         bytes: &[u8],
+        cancel: &dyn Fn() -> bool,
     ) -> Result<diskgc_core::host::StateWritten, HostError> {
         self.before("state_write");
-        self.host.state_write(lock, key, bytes)
+        self.host.state_write(lock, key, bytes, cancel)
     }
 }
 
@@ -825,6 +826,7 @@ processes:
                 .now()
                 .checked_add(Duration::from_secs(1))
                 .expect("deadline"),
+            second_signal: diskgc_core::host::SecondSignal::WaitOutGrace,
         };
         assert!(matches!(
             host.run_command(&a.fd, &run),
@@ -844,7 +846,8 @@ processes:
         else {
             panic!("the state lock is free")
         };
-        host.state_write(&locked, &key, b"x").expect("state_write");
+        host.state_write(&locked, &key, b"x", &|| false)
+            .expect("state_write");
         assert!(host.state_read(&key, 8).expect("state_read").is_some());
     }
 

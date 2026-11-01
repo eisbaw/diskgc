@@ -873,6 +873,7 @@ pub(crate) mod tests {
             _: &crate::host::Locked<Self::Fd>,
             _: &crate::host::FsKey,
             _: &[u8],
+            _: &dyn Fn() -> bool,
         ) -> Result<crate::host::StateWritten, HostError> {
             unreachable!()
         }

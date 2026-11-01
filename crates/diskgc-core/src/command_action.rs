@@ -6,7 +6,7 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use crate::host::{CommandRun, Host, HostError, MonoTime};
+use crate::host::{CommandRun, Host, HostError, MonoTime, SecondSignal};
 
 /// The first executable and every additional tool a known `env` wrapper
 /// would invoke. Nothing here is a cached filesystem verdict: the deleting
@@ -202,6 +202,7 @@ pub struct Context<'a> {
     pub profile: &'a str,
     pub label: String,
     pub deadline: MonoTime,
+    pub second_signal: SecondSignal,
 }
 
 /// Build the exact child request once the candidate and current need are
@@ -242,6 +243,7 @@ pub fn request(ready: &Ready, argv: &[String], context: Context<'_>) -> CommandR
         ],
         output_prefix: context.label,
         deadline: context.deadline,
+        second_signal: context.second_signal,
     }
 }
 

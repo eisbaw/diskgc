@@ -20,8 +20,7 @@ use diskgc_core::watch::{self, Ended, Mode};
 use diskgc_linux::LinuxHost;
 
 use super::{
-    CATALOG, EXIT_OUTPUT_ERROR, StartupFailure, builtins, draw_seed, env_state_dir, read_config,
-    set, startup_in, text, unknown_flag,
+    CATALOG, EXIT_OUTPUT_ERROR, Start, builtins, draw_seed, env_state_dir, set, text, unknown_flag,
 };
 
 /// `--interval`'s default and bounds (docs/reference.md, Watch flags).
@@ -256,17 +255,12 @@ fn fail(
 /// step 1 of docs/reference.md, Watch start, so a bad configuration is
 /// exit 2 even where the kernel or `/proc` checks would fail.
 pub(super) fn watch(args: &WatchArgs, json: bool) -> ExitCode {
-    watch_with(args, json, &startup_in, &mut io::stdout())
+    watch_with(args, json, &Start::MACHINE, &mut io::stdout())
 }
 
-/// [`watch`] with its host startup and its stdout given (a test seam: the
-/// order of the start is what the tests hold).
-fn watch_with(
-    args: &WatchArgs,
-    json: bool,
-    startup_in: &dyn Fn(Option<PathBuf>) -> Result<LinuxHost, StartupFailure>,
-    out: &mut dyn Write,
-) -> ExitCode {
+/// [`watch`] with what it reads from the machine to start, and its
+/// stdout, given.
+fn watch_with(args: &WatchArgs, json: bool, start: &Start<'_>, out: &mut dyn Write) -> ExitCode {
     let path = args.selection.path.as_path();
     let mut fail =
         |status: Status, cause: ErrorCause, why: String| fail(path, status, cause, why, json, out);
@@ -281,9 +275,9 @@ fn watch_with(
             );
         }
     }
-    let config = match read_config(args.config.as_deref(), args.selection.allow_root) {
+    let config = match (start.read_config)(args.config.as_deref(), args.selection.allow_root) {
         Ok(config) => config,
-        Err(why) => return fail(Status::UsageError, ErrorCause::Config, why),
+        Err((cause, why)) => return fail(invocation::refusal_status(cause), cause, why),
     };
     let platform = Platform {
         catalog: CATALOG,
@@ -291,22 +285,21 @@ fn watch_with(
         builtins: &builtins,
     };
     let mut log_mut = log;
-    let loaded = match invocation::load(&args.selection, &config, &platform, &mut log_mut) {
+    let loaded = match invocation::load(args.selection.clone(), &config, &platform, &mut log_mut) {
         Ok(loaded) => loaded,
         Err((cause, why)) => return fail(invocation::refusal_status(cause), cause, why),
     };
     let state_dir = env_state_dir();
     // `'static`: the background tally's thread may outlive the loop if it
     // is blocked in the kernel at the end (it is then left to the exit).
-    let host: &'static LinuxHost = match startup_in(state_dir.clone()) {
+    let host: &'static LinuxHost = match (start.startup)(state_dir.clone()) {
         Ok(host) => Box::leak(Box::new(host)),
         Err(failure) => return fail(failure.status(), failure.cause(), failure.message()),
     };
     let started = match watch::start(
         host,
         &args.mode,
-        &args.selection,
-        &loaded,
+        loaded,
         &platform,
         state_dir.as_deref(),
         &mut log_mut,
@@ -378,12 +371,16 @@ mod tests {
         let started = std::cell::Cell::new(0);
         let broken = |_: Option<PathBuf>| {
             started.set(started.get() + 1);
-            Err(StartupFailure::Host(
+            Err(crate::StartupFailure::Host(
                 "open /proc: EACCES (a test)".to_owned(),
             ))
         };
         let mut out = Vec::new();
-        let code = watch_with(&w, true, &broken, &mut out);
+        let start = Start {
+            read_config: &crate::read_config,
+            startup: &broken,
+        };
+        let code = watch_with(&w, true, &start, &mut out);
         assert_eq!(code, ExitCode::from(2));
         assert_eq!(
             started.get(),
@@ -408,9 +405,28 @@ mod tests {
         ])
         .expect("parses");
         let mut out = Vec::new();
-        assert_eq!(watch_with(&w, true, &broken, &mut out), ExitCode::from(3));
+        assert_eq!(watch_with(&w, true, &start, &mut out), ExitCode::from(3));
         assert_eq!(started.get(), 1);
         let object: serde_json::Value = serde_json::from_slice(&out).expect("one JSON object");
+        assert_eq!(object["errors"][0]["cause"], "host", "{object}");
+    }
+
+    /// TASK-272 review (Codex 1): a valid configuration that cannot be
+    /// read because `/proc` is unavailable: exit 3 with the error object
+    /// (cause `host`), the host not started.
+    #[test]
+    fn watch_with_a_valid_config_and_no_proc_is_exit_3_host() {
+        let good = crate::tests::ConfigFixture::new("watch-no-proc", "version: 1\n");
+        let w = parse(&["--tally-only", "--config", &good.path(), "/tmp"]).expect("parses");
+        let start = Start {
+            read_config: &crate::tests::read_config_without_proc,
+            startup: &|_| panic!("the host starts after the configuration is read"),
+        };
+        let mut out = Vec::new();
+        assert_eq!(watch_with(&w, true, &start, &mut out), ExitCode::from(3));
+        let object: serde_json::Value = serde_json::from_slice(&out).expect("one JSON object");
+        assert_eq!(object["status"], "error", "{object}");
+        assert_eq!(object["exit_code"], 3, "{object}");
         assert_eq!(object["errors"][0]["cause"], "host", "{object}");
     }
 

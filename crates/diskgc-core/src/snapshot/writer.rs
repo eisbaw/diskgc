@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::{Guard, Held, encode, write_held};
+use super::{Guard, Held, WriteChecks, encode, write_held};
 use crate::host::{Dev, FsKey, Host, LockMode, Locked, TryLock, WaitLock};
 use crate::tally::TallyState;
 
@@ -143,10 +143,10 @@ impl<F: std::fmt::Debug> Writer<F> {
     }
 
     /// Writes what [`Self::encode`] made, under the held lock and the space
-    /// guard ([`write_held`]); the live index is not needed. Not after a
-    /// second signal ([`Host::second_signal`]: docs/reference.md, Watch
-    /// signals), checked right before the write and by the port before
-    /// the link.
+    /// guard ([`write_held`]); the live index is not needed. A second
+    /// signal ([`Host::second_signal`]: docs/reference.md, Watch signals)
+    /// arriving during the write cancels it in the port, before the link;
+    /// one before the stop's write is [`crate::watch::run`]'s to skip.
     pub fn write<H: Host<Fd = F>>(&self, host: &H, encoded: &Encoded, log: &mut dyn FnMut(&str)) {
         let Some((locked, dir_fs)) = &self.held else {
             unreachable!("encoded only under the lock")
@@ -162,9 +162,9 @@ impl<F: std::fmt::Debug> Writer<F> {
             held,
             self.guard,
             &encoded.bytes,
-            &|host| {
-                host.second_signal()
-                    .then_some("a second signal arrived: watch stops at once")
+            WriteChecks {
+                last_check: &|_| None,
+                cancel: &|host| host.second_signal(),
             },
             log,
         );

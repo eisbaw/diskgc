@@ -953,9 +953,13 @@ is accepted until measured otherwise.
   and links it in as `index-<fs>.new` with `linkat`, never `O_TRUNC`, and
   renames only onto `index-<fs>`; the lock must be that key's lock file
   (same object) held exclusively, which `ModelHost` checks (a test fails
-  otherwise). After a second signal to `watch` (`second_signal`, counted
-  by `watch`'s handlers only) it does not link the file in and reports
-  the write cancelled ([reference.md](reference.md#watch-signals)). It is not gated (it is diskgc's cache, not user data, and
+  otherwise). When its caller's `cancel` says so (`watch`'s, after a
+  second signal, [reference.md](reference.md#watch-signals); `ensure`'s
+  never) it does not link the file in and reports the write cancelled.
+  The port counts signals the same for every command
+  (`second_signal`); what a second one does is core's policy, passed in:
+  this `cancel`, and a command's `second_signal` (leave a child running
+  or wait out its grace). It is not gated (it is diskgc's cache, not user data, and
   `watch --tally-only` must work anywhere). The single-writer lock file
   is a second typed operation beside it, `state_lock`: `LinuxHost` opens
   (creating if absent, with the state directory, mode 0700)

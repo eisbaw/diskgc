@@ -203,16 +203,17 @@ fn start(
     state_dir: Option<&Path>,
     log: &mut dyn FnMut(&str),
 ) -> Result<watch::Started<<ModelHost as Host>::Fd>, watch::Refused> {
-    let loaded = invocation::load(selection, config, platform, log).map_err(|(cause, why)| {
-        let status = invocation::refusal_status(cause);
-        let mut report = Report::new(status, Some(&selection.path), false);
-        report.errors.push(ErrorEntry::run(cause, why));
-        watch::Refused {
-            exit_code: report.exit_code(),
-            report: Some(Box::new(report)),
-        }
-    })?;
-    watch::start(host, mode, selection, &loaded, platform, state_dir, log)
+    let loaded =
+        invocation::load(selection.clone(), config, platform, log).map_err(|(cause, why)| {
+            let status = invocation::refusal_status(cause);
+            let mut report = Report::new(status, Some(&selection.path), false);
+            report.errors.push(ErrorEntry::run(cause, why));
+            watch::Refused {
+                exit_code: report.exit_code(),
+                report: Some(Box::new(report)),
+            }
+        })?;
+    watch::start(host, mode, loaded, platform, state_dir, log)
 }
 
 fn deletions(host: &ModelHost) -> usize {
@@ -890,7 +891,7 @@ fn a_second_signal_during_the_stops_snapshot_write_leaves_the_old_one() {
         "nothing linked in"
     );
     assert!(
-        run.has("not written: a second signal arrived before it was linked in"),
+        run.has("not written: a second signal arrived while it was written; it was not linked in"),
         "{:?}",
         run.lines
     );
@@ -917,7 +918,7 @@ fn a_second_signal_before_the_stops_write_skips_it() {
         "the 5-minute write only"
     );
     assert!(
-        run.has("not written: a second signal arrived: watch stops at once"),
+        run.has("not written: a second signal arrived before the stop's write"),
         "{:?}",
         run.lines
     );

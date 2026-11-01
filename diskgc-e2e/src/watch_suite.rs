@@ -483,6 +483,17 @@ pub fn watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock(ctx: &C
     let record: serde_json::Value =
         serde_json::from_str(records[0]).map_err(|e| format!("record {records:?}: {e}"))?;
     ensure!(record["status"] == "interrupted", "record: {record}");
+    // The action's error says the child is still running (TASK-257
+    // review: never an abandoned child the record does not mention).
+    let errors = record["errors"].as_array().cloned().unwrap_or_default();
+    ensure!(
+        errors.iter().any(|e| {
+            e["message"].as_str().is_some_and(|m| {
+                m.contains("still running: a second signal during its SIGTERM grace")
+            })
+        }),
+        "no error says the child was left running: {record}"
+    );
     ensure!(kept.exists(), "the cleaner's second file is gone");
     verdict.assert_clean()
 }

@@ -43,9 +43,9 @@ use diskgc_core::host::{
     DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, Host, HostError,
     LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MakeUserLock, MapEntry,
     MonoTime, MountEntry, OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace, Pressure, ProcError,
-    ProcFd, ProcLink, ProcStatus, ProcView, Space, Stat, StateFile, StateLock, StateWritten,
-    Timestamp, TryLock, UidMap, Unlink, UserLock, UserLockError, WaitLock, is_single_name,
-    read_proc_view,
+    ProcFd, ProcLink, ProcStatus, ProcView, SecondSignal, Space, Stat, StateFile, StateLock,
+    StateWritten, Timestamp, TryLock, UidMap, Unlink, UserLock, UserLockError, WaitLock,
+    is_single_name, read_proc_view,
 };
 use diskgc_core::report::Signal;
 use rustix::event::PollFlags;
@@ -73,38 +73,31 @@ const PROC: &str = "/proc";
 const LOCK_POLL_FIRST: Duration = Duration::from_millis(10);
 const LOCK_POLL_MAX: Duration = Duration::from_millis(100);
 
-/// A signal handler: [`note_interrupt`] or [`note_watch_signal`].
-type SignalHandler = extern "C" fn(i32);
-
 /// A signal handler may only record the signal. The executor does all I/O,
 /// reporting and cleanup after it observes this lock-free flag.
 static INTERRUPTED: AtomicI32 = AtomicI32::new(0);
 
-/// How many SIGINT, SIGTERM and SIGHUP `watch`'s handlers have seen: from
-/// the second on, `watch` stops at once ([`Host::second_signal`]).
+/// How many SIGINT, SIGTERM and SIGHUP the handlers have seen
+/// ([`Host::second_signal`]). What a second one does is the caller's
+/// policy (core: `watch` acts on it, `ensure` does not).
 static SIGNALS: AtomicU32 = AtomicU32::new(0);
 
-/// `ensure`'s handler: the first signal, kept.
+/// The handler: the first signal, kept, and the count (two lock-free
+/// atomic operations).
 extern "C" fn note_interrupt(signal: i32) {
     let _ = INTERRUPTED.compare_exchange(0, signal, Ordering::Relaxed, Ordering::Relaxed);
-}
-
-/// `watch`'s handler: the first signal, kept, and the count (two lock-free
-/// atomic operations).
-extern "C" fn note_watch_signal(signal: i32) {
-    note_interrupt(signal);
     SIGNALS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// The sole ungated signal-disposition wrapper. It changes only this
 /// process's SIGINT/SIGTERM handlers, never a filesystem or child process.
 /// The source scan counts every raw libc token here for explicit review.
-fn install_interrupt_handlers_ungated(handler: SignalHandler) -> Result<(), HostError> {
+fn install_interrupt_handlers_ungated() -> Result<(), HostError> {
     // SAFETY: sigaction writes only our process's signal dispositions;
     // the handler itself performs only lock-free atomic operations.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = handler as *const () as usize;
+        action.sa_sigaction = note_interrupt as *const () as usize;
         if libc::sigemptyset(&mut action.sa_mask) != 0 {
             return Err(HostError::invalid(
                 "sigemptyset",
@@ -149,7 +142,7 @@ fn install_hangup_handler_ungated() -> Result<bool, HostError> {
             return Ok(false);
         }
         let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = note_watch_signal as *const () as usize;
+        action.sa_sigaction = note_interrupt as *const () as usize;
         if libc::sigemptyset(&mut action.sa_mask) != 0 {
             return Err(failed("sigemptyset"));
         }
@@ -213,16 +206,14 @@ impl LinuxHost {
     /// Install the cooperative handlers before an `ensure` starts. The
     /// binary runs one command then exits, so the first signal is retained.
     pub fn install_interrupt_handlers() -> Result<(), HostError> {
-        install_interrupt_handlers_ungated(note_interrupt)
+        install_interrupt_handlers_ungated()
     }
 
     /// `watch`'s handlers: SIGINT and SIGTERM as for `ensure`, and SIGHUP,
     /// which stops `watch` the same way, unless it was ignored at start
-    /// (`nohup`: then it stays ignored, and this returns `false`). They
-    /// also count the signals, so a second one stops `watch` at once
-    /// ([`Host::second_signal`]).
+    /// (`nohup`: then it stays ignored, and this returns `false`).
     pub fn install_watch_handlers() -> Result<bool, HostError> {
-        install_interrupt_handlers_ungated(note_watch_signal)?;
+        install_interrupt_handlers_ungated()?;
         install_hangup_handler_ungated()
     }
 
@@ -339,7 +330,7 @@ impl LinuxHost {
     /// (see [`read_config_file`]), so a FIFO or a device at the path is
     /// refused without being opened. Missing: `ENOENT` (or `ENOTDIR`), which
     /// the lookup treats as "not there".
-    pub fn read_config_file(&self, path: &Path, limit: usize) -> Result<Vec<u8>, HostError> {
+    pub fn read_config_file(&self, path: &Path, limit: usize) -> Result<Vec<u8>, ConfigReadError> {
         read_config_file(path, limit)
     }
 }
@@ -374,71 +365,127 @@ fn open_procfs() -> Result<OwnedFd, HostError> {
 /// uses this in Nix build sandboxes where process inspection and a minimum
 /// kernel are irrelevant. The O_PATH/fstat/reopen sequence keeps FIFO and
 /// device files from being opened while still following packaged symlinks.
-pub fn read_config_file(path: &Path, limit: usize) -> Result<Vec<u8>, HostError> {
-    read_config_file_policy(path, limit, false)
+pub fn read_config_file(path: &Path, limit: usize) -> Result<Vec<u8>, ConfigReadError> {
+    read_config_file_policy(path, limit, false, Path::new(PROC))
 }
 
 /// Read a policy for privileged use. The original lookup path and every
 /// symlink target must be protected by root-owned, non-writable ancestors.
 /// The file is held by fd while it is checked and read.
-pub fn read_root_config_file(path: &Path, limit: usize) -> Result<Vec<u8>, HostError> {
-    read_config_file_policy(path, limit, true)
+pub fn read_root_config_file(path: &Path, limit: usize) -> Result<Vec<u8>, ConfigReadError> {
+    read_config_file_policy(path, limit, true, Path::new(PROC))
 }
 
+/// Why a configuration file was not read ([`read_config_file`]): the
+/// file's (the operator fixes it; `ensure` and `watch` exit 2, cause
+/// `config`), or the host's, while reading a file that may be fine (exit
+/// 3, cause `host`: TASK-272 review, Codex 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigReadError {
+    /// Missing, not a regular file, too large, refused by its permissions
+    /// or (root) its ancestors' modes, changed while it was checked.
+    File(HostError),
+    /// `/proc` (through which the checked file is reopened) unavailable,
+    /// an I/O error, diskgc out of descriptors or memory.
+    Host(HostError),
+}
+
+impl ConfigReadError {
+    pub fn error(&self) -> &HostError {
+        match self {
+            Self::File(e) | Self::Host(e) => e,
+        }
+    }
+
+    /// An error of a step on the file: the host's for the errnos that say
+    /// nothing about the file (`EIO`, out of descriptors or memory), the
+    /// file's otherwise.
+    fn of_step(e: HostError) -> Self {
+        let host = e.is_out_of_descriptors()
+            || [Errno::EIO, Errno::ENOMEM]
+                .into_iter()
+                .any(|errno| e.is(errno));
+        if host { Self::Host(e) } else { Self::File(e) }
+    }
+}
+
+impl fmt::Display for ConfigReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error().fmt(f)
+    }
+}
+
+/// [`read_config_file`] with `/proc` at `proc` (a test points it at a
+/// directory that is not there).
 fn read_config_file_policy(
     path: &Path,
     limit: usize,
     strict_modes: bool,
-) -> Result<Vec<u8>, HostError> {
+    proc: &Path,
+) -> Result<Vec<u8>, ConfigReadError> {
+    let file_err = ConfigReadError::File;
+    let step = ConfigReadError::of_step;
     let subject = path.display().to_string();
     if !path.is_absolute() {
-        return Err(HostError::invalid(
+        return Err(file_err(HostError::invalid(
             "open",
             &subject,
             "a configuration file path must be absolute",
-        ));
+        )));
     }
     let fd = rustix::fs::open(path, OFlags::PATH | OFlags::CLOEXEC, Mode::empty())
-        .map_err(|e| HostError::errno("open", &subject, errno_of(e)))?;
-    let kind =
-        rustix::fs::fstat(&fd).map_err(|e| HostError::errno("fstat", &subject, errno_of(e)))?;
+        .map_err(|e| step(HostError::errno("open", &subject, errno_of(e))))?;
+    let kind = rustix::fs::fstat(&fd)
+        .map_err(|e| step(HostError::errno("fstat", &subject, errno_of(e))))?;
     if FileType::from_mode(kind.st_mode) != FileType::Regular {
-        return Err(HostError::invalid(
+        return Err(file_err(HostError::invalid(
             "reopen",
             &subject,
             "not a regular file (only a regular file is read as a configuration file)",
-        ));
+        )));
     }
     if strict_modes {
-        check_root_config_modes(path, kind.st_dev, kind.st_ino)?;
+        check_root_config_modes(path, kind.st_dev, kind.st_ino).map_err(step)?;
     }
-    let fd_path = format!("{PROC}/self/fd/{}", fd.as_raw_fd());
+    // The checked file is reopened for reading through `/proc`, so a FIFO
+    // or a device put at the path meanwhile is never opened. A failure is
+    // the host's when `/proc`'s `self/fd` cannot be reached (no `/proc`);
+    // otherwise as for any step (`EACCES`: the file's mode refuses diskgc
+    // reading it).
+    let fd_path = proc.join(format!("self/fd/{}", fd.as_raw_fd()));
     let file = rustix::fs::open(
-        &*fd_path,
+        &fd_path,
         OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
         Mode::empty(),
     )
-    .map_err(|e| HostError::errno("open", &subject, errno_of(e)))?;
-    let opened =
-        rustix::fs::fstat(&file).map_err(|e| HostError::errno("fstat", &subject, errno_of(e)))?;
+    .map_err(|e| {
+        let e = HostError::errno("reopen through /proc", &subject, errno_of(e));
+        if rustix::fs::stat(proc.join("self/fd")).is_err() {
+            ConfigReadError::Host(e)
+        } else {
+            step(e)
+        }
+    })?;
+    let opened = rustix::fs::fstat(&file)
+        .map_err(|e| step(HostError::errno("fstat", &subject, errno_of(e))))?;
     if opened.st_dev != kind.st_dev || opened.st_ino != kind.st_ino {
-        return Err(HostError::invalid(
+        return Err(file_err(HostError::invalid(
             "reopen",
             &subject,
             "the configuration file changed between checking its type and reading it",
-        ));
+        )));
     }
     let mut content = Vec::new();
     std::fs::File::from(file)
         .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
         .read_to_end(&mut content)
-        .map_err(|e| io_error("read", &subject, &e))?;
+        .map_err(|e| step(io_error("read", &subject, &e)))?;
     if content.len() > limit {
-        return Err(HostError::invalid(
+        return Err(file_err(HostError::invalid(
             "read",
             &subject,
             format!("larger than {limit} bytes: not read as a configuration file"),
-        ));
+        )));
     }
     Ok(content)
 }
@@ -2567,6 +2614,7 @@ impl Host for LinuxHost {
         lock: &Locked<LinuxFd>,
         key: &FsKey,
         bytes: &[u8],
+        cancel: &dyn Fn() -> bool,
     ) -> Result<StateWritten, HostError> {
         if lock.mode() != LockMode::Exclusive {
             return Err(HostError::invalid(
@@ -2581,7 +2629,7 @@ impl Host for LinuxHost {
             lock.fd().as_fd(),
             bytes,
             self.proc.as_fd(),
-            &|| self.second_signal(),
+            cancel,
         )
     }
 }
@@ -3359,20 +3407,22 @@ fn run_command_permitted(
     };
     let mut leader_reaped = false;
     let result = drive_command_output(host, run, &subject, pid, &mut child, &mut leader_reaped);
-    if result.is_err() && !leader_reaped {
+    if !leader_reaped && let Err(failure) = &result {
         // An output or wait failure must not leave a trusted cleaner
         // running after the caller has been told the action failed. A signal
         // or deadline uses the same TERM grace even if output setup failed.
-        // A second signal (watch) ends the grace and leaves the group
-        // running, never killed unawaited ([`left_running`]).
-        let mut left = host.second_signal();
-        if !left && (host.interrupted().is_some() || host.now() >= run.deadline) {
+        // Only within that grace, after TERM was sent, may a second signal
+        // under `watch`'s policy end it: the group is then left running,
+        // never killed unawaited, and the error says so.
+        if host.interrupted().is_some() || host.now() >= run.deadline {
             let _ = signal_command_group(pid, rustix::process::Signal::TERM, &subject);
             let until = host.now().checked_add(COMMAND_TERMINATION_GRACE);
             while until.is_some_and(|until| host.now() < until) {
-                if host.second_signal() {
-                    left = true;
-                    break;
+                if leaves_running(host, run) {
+                    return CommandInvocation::Started(Err(left_running(
+                        &subject,
+                        &format!("after {failure}"),
+                    )));
                 }
                 // An exited leader does not prove its descendants exited.
                 // Keep it waitable to pin the process-group ID until KILL.
@@ -3382,24 +3432,34 @@ fn run_command_permitted(
                 host.sleep(Duration::from_millis(20).min(remaining));
             }
         }
-        if !left {
-            let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
-            let _ = child.wait();
-        }
+        let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
+        let _ = child.wait();
     }
     CommandInvocation::Started(result)
 }
 
-/// A command `watch` leaves running after a second signal during its
-/// SIGTERM grace (docs/reference.md, Watch signals): neither killed nor
-/// awaited, so it keeps the host lock it inherited until it exits, and no
-/// other reclaim starts beside it.
-fn left_running(subject: &str) -> HostError {
+/// Whether a running child's SIGTERM grace ends now, the child left
+/// running: a second signal arrived and the caller's policy is
+/// [`SecondSignal::LeaveRunning`] (`watch`: docs/reference.md, Watch
+/// signals). Asked only within the grace, after TERM was sent.
+fn leaves_running(host: &LinuxHost, run: &CommandRun) -> bool {
+    run.second_signal == SecondSignal::LeaveRunning && host.second_signal()
+}
+
+/// The error of a command left running by [`leaves_running`]: neither
+/// killed nor awaited, it keeps the host lock it inherited until it exits
+/// (not the candidate's own lock, which diskgc holds and never passes on,
+/// as when diskgc is killed), so no other reclaim starts beside it.
+/// `context` says what the grace followed.
+fn left_running(subject: &str, context: &str) -> HostError {
     HostError::invalid(
         "run command",
         subject,
-        "a second signal during its SIGTERM grace: left running in its process group with \
-         the host lock it inherited, not awaited",
+        format!(
+            "still running: a second signal during its SIGTERM grace ({context}) left it in its \
+             process group, not killed and not awaited; it holds the host lock it inherited \
+             until it exits"
+        ),
     )
 }
 
@@ -3441,6 +3501,7 @@ fn drive_command_output(
         ($grace:expr) => {
             return terminate_command_group(
                 host,
+                run,
                 subject,
                 pid,
                 child,
@@ -3531,6 +3592,7 @@ fn drive_command_output(
 #[allow(clippy::too_many_arguments)]
 fn terminate_command_group(
     host: &LinuxHost,
+    run: &CommandRun,
     subject: &str,
     pid: rustix::process::Pid,
     child: &mut process::Child,
@@ -3553,8 +3615,11 @@ fn terminate_command_group(
     };
     let mut draining = true;
     while host.now() < grace {
-        if host.second_signal() {
-            return Err(left_running(subject));
+        if leaves_running(host, run) {
+            // Its output is not drained further: the pipes close with
+            // diskgc (documented: a child that writes after it may end on
+            // SIGPIPE).
+            return Err(left_running(subject, "after SIGTERM to its group"));
         }
         // The leader remains waitable so its PID pins the group until KILL.
         if draining
@@ -4053,12 +4118,10 @@ mod tests {
             read_config_file(&link, 1024).expect("read link"),
             b"version: 1\n"
         );
-        assert!(
-            read_config_file(&config, 2)
-                .unwrap_err()
-                .to_string()
-                .contains("larger than")
-        );
+        assert!(matches!(
+            read_config_file(&config, 2),
+            Err(ConfigReadError::File(e)) if e.to_string().contains("larger than")
+        ));
         let fifo = tmp.0.join("fifo");
         rustix::fs::mknodat(
             CWD,
@@ -4068,10 +4131,52 @@ mod tests {
             0,
         )
         .expect("mkfifo");
+        assert!(matches!(
+            read_config_file(&fifo, 1024),
+            Err(ConfigReadError::File(e)) if e.cause == Cause::Invalid
+        ));
+        assert!(matches!(
+            read_config_file(&tmp.0.join("absent.yaml"), 1024),
+            Err(ConfigReadError::File(e)) if e.is(Errno::ENOENT)
+        ));
+    }
+
+    /// TASK-272 review (Codex 1): a valid configuration whose reopen
+    /// through `/proc` fails (no `/proc` here) is the host's failure, not
+    /// the file's: `ensure` and `watch` exit 3, not 2.
+    #[test]
+    fn a_config_read_that_fails_on_proc_is_the_hosts() {
+        let tmp = TempDir::new();
+        let config = tmp.0.join("config.yaml");
+        std::fs::write(&config, b"version: 1\n").expect("write");
+        let no_proc = tmp.0.join("no-proc");
         assert_eq!(
-            read_config_file(&fifo, 1024).unwrap_err().cause,
-            Cause::Invalid
+            read_config_file_policy(&config, 1024, false, &tmp.0).ok(),
+            None,
+            "a directory that is not procfs has no self/fd"
         );
+        match read_config_file_policy(&config, 1024, false, &no_proc) {
+            Err(ConfigReadError::Host(e)) => {
+                assert!(e.is(Errno::ENOENT), "{e}");
+                assert!(e.to_string().contains("reopen through /proc"), "{e}");
+            }
+            other => panic!("not the host's: {other:?}"),
+        }
+        assert_eq!(
+            read_config_file_policy(&config, 1024, false, Path::new(PROC)).expect("read"),
+            b"version: 1\n"
+        );
+        // With `/proc` there, a file diskgc may not read is the file's.
+        if !rustix::process::geteuid().is_root() {
+            let locked = tmp.0.join("locked.yaml");
+            std::fs::write(&locked, b"version: 1\n").expect("write");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+                .expect("chmod");
+            assert!(matches!(
+                read_config_file_policy(&locked, 1024, false, Path::new(PROC)),
+                Err(ConfigReadError::File(e)) if e.is(Errno::EACCES)
+            ));
+        }
     }
 
     /// Set in the environment of [`Holder`] processes: the mode of
@@ -6051,7 +6156,15 @@ mod tests {
             }
             for t in file.tokens.iter().filter(|t| t.word == "PROC") {
                 let defined = t.previous.as_deref() == Some("const");
-                if !defined && !matches!(file.enclosing_fn(t.pos), Some("open_procfs" | "shown")) {
+                // The configuration reader runs before any host exists
+                // (`ensure` and `watch` read the configuration first), so it
+                // reopens through `/proc` by path; its failure there is the
+                // host's ([`ConfigReadError::Host`]).
+                let exempt = matches!(
+                    file.enclosing_fn(t.pos),
+                    Some("open_procfs" | "shown" | "read_config_file" | "read_root_config_file")
+                );
+                if !defined && !exempt {
                     found.push(file.at(t.pos));
                 }
             }
@@ -6646,9 +6759,10 @@ mod tests {
             minor: 42,
         });
         let locked = exclusive(&host, &key);
-        host.state_write(&locked, &key, b"first snapshot")
+        host.state_write(&locked, &key, b"first snapshot", &|| false)
             .expect("write");
-        host.state_write(&locked, &key, b"second").expect("rewrite");
+        host.state_write(&locked, &key, b"second", &|| false)
+            .expect("rewrite");
         drop(locked);
         let file = host
             .state_read(&key, 1 << 20)
@@ -6678,13 +6792,88 @@ mod tests {
         let locked = exclusive(&host, &key);
         let state = tmp.0.join("state/diskgc");
         std::fs::write(state.join("index-dev-0-42.new"), b"left by a crash").expect("plant");
-        host.state_write(&locked, &key, b"fresh").expect("write");
+        host.state_write(&locked, &key, b"fresh", &|| false)
+            .expect("write");
         let file = host
             .state_read(&key, 1 << 20)
             .expect("read")
             .expect("a file");
         assert_eq!(file.bytes.as_deref(), Some(&b"fresh"[..]));
         assert_eq!(names_in(&state), ["index-dev-0-42", "index-dev-0-42.lock"]);
+    }
+
+    /// A `cancel` that says so at its `nth` question (from 1), and how
+    /// often it was asked.
+    fn cancel_at(
+        nth: usize,
+    ) -> (
+        std::cell::Cell<usize>,
+        impl Fn(&std::cell::Cell<usize>) -> bool,
+    ) {
+        (
+            std::cell::Cell::new(0),
+            move |asked: &std::cell::Cell<usize>| {
+                asked.set(asked.get() + 1);
+                asked.get() == nth
+            },
+        )
+    }
+
+    /// TASK-257 review (mped S4, Codex 3): a cancelled write never names
+    /// its file. Asked at the first chunk, before the link, and on a
+    /// crashed writer's `.new` before its promotion and before the link
+    /// after it: each leaves the old snapshot (and that `.new`) as it was.
+    #[test]
+    fn a_cancelled_state_write_leaves_the_old_snapshot_and_names_nothing() {
+        let key = FsKey::dev(Dev {
+            major: 0,
+            minor: 42,
+        });
+        // Without a leftover `.new`: asked at the chunk (1), the link (2).
+        for nth in [1, 2] {
+            let tmp = TempDir::new();
+            let host = state_host(&tmp.0);
+            let locked = exclusive(&host, &key);
+            host.state_write(&locked, &key, b"old", &|| false)
+                .expect("write");
+            let (asked, cancel) = cancel_at(nth);
+            let written = host
+                .state_write(&locked, &key, b"new snapshot", &|| cancel(&asked))
+                .expect("write");
+            assert_eq!(written, StateWritten::Cancelled, "asked {nth}");
+            assert_eq!(asked.get(), nth);
+            let state = tmp.0.join("state/diskgc");
+            assert_eq!(names_in(&state), ["index-dev-0-42", "index-dev-0-42.lock"]);
+            assert_eq!(
+                std::fs::read(state.join("index-dev-0-42")).expect("read"),
+                b"old"
+            );
+        }
+        // With one: asked before promoting it (3) and before the link
+        // after it (4). At 3 nothing moved; at 4 the leftover was promoted
+        // (a complete file of the crashed writer, as before), ours not.
+        for (nth, snapshot) in [(3, &b"old"[..]), (4, &b"left by a crash"[..])] {
+            let tmp = TempDir::new();
+            let host = state_host(&tmp.0);
+            let locked = exclusive(&host, &key);
+            host.state_write(&locked, &key, b"old", &|| false)
+                .expect("write");
+            let state = tmp.0.join("state/diskgc");
+            std::fs::write(state.join("index-dev-0-42.new"), b"left by a crash").expect("plant");
+            let (asked, cancel) = cancel_at(nth);
+            let written = host
+                .state_write(&locked, &key, b"new snapshot", &|| cancel(&asked))
+                .expect("write");
+            assert_eq!(written, StateWritten::Cancelled, "asked {nth}");
+            assert_eq!(asked.get(), nth);
+            assert_eq!(
+                std::fs::read(state.join("index-dev-0-42")).expect("read"),
+                snapshot,
+                "asked {nth}"
+            );
+            let left = state.join("index-dev-0-42.new");
+            assert_eq!(left.exists(), nth == 3, "asked {nth}");
+        }
     }
 
     #[test]
@@ -6722,7 +6911,7 @@ mod tests {
         let locked = exclusive(&host, &other);
         drop(host.state_lock(&key).expect("its own lock file"));
         let refused = host
-            .state_write(&locked, &key, b"x")
+            .state_write(&locked, &key, b"x", &|| false)
             .expect_err("another key's lock");
         assert!(
             refused.to_string().contains("not this snapshot's"),

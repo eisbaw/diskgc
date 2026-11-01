@@ -279,12 +279,15 @@ pub fn tally_thread<H: Host + Sync>(
 
 /// The background tally's thread, running ([`TallyThread::spawn`]).
 /// Dropping it, also while a panic unwinds the watcher's loop, stops the
-/// tally and waits for its thread at most [`JOIN_WAIT`]; one still blocked
-/// in the kernel then is detached and ends with the process (it only
-/// reads).
+/// tally and waits for its thread at most [`JOIN_WAIT`] (not at all after
+/// a second signal: `watch` then stops at once, docs/reference.md, Watch
+/// signals); one still running then is detached and ends with the process
+/// (it only reads).
 pub struct TallyThread {
     shared: Arc<Shared>,
     handle: Option<std::thread::JoinHandle<()>>,
+    /// Whether a second signal arrived ([`Host::second_signal`]).
+    second_signal: Box<dyn Fn() -> bool>,
 }
 
 impl TallyThread {
@@ -303,6 +306,7 @@ impl TallyThread {
         Self {
             shared,
             handle: Some(handle),
+            second_signal: Box::new(move || host.second_signal()),
         }
     }
 
@@ -318,7 +322,12 @@ impl Drop for TallyThread {
         let Some(handle) = self.handle.take() else {
             return;
         };
-        let deadline = std::time::Instant::now() + JOIN_WAIT;
+        let wait = if (self.second_signal)() {
+            Duration::ZERO
+        } else {
+            JOIN_WAIT
+        };
+        let deadline = std::time::Instant::now() + wait;
         while !handle.is_finished() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }

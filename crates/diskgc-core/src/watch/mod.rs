@@ -42,7 +42,7 @@ use crate::executor::{
 };
 use crate::host::{Delete, Dev, Host, MonoTime, Timestamp};
 use crate::hostlock::{self, LockError, Readiness, ReclaimLock};
-use crate::invocation::{Loaded, Platform, Prepared, Selection, prepare};
+use crate::invocation::{Loaded, Platform, Prepared, prepare};
 use crate::report::json::Json;
 use crate::report::{ErrorCause, ErrorEntry, Report, Signal, Status};
 use crate::snapshot::writer::{StartLock, Writer};
@@ -215,20 +215,20 @@ pub struct Started<F> {
 pub fn start<H: Delete>(
     host: &H,
     mode: &Mode,
-    selection: &Selection,
-    loaded: &Loaded,
+    loaded: Loaded,
     platform: &Platform<'_>,
     state_dir: Option<&Path>,
     log: &mut dyn FnMut(&str),
 ) -> Result<Started<H::Fd>, Refused> {
-    let path = selection.path.as_path();
+    let path_buf = loaded.selection().path.clone();
+    let path = path_buf.as_path();
     let refuse = |(cause, why): (ErrorCause, String)| {
         Refused::with(crate::invocation::refusal_status(cause), cause, path, why)
     };
     // 1 (the configuration and --select) is `load`'s and 2 (kernel,
     // /proc) the host's startup, both before this. 3: privileges, and what
     // depends on the user.
-    let prepared = prepare(host, selection, loaded, platform).map_err(refuse)?;
+    let prepared = prepare(host, loaded, platform).map_err(refuse)?;
     let mut goal = match mode {
         Mode::Reclaim {
             min_free,
@@ -358,9 +358,7 @@ pub fn start<H: Delete>(
         }
     }
     // 6. Supplied roots.
-    prepared
-        .refuse_missing_roots(host, selection)
-        .map_err(refuse)?;
+    prepared.refuse_missing_roots(host).map_err(refuse)?;
     let (tiers, timeouts) = prepared.tiers();
     if let Some(goal) = &goal {
         for (tier, own) in tiers.iter().zip(&timeouts) {
@@ -726,7 +724,8 @@ pub fn run<H: Host, L: LiveIndex>(
     // ([`Writer::write`]).
     if host.second_signal() {
         log(&format!(
-            "index: snapshot {} not written: a second signal arrived: watch stops at once",
+            "index: snapshot {} not written: a second signal arrived before the stop's write; \
+             watch stops at once",
             writer.key().snapshot_name()
         ));
     } else {

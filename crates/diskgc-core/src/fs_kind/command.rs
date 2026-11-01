@@ -14,6 +14,7 @@ use crate::command_action::{self, Ready};
 use crate::engine::{Checkouts, Identity, Reason, Skip, checkout_metadata_below};
 use crate::host::{
     Base, Cause, CommandExit, CommandInvocation, Delete, FileType, HostError, MonoTime,
+    SecondSignal,
 };
 use crate::inuse::{CandidateLock, Checker, FreshAttempts, lock_candidate, locked_is_walked};
 use crate::outcome::{ReclaimEnd, Stop};
@@ -45,6 +46,8 @@ pub struct CommandSpec<'a> {
     pub mount: &'a Path,
     pub sources: Vec<CommandSource<'a>>,
     pub deadline: Option<MonoTime>,
+    /// The caller's second-signal policy for the child's grace.
+    pub second_signal: SecondSignal,
 }
 
 struct Admitted<'a, F> {
@@ -70,6 +73,7 @@ pub fn run_command<H: Delete>(
     profile: &str,
     output_prefix: String,
     deadline: Option<MonoTime>,
+    second_signal: SecondSignal,
 ) -> CommandResult {
     run_command_checked(
         host,
@@ -87,6 +91,7 @@ pub fn run_command<H: Delete>(
                 output_prefix,
             }],
             deadline,
+            second_signal,
         },
         &mut |_| Ok(None),
     )
@@ -156,6 +161,7 @@ fn protocol<H: Delete>(
         mount,
         sources,
         deadline,
+        second_signal,
     } = command;
     let found = alternatives[0].found;
     let path = &found.path;
@@ -266,6 +272,7 @@ fn protocol<H: Delete>(
                 profile: sources[index].profile,
                 label: sources[index].output_prefix.clone(),
                 deadline: deadline.unwrap_or(MonoTime(Duration::MAX)),
+                second_signal,
             },
         );
         // The clear verdict is valid only briefly. Build the source-specific

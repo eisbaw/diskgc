@@ -305,14 +305,20 @@ pub struct Platform<'a> {
 /// static check for the user, a supplied root missing) is exit 2, or 3 for
 /// a host read, and deletes nothing ([`refused`]). `log` receives the
 /// diagnostics (`error: ...`), `progress` the executor's progress lines.
+/// `loaded` is [`load`] of `options.selection()`; `options` gives the goal.
 pub fn ensure<H: Delete>(
     host: &H,
     options: &EnsureOptions,
-    loaded: &Loaded,
+    loaded: Loaded,
     platform: &Platform<'_>,
     log: &mut dyn FnMut(&str),
     progress: &mut dyn FnMut(&str),
 ) -> Report {
+    debug_assert_eq!(
+        loaded.selection(),
+        &options.selection(),
+        "loaded from these options"
+    );
     match run(host, options, loaded, platform, progress) {
         Ok(report) => report,
         Err((cause, why)) => refused(options, cause, why, log),
@@ -349,13 +355,12 @@ pub fn refusal_status(cause: ErrorCause) -> Status {
 fn run<H: Delete>(
     host: &H,
     options: &EnsureOptions,
-    loaded: &Loaded,
+    loaded: Loaded,
     platform: &Platform<'_>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<Report, (ErrorCause, String)> {
-    let selection = options.selection();
-    let prepared = prepare(host, &selection, loaded, platform)?;
-    prepared.refuse_missing_roots(host, &selection)?;
+    let prepared = prepare(host, loaded, platform)?;
+    prepared.refuse_missing_roots(host)?;
     let mut index = if options.no_index {
         RunIndex::no_index()
     } else {
@@ -378,7 +383,8 @@ fn run<H: Delete>(
 /// at every reclaim cycle ([`Prepared::execute`]).
 #[derive(Debug, Clone)]
 pub struct Prepared {
-    path: PathBuf,
+    /// `PATH`, `--select`, `--roots`, `--allow-root` ([`Loaded`]'s).
+    selection: Selection,
     /// The `--select` tier, or the first configured one.
     tier: Tier,
     /// The configured tiers, their timeouts and the random seed; `None`
@@ -386,7 +392,6 @@ pub struct Prepared {
     configured: Option<(Vec<Tier>, Vec<Duration>, Option<u64>)>,
     owners: Vec<u32>,
     uid: u32,
-    allow_root: bool,
     config: Option<Config>,
     protections: Vec<executor::ProtectedSource>,
     max_entries: usize,
@@ -419,7 +424,7 @@ impl Prepared {
         watch: Option<executor::WatchCycle>,
     ) -> Request {
         Request {
-            path: self.path.clone(),
+            path: self.selection.path.clone(),
             min_free,
             target_free,
             timeout,
@@ -443,7 +448,7 @@ impl Prepared {
         log: &mut dyn FnMut(&str),
     ) -> Result<Self, (ErrorCause, String)> {
         let mut next = self.clone();
-        if self.allow_root {
+        if self.selection.allow_root {
             let config = self.config.as_ref().expect("root mode has a config");
             let owners = resolved_owners(host, config).map_err(|why| (ErrorCause::Config, why))?;
             if owners != self.owners {
@@ -459,7 +464,7 @@ impl Prepared {
         {
             let seed = draw_seed().map_err(|why| (ErrorCause::Config, why))?;
             let (mut tiers, timeouts) =
-                configured_tiers(config, self.uid, self.allow_root, Some(seed))
+                configured_tiers(config, self.uid, self.selection.allow_root, Some(seed))
                     .map_err(|why| (ErrorCause::Config, why))?;
             for tier in &mut tiers {
                 tier.protections = self.protections.clone();
@@ -473,12 +478,8 @@ impl Prepared {
 
     /// A supplied root that does not exist refuses the run (exit 2,
     /// [`refuse_missing_roots`]).
-    pub fn refuse_missing_roots<H: Host>(
-        &self,
-        host: &H,
-        selection: &Selection,
-    ) -> Result<(), (ErrorCause, String)> {
-        refuse_missing_roots(host, self.config.as_ref(), selection, self.uid)
+    pub fn refuse_missing_roots<H: Host>(&self, host: &H) -> Result<(), (ErrorCause, String)> {
+        refuse_missing_roots(host, self.config.as_ref(), &self.selection, self.uid)
     }
 
     /// Runs the executor on `request` ([`Self::request`]): the dry run, or
@@ -525,11 +526,12 @@ impl Prepared {
 /// protections for that uid) is [`prepare`]'s, after it. `log` receives
 /// the configuration's path and warnings, and the expression's.
 pub fn load(
-    options: &Selection,
+    selection: Selection,
     config_file: &ConfigFile,
     platform: &Platform<'_>,
     log: &mut dyn FnMut(&str),
 ) -> Result<Loaded, (ErrorCause, String)> {
+    let options = &selection;
     let fail = |cause: ErrorCause, why: String| Err((cause, why));
     let config = match config_file {
         ConfigFile::Read { path, bytes } => Some(
@@ -572,59 +574,74 @@ pub fn load(
     let select = match &options.select {
         None => None,
         Some(expr) => {
-            let builtins = match &config {
-                Some(_) => None,
-                None => Some(
-                    (platform.builtins)()
-                        .and_then(|builtins| platform.catalog.library(builtins))
-                        .map_err(|why| (ErrorCause::Config, why))?,
-                ),
+            // The configuration's library (its user profiles), else the
+            // catalog's built-ins.
+            let library = match &config {
+                Some(config) => config.library.clone(),
+                None => (platform.builtins)()
+                    .and_then(|builtins| platform.catalog.library(builtins))
+                    .map_err(|why| (ErrorCause::Config, why))?,
             };
-            let library = builtins
-                .as_ref()
-                .or(config.as_ref().map(|c| &c.library))
-                .expect("a library: the configuration's or the built-ins");
             let roots = (!options.roots.is_empty()).then_some(options.roots.as_slice());
             let compiled =
-                Tier::compile_selection(expr, library, roots).map_err(|failure| match failure {
-                    SelectionFailure::Parse(message) => (ErrorCause::Parse, message),
-                    SelectionFailure::Usage(message) => (ErrorCause::Usage, message),
-                })?;
+                Tier::compile_selection(expr, &library, roots).map_err(
+                    |failure| match failure {
+                        SelectionFailure::Parse(message) => (ErrorCause::Parse, message),
+                        SelectionFailure::Usage(message) => (ErrorCause::Usage, message),
+                    },
+                )?;
             for warning in compiled.warnings() {
                 log(&format!("warning: --select {expr:?}: {warning}"));
             }
-            Some(LoadedSelect { compiled, builtins })
+            Some(LoadedSelect { compiled, library })
         }
     };
-    Ok(Loaded { config, select })
+    Ok(Loaded {
+        selection,
+        config,
+        select,
+    })
 }
 
-/// What [`load`] checked, for [`prepare`].
+/// What [`load`] checked, for [`prepare`], with the selection it checked:
+/// the one source of `PATH`, `--select`, `--roots` and `--allow-root`
+/// from here on.
 #[derive(Debug, Clone)]
 pub struct Loaded {
+    selection: Selection,
     config: Option<Config>,
     /// `None` without `--select`.
     select: Option<LoadedSelect>,
 }
 
-/// `--select`, compiled, and the library it was compiled against when it
-/// is not the configuration's: the catalog's built-ins, without a
-/// configuration file.
+impl Loaded {
+    /// The selection [`load`] checked.
+    pub fn selection(&self) -> &Selection {
+        &self.selection
+    }
+}
+
+/// `--select`, compiled, and the library it was compiled against.
 #[derive(Debug, Clone)]
 struct LoadedSelect {
     compiled: CompiledSelection,
-    builtins: Option<Library>,
+    library: Library,
 }
 
 /// The decisions of [`Prepared`] from what [`load`] checked, or the
 /// refusal before the executor.
 pub fn prepare<H: Delete>(
     host: &H,
-    options: &Selection,
-    loaded: &Loaded,
+    loaded: Loaded,
     platform: &Platform<'_>,
 ) -> Result<Prepared, (ErrorCause, String)> {
-    let config = loaded.config.as_ref();
+    let Loaded {
+        selection,
+        config: loaded_config,
+        select,
+    } = loaded;
+    let options = &selection;
+    let config = loaded_config.as_ref();
     let uid = executor::privileges(host, options.allow_root).map_err(|e| (e.cause, e.message))?;
     let owners = if options.allow_root {
         let config = config.expect("root mode requires config (refused by load)");
@@ -637,7 +654,7 @@ pub fn prepare<H: Delete>(
             .map_err(|why| (ErrorCause::Config, why))?,
         None => Vec::new(),
     };
-    let mut configured = if loaded.select.is_none() {
+    let mut configured = if select.is_none() {
         let config = config.expect("unselected ensure requires config (refused by load)");
         let seed = if config
             .groups
@@ -669,15 +686,10 @@ pub fn prepare<H: Delete>(
             tier.max_entries = max_entries;
         }
     }
-    let mut tier = match (&configured, &loaded.select) {
+    let mut tier = match (&configured, &select) {
         (Some((tiers, _, _)), _) => tiers[0].clone(),
         (None, Some(select)) => {
-            let library = select
-                .builtins
-                .as_ref()
-                .or(config.map(|c| &c.library))
-                .expect("a library: the configuration's or the built-ins (load)");
-            let tier = selected_tier(options, &select.compiled, library, uid)?;
+            let tier = selected_tier(options, &select.compiled, &select.library, uid)?;
             validate_selected_root_action(options.allow_root, &tier)
                 .map_err(|why| (ErrorCause::Safety, why))?;
             tier
@@ -687,15 +699,14 @@ pub fn prepare<H: Delete>(
     tier.protections = protections.clone();
     tier.max_entries = max_entries;
     Ok(Prepared {
-        path: options.path.clone(),
         tier,
         configured,
         owners,
         uid,
-        allow_root: options.allow_root,
-        config: loaded.config.clone(),
+        config: loaded_config,
         protections,
         max_entries,
+        selection,
     })
 }
 

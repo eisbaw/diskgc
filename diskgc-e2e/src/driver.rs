@@ -80,6 +80,7 @@ use diskgc_core::engine::{
 };
 use diskgc_core::host::{
     Access, Base, CommandExit, CommandInvocation, CommandRun, Delete, DirListing, FileType, Host,
+    SecondSignal,
 };
 use diskgc_core::inuse::{self, Checker, Options, REUSE_LIMIT};
 use diskgc_core::profile::{IdleFor, IdleWindow, Library};
@@ -752,6 +753,7 @@ fn command_lock<H: Delete>(
         environment: Vec::new(),
         output_prefix: "test-tier/test-profile".to_owned(),
         deadline,
+        second_signal: SecondSignal::WaitOutGrace,
     };
     let exit = started_command(host.run_command(&checked.fd, &run))?;
     out.ok(format!("command exit={exit:?}"));
@@ -780,6 +782,7 @@ fn command_timeout<H: Delete>(host: &H, cwd: &Path, out: &mut Lines<'_>) -> Resu
         environment: Vec::new(),
         output_prefix: "test-tier/test-profile".to_owned(),
         deadline,
+        second_signal: SecondSignal::WaitOutGrace,
     };
     let exit = started_command(host.run_command(&checked.fd, &run))?;
     out.ok(format!("command exit={exit:?}"));
@@ -808,6 +811,7 @@ fn command_output<H: Delete>(host: &H, cwd: &Path, out: &mut Lines<'_>) -> Resul
         environment: Vec::new(),
         output_prefix: "test-tier/test-profile".to_owned(),
         deadline,
+        second_signal: SecondSignal::WaitOutGrace,
     };
     let exit = started_command(host.run_command(&checked.fd, &run))?;
     out.ok(format!("command exit={exit:?}"));
@@ -834,6 +838,7 @@ fn command_orphan<H: Delete>(host: &H, cwd: &Path, out: &mut Lines<'_>) -> Resul
         environment: Vec::new(),
         output_prefix: "test-tier/test-profile".to_owned(),
         deadline,
+        second_signal: SecondSignal::WaitOutGrace,
     };
     match host.run_command(&checked.fd, &run) {
         CommandInvocation::Started(Err(error)) => out.ok(format!("command error={error}")),
@@ -880,6 +885,7 @@ fn command_descendant<H: Delete>(
         environment: Vec::new(),
         output_prefix: "test-tier/test-profile".to_owned(),
         deadline,
+        second_signal: SecondSignal::WaitOutGrace,
     };
     let started = host.now();
     let exit = started_command(host.run_command(&checked.fd, &run))?;
@@ -934,6 +940,7 @@ fn command_stalled_stderr<H: Delete>(
             .now()
             .checked_add(std::time::Duration::from_secs(2))
             .ok_or("deadline overflow")?,
+        second_signal: SecondSignal::WaitOutGrace,
     };
     let started = host.now();
     let result = host.run_command(&checked.fd, &run);

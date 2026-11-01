@@ -301,8 +301,14 @@ In this order; the first failure exits with its code and deletes nothing:
 
 1. Command line, configuration and the `--select` expression: exit 2 as
    for `ensure` (Configuration file, Selection grammar). Nothing on the
-   machine is read for this step, so a bad configuration (what `check`
-   reports) or expression is exit 2 even where the next step would fail.
+   machine beyond the configuration file is read for this step, so a bad
+   configuration (what `check` reports) or expression is exit 2 even
+   where the next step would fail. A configuration file that cannot be
+   read for a reason of the host (`/proc`, through which the checked file
+   is reopened, unavailable; an I/O error; diskgc out of descriptors or
+   memory) is exit 3 (`host`), as the next step's failures are; one that
+   is missing, not a regular file, too large or refused by its
+   permissions is exit 2 (`config`).
 2. Kernel and `/proc` requirements ([architecture.md](architecture.md#deployment)):
    exit 2 when unsupported (a kernel older than 5.8), 3 when one of their
    operations fails (`/proc` cannot be opened or is not this process's
@@ -514,8 +520,10 @@ keeps protecting the disk).
 - **SIGTERM, SIGINT and SIGHUP** stop `watch` the same way. In a cycle:
   as `ensure` stops (Signals): no further candidate starts, a running
   child gets SIGTERM and SIGKILL after 10 s, the host lock is released,
-  and the cycle's record (status `interrupted`) is written. While waiting
-  for the host lock or in back-off or between samples: at once. The
+  and the cycle's record (status `interrupted`) is written; the wait for
+  the host lock is part of a cycle: it ends at the signal, and its
+  record (status `interrupted`, nothing deleted) is written. In back-off
+  or between samples: at once, no record. The
   background tally stops at its batch boundary (at most 50 ms). Then the
   snapshot is written (Snapshot: same space guard, at most once) and the
   process exits 0: a stopped watcher is not a failure, for a supervisor
@@ -533,10 +541,15 @@ keeps protecting the disk).
   a running child's 10 s SIGTERM grace (the child is left running with
   the host lock it inherited, never killed unawaited), and exits 0 at
   once. The cycle's record (status `interrupted`, the child's action an
-  error saying it was left running) is still written. The child's output
+  error saying it is still running) is still written. The child's output
   pipes close with `watch`, so a child that writes output after it may
   end then (`SIGPIPE`); one that does not keeps running, and keeps the
-  host lock, until it exits. SIGKILL at any point is safe: deletions are crash-safe (the kill
+  host lock, until it exits. It does not keep the candidate's own lock,
+  which diskgc holds and never passes on, as when diskgc is killed. The
+  child always gets its SIGTERM first: a second signal only cuts its
+  grace short (also one that came before the SIGTERM was sent), and a
+  child whose action failed outside a signal or deadline is still killed
+  and awaited. `ensure` counts the second signal and ignores it. SIGKILL at any point is safe: deletions are crash-safe (the kill
   points of [testing.md](testing.md#controlled-pause-and-kill-points))
   and a child keeps the host lock until it exits
   ([safety.md](safety.md#host-lock)); only the snapshot write is lost.
@@ -959,9 +972,11 @@ sample: a sample that could not be taken is a run error (3); 75 and 124
 require a fresh sample below `--min-free`. An I/O failure in the first
 sample or startup host check is exit 3; an invalid `PATH` or unsupported
 kernel remains exit 2. The configuration (what `check` reports) and the
-`--select` expression are checked before that startup check, without
-reading anything on the machine, so a bad one is exit 2 even where the
-startup check would fail. A dry run with a host
+`--select` expression are checked before that startup check, reading
+nothing on the machine beyond the configuration file, so a bad one is
+exit 2 even where the startup check would fail; a configuration file the
+host fails to read (`/proc` unavailable, an I/O error) is exit 3
+(`host`), as in `watch` (Watch start, step 1). A dry run with a host
 or planning error also exits 3, reports its partial plan and errors, and
 uses `avail_after_bytes: null` when its final sample failed. The JSON
 `status` of each: 2 `usage_error` (also for a refusal to

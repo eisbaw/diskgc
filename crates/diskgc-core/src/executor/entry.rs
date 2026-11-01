@@ -30,7 +30,7 @@ use std::time::Duration;
 use crate::command_action::{self, Preflight, Ready};
 use crate::docker_backend::{self, Binding, Bound};
 use crate::engine::Reason;
-use crate::host::{Delete, Host, MonoTime};
+use crate::host::{Delete, Host, MonoTime, SecondSignal};
 use crate::hostlock::{self, LockError};
 use crate::profile::Action;
 use crate::report::{Final, Report, Status, after_lock_timeout, conclude, human_space_values};
@@ -652,6 +652,11 @@ impl<H: Delete> Tallied<'_, H> {
                 index: index.as_deref_mut(),
                 tally_refused,
                 run_started: self.run_started,
+                second_signal: if self.request.watch.is_some() {
+                    SecondSignal::LeaveRunning
+                } else {
+                    SecondSignal::WaitOutGrace
+                },
             };
             reclaim.run(self.owners);
             let (timed_out, stopped) = (reclaim.deadline_hit, reclaim.run_stopped);

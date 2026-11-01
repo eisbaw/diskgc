@@ -471,7 +471,7 @@ pub struct Pressure {
 pub enum StateWritten {
     /// The new snapshot replaced the old one.
     Replaced,
-    /// A second signal arrived before the link: nothing changed.
+    /// `cancel` said so before the link: nothing changed.
     Cancelled,
 }
 
@@ -1155,12 +1155,11 @@ pub trait Host {
     fn interrupted(&self) -> Option<crate::report::Signal>;
 
     /// Whether a second SIGTERM, SIGINT or SIGHUP arrived after the first
-    /// ([`Host::interrupted`]): `watch`'s escalation (docs/reference.md,
-    /// Watch signals), which skips the snapshot write
-    /// ([`Host::state_write`] does not link it in) and the rest of a
-    /// running child's SIGTERM grace ([`Delete::run_command`] leaves it
-    /// running). `LinuxHost` counts only under `watch`'s handlers; under
-    /// `ensure`'s, which keep the first signal alone, it is always false.
+    /// ([`Host::interrupted`]). A fact, counted alike by every host; what
+    /// it does is the caller's policy: `watch` skips the snapshot write (a
+    /// `cancel` of [`Host::state_write`]) and the rest of a running
+    /// child's SIGTERM grace ([`SecondSignal::LeaveRunning`]);
+    /// `ensure` ignores it (docs/reference.md, Watch signals).
     fn second_signal(&self) -> bool;
 
     /// The monotonic clock including suspend time.
@@ -1411,15 +1410,18 @@ pub trait Host {
     /// failed write leaves the old one. `lock` must be this key's
     /// single-writer lock from [`Host::state_lock`], held exclusively
     /// (`ModelHost` fails the test otherwise). No `fsync`. Ungated, as
-    /// [`Host::state_lock`]. After a second signal ([`Host::second_signal`],
-    /// checked while the new file is filled and right before it is linked
-    /// in) it is never linked in: [`StateWritten::Cancelled`], the old
-    /// snapshot unchanged.
+    /// [`Host::state_lock`]. When `cancel` says so (asked while the new
+    /// file is filled and right before each step that names it: the link,
+    /// and a crashed writer's `.new` promoted first) the file is never
+    /// linked in: [`StateWritten::Cancelled`], the old snapshot unchanged.
+    /// `watch` cancels on a second signal; `ensure` passes a `cancel` that
+    /// never says so.
     fn state_write(
         &self,
         lock: &Locked<Self::Fd>,
         key: &FsKey,
         bytes: &[u8],
+        cancel: &dyn Fn() -> bool,
     ) -> Result<StateWritten, HostError>;
 
     /// Where diskgc's per-user reclaim lock is now (docs/safety.md, Host
@@ -1641,6 +1643,21 @@ pub struct CommandRun {
     /// never reach diskgc's result-only stdout.
     pub output_prefix: String,
     pub deadline: MonoTime,
+    /// What a second signal during the child's SIGTERM grace does: the
+    /// caller's policy (`watch`'s or `ensure`'s), never the host's.
+    pub second_signal: SecondSignal,
+}
+
+/// What a second SIGTERM, SIGINT or SIGHUP ([`Host::second_signal`]) does
+/// to a running child's SIGTERM grace ([`Delete::run_command`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecondSignal {
+    /// `ensure`: nothing; the grace runs out, then SIGKILL and a wait.
+    WaitOutGrace,
+    /// `watch` (docs/reference.md, Watch signals): the grace ends, the
+    /// child is left running with the host lock it inherited, not killed
+    /// and not awaited, and the action's error says so.
+    LeaveRunning,
 }
 
 /// Closed set of read-only Docker client queries. LinuxHost alone maps each
@@ -1733,7 +1750,9 @@ pub trait Delete: Host {
     /// absolute path obtained by preflight; the caller performs the
     /// candidate's walk and last in-use check before this call. LinuxHost
     /// asks the sandbox gate before starting a child, terminates its process
-    /// group at `deadline`, and waits for the leader. The caller must have
+    /// group at `deadline` or on a signal (SIGTERM, SIGKILL after a 10 s
+    /// grace), and waits for the leader, unless `second_signal` says to
+    /// leave it running. The caller must have
     /// called [`Host::inherit_lock`] on the host lock before this call: the
     /// child inherits that fd across exec and holds the lock if diskgc dies.
     fn run_command(&self, cwd: &Self::Fd, run: &CommandRun) -> CommandInvocation;

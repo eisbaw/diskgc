@@ -585,6 +585,17 @@ impl ModelHost {
 }
 
 impl Inner {
+    /// Fires, ahead of the next call (`op` on `path`), what would fire as
+    /// it starts: the due timed events and its `when: before` events (each
+    /// fires once, so the call itself fires none again). For a port call
+    /// that asks the caller something between those events and its effect
+    /// (`state_write`'s `cancel`), which it cannot do inside the call.
+    fn fire_before(&mut self, op: Op, path: Option<&Path>) {
+        self.fire_due();
+        let index = self.trace.len() as u64 + 1;
+        self.fire_calls(index, op, path, When::Before);
+    }
+
     /// Fires every timed event that is due, earliest first.
     fn fire_due(&mut self) {
         while let Some(pos) = self.next_timed(self.state.elapsed) {
@@ -2364,12 +2375,20 @@ impl Host for ModelHost {
         lock: &Locked<ModelFd>,
         key: &FsKey,
         bytes: &[u8],
+        cancel: &dyn Fn() -> bool,
     ) -> Result<StateWritten, HostError> {
         let lock_ofd = self.fd_ofd(lock.fd());
         let path = self.state_path(&key.snapshot_name());
         let shown = path
             .as_ref()
             .map_or_else(|| key.snapshot_name(), |p| p.display().to_string());
+        // The model's write is one step: `cancel` is asked once, after the
+        // events before this call (a signal `before` it is a signal during
+        // the write) and before anything is made.
+        self.inner
+            .borrow_mut()
+            .fire_before(Op::StateWrite, path.as_deref());
+        let cancelled = cancel();
         self.call(Op::StateWrite, path.clone(), None, |inner| {
             if let Some(e) = inner.injected.take() {
                 return (
@@ -2400,9 +2419,8 @@ impl Host for ModelHost {
                     key.lock_name()
                 ));
             }
-            // A second signal (an event before this call) cancels the write
-            // before the link: nothing is made, the old snapshot stays.
-            if inner.state.signals >= 2 {
+            // Cancelled: nothing is made, the old snapshot stays.
+            if cancelled {
                 return (
                     Ok(StateWritten::Cancelled),
                     None,

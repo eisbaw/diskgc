@@ -457,9 +457,12 @@ pub(crate) fn write_snapshot_ungated(
         Mode::from_raw_mode(FILE_MODE),
     )
     .map_err(|e| HostError::errno("open O_TMPFILE", dir.display(), errno_of(e)))?;
-    // `cancelled` (a second signal) is asked between chunks and right
-    // before the link: until then the file has no name, and dropping it
-    // leaves nothing behind.
+    // `cancelled` (the caller's: a second signal to `watch`) is asked
+    // between chunks and right before each step that names something: the
+    // link, a crashed writer's `.new` promoted first, and the link after
+    // it. Until the link the file has no name, and dropping it leaves
+    // nothing behind; the link is the commit point, the rename after it
+    // is not asked.
     let mut rest = bytes;
     while !rest.is_empty() {
         if cancelled() {
@@ -499,7 +502,13 @@ pub(crate) fn write_snapshot_ungated(
         Ok(()) => {}
         Err(rustix::io::Errno::EXIST) => {
             // A complete `.new` a crashed writer left: promote it, then link.
+            if cancelled() {
+                return Ok(StateWritten::Cancelled);
+            }
             promote(&dir_fd)?;
+            if cancelled() {
+                return Ok(StateWritten::Cancelled);
+            }
             link(&dir_fd).map_err(|e| HostError::errno("linkat", &new, errno_of(e)))?;
         }
         Err(e) => return Err(HostError::errno("linkat", &new, errno_of(e))),
