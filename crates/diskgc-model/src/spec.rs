@@ -675,19 +675,33 @@ pub enum ModelSignal {
     Term,
 }
 
-/// A mount an event makes: a fresh, empty filesystem of type `fs` on the
-/// existing directory `at`, on the mount that directory is on.
+/// A mount an event makes on the existing directory `at`, on the mount that
+/// directory is on: a fresh, empty filesystem of type `fs`, or with
+/// `bind_of` a bind of an existing mount (TASK-285 review: a mount made
+/// after the protected matches were enumerated).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MountEventSpec {
     /// Mount id; unique, not 0.
     pub id: u64,
     pub at: PathBuf,
-    /// Filesystem type, e.g. `fuse`, `nfs4`.
+    /// Filesystem type, e.g. `fuse`, `nfs4`; with `bind_of`, the source
+    /// mount's (`overlay` for an overlay).
     pub fs: String,
-    /// Device number `major:minor`, not one already mounted.
+    /// Device number `major:minor`, not one already mounted; with
+    /// `bind_of`, the one the source mount shows.
     pub dev: DevSpec,
+    /// Ignored with `bind_of` (the source's filesystem's space).
     pub size: Bytes,
+    /// Bind the filesystem an existing mount shows (overlays included: the
+    /// bind shows the same overlay), its root or `bind_root`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_of: Option<u64>,
+    /// With `bind_of`: the directory of the source mount's filesystem the
+    /// bind shows, as a path from that filesystem's root (mountinfo's root
+    /// field); it must exist. Not for an overlay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_root: Option<PathBuf>,
 }
 
 /// A process and how reading its `/proc` entry goes.

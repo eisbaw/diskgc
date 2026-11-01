@@ -1,48 +1,25 @@
 //! A tier's `protect` and `!profile:` matches, enumerated once for its
-//! delete actions (TASK-200; docs/safety.md, Filesystem candidates:
-//! protected and negated matches).
-//!
-//! Enumerating every protected and negated tree again for each candidate,
-//! three times (before its lock, under it, and inside its freshness
-//! window), cost a full discovery of those trees per candidate: with a
-//! 61,000-directory protect, 2.2 to 3.3 s per candidate and clears expiring
-//! before their deletion (`in_use_unknown`), against 5 to 33 ms without
-//! (TASK-184 walk). A delete action unlinks only the entries its
-//! eligibility walk listed under the candidate's lock, so a match the
-//! enumeration missed can only matter if it was there when the walk ran:
-//! inside the candidate, that is a change the walk sees as an mtime or ctime
-//! at or after the enumeration began, and then the matches are enumerated
-//! again, as before, for that candidate ([`DeletePolicy::skip`]). Command
-//! actions run code that may touch anything in the candidate, walked or
-//! not: they keep the full recheck (`super::policy_skip`).
-//!
-//! A directory outside the candidate, on its path, that becomes a Cargo
-//! target after the enumeration (a new `CACHEDIR.TAG`) changes no time the
-//! walk reads: a tag on the candidate's way down that is no enumerated match
-//! makes the check enumerate again ([`tagged_ancestor`]).
-//!
-//! Nor does a rename above the source of a bind mount the candidate is
-//! reached through (TASK-285): `/alias/cruft` keeps its path, identity and
-//! times when `/src/work`, which `/alias` binds a directory of, becomes
-//! `/src/keep-work`. The mount table shows it (the bind's root field
-//! follows the rename), so the table read before the enumeration is kept,
-//! and a candidate the table now shows differently ([`places::Ancestry`])
-//! makes the check enumerate again.
-//!
-//! What the cached set cannot see (docs/safety.md states it): such a tag made
-//! after the candidate's last check, and a change inside the candidate whose
-//! times were set back past the enumeration by a wall-clock step that
-//! [`changed_since`] did not detect.
+//! delete actions and enumerated again only when they may be stale
+//! (TASK-200, TASK-268 review, TASK-285). Which changes make a check
+//! enumerate again, why (the TASK-184 cost of enumerating per candidate),
+//! and what the cached set cannot see are in docs/safety.md (Filesystem
+//! candidates, Not protected, not excluded); [`DeletePolicy::skip`] is the
+//! one place that decides. Command actions run code that may touch anything
+//! in the candidate, walked or not: they keep the full recheck
+//! (`super::policy_skip`).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::policy::{Refresh, judge_negated, judge_protect, policy_failed, tagged_ancestor};
-use super::{NegatedKind, NegatedSource, ProtectedKind, ProtectedSource, scan_protections};
+use super::policy::{
+    NegatedMatches, excluded_by_in, overlaps_checked_in, policy_failed, tagged_ancestor,
+};
+use super::{
+    NegatedKind, NegatedSource, ProtectedKind, ProtectedSource, scan_negated, scan_protections,
+};
 use crate::engine::{Reason, Skip};
 use crate::host::{Host, MonoTime, MountEntry, Timestamp};
 use crate::outcome::{PolicyAt, Stop};
-use crate::places;
 
 /// How far before the enumeration a change's recorded time may lie and
 /// still count as made after it began. A filesystem records a change at or
@@ -114,27 +91,38 @@ impl Protection {
 
 /// The policy a delete action's candidates are judged against under their
 /// locks and immediately before deletion: the tier's matches, enumerated
-/// once, and the definitions to enumerate them again with.
-#[derive(Debug, Clone, Copy)]
+/// once, and the definitions to enumerate them again with. A check that
+/// enumerates every one of them again keeps what it found, with its own
+/// horizon ([`Protection`]), so one change costs one enumeration, not one
+/// per later candidate (TASK-200's cost).
+#[derive(Debug)]
 pub(super) struct DeletePolicy<'p> {
     pub protections: &'p [ProtectedSource],
-    pub protection: &'p Protection,
-    pub negated: &'p [NegatedSource],
-    /// One list per `negated` source, enumerated after `protection` was.
-    pub negated_matches: &'p [Vec<PathBuf>],
+    pub protection: &'p mut Protection,
+    /// The tier's negated sources, per source term (a union has one term
+    /// per source), and one match list per source each, enumerated after
+    /// `protection` began.
+    pub negated: &'p [&'p [NegatedSource]],
+    pub negated_matches: &'p mut [NegatedMatches],
+    /// The term whose negated sources judge this candidate (`None`: none).
+    pub term: Option<usize>,
 }
 
 impl DeletePolicy<'_> {
-    /// `path` judged against the enumerated matches ([`judge_protect`],
-    /// [`judge_negated`]): against matches enumerated now when one of them
-    /// cannot be proven any more (a `cargo clean` of a protected target
-    /// says nothing about this candidate), and, after the walk, whenever
-    /// it saw a change made since they were enumerated (or cannot tell).
-    /// Uncertain discovery or identity there stops the run. What it
-    /// enumerates again is not kept: the reclaim's next first screen
-    /// refreshes the tier's matches if it needs to.
+    /// `path` judged against the tier's matches, the mount table read once
+    /// for the step: against matches enumerated now when one of them cannot
+    /// be proven any more (a `cargo clean` of a protected target says
+    /// nothing about this candidate), and whenever the cached matches may be
+    /// stale: after the walk, a change it saw made since they were
+    /// enumerated (or cannot tell); at any check, a mount table other than
+    /// the one read before the enumeration (TASK-285 and its review: a
+    /// rename above a bind's source, a bind or overlay mounted at a
+    /// protected root, which no time or identity of the candidate shows),
+    /// or a `CACHEDIR.TAG` on its way down ([`tagged_ancestor`]). Then every
+    /// match is enumerated again and kept with the new horizon. Uncertain
+    /// discovery or identity stops the run.
     pub fn skip<H: Host>(
-        &self,
+        &mut self,
         host: &H,
         deadline: Option<MonoTime>,
         path: &Path,
@@ -143,100 +131,164 @@ impl DeletePolicy<'_> {
         assert_eq!(
             self.negated.len(),
             self.negated_matches.len(),
-            "one match list per negated source"
+            "one match set per negated term"
         );
-        let changed = match at {
-            PolicyAt::AfterWalk { newest_change } => changed_since(
-                self.protection.enumerated,
-                Instant::now(host),
-                newest_change,
-            ),
-            _ => false,
-        };
-        let refresh = if changed || self.moved(host, path) || self.tag_on_the_way(host, path) {
-            Refresh::Always
-        } else {
-            Refresh::OnError
-        };
-        let (protected, _) = judge_protect(
-            host,
-            self.protections,
-            self.protection,
-            path,
-            deadline,
-            refresh,
-        )
-        .map_err(|error| policy_failed(path, "protect overlap", error))?;
-        if protected {
-            return Ok(Some(Skip::new(
-                Reason::Protected,
-                path.to_owned(),
-                "overlaps a protected match at final action check".to_owned(),
-            )));
+        let term = self.term.map_or(&[][..], |term| self.negated[term]);
+        if self.protections.is_empty() && term.is_empty() {
+            return Ok(None);
         }
-        let (excluded, _) = judge_negated(
-            host,
-            self.negated,
-            self.negated_matches,
-            path,
-            deadline,
-            refresh,
-        )
-        .map_err(|error| policy_failed(path, "!profile overlap", error))?;
-        Ok(excluded.map(|profile| {
-            Skip::new(
-                Reason::Excluded,
-                path.to_owned(),
-                format!("overlaps !profile:{profile} at final action check"),
+        let started = Instant::now(host);
+        let mounts = host.mountinfo().map_err(|error| {
+            policy_failed(
+                path,
+                "protect overlap",
+                format!("cannot read mountinfo: {error}"),
             )
-        }))
-    }
-}
-
-impl DeletePolicy<'_> {
-    /// Whether the mount table shows `path` differently now than before the
-    /// enumeration (TASK-285): another place, or other mount points showing
-    /// it or attached where they are ([`places::ancestry`]). A rename above
-    /// a bind's source, a mount point's ancestor renamed, or a mount made
-    /// or removed on the way changes what the matches say about it while
-    /// its path, identity and times stay. A table that cannot be read, or
-    /// a path either table cannot place, is a doubt: yes. Nothing to judge
-    /// against (no `protect`, no negated source) asks nothing.
-    fn moved<H: Host>(&self, host: &H, path: &Path) -> bool {
-        if self.protections.is_empty() && self.negated.is_empty() {
-            return false;
+        })?;
+        let stale = match at {
+            PolicyAt::AfterWalk { newest_change } => {
+                changed_since(self.protection.enumerated, started, newest_change)
+            }
+            _ => false,
+        } || mounts != self.protection.mounts
+            || self.tag_on_the_way(host, &mounts, path);
+        let protected =
+            overlaps_checked_in(host, &mounts, path, &self.protection.matches, deadline);
+        if matches!(protected, Ok(true)) {
+            return Ok(Some(protected_skip(path)));
         }
-        let Ok(now) = host.mountinfo() else {
-            return true;
+        let excluded = match self.term {
+            Some(index) => excluded_by_in(
+                host,
+                &mounts,
+                term,
+                &self.negated_matches[index],
+                path,
+                deadline,
+            ),
+            None => Ok(None),
         };
-        match (
-            places::ancestry(&self.protection.mounts, path),
-            places::ancestry(&now, path),
-        ) {
-            (Ok(then), Ok(now)) => then != now,
-            _ => true,
+        if let Ok(Some(profile)) = &excluded {
+            return Ok(Some(excluded_skip(path, profile)));
         }
+        if !stale && protected.is_ok() && excluded.is_ok() {
+            return Ok(None);
+        }
+        if stale {
+            self.enumerate_all(host, deadline, path, started, mounts)?;
+        } else {
+            // Only a match that cannot be proven any more: that list again,
+            // under the old horizon (the others are as old as it is).
+            if protected.is_err() {
+                let fresh = Protection::enumerate(host, self.protections, deadline)
+                    .map_err(|error| policy_failed(path, "protect overlap", error))?;
+                self.protection.refresh(fresh);
+            }
+            if let (Err(_), Some(index)) = (&excluded, self.term) {
+                self.negated_matches[index] = scan_negated(host, term, deadline)
+                    .map_err(|error| policy_failed(path, "!profile overlap", error))?;
+            }
+        }
+        // Judged on a table read after the enumeration: the fresh matches
+        // are resolved on mounts it names.
+        let after = host.mountinfo().map_err(|error| {
+            policy_failed(
+                path,
+                "protect overlap",
+                format!("cannot read mountinfo: {error}"),
+            )
+        })?;
+        if overlaps_checked_in(host, &after, path, &self.protection.matches, deadline)
+            .map_err(|error| policy_failed(path, "protect overlap", error))?
+        {
+            return Ok(Some(protected_skip(path)));
+        }
+        let Some(index) = self.term else {
+            return Ok(None);
+        };
+        Ok(excluded_by_in(
+            host,
+            &after,
+            term,
+            &self.negated_matches[index],
+            path,
+            deadline,
+        )
+        .map_err(|error| policy_failed(path, "!profile overlap", error))?
+        .map(|profile| excluded_skip(path, &profile)))
+    }
+
+    /// Every `protect` match and every term's negated matches enumerated
+    /// again, kept with the horizon `started` and `mounts` (read before any
+    /// of them began).
+    fn enumerate_all<H: Host>(
+        &mut self,
+        host: &H,
+        deadline: Option<MonoTime>,
+        path: &Path,
+        started: Instant,
+        mounts: Vec<MountEntry>,
+    ) -> Result<(), Stop> {
+        let matches = scan_protections(host, self.protections, deadline)
+            .map_err(|error| policy_failed(path, "protect recheck", error))?;
+        let mut negated = Vec::with_capacity(self.negated.len());
+        for sources in self.negated {
+            negated.push(
+                scan_negated(host, sources, deadline)
+                    .map_err(|error| policy_failed(path, "!profile recheck", error))?,
+            );
+        }
+        *self.protection = Protection {
+            matches,
+            enumerated: started,
+            mounts,
+        };
+        for (kept, fresh) in self.negated_matches.iter_mut().zip(negated) {
+            *kept = fresh;
+        }
+        Ok(())
     }
 
     /// [`tagged_ancestor`] for the Cargo sources of `protect` and of this
     /// term's `!profile:`s, against their enumerated matches.
-    fn tag_on_the_way<H: Host>(&self, host: &H, path: &Path) -> bool {
+    fn tag_on_the_way<H: Host>(&self, host: &H, mounts: &[MountEntry], path: &Path) -> bool {
+        let term = self.term.map_or(&[][..], |term| self.negated[term]);
         let protected = self
             .protections
             .iter()
             .filter(|source| matches!(source.kind, ProtectedKind::CargoTarget))
             .flat_map(|source| &source.roots);
-        let negated = self
-            .negated
+        let negated = term
             .iter()
             .filter(|source| matches!(source.source, NegatedKind::CargoTarget))
             .flat_map(|source| &source.roots);
+        let term_matches = self.term.map(|term| &self.negated_matches[term]);
         let matched = |dir: &Path| {
             self.protection.matches.iter().any(|m| m == dir)
-                || self.negated_matches.iter().flatten().any(|m| m == dir)
+                || term_matches
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|m| m == dir)
         };
-        tagged_ancestor(host, protected.chain(negated), matched, path)
+        tagged_ancestor(host, mounts, protected.chain(negated), matched, path)
     }
+}
+
+fn protected_skip(path: &Path) -> Skip {
+    Skip::new(
+        Reason::Protected,
+        path.to_owned(),
+        "overlaps a protected match at final action check".to_owned(),
+    )
+}
+
+fn excluded_skip(path: &Path, profile: &str) -> Skip {
+    Skip::new(
+        Reason::Excluded,
+        path.to_owned(),
+        format!("overlaps !profile:{profile} at final action check"),
+    )
 }
 
 /// Whether a walk whose newest mtime or ctime is `newest` (`None`: some time

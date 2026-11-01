@@ -42,24 +42,34 @@ Every candidate of kind `fs` or `cargo-target`, whichever profile found it.
   touched, and a name a pattern matches is never `statx`ed when it is a
   mount point, so a dead mount cannot hang discovery or the judgement of a
   candidate (a container test mounts a FUSE filesystem whose server never
-  answers, task-18). It contains one by path, or by place (TASK-290): a
-  mount attached, on any mount of the candidate's filesystem, at or inside
-  the candidate's place in that filesystem (its mount's `mountinfo` root
-  field joined with the rest of its path). Through a non-recursive or
-  private bind of its parent a mount point is an uncovered directory, and
-  Linux refuses to remove it there too (`EBUSY`): deleting the candidate
-  would remove everything around it first, a partial deletion. A candidate
-  whose place the table cannot tell (a root field that is not absolute, a
-  mount on its filesystem that cannot be placed on its parent) is
-  `unsafe_path`. Limit: a mount made in another mount namespace on a
-  directory the candidate shows is not in diskgc's table; Linux (3.18 and
-  later) detaches such a mount when the directory is removed. That covers those two only: the in-use scan can still
+  answers, task-18). Reading the table first covers those two, discovery
+  and judgement, only: the in-use scan can still
   hang on a process that uses a dead mount (In use, limits), and a mount
   made after the table was read is a limit of the deletion (Deletion). For
   an `fs` candidate the mount table is read again when it is reached for
   its tally and its deletion, and once more under its lock (Deletion). The
   shared eligibility walk also reads it before statting the candidate or
   any descendant; this protects nested mounts in Cargo profile entries.
+  A candidate contains a mount by path, or by place (TASK-290): a mount
+  attached, on any mount of the candidate's filesystem, at or inside the
+  candidate's place in that filesystem (its mount's `mountinfo` root field
+  joined with the rest of its path). Through a non-recursive or private
+  bind of its parent a mount point is an uncovered directory, and Linux
+  refuses to remove it there too (`EBUSY`): deleting the candidate would
+  remove everything around it first, a partial deletion. The same holds
+  for a Cargo target: a directory of it that discovery or the inspection
+  reaches, a profile directory included, that is a mount point by place is
+  `contains_mount`, at the inspection and at every reading of the profile
+  directory under its locks (TASK-290 review: a tmpfs on `target/debug`,
+  seen through a non-recursive bind, shows the `.cargo-lock` and entries
+  it covers, and Cargo would delete them without any `EBUSY`); a mount
+  deeper in a profile entry is the walk's, by path and by place. A
+  candidate whose place the table cannot tell (a root field that is not
+  absolute, a mount on its filesystem that cannot be placed on its
+  parent) is `unsafe_path` (before TASK-290 such a table was not read for
+  this check at all). Limit: a mount made in another mount namespace on a
+  directory the candidate shows is not in diskgc's table; Linux (3.18 and
+  later) detaches such a mount when the directory is removed.
   `statx` uses `AT_NO_AUTOMOUNT` for a candidate entry, so merely checking
   an autofs trigger at that entry does not ask the kernel to mount it.
   Path traversal and a pre-existing mounted network path can still block
@@ -242,12 +252,30 @@ Immediately before acting, diskgc walks the candidate's whole tree
     place found (a filesystem mounted inside storage and bound elsewhere,
     a bind of an overlay that is also mounted inside storage). Without a
     bind on the way these are the directories on the path, asked once. A
-    root the table cannot place is refused as an unreachable root is.
+    root the table cannot place is refused as an unreachable root is, and
+    so is one with more than `PLACES_ABOVE_LIMIT` (4096) places above it
+    (fail closed; a host with tens of thousands of binds of one
+    filesystem, a kubelet node's pod volumes, could reach it). Two kinds
+    of place are never asked (mped review of TASK-267: on a default
+    openSUSE/snapper btrfs, and on Arch booted into a snapper snapshot,
+    `/` shows `/@/.snapshots/1/snapshot` and `/.snapshots`, mode 0750 and
+    root's, shows `/@/.snapshots`, so asking them refused every root on the
+    volume as `unreadable` for a user other than root):
+    - where a mount is attached: the directory the mount covers is not
+      above what the mount shows, only the directories above it are;
+    - above the namespace's root in its filesystem (above `/`'s root
+      field): what `/` shows is taken as the top, as a `chroot` is, and
+      nothing there is followed further. A root inside a container whose
+      own root directory lies inside container storage (a `vfs` layer
+      bound as its root) is therefore not refused for that.
+
+    A directory above the root's place that is asked and fails is the
+    root's refusal, and the refusal names that directory.
     Limit: a directory above the root's place that no mount of diskgc's
     mount namespace shows uncovered is not asked: on a btrfs subvolume
     mounted alone (root field `/@home`), the volume's top level above it;
-    in a container, the host directories above a bind volume; a directory
-    covered by a mount and bound nowhere else. Refusing every root whose
+    in a container, the host directories above a bind volume. Refusing
+    every root whose
     filesystem's top is not mounted would refuse every btrfs subvolume and
     every container volume.
     Discovery of both kinds does not descend into a storage root it lists
@@ -556,25 +584,31 @@ Immediately before acting, diskgc walks the candidate's whole tree
   candidate's is looked up below the root, where discovery from that root
   would find it, and one the table does not show there counts as a tag.
 
-  A rename above the source of a bind mount the candidate is reached
-  through changes neither its path nor its identity nor any time the walk
-  reads (TASK-285: `/alias` binding `/src/work/sub`, `/src/work` renamed
-  to `/src/keep-work` under `protect` of `/src/keep-*`). The mount table
-  follows it: a bind's root field is its directory's path now. So the
-  table read just before the enumeration is kept with the tier's matches,
-  and every check of a delete action whose candidate the table now shows
-  differently (another place, other mount points showing it, or other
-  places those are attached at: a rename above a mount point, a bind made
-  or removed) enumerates again. When a check replaces the tier's
-  `protect` matches with fresh ones, the enumeration's instant and table
-  are kept: the tier's negated matches are older than the fresh ones.
+  A change of the mount table changes neither the candidate's path nor
+  its identity nor any time the walk reads, yet it can change what the
+  matches are: a rename above the source of a bind mount the candidate is
+  reached through (TASK-285: `/alias` binding `/src/work/sub`,
+  `/src/work` renamed to `/src/keep-work` under `protect` of
+  `/src/keep-*`; a bind's root field follows the rename), or a mount made
+  at a protected root that shows the candidate under another device (the
+  TASK-285 review: a bind of an overlay whose upper directory holds the
+  candidate, a FUSE view, a bind exposing a hard link under a protected
+  pattern). So the table read just before the enumeration is kept with
+  the tier's matches, and every check of a delete action reads the table
+  once and judges with it; when it differs in anything from the kept one,
+  every `protect` and negated match is enumerated again and judged on a
+  table read after that. A check that enumerated them all keeps them with
+  its own instant and table, so one mount event costs one enumeration
+  more, not one per later candidate; one that enumerated only `protect`
+  again (a match gone) keeps the old instant and table, which the negated
+  matches are as old as.
 
   Limits (delete actions): a
   tag made on the candidate's path after its last check, or an ancestor
   that becomes a match of an `fs` source after the enumeration (by a
   rename, which changes the candidate's path, so its identity checks
-  fail, or its place, above), is not seen until the next tier or run, nor
-  is a rename undone before the check (two events); a walked directory inside the candidate that becomes a match only
+  fail, or the mount table, above), is not seen until the next tier or
+  run, nor is a rename undone before the check (two events); a walked directory inside the candidate that becomes a match only
   by a marker made after the walk (a `CACHEDIR.TAG` or `.cargo-lock`
   making it a Cargo target) loses its walked entries, where the per-check
   enumeration saw such a marker until the final check (the window grew
@@ -582,8 +616,8 @@ Immediately before acting, diskgc walks the candidate's whole tree
   includes the in-use scan); a bind mount made after the enumeration in
   another mount namespace that shows part of the candidate under a
   protected match changes no time inside it and no table diskgc reads,
-  and is not seen (one made in diskgc's namespace changes how the table
-  shows the candidate, above); a match made inside a candidate whose times
+  and is not seen (one made in diskgc's namespace changes the table,
+  above), nor is one made after the candidate's last check; a match made inside a candidate whose times
   a wall-clock step set back past the enumeration is not seen when the
   step was undone before the check. A match made in the candidate after
   its walk is never unlinked, but its directory then fails `ENOTEMPTY`:

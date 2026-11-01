@@ -44,8 +44,8 @@ use crate::index::queue::{self, AgeFilter, QueueEntry, Queued, Source, TierQuery
 use crate::index::{Family, Finder, FinderSetId, MountKey, name_family};
 use crate::inuse::Checker;
 use crate::outcome::Stop;
+use crate::places::mount_for;
 use crate::report::Report;
-use crate::resolve::mount_for;
 use crate::snapshot::{Reclaimed, RunIndex};
 use crate::tally::budget::Budget;
 use crate::tally::listing::{SourceFind, TallySource, index_identity};

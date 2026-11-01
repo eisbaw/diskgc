@@ -79,7 +79,8 @@ use super::trie::{
 use super::unit::{Block, Family, FinderSetId, Identity, Single};
 use super::{Index, MountKey, finder_set_bytes, name_family};
 use crate::host::{Access, Base, Errno, Host, HostError, MountEntry};
-use crate::resolve::{ResolveError, Want, mount_for, open_beneath, resolve_in};
+use crate::places::mount_for;
+use crate::resolve::{ResolveError, Want, open_beneath, resolve_in};
 
 /// Units estimated at or above this (64 MiB) keep their exact places
 /// longest: they matter most to freeing space and to `best-fit`.

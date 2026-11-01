@@ -17,12 +17,58 @@
 //! Only diskgc's own mount namespace's table is read: a mount made in
 //! another namespace is not seen (docs/safety.md states the limit).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::host::{Dev, MountEntry};
-use crate::resolve::{mount_for, place_in_filesystem};
+use crate::resolve::Unsafe;
+
+/// The mount a path is on: the deepest mount point that is a (component-
+/// wise) prefix of `path`; of mounts stacked on that point, the topmost (the
+/// one no other mount there is stacked on).
+pub fn mount_for<'m>(mounts: &'m [MountEntry], path: &Path) -> Result<&'m MountEntry, Unsafe> {
+    let depth = |m: &MountEntry| m.mount_point.components().count();
+    let deepest = mounts
+        .iter()
+        .filter(|m| path.starts_with(&m.mount_point))
+        .map(depth)
+        .max()
+        .ok_or(Unsafe::NoMount)?;
+    let at_point: Vec<&MountEntry> = mounts
+        .iter()
+        .filter(|m| path.starts_with(&m.mount_point) && depth(m) == deepest)
+        .collect();
+    let topmost: Vec<&MountEntry> = at_point
+        .iter()
+        .copied()
+        .filter(|m| !at_point.iter().any(|other| other.parent_id == m.id))
+        .collect();
+    match topmost.as_slice() {
+        [one] => Ok(one),
+        _ => Err(Unsafe::AmbiguousMounts(
+            at_point.iter().map(|m| m.id).collect(),
+        )),
+    }
+}
+
+/// Where `path`, a path on `mount` (at or below its mount point), is in
+/// that mount's filesystem: the mount's root field (mountinfo field 4)
+/// joined with the rest of `path`. `None` when `path` is not at or below the
+/// mount point or the root field is not an absolute path: nothing can be
+/// translated then. Nothing is looked up.
+pub fn place_in_filesystem(mount: &MountEntry, path: &Path) -> Option<PathBuf> {
+    let below = path.strip_prefix(&mount.mount_point).ok()?;
+    // No trailing `/` for the mount point itself (`Path` compares and
+    // hashes by components, so this is only for what is shown).
+    mount.fs_root.is_absolute().then(|| {
+        if below.as_os_str().is_empty() {
+            mount.fs_root.clone()
+        } else {
+            mount.fs_root.join(below)
+        }
+    })
+}
 
 /// A directory's place: the device of its filesystem and its path from
 /// that filesystem's root.
@@ -52,7 +98,7 @@ pub fn by_id(mounts: &[MountEntry]) -> HashMap<u64, &MountEntry> {
 
 /// The mount's root field, which must be an absolute path to translate
 /// anything on that filesystem.
-pub fn root_of(mount: &MountEntry) -> Result<&Path, String> {
+fn root_of(mount: &MountEntry) -> Result<&Path, String> {
     if mount.fs_root.is_absolute() {
         Ok(&mount.fs_root)
     } else {
@@ -173,6 +219,19 @@ pub fn mount_within<'m>(
     Ok(mounts_within(mounts, path)?.into_iter().next())
 }
 
+/// A mount whose point is the directory `path` itself, by path or by place
+/// (attached at `path`'s place on a mount of its filesystem: through a
+/// non-recursive bind, the directory it covers). As [`mounts_within`].
+pub fn mount_at<'m>(
+    mounts: &'m [MountEntry],
+    path: &Path,
+) -> Result<Option<&'m MountEntry>, String> {
+    Ok(mounts_within(mounts, path)?
+        .into_iter()
+        .find(|(_, at)| at == path)
+        .map(|(mount, _)| mount))
+}
+
 /// Every mount inside the directory `path` ([`mount_within`]), each with
 /// where it lies in `path`'s view: those by path first, then those by place
 /// only. A mount whose parent the table does not list is placed by its
@@ -212,58 +271,95 @@ pub fn mounts_within<'m>(
 }
 
 /// How many places [`places_above`] collects before it gives up: far more
-/// than any real table needs (the places above one path, over every mount
-/// that shows it), small enough to bound a looping table.
+/// than a desktop or CI table needs (the places above one path, over every
+/// mount that shows it), small enough to bound a looping table. Beyond it
+/// the root is refused (fail closed): a host with tens of thousands of
+/// binds of one filesystem (a kubelet node's pod volumes) could reach it.
 const PLACES_ABOVE_LIMIT: usize = 4096;
 
 /// Every directory above `path`'s directory in any view the table shows,
 /// with a path that reaches it uncovered (TASK-267): the directories above
 /// its place on its filesystem; for every mount of that filesystem showing
 /// one of them, the places its point is attached at down its parent chain
-/// ([`attachments`]); and so on from each place found. The path's own
-/// place and what lies inside it are not above it.
+/// ([`attachments`]), and the directories above those; and so on from each
+/// place found. The path's own place and what lies inside it are not above
+/// it. Two kinds of place are never asked (mped B1 on the TASK-267 change:
+/// a default openSUSE/snapper layout, where `/` shows
+/// `/@/.snapshots/1/snapshot` and `/.snapshots`, mode 0750, shows
+/// `/@/.snapshots`, refused every root on the volume as unreadable):
+///
+/// - a place where a mount is attached: the directory the mount covers,
+///   which is not the directory above anything shown through the mount
+///   (only the directories above it are);
+/// - a place above the namespace's root on its filesystem (above `/`'s
+///   root field): what `/` shows is taken as the top, as a `chroot` is;
+///   nothing there is followed further either.
 ///
 /// Places that no mount of the table shows uncovered are left out: on a
 /// btrfs subvolume mounted alone (root field `/@home`), the top-level
 /// subvolume above it; on a bind volume of a container, the host's
-/// directories above the bound one; a directory under a mount point. The
-/// caller states that limit. Sorted by the reaching path, shallowest first.
+/// directories above the bound one. The caller states that limit. Sorted by
+/// the reaching path, shallowest first.
 pub fn places_above(mounts: &[MountEntry], path: &Path) -> Result<Vec<(Place, PathBuf)>, String> {
     let by_id = by_id(mounts);
     let start = place_of(mounts, path)?;
-    let mut seen: HashSet<Place> = HashSet::from([start.clone()]);
+    let top = mount_for(mounts, Path::new("/")).ok().and_then(|root| {
+        root_of(root).ok().map(|path| Place {
+            dev: root.dev,
+            path: path.to_owned(),
+        })
+    });
+    let above_the_top = |place: &Place| {
+        top.as_ref()
+            .is_some_and(|top| top.within(place) && top.path != place.path)
+    };
+    // Each place found, and whether it is asked (`false`: only where a
+    // mount is attached, so far).
+    let mut found: HashMap<Place, bool> = HashMap::from([(start.clone(), false)]);
     let mut todo = vec![start.clone()];
     while let Some(place) = todo.pop() {
-        let mut found: Vec<Place> = place
+        let mut next: Vec<(Place, bool)> = place
             .path
             .ancestors()
             .skip(1)
-            .map(|above| Place {
-                dev: place.dev,
-                path: above.to_owned(),
+            .map(|above| {
+                let above = Place {
+                    dev: place.dev,
+                    path: above.to_owned(),
+                };
+                (above, true)
             })
             .collect();
         for mount in mounts.iter().filter(|mount| mount.dev == place.dev) {
             if place.path.starts_with(root_of(mount)?) {
-                attachments(&by_id, mount, &mut found)?;
+                let mut attached = Vec::new();
+                attachments(&by_id, mount, &mut attached)?;
+                next.extend(attached.into_iter().map(|at| (at, false)));
             }
         }
-        for place in found {
-            if seen.insert(place.clone()) {
-                if seen.len() > PLACES_ABOVE_LIMIT {
-                    return Err(format!(
-                        "more than {PLACES_ABOVE_LIMIT} places above {} in the mount table",
-                        path.display()
-                    ));
+        for (place, ask) in next {
+            if above_the_top(&place) {
+                continue;
+            }
+            match found.get_mut(&place) {
+                Some(asked) => *asked |= ask,
+                None => {
+                    found.insert(place.clone(), ask);
+                    if found.len() > PLACES_ABOVE_LIMIT {
+                        return Err(format!(
+                            "more than {PLACES_ABOVE_LIMIT} places above {} in the mount table",
+                            path.display()
+                        ));
+                    }
+                    todo.push(place);
                 }
-                todo.push(place);
             }
         }
     }
-    let mut above: Vec<(Place, PathBuf)> = seen
+    let mut above: Vec<(Place, PathBuf)> = found
         .into_iter()
-        .filter(|place| !place.within(&start))
-        .filter_map(|place| view_of(mounts, &place).map(|view| (place, view)))
+        .filter(|(place, ask)| *ask && !place.within(&start))
+        .filter_map(|(place, _)| view_of(mounts, &place).map(|view| (place, view)))
         .collect();
     above.sort_by(|(_, a), (_, b)| {
         (a.components().count(), a.as_path()).cmp(&(b.components().count(), b.as_path()))
@@ -275,7 +371,7 @@ pub fn places_above(mounts: &[MountEntry], path: &Path) -> Result<Vec<(Place, Pa
 /// whose root field is at or above it, where no other mount covers it
 /// (the path's own place, by the table, is `place`). The first such mount
 /// in table order; `None` when the table shows it nowhere.
-pub fn view_of(mounts: &[MountEntry], place: &Place) -> Option<PathBuf> {
+fn view_of(mounts: &[MountEntry], place: &Place) -> Option<PathBuf> {
     mounts
         .iter()
         .filter(|mount| mount.dev == place.dev)

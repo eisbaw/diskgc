@@ -411,7 +411,11 @@ How the format reads (the schema documents every key):
   its source (it is non-recursive, or private), so it shows a mount point
   there as the uncovered directory; removing or renaming that directory is
   still `EBUSY` through every mount of its filesystem, as Linux marks the
-  directory, not a mount showing it (TASK-290). `fs: overlay` with `overlay_upper:
+  directory, not a mount showing it (TASK-290). An overlay's directories
+  count as the overlay's own there: a mount on an upper directory does not
+  make the merged entry busy in the model, where Linux's rmdir through the
+  overlay reaches the upper directory and is `EBUSY` (a divergence that
+  lets the model delete where Linux refuses, never the reverse). `fs: overlay` with `overlay_upper:
   /path` (a directory on an earlier mount) shows that directory's tree
   under the overlay's own `dev` and root field `/`, so an unlink on either
   side removes the entry from both; lower layers, whiteouts and copy-up
@@ -471,7 +475,9 @@ How the format reads (the schema documents every key):
   `proc_uids`, `proc_cmdline`, `proc_root_lookup`, `docker_query` or
   `run_command`), `mount` (`{id, at, fs, dev,
   size}`: a fresh filesystem mounted on an existing directory, e.g. a FUSE
-  mount appearing in a candidate). `remove` is `rm -r`: every entry below is unlinked, and an
+  mount appearing in a candidate; with `bind_of: <mount id>` and optional
+  `bind_root`, a bind of that mount's filesystem, an overlay's included,
+  whose `fs` and `dev` must be the ones it shows). `remove` is `rm -r`: every entry below is unlinked, and an
   object still open keeps only itself. An event that never fires fails the
   test.
 - **Clock:** virtual; it moves only by `sleep`, `flock_wait` (which jumps
@@ -587,6 +593,39 @@ Model scenarios required by [safety.md](safety.md) and
   (`a_negated_match_on_another_filesystem_is_searched`); a covered mount
   still listed in the table cannot prove no overlap
   (`a_covered_mount_in_the_table_cannot_prove_no_overlap`);
+- binds compared by place, not path text (TASK-267, TASK-285, TASK-290
+  and their review): a root bound from inside container storage is
+  refused (`vectors/walk/container-storage-behind-a-subdirectory-bind`,
+  `container-storage-cargo-root-behind-a-subdirectory-bind`); a snapper
+  layout (`/` showing a snapshot, `/.snapshots` unreadable) does not make
+  roots look above the namespace's root or where a mount is attached
+  (`tests/fs_dry_run.rs`
+  `a_snapper_root_does_not_make_roots_climb_into_the_snapshots`), and a
+  directory above a bound root that cannot be asked is named
+  (`an_unaskable_directory_above_a_bound_roots_place_is_named`); a
+  candidate, or a Cargo profile directory, holding a mount point only by
+  place is `contains_mount`
+  (`vectors/walk/{,cargo-}mount-point-inside-through-a-non-recursive-bind`,
+  `cargo-profile-dir-is-a-mount-point-through-a-non-recursive-bind`,
+  `cargo-triple-dir-is-a-mount-point-through-a-non-recursive-bind`, and
+  under the locks
+  `vectors/races/cargo-profile-dir-mounted-over-during-the-locked-walk`); a
+  rename above a bind's source, a `CACHEDIR.TAG` above it, or a mount made
+  after the enumeration (a bind of an overlay at a protected root) makes
+  the check enumerate again
+  (`vectors/config/protect-rename-above-a-bind-source`,
+  `protect-cargo-tag-above-a-bind-source`,
+  `negated-rename-above-a-bind-source-after-a-protect-refresh`,
+  `protect-overlay-bound-at-a-protect-root-after-enumeration`), and one
+  mount event costs one enumeration more, not one per candidate
+  (`tests/fs_reclaim.rs`
+  `a_mount_after_the_enumeration_costs_one_enumeration_more`). On a real
+  kernel (rootless container, a non-recursive `MS_BIND` of a scratch
+  directory; each fails with its check disabled):
+  `a_non_recursive_bind_keeps_a_candidate_holding_a_mount_point`,
+  `a_non_recursive_bind_keeps_a_cargo_profile_directory_that_is_a_mount_point`,
+  `a_root_bound_from_inside_container_storage_is_refused`. Not on a real
+  kernel: the snapper layout, btrfs subvolumes, binds of overlays.
 - a `protect` match removed after the tier enumerated it, before a
   candidate's first overlap screen, does not stop the run: the screen
   enumerates again (TASK-269), from discovery, the union walk, the

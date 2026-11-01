@@ -4018,3 +4018,64 @@ fn a_negated_match_removed_before_the_first_screen_does_not_stop_the_run() {
     assert!(report.errors.is_empty(), "{report:#?}");
     assert_eq!(actions(&report), ["/tmp/pytest-of-u0"], "{report:#?}");
 }
+
+/// TASK-285 review (Codex 1, mped S2): a mount made after the `protect`
+/// enumeration makes the next check enumerate again (any change of the
+/// mount table), and that check keeps what it found with a new horizon,
+/// so the later candidates do not enumerate again: one mount event costs
+/// one enumeration, not one per candidate (TASK-200's cost).
+#[test]
+fn a_mount_after_the_enumeration_costs_one_enumeration_more() {
+    let tree = format!(
+        "  /tmp/a: {}\n  /tmp/b: {}\n  /tmp/c: {}\n  /keep/x: {{.: {{}}}}\n  /media: {{.: {{}}}}\n",
+        old_dir("1M"),
+        old_dir("1M"),
+        old_dir("1M")
+    );
+    let event = "events:\n  - {at: {op: flock, path: /tmp/a, when: after}, mount: {id: 70, at: /media, fs: tmpfs, dev: \"0:70\", size: 1G}}\n";
+    let protect = || {
+        let config = diskgc_core::config::parse(
+            Path::new("/tmp/protect.yaml"),
+            br#"version: 1
+profiles:
+  - name: keep-x
+    find: {roots: [/keep], paths: [x], type: dir}
+    action: delete
+    examples: {match: [/keep/x]}
+protect: [keep-x]
+"#,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        executor::bind_protections(&config, 1000, false).unwrap_or_else(|e| panic!("{e}"))
+    };
+    // Lookups of the match: each enumeration's discovery and each overlap
+    // check's identity resolution make one (an enumeration more and its
+    // judgement: two), so the counts are compared, not fixed. Without the
+    // new horizon each later check enumerates again (25 against 13).
+    let lookups = |host: &ModelHost| {
+        calls(host, Op::Statx)
+            .iter()
+            .filter(|call| call.path.as_deref() == Some(Path::new("/keep/x")))
+            .count()
+    };
+    let run = |events: &str| {
+        let host = host(&yaml("", &tree, events));
+        let mut request = request("profile:anything", &["/tmp"], "/tmp", "100%");
+        request.tier.protections = protect();
+        let report = ensure(&host, &request);
+        assert!(host.unfired_events().is_empty());
+        assert!(report.errors.is_empty(), "{report:#?}");
+        assert_eq!(
+            actions(&report),
+            ["/tmp/a", "/tmp/b", "/tmp/c"],
+            "{report:#?}"
+        );
+        lookups(&host)
+    };
+    let quiet = run("");
+    let mounted = run(event);
+    assert!(
+        quiet < mounted && mounted <= quiet + 2,
+        "lookups of /keep/x: {mounted} with the mount, {quiet} without"
+    );
+}

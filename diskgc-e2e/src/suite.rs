@@ -1496,6 +1496,12 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::a_non_recursive_bind_keeps_a_candidate_holding_a_mount_point,
     },
     Test {
+        name: "a_non_recursive_bind_keeps_a_cargo_profile_directory_that_is_a_mount_point",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::a_non_recursive_bind_keeps_a_cargo_profile_directory_that_is_a_mount_point,
+    },
+    Test {
         name: "a_root_bound_from_inside_container_storage_is_refused",
         tier: Tier::Fast,
         expect: Expect::Pass,

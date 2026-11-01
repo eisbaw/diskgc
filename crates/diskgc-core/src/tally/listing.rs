@@ -25,7 +25,7 @@ use crate::fs_kind::{self, Find};
 use crate::host::{Host, HostError, MonoTime, MountEntry, Timestamp};
 use crate::index::{Birth, Discovered, Finder, Identity, MountKey};
 use crate::outcome::Stop;
-use crate::resolve::mount_for;
+use crate::places::mount_for;
 
 /// What finds a source's candidates.
 #[derive(Debug, Clone, PartialEq, Eq)]

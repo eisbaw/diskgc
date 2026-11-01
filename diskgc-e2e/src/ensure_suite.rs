@@ -279,6 +279,77 @@ pub fn a_non_recursive_bind_keeps_a_candidate_holding_a_mount_point(ctx: &Ctx) -
     judged.assert_clean()
 }
 
+/// TASK-290 review (Codex 2, mped S3) on a real kernel: a tmpfs mounted on
+/// the profile directory `/tmp/cpm/src/proj/target/debug`, and
+/// `/tmp/cpm/alias` a non-recursive bind of `/tmp/cpm/src`. Through the
+/// bind, `debug` is the directory the tmpfs covers, holding its own
+/// `.cargo-lock` and `deps/app` (checked first: the kernel shows them there
+/// and not through `/tmp/cpm/src`). The Cargo kind refuses the target
+/// (`contains_mount`) and the shadowed entries stay; with the check by
+/// place disabled it deleted `deps/app` and kept the profile directory, so
+/// no `EBUSY` told.
+pub fn a_non_recursive_bind_keeps_a_cargo_profile_directory_that_is_a_mount_point(
+    ctx: &Ctx,
+) -> TestResult {
+    let s = &ctx.scratch;
+    s.mkdirs("cpm/src/proj/target/debug/deps", 0o755, TESTER)?;
+    s.mkdir("cpm/alias", 0o755, TESTER)?;
+    s.write_file("cpm/src/proj/Cargo.toml", b"", 0o644, TESTER)?;
+    s.write_file(
+        "cpm/src/proj/target/CACHEDIR.TAG",
+        b"Signature: 8a477f597d28d172789f06886806bc55\n",
+        0o644,
+        TESTER,
+    )?;
+    s.write_file("cpm/src/proj/target/debug/.cargo-lock", b"", 0o644, TESTER)?;
+    s.write_file(
+        "cpm/src/proj/target/debug/deps/app",
+        &[7; 8192],
+        0o644,
+        TESTER,
+    )?;
+    s.mount_tmpfs("cpm/src/proj/target/debug")?;
+    s.bind_mount("cpm/src", "cpm/alias")?;
+    let shadowed = s.path("cpm/alias/proj/target/debug/deps/app");
+    ensure!(
+        shadowed.exists() && !s.path("cpm/src/proj/target/debug/deps/app").exists(),
+        "the bind does not show the directory the tmpfs covers at {}",
+        shadowed.display()
+    );
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ensure_run(
+        ctx,
+        &[
+            "--json",
+            "--select",
+            "profile:cargo-target",
+            "--roots",
+            "/tmp/cpm/alias",
+            "--min-free",
+            "100%",
+            "--timeout",
+            "10s",
+            "/tmp",
+        ],
+    )?;
+    let judged = oracle.judge(&run)?;
+    run.expect_code(1)?;
+    let result = report(&run)?;
+    ensure!(
+        result["skipped"]
+            .as_array()
+            .is_some_and(
+                |rows| rows.iter().any(|row| row["reason"] == "contains_mount"
+                    && row["candidate"]
+                        .as_str()
+                        .is_some_and(|c| c.starts_with("/tmp/cpm/alias/proj/target")))
+            ),
+        "the target is not skipped contains_mount: {result}"
+    );
+    ensure!(shadowed.exists(), "{} was deleted", shadowed.display());
+    judged.assert_clean()
+}
+
 /// TASK-267 on a real kernel: `/tmp/csb/l` is a bind of an image layer's
 /// `diff` directory inside a rootless Podman graphroot
 /// (`/tmp/csb/home/.local/share/containers/storage`), so the root's path has

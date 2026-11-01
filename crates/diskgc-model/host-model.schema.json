@@ -897,18 +897,34 @@
       ]
     },
     "MountEventSpec": {
-      "description": "A mount an event makes: a fresh, empty filesystem of type `fs` on the\nexisting directory `at`, on the mount that directory is on.",
+      "description": "A mount an event makes on the existing directory `at`, on the mount that\ndirectory is on: a fresh, empty filesystem of type `fs`, or with\n`bind_of` a bind of an existing mount (TASK-285 review: a mount made\nafter the protected matches were enumerated).",
       "type": "object",
       "properties": {
         "at": {
           "type": "string"
         },
+        "bind_of": {
+          "description": "Bind the filesystem an existing mount shows (overlays included: the\nbind shows the same overlay), its root or `bind_root`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bind_root": {
+          "description": "With `bind_of`: the directory of the source mount's filesystem the\nbind shows, as a path from that filesystem's root (mountinfo's root\nfield); it must exist. Not for an overlay.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "dev": {
-          "description": "Device number `major:minor`, not one already mounted.",
+          "description": "Device number `major:minor`, not one already mounted; with\n`bind_of`, the one the source mount shows.",
           "$ref": "#/$defs/Dev"
         },
         "fs": {
-          "description": "Filesystem type, e.g. `fuse`, `nfs4`.",
+          "description": "Filesystem type, e.g. `fuse`, `nfs4`; with `bind_of`, the source\nmount's (`overlay` for an overlay).",
           "type": "string"
         },
         "id": {
@@ -918,6 +934,7 @@
           "minimum": 0
         },
         "size": {
+          "description": "Ignored with `bind_of` (the source's filesystem's space).",
           "$ref": "#/$defs/Bytes"
         }
       },

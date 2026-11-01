@@ -1,0 +1,42 @@
+# As cargo-profile-dir-is-a-mount-point-through-a-non-recursive-bind, with
+# the tmpfs on the target-triple directory
+# /src/proj/target/x86_64-unknown-linux-gnu: through /alias its profile
+# directory is below the directory the tmpfs covers, so no mount is at the
+# profile directory's place; the triple directory itself is a mount point
+# by place, and the inspection refuses it (`contains_mount`) before it is
+# entered.
+profile_vector: 1
+profile: cargo-target
+roots: [/alias]
+path: /src
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /src, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /src/proj/target/x86_64-unknown-linux-gnu, fs: tmpfs, dev: "0:50", size: 1G, parent: 2}
+    - {id: 4, at: /alias, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /src/proj/Cargo.toml: {}
+    /src/proj/target/CACHEDIR.TAG: {cachedir_tag: true}
+    /src/proj/target/x86_64-unknown-linux-gnu/debug/.cargo-lock: {}
+    /src/proj/target/x86_64-unknown-linux-gnu/debug/deps/on-tmpfs: {size: 4K}
+    /alias/proj/target/x86_64-unknown-linux-gnu/debug/.cargo-lock: {}
+    /alias/proj/target/x86_64-unknown-linux-gnu/debug/deps/shadowed: {size: 1M}
+    /src/other/Cargo.toml: {}
+    /src/other/target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}
+expect:
+  plan:
+    - {candidate: /alias/other/target}
+    - {candidate: /alias/proj/target/x86_64-unknown-linux-gnu, reason: contains_mount}
+  reclaim_exit: 1
+  actions: [/alias/other/target]
+  removed: [/alias/other/target/debug/deps]
+  skipped:
+    - {candidate: /alias/proj/target/x86_64-unknown-linux-gnu, reason: contains_mount}
+  preserved:
+    - /alias/proj/target/x86_64-unknown-linux-gnu/debug/deps/shadowed
+    - /src/proj/target/x86_64-unknown-linux-gnu/debug/deps/on-tmpfs

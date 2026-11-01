@@ -602,9 +602,17 @@ impl State {
         )
     }
 
-    /// Mounts a fresh filesystem on the existing directory `spec.at` (an
-    /// event): the new mount's parent is the mount that directory is on.
+    /// Mounts a fresh filesystem, or binds an existing mount's
+    /// ([`crate::spec::MountEventSpec::bind_of`]), on the existing directory
+    /// `spec.at` (an event): the new mount's parent is the mount that
+    /// directory is on.
     pub fn mount_on(&mut self, spec: &crate::spec::MountEventSpec) -> Result<(), Fault> {
+        if let Some(source) = spec.bind_of {
+            return self.bind_on(spec, source);
+        }
+        if spec.bind_root.is_some() {
+            return Err(Fault::Model("mount: bind_root requires bind_of".to_owned()));
+        }
         if self.fss.contains_key(&spec.dev.0)
             || self
                 .mounts
@@ -636,6 +644,77 @@ impl State {
             read_only: false,
             dead: false,
             overlay: None,
+        });
+        Ok(())
+    }
+
+    /// [`Self::mount_on`] for a bind of mount `source`: the same device,
+    /// overlay and filesystem, showing its root or `spec.bind_root`.
+    fn bind_on(&mut self, spec: &crate::spec::MountEventSpec, source: u64) -> Result<(), Fault> {
+        if self.mounts.iter().any(|m| m.id == spec.id) {
+            return Err(Fault::Model(format!(
+                "mount: id {} already exists",
+                spec.id
+            )));
+        }
+        let Some(from) = self.mounts.iter().find(|m| m.id == source).cloned() else {
+            return Err(Fault::Model(format!(
+                "mount: bind_of {source}: no such mount"
+            )));
+        };
+        let fs_type = if from.overlay.is_some() {
+            "overlay"
+        } else {
+            self.fss[&from.dev].fs_type.as_str()
+        };
+        if from.shown_dev() != spec.dev.0 || fs_type != spec.fs {
+            return Err(Fault::Model(format!(
+                "mount: bind_of {source} shows {fs_type} on {}, not {} on {}",
+                from.shown_dev(),
+                spec.fs,
+                spec.dev.0
+            )));
+        }
+        let root = match &spec.bind_root {
+            None => from.root,
+            Some(_) if from.overlay.is_some() => {
+                return Err(Fault::Model(
+                    "mount: bind_root of an overlay is not modelled".to_owned(),
+                ));
+            }
+            Some(path) => {
+                let mut here = Loc {
+                    mnt: from.id,
+                    ino: self.fs(from.id).root,
+                };
+                for name in path.iter().filter(|name| *name != "/") {
+                    let ino = self
+                        .inode(here)
+                        .entries()
+                        .and_then(|entries| entries.get(name))
+                        .copied()
+                        .ok_or(Errno::ENOENT)?;
+                    here = Loc { mnt: from.id, ino };
+                }
+                here.ino
+            }
+        };
+        let on = self.lookup(&spec.at)?;
+        if self.inode(on).entries().is_none() {
+            return Err(Fault::Model(format!(
+                "mount: {} is not a directory",
+                spec.at.display()
+            )));
+        }
+        self.mounts.push(Mount {
+            id: spec.id,
+            parent: Some(on.mnt),
+            dev: from.dev,
+            on: Some(on),
+            root,
+            read_only: false,
+            dead: from.dead,
+            overlay: from.overlay,
         });
         Ok(())
     }

@@ -30,6 +30,7 @@ use crate::engine::{
 use crate::host::{
     Access, Base, DevIno, DirListing, FileType, Host, HostError, MonoTime, MountEntry, Stat,
 };
+use crate::places;
 use crate::resolve::{
     MountScreenError, ResolveError, Resolved, Unsafe, Want, is_mount_point, open_beneath,
     resolve_in,
@@ -326,7 +327,10 @@ pub(super) fn identity_of(stat: &Stat, path: &Path) -> Result<Identity, Skip> {
 
 /// `name` below the open directory `dir` when it is a directory on mount
 /// `mount_id`: `Ok(Ok(None))` for anything else but a mount (a symlink, a
-/// file), `contains_mount` for a directory of another mount.
+/// file), `contains_mount` for a directory of another mount, or for a mount
+/// point by place (TASK-290 review: through a non-recursive bind, the
+/// directory a mount covers is on `mount_id`, and its entries are the
+/// shadowed ones). One the table cannot place is `unsafe_path`.
 fn subdir<H: Host>(
     host: &H,
     dir: &H::Fd,
@@ -337,6 +341,11 @@ fn subdir<H: Host>(
 ) -> Judged<Option<Stat>> {
     if is_mount_point(mounts, path) {
         return Ok(Err(mounted(path)));
+    }
+    match places::mount_at(mounts, path) {
+        Ok(None) => {}
+        Ok(Some(mount)) => return Ok(Err(mounted_by_place(path, mount))),
+        Err(why) => return Ok(Err(unplaceable(path, &why))),
     }
     let stat = match host.statx(Base::Dir(dir), Path::new(name)) {
         Ok(stat) => stat,
@@ -364,6 +373,26 @@ fn mounted(path: &Path) -> Skip {
         Reason::ContainsMount,
         path.to_owned(),
         "a mount point (mountinfo): not touched",
+    )
+}
+
+fn mounted_by_place(path: &Path, mount: &MountEntry) -> Skip {
+    Skip::new(
+        Reason::ContainsMount,
+        path.to_owned(),
+        format!(
+            "a mount point by its place in the filesystem (mount {} is attached there, \
+             mountinfo): its entries here are the ones that mount covers, not touched",
+            mount.mount_point.display()
+        ),
+    )
+}
+
+fn unplaceable(path: &Path, why: &str) -> Skip {
+    Skip::new(
+        Reason::UnsafePath,
+        path.to_owned(),
+        format!("cannot be placed in its filesystem (mountinfo): {why}"),
     )
 }
 
@@ -572,6 +601,19 @@ fn profile_dir_in<H: Host>(
     stat: &Stat,
     names: Vec<OsString>,
 ) -> Judged<ProfileDir> {
+    // The profile directory itself a mount point, by path or by place
+    // (TASK-290 review): read at the inspection and at every reading under
+    // the locks, before any entry is locked or deleted. A mount deeper in
+    // an entry is the eligibility walk's (by path and place, under the
+    // locks); refusing it here would also make a protected target holding
+    // one an incomplete enumeration, which discovery does not look into
+    // (docs/safety.md, Not protected, not excluded).
+    match places::mount_at(mounts, path) {
+        Ok(None) => {}
+        Ok(Some(mount)) if mount.mount_point == path => return Ok(Err(mounted(path))),
+        Ok(Some(mount)) => return Ok(Err(mounted_by_place(path, mount))),
+        Err(why) => return Ok(Err(unplaceable(path, &why))),
+    }
     let identity = match identity_of(stat, path) {
         Ok(identity) => identity,
         Err(skip) => return Ok(Err(skip)),

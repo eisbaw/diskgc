@@ -15,6 +15,7 @@ use diskgc_core::engine::{
     Candidate, Checkouts, DeleteOptions, End, Reason, Rules, delete_unchecked, walk,
 };
 use diskgc_core::executor::{self, Request, SourceKind, Tier};
+use diskgc_core::host::Host;
 use diskgc_core::inuse::MAX_LISTINGS;
 use diskgc_core::profile::{Action, Body, Library, parse_profiles};
 use diskgc_core::report::{Report, Status};
@@ -3184,6 +3185,90 @@ fn a_candidate_inside_a_checkouts_metadata_is_contains_checkout_by_its_path() {
         ],
         "{:#?}",
         report.plan
+    );
+    nothing_locked_or_deleted(&host);
+}
+
+/// mped B1 on the TASK-267 change: a default openSUSE/snapper layout (also
+/// Arch booted into a snapper snapshot). `/` shows the snapshot
+/// `/@/.snapshots/1/snapshot`, `/.snapshots` the subvolume `/@/.snapshots`
+/// (mode 0750, root's: the model does not check search permission, so a
+/// lookup there is made to fail `EACCES`), and `/home` the subvolume
+/// `/@/home`, all of one btrfs. The places above a root in `/home` must
+/// not climb above the namespace's root (`/@/.snapshots/1` and up), nor
+/// ask where a mount is attached (the directory `/home` covers, reached
+/// through `/.snapshots/1/snapshot/home`): the root is searched as usual
+/// and nothing below `/.snapshots` is looked at.
+#[test]
+fn a_snapper_root_does_not_make_roots_climb_into_the_snapshots() {
+    let model = r#"host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {id: 1, at: /, fs: btrfs, dev: "0:35", size: 100G}
+  - {id: 2, at: /, fs: btrfs, dev: "0:35", size: 100G, parent: 1, bind_of: 1, bind_root: /@/.snapshots/1/snapshot}
+  - {id: 3, at: /.snapshots, fs: btrfs, dev: "0:35", size: 100G, parent: 2, bind_of: 1, bind_root: /@/.snapshots}
+  - {id: 4, at: /home, fs: btrfs, dev: "0:35", size: 100G, parent: 2, bind_of: 1, bind_root: /@/home}
+tree:
+  /usr/bin/tool: {}
+  /home/tester/w/old: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 1K, mtime: 2026-10-01T00:00:00Z}}
+events:
+  - {at: {op: openat2, path: /.snapshots, when: before}, fail: EACCES}
+"#;
+    let host = host(model);
+    let mounts = host.mountinfo().expect("mountinfo");
+    assert_eq!(
+        diskgc_core::places::mount_for(&mounts, Path::new("/"))
+            .expect("one root")
+            .fs_root,
+        Path::new("/@/.snapshots/1/snapshot")
+    );
+    let report = dry_run(
+        &host,
+        &request("profile:anything", &["/home/tester/w"], "/home"),
+    );
+    assert_eq!(
+        reason_of(&report, "/home/tester/w/old"),
+        Some(None),
+        "{report:#?}"
+    );
+    let snapshots: Vec<_> = host
+        .trace()
+        .into_iter()
+        .filter(|call| {
+            call.path
+                .as_deref()
+                .is_some_and(|path| path.starts_with("/.snapshots"))
+        })
+        .collect();
+    assert!(snapshots.is_empty(), "{snapshots:#?}");
+    nothing_locked_or_deleted(&host);
+}
+
+/// mped S4 on the TASK-267 change: a directory above a bound root's place
+/// that cannot be asked refuses the root (fail closed), and the refusal
+/// names that directory, not only the root.
+#[test]
+fn an_unaskable_directory_above_a_bound_roots_place_is_named() {
+    let model = yaml(
+        "  /home/tester/layers/x/old: {.: {mtime: 2026-10-01T00:00:00Z}, payload: {size: 1K, mtime: 2026-10-01T00:00:00Z}}\nevents:\n  - {at: {op: openat2, path: /home, when: before}, fail: EACCES}\n",
+    )
+    .replacen(
+        "tree:\n",
+        "  - {id: 40, at: /mnt/l, fs: ext4, dev: \"254:2\", size: 100G, parent: 1, bind_of: 2, bind_root: /tester/layers/x}\ntree:\n",
+        1,
+    );
+    let host = host(&model);
+    let report = dry_run(&host, &request("profile:anything", &["/mnt/l"], "/mnt/l"));
+    let row = report
+        .plan
+        .iter()
+        .find(|row| row.candidate.as_deref() == Some(Path::new("/mnt/l")))
+        .unwrap_or_else(|| panic!("the root is not refused: {report:#?}"));
+    assert_eq!(row.reason, Some(Reason::Unreadable), "{report:#?}");
+    let detail = row.detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains("asking /home, above the root's place in its filesystem"),
+        "{detail}"
     );
     nothing_locked_or_deleted(&host);
 }

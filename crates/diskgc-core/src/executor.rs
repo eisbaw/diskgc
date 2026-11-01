@@ -1549,9 +1549,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 &mut |path, at| {
                     DeletePolicy {
                         protections: &self.tier.protections,
-                        protection: &self.protection,
-                        negated: &self.tier.negated,
-                        negated_matches: &negated_matches,
+                        protection: &mut self.protection,
+                        negated: &[&self.tier.negated],
+                        negated_matches: std::slice::from_mut(&mut negated_matches),
+                        term: Some(0),
                     }
                     .skip(self.host, self.deadline, path, at)
                 },
@@ -1795,9 +1796,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     &mut |_, path, at| {
                         DeletePolicy {
                             protections: &self.tier.protections,
-                            protection: &self.protection,
+                            protection: &mut self.protection,
                             negated: &[],
-                            negated_matches: &[],
+                            negated_matches: &mut [],
+                            term: None,
                         }
                         .skip(self.host, self.deadline, path, at)
                     },
@@ -2164,6 +2166,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 self.host.wall_clock(),
                 tally.as_ref().and_then(|t| t.newest_change),
             );
+            let term_negated: Vec<&[NegatedSource]> =
+                sources.iter().map(|source| source.negated).collect();
             let (selected, removed_entries, attempted_command, end) = match &self.tier.action {
                 Action::Delete { make_writable } => {
                     let done = fs_kind::reclaim_alternatives_checked(
@@ -2173,12 +2177,12 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                         checker,
                         self.deadline,
                         &mut |selected, path, at| {
-                            let index = contributors[selected].0;
                             DeletePolicy {
                                 protections: &self.tier.protections,
-                                protection: &self.protection,
-                                negated: sources[index].negated,
-                                negated_matches: &negated_matches[index],
+                                protection: &mut self.protection,
+                                negated: &term_negated,
+                                negated_matches: &mut negated_matches,
+                                term: Some(contributors[selected].0),
                             }
                             .skip(self.host, self.deadline, path, at)
                         },

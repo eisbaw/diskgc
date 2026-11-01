@@ -36,6 +36,7 @@ use crate::engine::{Reason, may_be_networked, path_in_private_tmp};
 use crate::host::{
     Access, Base, Errno, FileType, Host, HostError, MountEntry, OpenHow, ResolveFlags, Stat,
 };
+use crate::places::mount_for;
 
 /// What the resolved object must be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,52 +192,6 @@ impl std::error::Error for ResolveError {}
 /// entered: a dead mount would hang it (docs/safety.md, Before the walk).
 pub fn is_mount_point(mounts: &[MountEntry], path: &Path) -> bool {
     mounts.iter().any(|m| m.mount_point == path)
-}
-
-/// The mount a path is on: the deepest mount point that is a (component-
-/// wise) prefix of `path`; of mounts stacked on that point, the topmost (the
-/// one no other mount there is stacked on).
-pub fn mount_for<'m>(mounts: &'m [MountEntry], path: &Path) -> Result<&'m MountEntry, Unsafe> {
-    let depth = |m: &MountEntry| m.mount_point.components().count();
-    let deepest = mounts
-        .iter()
-        .filter(|m| path.starts_with(&m.mount_point))
-        .map(depth)
-        .max()
-        .ok_or(Unsafe::NoMount)?;
-    let at_point: Vec<&MountEntry> = mounts
-        .iter()
-        .filter(|m| path.starts_with(&m.mount_point) && depth(m) == deepest)
-        .collect();
-    let topmost: Vec<&MountEntry> = at_point
-        .iter()
-        .copied()
-        .filter(|m| !at_point.iter().any(|other| other.parent_id == m.id))
-        .collect();
-    match topmost.as_slice() {
-        [one] => Ok(one),
-        _ => Err(Unsafe::AmbiguousMounts(
-            at_point.iter().map(|m| m.id).collect(),
-        )),
-    }
-}
-
-/// Where `path`, a path on `mount` (at or below its mount point), is in
-/// that mount's filesystem: the mount's root field (mountinfo field 4)
-/// joined with the rest of `path`. `None` when `path` is not at or below the
-/// mount point or the root field is not an absolute path: nothing can be
-/// translated then. Nothing is looked up.
-pub fn place_in_filesystem(mount: &MountEntry, path: &Path) -> Option<PathBuf> {
-    let below = path.strip_prefix(&mount.mount_point).ok()?;
-    // No trailing `/` for the mount point itself (`Path` compares and
-    // hashes by components, so this is only for what is shown).
-    mount.fs_root.is_absolute().then(|| {
-        if below.as_os_str().is_empty() {
-            mount.fs_root.clone()
-        } else {
-            mount.fs_root.join(below)
-        }
-    })
 }
 
 /// A reason to refuse a root before opening it or any ancestor. A local

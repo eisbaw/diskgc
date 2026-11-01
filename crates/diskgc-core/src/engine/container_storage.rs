@@ -51,10 +51,9 @@ use std::path::{Path, PathBuf};
 
 use super::{Reason, Skip};
 use crate::host::{Access, Host, HostError, MountEntry};
-use crate::places;
+use crate::places::{self, mount_for};
 use crate::resolve::{
-    MountedNames, ResolveError, Resolved, Unsafe, Want, mount_for, name_present_in, open_beneath,
-    resolve_in,
+    MountedNames, ResolveError, Resolved, Unsafe, Want, name_present_in, open_beneath, resolve_in,
 };
 
 /// One kind of storage root and the names that make one: for every group,
@@ -303,14 +302,36 @@ pub fn storage_above<H: Host>(
         if on_the_path.contains(&place) {
             continue;
         }
-        let dir = resolve_in(host, mounts, &at, Want::Directory)?;
+        let dir = resolve_in(host, mounts, &at, Want::Directory).map_err(|e| asking(e, &at))?;
         match storage_in(host, &dir.fd, &at, mounts) {
             Ok(None) => {}
             Ok(Some(storage)) => return Ok(Some(storage.inside(&at, root))),
-            Err((_, e)) => return Err(ResolveError::Host(e)),
+            Err((_, e)) => return Err(asking(ResolveError::Host(e), &at)),
         }
     }
     Ok(None)
+}
+
+/// `e`, met asking `at` (a directory above a root's place, shown elsewhere)
+/// for container storage: a host error says so, so the root's refusal
+/// names the directory that failed, not only the root (mped S4). The other
+/// errors name the path they met already.
+fn asking(e: ResolveError, at: &Path) -> ResolveError {
+    match e {
+        ResolveError::Host(mut error) => {
+            let asked = format!(
+                "asking {}, above the root's place in its filesystem, for container storage",
+                at.display()
+            );
+            error.detail = if error.detail.is_empty() {
+                asked
+            } else {
+                format!("{}; {asked}", error.detail)
+            };
+            ResolveError::Host(error)
+        }
+        other => other,
+    }
 }
 
 /// [`storage_above`] on the root's path: each directory from `/` down to

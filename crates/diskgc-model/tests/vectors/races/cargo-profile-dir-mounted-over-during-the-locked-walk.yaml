@@ -1,0 +1,34 @@
+# TASK-290 review (Codex 2), the reading under the locks: /alias is a
+# non-recursive bind of /src. Under the target's locks, after its locked
+# inspection, a tmpfs is mounted on the profile directory
+# /src/proj/target/debug: through /alias, debug is now the directory that
+# tmpfs covers. The profile directory is read again before its part is
+# deleted, the mount at its place makes it `contains_mount`, and nothing
+# of it is deleted.
+profile_vector: 1
+profile: cargo-target
+roots: [/alias]
+path: /src
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /src, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 4, at: /alias, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /src/proj/Cargo.toml: {}
+    /src/proj/target/CACHEDIR.TAG: {cachedir_tag: true}
+    /src/proj/target/debug/.cargo-lock: {}
+    /src/proj/target/debug/deps/app: {size: 1M}
+  events:
+    - {at: {op: read_dir, path: /alias/proj/target/debug/deps, nth: 2, when: before}, mount: {id: 9, at: /src/proj/target/debug, fs: tmpfs, dev: "0:50", size: 1G}}
+expect:
+  plan: [{candidate: /alias/proj/target}]
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: [{candidate: /alias/proj/target, reason: contains_mount}]
+  preserved: [/alias/proj/target/debug/deps/app]

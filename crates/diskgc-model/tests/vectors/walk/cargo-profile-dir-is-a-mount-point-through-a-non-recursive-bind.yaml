@@ -1,0 +1,44 @@
+# TASK-290 review (Codex 2, mped S3; static, no events). A tmpfs is
+# mounted on the profile directory /src/proj/target/debug, and /alias is a
+# non-recursive bind of /src. Through /alias, debug is the directory the
+# tmpfs covers: its own `.cargo-lock` and `deps`, on /src's mount, with no
+# mount point at or below it by path. Cargo would lock and delete those
+# shadowed entries (and keep the profile directory, so no EBUSY tells).
+# The profile directory is a mount point by place, the target is
+# `contains_mount`, and nothing of it is touched; /alias/other's target is
+# reclaimed.
+profile_vector: 1
+profile: cargo-target
+roots: [/alias]
+path: /src
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /src, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /src/proj/target/debug, fs: tmpfs, dev: "0:50", size: 1G, parent: 2}
+    - {id: 4, at: /alias, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /src/proj/Cargo.toml: {}
+    /src/proj/target/CACHEDIR.TAG: {cachedir_tag: true}
+    /src/proj/target/debug/.cargo-lock: {}
+    /src/proj/target/debug/deps/on-tmpfs: {size: 4K}
+    /alias/proj/target/debug/.cargo-lock: {}
+    /alias/proj/target/debug/deps/shadowed: {size: 1M}
+    /src/other/Cargo.toml: {}
+    /src/other/target: {CACHEDIR.TAG: {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {app: {size: 1M}}}}
+expect:
+  plan:
+    - {candidate: /alias/other/target}
+    - {candidate: /alias/proj/target/debug, reason: contains_mount}
+  reclaim_exit: 1
+  actions: [/alias/other/target]
+  removed: [/alias/other/target/debug/deps]
+  skipped:
+    - {candidate: /alias/proj/target/debug, reason: contains_mount}
+  preserved:
+    - /alias/proj/target/debug/deps/shadowed
+    - /src/proj/target/debug/deps/on-tmpfs

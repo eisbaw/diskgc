@@ -1,0 +1,48 @@
+# TASK-285 review (Codex 1, one event). `protect` covers Cargo targets at
+# the root /safe/t, empty when enumerated. An overlay at /merged shows the
+# upper directory /upper, which holds a Cargo target's layout; the tier
+# selects /upper/debug/deps/cruft. Under the candidate's lock a bind of
+# /merged is mounted at /safe/t: /safe/t is now a protected target showing
+# the candidate, while the candidate's path, identity, times and place
+# (on /'s device, the overlay's is its own) stay. The mount table differs
+# from the one read before the enumeration, so the check enumerates again;
+# the fresh match is on an overlay, the overlap cannot be proved, and the
+# run stops (exit 3) with nothing deleted.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: upper-cruft
+      find: {roots: [/upper/debug/deps], paths: [cruft], type: dir}
+      action: delete
+      examples: {match: [/upper/debug/deps/cruft]}
+  protect:
+    - {profile: cargo-target, roots: [/safe/t]}
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: profile:upper-cruft}
+path: /upper
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 60, at: /merged, fs: overlay, dev: "0:60", size: 1G, parent: 1, overlay_upper: /upper}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /safe/t: {.: {}}
+    /upper/CACHEDIR.TAG: {cachedir_tag: true}
+    /upper/debug/.cargo-lock: {}
+    /upper/debug/deps/cruft: {.: {mtime: 2026-10-01T00:00:00Z}, blob: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+  events:
+    - {at: {op: flock, path: /upper/debug/deps/cruft, when: after}, mount: {id: 61, at: /safe/t, fs: overlay, dev: "0:60", size: 1G, bind_of: 60}}
+expect:
+  plan: [{candidate: /upper/debug/deps/cruft}]
+  reclaim_exit: 3
+  errors: [{cause: host, contains: "cannot prove overlap at /safe/t: it is on overlay mount /safe/t"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/upper/debug/deps/cruft/blob]

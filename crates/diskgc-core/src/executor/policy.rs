@@ -8,9 +8,9 @@ use crate::cargo_target::{self, Stop};
 use crate::engine::{CACHEDIR_TAG, Reason, Skip, may_be_networked};
 use crate::fs_kind;
 use crate::host::{DevIno, Host, HostError, MonoTime, MountEntry};
-use crate::places::{self, Place};
+use crate::places::{self, Place, mount_for};
 use crate::resolve::{
-    MountScreenError, ResolveError, Want, mount_for, resolve, resolve_in, screen_mount_chain,
+    MountScreenError, ResolveError, Want, resolve, resolve_in, screen_mount_chain,
 };
 use crate::select;
 use std::collections::HashMap;
@@ -91,7 +91,27 @@ pub(super) fn overlaps_checked_until<H: Host>(
     matches: &[PathBuf],
     deadline: Option<MonoTime>,
 ) -> Result<bool, String> {
-    overlaps_through_images(host, candidate, matches, deadline, LOOP_IMAGE_DEPTH)
+    if matches.is_empty() {
+        return Ok(false);
+    }
+    let mounts = host
+        .mountinfo()
+        .map_err(|error| format!("cannot read mountinfo to prove overlap: {error}"))?;
+    overlaps_checked_in(host, &mounts, candidate, matches, deadline)
+}
+
+/// [`overlaps_checked_until`] against the mount table `mounts`, which the
+/// caller read for this step (one table per check, TASK-285 review). The
+/// candidate and every match are resolved on the mounts it names, so a
+/// table older than a change on their way fails there, never passes.
+pub(super) fn overlaps_checked_in<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    candidate: &Path,
+    matches: &[PathBuf],
+    deadline: Option<MonoTime>,
+) -> Result<bool, String> {
+    overlaps_through_images(host, mounts, candidate, matches, deadline, LOOP_IMAGE_DEPTH)
 }
 
 /// How many loop images deep (an image inside an image) the verdict
@@ -110,6 +130,7 @@ const LOOP_MAJOR: u32 = 7;
 /// judged again. `depth` bounds images within images.
 fn overlaps_through_images<H: Host>(
     host: &H,
+    mounts: &[MountEntry],
     candidate: &Path,
     matches: &[PathBuf],
     deadline: Option<MonoTime>,
@@ -123,9 +144,6 @@ fn overlaps_through_images<H: Host>(
     }
     // Preflight every ancestor before opening even the deepest path: a
     // local bind mount can sit below a network or FUSE mount point.
-    let mounts = host
-        .mountinfo()
-        .map_err(|error| format!("cannot read mountinfo to prove overlap: {error}"))?;
     let check_time = || {
         if deadline.is_some_and(|end| host.now() >= end) {
             Err(format!(
@@ -136,9 +154,9 @@ fn overlaps_through_images<H: Host>(
             Ok(())
         }
     };
-    screen_overlap_mounts(&mounts, candidate, matches, check_time)?;
-    refuse_overlay(&mounts, candidate, matches)?;
-    if overlaps_in_filesystem(&mounts, candidate, matches, check_time)? {
+    screen_overlap_mounts(mounts, candidate, matches, check_time)?;
+    refuse_overlay(mounts, candidate, matches)?;
+    if overlaps_in_filesystem(mounts, candidate, matches, check_time)? {
         return Ok(true);
     }
     // The precondition of the "no" above: the candidate and every match are
@@ -148,7 +166,7 @@ fn overlaps_through_images<H: Host>(
     // table was read is not seen (docs/safety.md, limits).
     let by_identity = overlaps_with(candidate, matches, |path| {
         check_time()?;
-        let at = resolve_in(host, &mounts, path, Want::Any)
+        let at = resolve_in(host, mounts, path, Want::Any)
             .map_err(|error| format!("cannot prove overlap at {}: {error}", path.display()))?;
         at.stat.dev_ino().ok_or_else(|| {
             format!(
@@ -160,7 +178,7 @@ fn overlaps_through_images<H: Host>(
     if by_identity {
         return Ok(true);
     }
-    let (inside, images) = loop_images(host, &mounts, candidate, matches)?;
+    let (inside, images) = loop_images(host, mounts, candidate, matches)?;
     if inside.is_none() && images.is_empty() {
         return Ok(false);
     }
@@ -171,11 +189,11 @@ fn overlaps_through_images<H: Host>(
         ));
     };
     if let Some(image) = inside
-        && overlaps_through_images(host, &image, matches, deadline, depth)?
+        && overlaps_through_images(host, mounts, &image, matches, deadline, depth)?
     {
         return Ok(true);
     }
-    overlaps_through_images(host, candidate, &images, deadline, depth)
+    overlaps_through_images(host, mounts, candidate, &images, deadline, depth)
 }
 
 /// The backing file of the loop device `candidate`'s mount is on, if it is
@@ -507,6 +525,7 @@ pub(super) fn ancestor_identities(
 /// show there is a doubt.
 pub(super) fn tagged_ancestor<'r, H: Host>(
     host: &H,
+    mounts: &[MountEntry],
     roots: impl IntoIterator<Item = &'r PathBuf>,
     matches: impl Fn(&Path) -> bool,
     path: &Path,
@@ -537,14 +556,11 @@ pub(super) fn tagged_ancestor<'r, H: Host>(
             dir.push(name);
         }
     }
-    let Ok(mounts) = host.mountinfo() else {
-        return true;
-    };
-    let Ok(shown) = places::ancestry(&mounts, path) else {
+    let Ok(shown) = places::ancestry(mounts, path) else {
         return true;
     };
     for root in &roots {
-        let Ok(at) = places::place_of(&mounts, root) else {
+        let Ok(at) = places::place_of(mounts, root) else {
             return true;
         };
         // The candidate's own place when its path does not show it below
@@ -562,7 +578,7 @@ pub(super) fn tagged_ancestor<'r, H: Host>(
             let mut dir = (*root).clone();
             let mut dir_place = at.clone();
             for name in below.iter() {
-                if places::place_of(&mounts, &dir).as_ref() != Ok(&dir_place) || tagged(&dir) {
+                if places::place_of(mounts, &dir).as_ref() != Ok(&dir_place) || tagged(&dir) {
                     return true;
                 }
                 dir.push(name);
@@ -674,6 +690,24 @@ pub(super) fn judge_negated<H: Host>(
         |matches: &[Vec<PathBuf>]| excluded_by_until(host, sources, matches, candidate, deadline),
         || scan_negated(host, sources, deadline),
     )
+}
+
+/// [`excluded_by_until`] against the mount table `mounts` (as
+/// [`overlaps_checked_in`]).
+pub(super) fn excluded_by_in<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    sources: &[NegatedSource],
+    matches: &[Vec<PathBuf>],
+    candidate: &Path,
+    deadline: Option<MonoTime>,
+) -> Result<Option<String>, String> {
+    for (source, paths) in sources.iter().zip(matches) {
+        if overlaps_checked_in(host, mounts, candidate, paths, deadline)? {
+            return Ok(Some(source.profile.clone()));
+        }
+    }
+    Ok(None)
 }
 
 pub(super) fn excluded_by_until<H: Host>(
