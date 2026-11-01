@@ -433,8 +433,8 @@ enum Seen {
     /// The task is live, yet its read was empty: maybe bound to another
     /// task (see the module docs).
     Empty,
-    /// The task is live, yet its read said `ENOENT`.
-    Missing,
+    /// The task is live, yet its read said `ENOENT` or `ESRCH` (which).
+    Missing(Errno),
     /// The leader's own entry vanished: a lookup can race a non-leader exec.
     LeaderVanished,
     /// The number was handed to another task during this read. The read
@@ -486,7 +486,14 @@ fn observe<T>(
         _ if reused => Seen::Reused,
         _ if tid == pid && status == Status::Vanished => Seen::LeaderVanished,
         Ok(value) if status == Status::Live && (tasks.is_empty)(value) => Seen::Empty,
-        Err(e) if status == Status::Live && is_vanished(e) => Seen::Missing,
+        Err(e) if status == Status::Live && is_vanished(e) => {
+            Seen::Missing(e.kernel_errno().unwrap_or(Errno::ENOENT))
+        }
+        // A kernel thread by both `stat`s around the read, or not at all
+        // (TASK-306 review): a task that turned into one is no answer.
+        _ if status == Status::KernelThread && !matches!(&before, Ok(b) if b.kernel_thread) => {
+            Seen::Reused
+        }
         _ => Seen::Trusted(status),
     };
     let value = match result {
@@ -641,7 +648,12 @@ impl Shortfall {
                     "task {tid} is live but gave an empty or incomplete {what} (which cannot be \
                      told from a read bound to another task)"
                 ),
-                Seen::Missing => format!("task {tid} is live but its {what} said ENOENT"),
+                Seen::Missing(errno) => {
+                    format!(
+                        "task {tid} is live but its {what} said {}",
+                        errno.name().unwrap_or("an errno")
+                    )
+                }
                 Seen::LeaderVanished => format!("the leader's entry (task {tid}) vanished"),
                 Seen::Reused => format!("task {tid} changed identity during its {what} read"),
                 Seen::Trusted(_) => format!("task {tid} gave no trustworthy read"),
@@ -1746,7 +1758,7 @@ mod tests {
             Want::FirstLiveTask,
         );
         assert!(
-            failed_saying(&got, "task 10 is live but its table said ENOENT"),
+            failed_saying(&got, "task 10 is live but its table said ESRCH"),
             "{got:?}"
         );
         assert_eq!(made.get(), MAX_ROUNDS);
@@ -1766,6 +1778,24 @@ mod tests {
                 let mut stat = task('S', false, true)?;
                 stat.start_ticks = stats.get();
                 Ok(stat)
+            },
+            Want::FirstLiveTask,
+        );
+        assert!(failed_saying(&got, "changed identity"), "{got:?}");
+    }
+
+    /// TASK-306 review: `PF_KTHREAD` must show in both `stat`s around the
+    /// read; one shown only after it is not the answer.
+    #[test]
+    fn a_kernel_thread_flag_seen_only_after_the_read_is_not_the_answer() {
+        let stats = Cell::new(0u32);
+        let got = scan(
+            2,
+            rounds(vec![complete(&[2])]),
+            |_| Err(errno(Errno::ESRCH)),
+            |_| {
+                stats.set(stats.get() + 1);
+                task('S', false, stats.get().is_multiple_of(2))
             },
             Want::FirstLiveTask,
         );
