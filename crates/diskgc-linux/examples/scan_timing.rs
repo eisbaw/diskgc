@@ -23,9 +23,13 @@ const SCANS_MAX: usize = 1000;
 fn main() {
     let mut scans = 20;
     let mut pytest_facts = false;
+    let mut project_facts = false;
     for arg in std::env::args().skip(1) {
         if arg == "--pytest-facts" {
             pytest_facts = true;
+        } else if arg == "--project-facts" {
+            // The project contracts' held objects and climbs (TASK-79).
+            project_facts = true;
         } else {
             scans = arg
                 .parse()
@@ -41,12 +45,14 @@ fn main() {
     let options = Options {
         users: &users,
         sockets: false,
-        pid_lookup: pytest_facts,
+        pid_lookup: pytest_facts || project_facts,
         pytest_facts,
+        project_facts,
     };
     let load = std::fs::read_to_string("/proc/loadavg").expect("read /proc/loadavg");
     println!(
-        "processes listed: {}, load: {}, pytest facts: {pytest_facts}",
+        "processes listed: {}, load: {}, pytest facts: {pytest_facts}, project facts: \
+         {project_facts}",
         host.pids().expect("list /proc").len(),
         load.split_whitespace().next().expect("loadavg has fields"),
     );

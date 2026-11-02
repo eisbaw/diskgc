@@ -370,6 +370,39 @@
       "description": "A directory's own attributes (the `.` key).",
       "type": "object",
       "properties": {
+        "atime": {
+          "description": "Access time when it differs from `mtime` (a lister moves a\ndirectory's); default `mtime`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WallTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "btime": {
+          "description": "Birth time when it differs from `mtime` (a directory made long ago\nwhose entries were removed since); default `mtime`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WallTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ctime": {
+          "description": "Change time when it differs from `mtime`; default `mtime`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WallTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "gid": {
           "description": "Group; default 1000.",
           "type": [
@@ -391,7 +424,7 @@
           ]
         },
         "mtime": {
-          "description": "Modification time (also ctime and birth time); default `clock`.",
+          "description": "Modification time (also ctime, btime and atime unless those are\ngiven); default `clock`.",
           "anyOf": [
             {
               "$ref": "#/$defs/WallTime"
@@ -766,7 +799,7 @@
       "type": "object",
       "properties": {
         "atime": {
-          "description": "Last access time; default the modification time. A read of the\nfile (`read_head`) or link (`readlink`) sets it to the clock.",
+          "description": "Last access time; default the modification time. A `readlink` of\na link sets it to the clock; a `read_head` of a file does only\nwhere Linux refuses diskgc's `O_NOATIME` (a file of another owner\nwhile diskgc is not root), as LinuxHost opens with it.",
           "anyOf": [
             {
               "$ref": "#/$defs/WallTime"
@@ -780,6 +813,17 @@
           "description": "Only with `type: socket`: a socket is bound to this file in\ndiskgc's network namespace (`bound_unix_sockets` reports it).",
           "type": "boolean"
         },
+        "btime": {
+          "description": "Birth time when it differs from `mtime` (a directory made long ago\nwhose entries were removed since); default `mtime`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WallTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cachedir_tag": {
           "description": "Holds a valid `CACHEDIR.TAG` signature.",
           "type": "boolean"
@@ -789,6 +833,17 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "ctime": {
+          "description": "Change time when it differs from `mtime` (a package manager\nextracting files with old, normalised mtimes leaves fresh ctimes);\ndefault `mtime`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WallTime"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "gid": {
@@ -819,7 +874,7 @@
           ]
         },
         "mtime": {
-          "description": "Modification time (also ctime and birth time); default `clock`.",
+          "description": "Modification time (also ctime, btime and atime unless those are\ngiven); default `clock`.",
           "anyOf": [
             {
               "$ref": "#/$defs/WallTime"
@@ -1110,6 +1165,10 @@
             "$ref": "#/$defs/Dev"
           }
         },
+        "noatime": {
+          "description": "Mounted `noatime`: mountinfo shows `noatime` among its per-mount\noptions, so atimes there say nothing about reads. The model never\nmoves an atime either way.",
+          "type": "boolean"
+        },
         "other_used": {
           "description": "Space used by things outside the model; available space is `size -\nother_used -` the blocks of every live inode.",
           "$ref": "#/$defs/Bytes"
@@ -1262,6 +1321,8 @@
         "proc_uids",
         "proc_cmdline",
         "proc_root_lookup",
+        "proc_climb",
+        "proc_mountinfo",
         "may_delete",
         "unlinkat",
         "fchmod",
@@ -1600,6 +1661,7 @@
             "mtime",
             "ctime",
             "btime",
+            "atime",
             "mnt_id",
             "mount_root"
           ]

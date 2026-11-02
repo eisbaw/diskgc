@@ -692,6 +692,7 @@ pub(crate) mod tests {
             source: "tmpfs".into(),
             read_only: false,
             idmapped: false,
+            noatime: false,
             upper_dir: None,
         }
     }
@@ -866,6 +867,18 @@ pub(crate) mod tests {
             _: &Path,
             _: bool,
         ) -> Result<Vec<crate::host::DevIno>, ProcError> {
+            unreachable!()
+        }
+
+        fn proc_climb(
+            &self,
+            _: Pid,
+            _: crate::host::HeldDir,
+        ) -> Result<Vec<crate::host::DevIno>, ProcError> {
+            unreachable!()
+        }
+
+        fn proc_mountinfo(&self, _: Pid) -> Result<Vec<MountEntry>, ProcError> {
             unreachable!()
         }
 

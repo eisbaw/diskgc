@@ -1848,14 +1848,11 @@ The report always names the measure used.
 
 ### Liveness contract predicate
 
-Status (TASK-112 step 5): `nix-shell` and `pytest` are implemented and
-judged; the `nix-shell-rc` and `pytest-tmp` built-ins use them.
-`node-project` and `python-project` are designed below and refused at
-load ("not supported by this version of diskgc", naming the supported
-ones) until they land (TASK-79), so nothing half-built can be selected.
-They are reserved, not part of the accepted set: since no valid profile
-can name them today, TASK-79 may still rename or merge them (one
-`project` contract, say) without breaking a configuration. What each contract shows,
+Status: every contract is implemented and judged. `nix-shell` and
+`pytest` (TASK-112 step 5) are used by the `nix-shell-rc` and
+`pytest-tmp` built-ins; `node-project` and `python-project` (TASK-79) by
+`node-modules` and `python-venv`, in the development library only. What
+each contract shows,
 and when it cannot decide, is in
 [safety.md](safety.md#producer-liveness); which built-in uses which
 contract is in [Liveness contracts](#liveness-contracts).
@@ -1875,8 +1872,8 @@ where:
 |---|---|---|
 | `nix-shell` | directories named `nix-shell-<pid>-<suffix>` or `nix-develop-<pid>-<suffix>` | nix-shell rc directories (Owner PID) |
 | `pytest` | a pytest session directory `pytest-of-*/pytest-*` | pytest sessions |
-| `node-project` (reserved: refused at load, TASK-79) | a `node_modules` directory whose parent holds `package.json` and that lies in no other dependency directory | project dependency directories |
-| `python-project` (reserved: refused at load, TASK-79) | a virtual environment (holding `pyvenv.cfg`) whose parent holds a Python project manifest and that lies in no other dependency directory | project dependency directories |
+| `node-project` | a `node_modules` directory whose parent holds a regular `package.json` and that lies in no other dependency directory | project dependency directories |
+| `python-project` | a virtual environment (holding a regular `pyvenv.cfg`) whose parent holds a Python project manifest and that lies in no other dependency directory | project dependency directories |
 
 There is no default: without the key no contract is required.
 `min_idle_for` stays a separate field; each built-in's value is in
@@ -1891,10 +1888,10 @@ touching the machine):
   guard);
 - a value that is not one of the contract names, the message naming them
   (`liveness_contract: pytset`); a mapping or a list;
-- a contract this version does not judge yet (`node-project`,
-  `python-project` until they land), the message naming the supported
-  ones, so nothing half-built can be selected; the find-shape and
-  checkout rules below apply to each from the version that judges it;
+- a contract this version does not judge yet (none since TASK-79), the
+  message naming the supported ones, so nothing half-built can be
+  selected; the find-shape and checkout rules below apply to each from
+  the version that judges it;
 - `liveness_contract` on a filter profile: it is a source predicate, since
   the producer belongs to what the source finds; on a kind other than
   `fs`: the existing "predicate on a kind that does not support it" error;
@@ -1940,7 +1937,8 @@ checks before the table (`liveness_contract pytest: ...`); programs branch on
   that stayed unreadable, a relative or unresolvable temp-root or
   `--basetemp` value, an unreadable command line or environment, an
   oversized or unparsable workspace `package.json`, a project climb that
-  reached a bind-mounted subdirectory. Its `process_blockers` is `null`
+  reached a bind-mounted subdirectory or found the nearest project above
+  the source root. Its `process_blockers` is `null`
   when no particular process caused it (a precondition, a marker, a
   listing); otherwise it holds one ordinary entry (a pid, as every entry
   has) per process that caused it, sorted by pid, each with evidence
@@ -1950,7 +1948,7 @@ checks before the table (`liveness_contract pytest: ...`); programs branch on
   a failed lookup of one of Python's fallback roots).
 - what is not a recognised instance is `filtered` (a name without a valid
   pid, a name that is not a session name, a missing manifest, a nested
-  dependency directory); a failed listing or project walk is
+  dependency directory, a `node_modules` that an outer one would replace); a failed listing or project walk is
   `unreadable`; a project tree over the entry budget is
   `too_many_entries` (all existing reasons);
 - `process_blockers` evidence `owner_pid` (a listed process carries the
@@ -2239,7 +2237,7 @@ remain a release decision under TASK-67.
 | python / js | `bun-cache` | `.bun/install/cache` or `.cache/.bun/install/cache` below a supplied home root | `delete` |
 | python / js | `python-pycache` | `__pycache__` directories at relative depths 1 through 5 below each supplied project root | `delete` |
 | python / js | `mypy-cache` | `.mypy_cache` directories at relative depths 1 through 5 below each supplied project root, with a regular `CACHEDIR.TAG` file | `delete` |
-| python / js | `node-modules`, `python-venv` | planned: `node_modules` directories, and `.venv` directories holding `pyvenv.cfg`, at relative depths 1 through 5 below a supplied project or workspace root and inside no other dependency directory, judged by their project's activity; `checkouts: refuse` | no safe action yet; contract designed, see [Liveness contracts](#liveness-contracts) |
+| python / js | `node-modules`, `python-venv` | `node_modules` directories beside a regular `package.json`, and `.venv` directories holding `pyvenv.cfg` beside a Python project manifest, at relative depths 1 through 5 below a supplied project or workspace root, with no hidden directory between the root and them (`find.exclude`: tool-managed installs such as `~/.npm/_npx`, editor extensions and `~/.cache` are not the user's projects), and inside no other dependency directory; `liveness_contract: node-project` or `python-project`, `min_idle_for: 30d`, judged by their project's activity ([Liveness contracts](#liveness-contracts)); `checkouts: refuse`. Development library only (no release catalog names them) | `delete` |
 | python / js | `jest-cache` | Jest's default `jest_*` cache under `/tmp` or `/var/tmp`, including the temp-prefix v1 preset below | `jest --config '{}' --cacheDirectory '{path}' --clearCache` from the checked parent; Jest removes the measured directory itself |
 | python / js | `node-compile-cache` | `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
 | c / c++ | `cmake-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `CMakeCache.txt`, a direct `CMakeFiles/` directory, no `CMakeLists.txt` entry, and a surviving recorded CMake source ancestor; minimum 3-day idle age and `checkouts: refuse` | `delete` |
@@ -2449,7 +2447,8 @@ its task notes.
 | `zephyr-tmp` | no tool: on the host, a project script (`mktemp -d /tmp/zephyr-h5e5-run.XXXXXXXX`; 2,578 such and 213 `zephyr-h5-run.*`) removes its run directory on success and keeps it on failure, printing its Renode and UART log paths for the user; hand-made directories (`zephyr-h5-clock-patch`, `zephyr-usart-patch.*`, without `.git`) and Git checkouts match too | in use only; no floor | none | Not a built-in. Was: Failure diagnostics the user was pointed to; hand-made work without a checkout; a live run's directory between two steps. Counterexample vector (user probe `zephyr-tmp-probe`) `zephyr-tmp-kept-failure-diagnostics-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). |
 | `renode-tmp` | Renode 1.17.0 TemporaryFilesManager (source read, renode-infrastructure `f3d5d7b7d`): one `renode-<pid>` per process; `GetTemporaryFile` creates each file and closes it; at start and exit Renode removes `renode-<pid>` directories of pids that are not alive, never `*-crash` (its crash reports) and nothing under `--keep-temporary-files` | in use only; no floor | none | Not a built-in. Was: A live Renode's directory holds no descriptor between uses, so a running emulation loses the files it created; crash reports (`renode-<pid>-crash`, 29 on the host) and directories kept on request are deleted. Counterexample vector (user probe `renode-tmp-probe`) `renode-tmp-live-emulation-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). Re-admission: a new name over `renode-<pid>` only, without `-crash`, under an Owner PID contract (Renode's own rule). |
 | `xdg-cache-entry-v2` | any application under `$XDG_CACHE_HOME` (XDG Base Directory Specification 0.8 calls it non-essential data; the profile's own exclusion list records applications that keep sessions, credentials, models and backups there) | in use, `min_idle_for: 30d`, `checkouts: refuse`, exact-name exclusions | none | Not a built-in. Was: Not all can be named: any unknown application's state, or a cache that is the only copy; a dormant application that reads its cache only when it starts. Counterexample vector (user probe `xdg-cache-entry-v2-probe`) `xdg-cache-entry-v2-unknown-app-state-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). |
-| `node-modules`, `python-venv` | npm: to be verified by the planned container test (an install from an offline tarball, a read-only run); pnpm, Yarn, Bun, venv, virtualenv and uv: planned, not verified; consumers are `node`, `python` and editors | planned: `liveness_contract: node-project` or `python-project`, `min_idle_for: 30d`, `checkouts: refuse` | verified heuristic: project activity | Those of safety.md (Project dependency directories); the loss in a residual is a reinstall, except hand-edited dependency files, a dated exception to the admission rule (Mark, 2026-10-23; remedy `.diskgc-keep` or `protect`). | Admitted by Mark, 2026-10-23. Nested dependency directories are never candidates, so a removal cannot silently switch Node to a hoisted copy. The matching set is fixed before the names ship. Not shipped: the loader refuses both contracts until they land with their vectors and container tests (TASK-79, which took over TASK-112 step 6). |
+| `node-modules` | npm 11.19.0 with Node.js 24.21.0 (the development host's install layout, read-only dry run 2026-11-02); TASK-79's container probe: reading `node_modules` changed neither mtime nor ctime. pnpm (its store links: vector `node-project-pnpm-layout-eligible`), Yarn and Bun: not verified; consumers are `node` and editors | `liveness_contract: node-project`, `min_idle_for: 30d`, `checkouts: refuse`: no change in the project, no read in its `node_modules` directories (project-wide when one links out; this narrowing is PENDING Mark's confirmation), no visible use (identity, held paths, environment, command line); kept while an outer `node_modules` exists | verified heuristic: project activity | Those named in safety.md, Project dependency directories (Residuals), among them a cached consumer launched through a path outside the project, a removal-only change, and under the pending narrowing a project whose own code but no dependency was read; plus safety.md, A process's paths (a mapping is matched by identity only). The loss in a residual is a reinstall, except hand-edited dependency files, a dated exception to the admission rule (Mark, 2026-10-23; remedy `.diskgc-keep` or `protect`). | Shipped, admitted by Mark, 2026-10-23 (TASK-79): development library only, in no release catalog; rule 2's narrowed scope is the orchestrator's, PENDING Mark's confirmation. Nested dependency directories, and one an outer `node_modules` would replace, are never candidates, so a removal cannot silently switch Node to a hoisted copy. Vectors: `node-project-*` in crates/diskgc-model/tests/vectors/liveness, `node-modules` in vectors/builtins. Container test: pending (TASK-79) |
+| `python-venv` | CPython 3.13.15 `venv` (the development host's layout, read-only dry run 2026-11-02); TASK-79's container probe: reading `.venv` changed neither mtime nor ctime. virtualenv and uv: not verified; consumers are `python` and editors | `liveness_contract: python-project`, `min_idle_for: 30d`, `checkouts: refuse`: no change in the project, no read in its `.venv` directories (project-wide with an editable install or a link out; this narrowing is PENDING Mark's confirmation), no visible use (identity, held paths, environment, command line) | verified heuristic: project activity | Those named in safety.md, Project dependency directories (Residuals), among them a cached consumer launched through a path outside the project, a removal-only change, and under the pending narrowing a project whose own code but no dependency was read; plus safety.md, A process's paths (a mapping is matched by identity only). The loss in a residual is a reinstall, except hand-edited dependency files, a dated exception to the admission rule (Mark, 2026-10-23; remedy `.diskgc-keep` or `protect`). | Shipped, admitted by Mark, 2026-10-23 (TASK-79): development library only, in no release catalog; rule 2's narrowed scope is the orchestrator's, PENDING Mark's confirmation. A `.venv` inside another dependency directory, or without `pyvenv.cfg` or a manifest beside it, is never a candidate; an editable install's checkout keeps it (`contains_checkout`). Vectors: `python-project-*` in crates/diskgc-model/tests/vectors/liveness, `python-venv` in vectors/builtins. Container test: pending (TASK-79) |
 | `nix-shell-tmpdir` | `nix develop`'s rc runs `mktemp -d -t nix-shell.XXXXXX` and exports it after `exec`; no exit cleanup (left after a normal exit, Nix 2.34.8) | none: the name records no owner; a dormant shell shows no use | none | Not a built-in. | Excluded. Counterexample: the dormant-temp-users container test. The class is fixed at the producer, upstream (TASK-123). |
 | `mktemp-dir` | any program | none | none | Not a built-in. | Excluded. Counterexample: a shell that exports `TMPDIR=$(mktemp -d)` after `exec`. |
 | `tmp-entry` | any program | none | none | Not a built-in. | Excluded for good: there is no one producer, and every counterexample above applies. |

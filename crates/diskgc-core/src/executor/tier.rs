@@ -199,6 +199,19 @@ impl Tier {
         own || self.fs_union.iter().any(|term| pytest(&term.find))
     }
 
+    /// Whether a source of this tier (its own or a union term) has a
+    /// project contract (`node-project`, `python-project`): its in-use
+    /// scans then also keep what processes hold and climb their
+    /// directories (docs/safety.md, Producer liveness, Cost).
+    pub fn project_facts(&self) -> bool {
+        let project = |find: &Find| {
+            find.liveness_contract
+                .is_some_and(LivenessContract::is_project)
+        };
+        let own = matches!(&self.source, SourceKind::Fs(find) if project(find));
+        own || self.fs_union.iter().any(|term| project(&term.find))
+    }
+
     pub(super) fn fs_sources(&self) -> Vec<FsUnionSourceRef<'_>> {
         let SourceKind::Fs(find) = &self.source else {
             unreachable!("a filesystem union retains a filesystem first source")

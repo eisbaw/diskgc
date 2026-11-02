@@ -262,6 +262,25 @@ fn protocol<H: Delete>(
         } else {
             &reached.parent().fd
         };
+        // The project contracts' walks and rules 1 and 2, before the
+        // freshness loop (rule 3 is judged on its scan, in the veto).
+        let prepared = (0..alternatives.len())
+            .map(|at| {
+                let a = &alternatives[at];
+                if a.admitted {
+                    super::liveness::prepare(
+                        host,
+                        &a.judge,
+                        a.found,
+                        candidate.parent(),
+                        &record,
+                        deadline,
+                    )
+                } else {
+                    Ok(super::liveness::Prepared::Nothing)
+                }
+            })
+            .collect::<Result<Vec<_>, Stop>>()?;
         let run = command_action::request(
             ready,
             argv,
@@ -298,9 +317,13 @@ fn protocol<H: Delete>(
                 if let Err((veto_index, skip)) = super::liveness::veto(
                     host,
                     scan,
-                    admitted
-                        .iter()
-                        .map(|at| (alternatives[*at].judge.find, alternatives[*at].found)),
+                    admitted.iter().map(|at| {
+                        (
+                            alternatives[*at].judge.find,
+                            alternatives[*at].found,
+                            &prepared[*at],
+                        )
+                    }),
                     candidate.parent(),
                     &record,
                 )? {

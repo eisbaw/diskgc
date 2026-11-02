@@ -297,6 +297,114 @@ fn project_python_caches_have_frozen_depth_and_marker_rules() {
     }
 }
 
+/// TASK-79: the project dependency built-ins' frozen definitions: depth
+/// one through five below a required root, exactly their directory name
+/// (no `.venv-*`, no `node_modules.old`), their contract, the 30-day
+/// floor, checkouts refused, plain delete, no other predicate, and no
+/// release catalog (Mark's TASK-276/138 call).
+#[test]
+fn project_dependency_profiles_have_frozen_depth_contract_and_floor() {
+    let library = Library::builtin().expect("built-ins");
+    let root = Path::new("/home/mark/src");
+    for (name, suffix, contract) in [
+        (
+            "node-modules",
+            "node_modules",
+            LivenessContract::NodeProject,
+        ),
+        ("python-venv", ".venv", LivenessContract::PythonProject),
+    ] {
+        let profile = library.get(name).expect("project dependency built-in");
+        assert!(
+            profile.releases.is_empty(),
+            "{name} is in no release catalog"
+        );
+        let Body::Source(source) = &profile.body else {
+            panic!("{name} is a source")
+        };
+        assert_eq!(source.roots, Roots::Required);
+        let mut predicates = source.where_.clone();
+        assert_eq!(
+            predicates.liveness_contract.take(),
+            Some(contract),
+            "{name}"
+        );
+        assert!(predicates.is_empty(), "{name} has no other predicate");
+        assert_eq!(
+            source.min_idle_for,
+            Some(IdleFor(Duration::from_secs(30 * 86_400))),
+            "{name} floor"
+        );
+        assert_eq!(source.checkouts, Checkouts::Refuse, "{name}");
+        assert_eq!(
+            source.action,
+            Action::Delete {
+                make_writable: false
+            }
+        );
+        assert_eq!(
+            source.liveness_class,
+            Some(LivenessClass::VerifiedHeuristic)
+        );
+        let find = Find::of(source, 1000).expect("filesystem source");
+        assert_eq!(find.entry_type, EntryType::Dir, "{name}");
+        for depth in 1..=6 {
+            let mut relative = vec!["part"; depth - 1];
+            relative.push(suffix);
+            let path = root.join(relative.join("/"));
+            assert_eq!(
+                path_matches(Some(&[root]), &find.patterns, &path),
+                depth <= 5,
+                "{name} depth {depth} at {}",
+                path.display()
+            );
+        }
+        for other in [
+            format!("app/{suffix}.old"),
+            format!("app/{suffix}-3a9f"),
+            format!("app/x{suffix}"),
+            format!("app/{suffix}/pkg"),
+        ] {
+            assert!(
+                !path_matches(Some(&[root]), &find.patterns, &root.join(&other)),
+                "{name} must not match {other}"
+            );
+        }
+        // Nothing below a hidden directory under the root (tool-managed
+        // installs), at any position; a hidden name is not hidden by
+        // itself, nor is the root's own name.
+        let found = |rel: &str| {
+            let path = root.join(rel);
+            path_matches(Some(&[root]), &find.patterns, &path)
+                && !path_matches(Some(&[root]), &find.exclude, &path)
+        };
+        for hidden in [
+            format!(".npm/{suffix}"),
+            format!(".npm/_npx/{suffix}"),
+            format!("a/.cache/{suffix}"),
+            format!("a/b/.c/{suffix}"),
+            format!(".a/b/c/d/{suffix}"),
+            format!("a/b/c/.d/{suffix}"),
+        ] {
+            assert!(!found(&hidden), "{name} must exclude {hidden}");
+        }
+        for kept in [
+            suffix.to_owned(),
+            format!("a/b/c/d/{suffix}"),
+            format!("a.b/{suffix}"),
+        ] {
+            assert!(found(&kept), "{name} must find {kept}");
+        }
+        let hidden_root = Path::new("/home/.mark/src");
+        let below = hidden_root.join(suffix);
+        assert!(
+            path_matches(Some(&[hidden_root]), &find.patterns, &below)
+                && !path_matches(Some(&[hidden_root]), &find.exclude, &below),
+            "{name}: a hidden directory above the root does not exclude"
+        );
+    }
+}
+
 #[test]
 fn jest_cache_has_a_frozen_temp_match_set_and_exact_cleaner_path() {
     let library = Library::builtin().expect("built-ins");

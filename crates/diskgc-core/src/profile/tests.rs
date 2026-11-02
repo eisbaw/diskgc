@@ -254,6 +254,8 @@ fn the_built_in_library_loads() {
         "pnpm-store",
         "uv-cache",
         "yarn-cache",
+        "node-modules",
+        "python-venv",
     ]);
     want.sort_unstable();
     assert_eq!(names, want);
@@ -1928,23 +1930,94 @@ fn pytest_contract_requires_the_session_layout() {
     assert_has(&user_errors(yaml), "needs `find.type: dir`");
 }
 
-/// Refused until TASK-112 step 6 (TASK-79), whose rule this becomes.
+/// `node-project` recognises only `node_modules` directories: every
+/// pattern must end in that segment (TASK-79), and it judges directories.
 #[test]
 fn node_project_contract_requires_node_modules() {
-    let yaml = "- name: n\n  find: {roots: required, paths: [\"*/node_modules\"], type: dir}\n  where: {liveness_contract: node-project}\n  action: delete\n";
-    assert_has(&user_errors(yaml), "is not supported by this version");
+    for (paths, example, ok) in [
+        ("[\"node_modules\"]", "/r/node_modules", true),
+        ("[\"*/node_modules\"]", "/r/a/node_modules", true),
+        (
+            "[\"*/node_modules\", \"*/*/node_modules\"]",
+            "/r/a/node_modules",
+            true,
+        ),
+        ("[\"*/node_modules*\"]", "/r/a/node_modules", false),
+        ("[\"*/xnode_modules\"]", "/r/a/xnode_modules", false),
+        ("[\"node_modules/*\"]", "/r/node_modules/a", false),
+        (
+            "[\"*/node_modules\", \"*/.venv\"]",
+            "/r/a/node_modules",
+            false,
+        ),
+    ] {
+        let yaml = format!(
+            "- name: n\n  find: {{roots: required, paths: {paths}, type: dir}}\n  where: {{liveness_contract: node-project}}\n  action: delete\n  examples: {{match: [{example}]}}\n"
+        );
+        match with_user(&yaml) {
+            Ok(_) => assert!(ok, "accepted {paths}"),
+            Err(errors) => {
+                assert!(!ok, "refused {paths}: {errors}");
+                assert!(
+                    errors
+                        .to_string()
+                        .contains("recognises only names shaped `node_modules`"),
+                    "{errors}"
+                );
+            }
+        }
+    }
+    let yaml = "- name: n\n  find: {roots: required, paths: [\"*/node_modules\"], type: any}\n  where: {liveness_contract: node-project}\n  action: delete\n";
+    assert_has(&user_errors(yaml), "needs `find.type: dir`");
 }
 
-/// The checkout rule of the project contracts lands with them (step 6);
-/// until then both are refused whatever `checkouts` says.
+/// `python-project` accepts any name (its contract requires `pyvenv.cfg`
+/// in the candidate) but only directories.
+#[test]
+fn python_project_contract_takes_any_directory_name() {
+    for paths in ["[\".venv\"]", "[\"*/venv\"]", "[\"*/.venv-*\"]"] {
+        let yaml = format!(
+            "- name: p\n  find: {{roots: required, paths: {paths}, type: dir}}\n  where: {{liveness_contract: python-project}}\n  action: delete\n  examples: {{match: [/r/a/.venv]}}\n"
+        );
+        let yaml = yaml.replace(
+            "/r/a/.venv",
+            if paths.contains("venv-") {
+                "/r/a/.venv-1"
+            } else if paths.contains("*/venv") {
+                "/r/a/venv"
+            } else {
+                "/r/.venv"
+            },
+        );
+        assert!(with_user(&yaml).is_ok(), "refused {paths}");
+    }
+    let yaml = "- name: p\n  find: {roots: required, paths: [\".venv\"], type: file}\n  where: {liveness_contract: python-project}\n  action: delete\n";
+    assert_has(&user_errors(yaml), "needs `find.type: dir`");
+}
+
+/// Both project contracts refuse `checkouts: allow`: an editable install
+/// can put a real checkout in a dependency directory (docs/safety.md,
+/// Project dependency directories); `refuse` and the default load.
 #[test]
 fn project_contracts_refuse_checkouts_allow() {
-    for contract in ["node-project", "python-project"] {
-        for checkouts in ["allow", "refuse"] {
+    for (contract, path, example) in [
+        ("node-project", "*/node_modules", "/r/a/node_modules"),
+        ("python-project", "*/.venv", "/r/a/.venv"),
+    ] {
+        for checkouts in ["allow", "refuse", ""] {
+            let setting = if checkouts.is_empty() {
+                String::new()
+            } else {
+                format!("  checkouts: {checkouts}\n")
+            };
             let yaml = format!(
-                "- name: n\n  find: {{roots: required, paths: [\"*/node_modules\"], type: dir}}\n  where: {{liveness_contract: {contract}}}\n  checkouts: {checkouts}\n  action: delete\n"
+                "- name: n\n  find: {{roots: required, paths: [\"{path}\"], type: dir}}\n  where: {{liveness_contract: {contract}}}\n{setting}  action: delete\n  examples: {{match: [{example}]}}\n"
             );
-            assert_has(&user_errors(&yaml), "is not supported by this version");
+            if checkouts == "allow" {
+                assert_has(&user_errors(&yaml), "refuses `checkouts: allow`");
+            } else {
+                assert!(with_user(&yaml).is_ok(), "{contract} with {checkouts:?}");
+            }
         }
     }
 }

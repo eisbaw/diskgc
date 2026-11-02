@@ -26,6 +26,7 @@
 //! inode number alone: more matches, the conservative side.
 
 pub(crate) mod environ;
+pub mod held;
 pub mod loops;
 pub mod scan;
 
@@ -48,7 +49,7 @@ use crate::outcome::Stop;
 use crate::resolve::{ResolveError, Want, open_beneath};
 
 pub use scan::{
-    EnvPath, Excuse, HeldDeleted, How, MAX_LISTINGS, REREAD_PAUSES, Seen, TOOLCHAIN_VARS,
+    EnvPath, Excuse, Held, HeldDeleted, How, MAX_LISTINGS, REREAD_PAUSES, Seen, TOOLCHAIN_VARS,
     Unreadable, Use,
 };
 
@@ -135,6 +136,10 @@ pub struct Options<'a> {
     /// `liveness_contract: pytest`. Implies nothing about `pid_lookup`,
     /// which that contract also needs.
     pub pytest_facts: bool,
+    /// Also keep what every process holds and climb its directories
+    /// ([`Scan::held`], [`held`]); only when a selected source has a
+    /// project contract (`node-project`, `python-project`).
+    pub project_facts: bool,
 }
 
 impl<'a> Options<'a> {
@@ -148,6 +153,7 @@ impl<'a> Options<'a> {
             sockets: !rules.block_ipc,
             pid_lookup: false,
             pytest_facts: false,
+            project_facts: false,
         }
     }
 }
@@ -164,6 +170,16 @@ impl Options<'_> {
     pub fn with_pytest_facts(self, pytest_facts: bool) -> Self {
         Self {
             pytest_facts,
+            ..self
+        }
+    }
+
+    /// These options, also keeping what processes hold and climbing their
+    /// directories (the project contracts).
+    #[must_use]
+    pub fn with_project_facts(self, project_facts: bool) -> Self {
+        Self {
+            project_facts,
             ..self
         }
     }
@@ -245,6 +261,8 @@ pub struct Scan {
     /// The pytest contract's process facts, when the options asked for
     /// them (sorted by pid), with the users they were read for.
     pytest_facts: Option<(Vec<u32>, Processes)>,
+    /// What processes hold, when the options asked for it.
+    held: Option<held::HeldObjects>,
 }
 
 /// Why a scan ended without a result: an error of the run, or the run's
@@ -333,7 +351,17 @@ pub fn scan<H: Host>(
     let test_container = host.test_container_pid_namespace();
     let namespace_before = scan::namespace_or_run_error(host.pid_namespace())?;
     let loops = loops::read(host, options.users)?;
-    let gathered = scan::gather(host, options.users, options.pytest_facts, deadline)?;
+    let gathered = scan::gather(
+        host,
+        options.users,
+        options.pytest_facts,
+        options.project_facts,
+        deadline,
+    )?;
+    let held = options
+        .project_facts
+        .then(|| held::collect(host, &gathered.read, deadline))
+        .transpose()?;
     let pid_table = options
         .pid_lookup
         .then(|| {
@@ -381,6 +409,7 @@ pub fn scan<H: Host>(
         sockets,
         pid_table,
         pytest_facts,
+        held,
     };
     for (pid, read) in gathered.read {
         for (id, how) in read.uses {
@@ -427,6 +456,31 @@ impl Scan {
     /// [`Options::pid_lookup`]).
     pub fn pid_table(&self) -> Option<&PidTable> {
         self.pid_table.as_ref()
+    }
+
+    /// What processes hold ([`held`]), when the options asked for it.
+    pub fn held(&self) -> Option<&held::HeldObjects> {
+        self.held.as_ref()
+    }
+
+    /// Memory maps by inode number alone on `fs_type` (overlay, btrfs:
+    /// [`MAPS_BY_INODE`]): the first process mapping inode `ino`.
+    pub fn mapped_by_inode(&self, fs_type: &str, ino: u64) -> Option<Pid> {
+        if !MAPS_BY_INODE.contains(&fs_type) {
+            return None;
+        }
+        self.maps_by_inode
+            .get(&ino)
+            .and_then(|p| p.first())
+            .copied()
+    }
+
+    /// The first process whose initial environment names a path at or
+    /// below `path`, with the variable and the path named.
+    pub fn environ_naming(&self, path: &Path) -> Option<&EnvPath> {
+        self.environ_index
+            .first_inside(path)
+            .map(|i| &self.environ[i])
     }
 
     /// The pytest contract's process facts (`None`: not asked for, see
@@ -1041,6 +1095,16 @@ impl<'a> Checker<'a> {
     #[must_use]
     pub fn with_pytest_facts(mut self, pytest_facts: bool) -> Self {
         self.options = self.options.with_pytest_facts(pytest_facts);
+        self.latest = None;
+        self
+    }
+
+    /// This checker, its scans also keeping what processes hold and
+    /// climbing their directories ([`Options::with_project_facts`]): set
+    /// when a source it serves has a project contract.
+    #[must_use]
+    pub fn with_project_facts(mut self, project_facts: bool) -> Self {
+        self.options = self.options.with_project_facts(project_facts);
         self.latest = None;
         self
     }

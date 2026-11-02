@@ -340,6 +340,7 @@ fn space(dev: Dev) -> crate::places::Space {
         source: "/dev/fixture".to_owned(),
         read_only: false,
         idmapped: false,
+        noatime: false,
         upper_dir: None,
     })
 }

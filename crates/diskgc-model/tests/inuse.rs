@@ -92,6 +92,7 @@ fn options(sockets: bool) -> Options<'static> {
         sockets,
         pid_lookup: false,
         pytest_facts: false,
+        project_facts: false,
     }
 }
 

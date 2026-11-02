@@ -1,0 +1,35 @@
+# .venv is a symlink to a shared environment: never a candidate (discovery
+# reports no symlink and follows none); the target survives.
+profile_vector: 1
+profile: python-venv
+roots: [/home/tester/q]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /home/tester/.bash_history: {size: 1K}
+    /home/tester/q:
+      .: {mtime: 2026-08-16T03:00:00Z}
+      pyproject.toml: {mtime: 2026-08-16T03:00:00Z}
+      ".venv": {symlink: /home/tester/envs/shared}
+    /home/tester/envs:
+      .: {mtime: 2026-08-16T03:00:00Z}
+      shared:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        pyvenv.cfg: {mtime: 2026-08-16T03:00:00Z}
+  processes:
+    - {pid: 900, exe: /usr/bin/bash, cwd: /home/tester, maps: [/usr/bin/bash], environ: ["HOME=/home/tester"], fds: [{path: /usr/bin/bash}, {path: /home/tester/.bash_history}]}
+expect:
+  plan: []
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/home/tester/q/.venv, /home/tester/envs/shared/pyvenv.cfg]

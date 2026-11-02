@@ -20,6 +20,7 @@ fn scan_with_pids(host: &diskgc_model::ModelHost) -> inuse::Scan {
             sockets: false,
             pid_lookup: true,
             pytest_facts: false,
+            project_facts: false,
         },
         None,
     )
@@ -139,6 +140,7 @@ fn without_the_option_no_status_is_read() {
             sockets: false,
             pid_lookup: false,
             pytest_facts: false,
+            project_facts: false,
         },
         None,
     )

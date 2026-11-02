@@ -72,6 +72,7 @@ fn inuse_index_memory(host: &LinuxHost) -> Result<(), String> {
             sockets: false,
             pid_lookup: false,
             pytest_facts: false,
+            project_facts: false,
         },
         None,
     )

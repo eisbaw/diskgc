@@ -143,6 +143,51 @@
   verified_with: mypy 1.11.2 (version_id in an observed cache metadata file), tagged project cache layout 2026-10-20
   liveness_class: verified-heuristic
 
+# Project dependency directories (TASK-79): judged by their whole
+# project's activity, not their own (a reader changes neither mtime nor
+# ctime), with a 30-day floor (docs/safety.md, Project dependency
+# directories; docs/reference.md, Liveness contracts). Nested dependency
+# directories and symlinks are never candidates; checkouts stay refused (an
+# editable install can put a real checkout under .venv/src). Nothing below a
+# hidden directory under the root is a candidate (`exclude`): those are
+# tool-managed installs (~/.npm/_npx, editor extensions, ~/.cache), not the
+# user's projects, which a root of ~ would otherwise reach.
+- name: node-modules
+  category: python / js
+  description: Node project dependency directories (node_modules beside a package.json) through depth five below a supplied project or workspace root, outside hidden directories, once their project shows no change, read or visible use for 30 days
+  find:
+    roots: required
+    paths: [node_modules, "*/node_modules", "*/*/node_modules", "*/*/*/node_modules", "*/*/*/*/node_modules"]
+    exclude: [".*/node_modules", ".*/*/node_modules", "*/.*/node_modules", ".*/*/*/node_modules", "*/.*/*/node_modules", "*/*/.*/node_modules", ".*/*/*/*/node_modules", "*/.*/*/*/node_modules", "*/*/.*/*/node_modules", "*/*/*/.*/node_modules"]
+    type: dir
+  where: {liveness_contract: node-project}
+  min_idle_for: 30d
+  action: delete
+  examples:
+    root: /home/mark/src
+    match: [/home/mark/src/node_modules, /home/mark/src/app/node_modules, /home/mark/src/mono/packages/a/node_modules]
+    no_match: [/home/mark/src/app/node_modules/left-pad, /home/mark/src/a/b/c/d/e/node_modules, /home/mark/src/app/node_modules.old, /home/mark/other/app/node_modules, /home/mark/src/.npm/_npx/f00d/node_modules, /home/mark/src/app/.cache/tool/node_modules]
+  verified_with: npm 11.19.0 and Node.js 24.21.0 install layout on the development host (read-only dry run 2026-11-02) and the ModelHost vectors; container tests pending (TASK-79)
+  liveness_class: verified-heuristic
+
+- name: python-venv
+  category: python / js
+  description: Python virtual environments named .venv (holding pyvenv.cfg, beside a Python project manifest) through depth five below a supplied project or workspace root, outside hidden directories, once their project shows no change, read or visible use for 30 days
+  find:
+    roots: required
+    paths: [.venv, "*/.venv", "*/*/.venv", "*/*/*/.venv", "*/*/*/*/.venv"]
+    exclude: [".*/.venv", ".*/*/.venv", "*/.*/.venv", ".*/*/*/.venv", "*/.*/*/.venv", "*/*/.*/.venv", ".*/*/*/*/.venv", "*/.*/*/*/.venv", "*/*/.*/*/.venv", "*/*/*/.*/.venv"]
+    type: dir
+  where: {liveness_contract: python-project}
+  min_idle_for: 30d
+  action: delete
+  examples:
+    root: /home/mark/src
+    match: [/home/mark/src/.venv, /home/mark/src/app/.venv, /home/mark/src/mono/tools/x/.venv]
+    no_match: [/home/mark/src/app/.venv/lib, /home/mark/src/app/venv, /home/mark/src/app/.venv-3a9f, /home/mark/src/a/b/c/d/e/.venv, /home/mark/src/.local/share/tool/.venv]
+  verified_with: CPython 3.13.15 venv layout (pyvenv.cfg) on the development host (read-only dry run 2026-11-02) and the ModelHost vectors; container tests pending (TASK-79)
+  liveness_class: verified-heuristic
+
 # A narrower source-anchored recognizer for build output of any directory
 # name. It requires the cache's recorded source to be an ancestor outside
 # the candidate; a missing source cannot be rebuilt and is retained.

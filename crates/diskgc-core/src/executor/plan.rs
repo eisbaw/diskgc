@@ -249,7 +249,8 @@ fn dry_run_inner<H: Host>(
     let rules = rules(tier, owners);
     let mut checker = Checker::for_plan(&rules)
         .with_pid_lookup(tier.pid_lookup())
-        .with_pytest_facts(tier.pytest_facts());
+        .with_pytest_facts(tier.pytest_facts())
+        .with_project_facts(tier.project_facts());
     let started = host.now();
     let planned = match &tier.source {
         SourceKind::CargoTarget => plan_cargo(
@@ -1261,7 +1262,8 @@ pub(super) fn plan_fs_union<H: Host>(
     };
     let mut checker = Checker::for_plan(rules)
         .with_pid_lookup(tier.pid_lookup())
-        .with_pytest_facts(tier.pytest_facts());
+        .with_pytest_facts(tier.pytest_facts())
+        .with_project_facts(tier.project_facts());
     for candidate in &candidates {
         if host.interrupted().is_some() {
             return planned;
@@ -1360,9 +1362,19 @@ pub(super) fn plan_fs_union<H: Host>(
                 .iter()
                 .map(|(source, found)| (*source, found))
                 .collect();
-            let contracts: Vec<(&Find, &fs_kind::Found)> = claimed
+            let contracts: Vec<(fs_kind::Judge<'_>, &fs_kind::Found)> = claimed
                 .iter()
-                .map(|(source, found)| (sources[*source].find, *found))
+                .map(|(source, found)| {
+                    (
+                        fs_kind::Judge {
+                            find: sources[*source].find,
+                            rules: &evaluation_rules,
+                            idle: sources[*source].idle,
+                            space,
+                        },
+                        *found,
+                    )
+                })
                 .collect();
             let record = selected_record
                 .as_ref()

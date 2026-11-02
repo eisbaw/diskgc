@@ -73,6 +73,9 @@ fn parse_line(line: &[u8]) -> Result<MountEntry, String> {
         // Per-mount options only: the kernel prints `idmapped` there
         // (`show_vfsmnt_opts`), never among a superblock's options.
         idmapped: fields[5].split(|b| *b == b',').any(|o| o == b"idmapped"),
+        // Per-mount options only, as the kernel prints `noatime` there
+        // (`show_mnt_opts`, MNT_NOATIME).
+        noatime: fields[5].split(|b| *b == b',').any(|o| o == b"noatime"),
         upper_dir: if fields[sep + 1] == b"overlay" {
             overlay_upper_dir(fields[sep + 3])
                 .map_err(|e| format!("{e} in mountinfo line: {}", shown()))?

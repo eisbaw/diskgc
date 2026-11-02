@@ -1,0 +1,112 @@
+# Each Python manifest beside a .venv makes it a project's: pyproject.toml,
+# setup.py, setup.cfg, Pipfile, requirements.txt. No manifest, a
+# requirements.in (not *.txt) or only a package.json: filtered (a venv
+# outside a Python project).
+profile_vector: 1
+profile: python-venv
+roots: [/home/tester/m]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /home/tester/.bash_history: {size: 1K}
+    /home/tester/m:
+      .: {mtime: 2026-08-16T03:00:00Z}
+      a:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        pyproject.toml: {mtime: 2026-08-16T03:00:00Z}
+        ".venv":
+          .: {mtime: 2026-08-16T03:00:00Z}
+          pyvenv.cfg: {mtime: 2026-08-16T03:00:00Z}
+          lib:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            x.py: {mtime: 2026-08-16T03:00:00Z}
+      b:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        setup.py: {mtime: 2026-08-16T03:00:00Z}
+        ".venv":
+          .: {mtime: 2026-08-16T03:00:00Z}
+          pyvenv.cfg: {mtime: 2026-08-16T03:00:00Z}
+          lib:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            x.py: {mtime: 2026-08-16T03:00:00Z}
+      c:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        setup.cfg: {mtime: 2026-08-16T03:00:00Z}
+        ".venv":
+          .: {mtime: 2026-08-16T03:00:00Z}
+          pyvenv.cfg: {mtime: 2026-08-16T03:00:00Z}
+          lib:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            x.py: {mtime: 2026-08-16T03:00:00Z}
+      d:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        Pipfile: {mtime: 2026-08-16T03:00:00Z}
+        ".venv":
+          .: {mtime: 2026-08-16T03:00:00Z}
+          pyvenv.cfg: {mtime: 2026-08-16T03:00:00Z}
+          lib:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            x.py: {mtime: 2026-08-16T03:00:00Z}
+      e:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        requirements.txt: {mtime: 2026-08-16T03:00:00Z}
+        ".venv":
+          .: {mtime: 2026-08-16T03:00:00Z}
+          pyvenv.cfg: {mtime: 2026-08-16T03:00:00Z}
+          lib:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            x.py: {mtime: 2026-08-16T03:00:00Z}
+      f:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        ".venv":
+          .: {mtime: 2026-08-16T03:00:00Z}
+          pyvenv.cfg: {mtime: 2026-08-16T03:00:00Z}
+          lib:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            x.py: {mtime: 2026-08-16T03:00:00Z}
+      g:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        requirements.in: {mtime: 2026-08-16T03:00:00Z}
+        ".venv":
+          .: {mtime: 2026-08-16T03:00:00Z}
+          pyvenv.cfg: {mtime: 2026-08-16T03:00:00Z}
+          lib:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            x.py: {mtime: 2026-08-16T03:00:00Z}
+      h:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        package.json: {mtime: 2026-08-16T03:00:00Z}
+        ".venv":
+          .: {mtime: 2026-08-16T03:00:00Z}
+          pyvenv.cfg: {mtime: 2026-08-16T03:00:00Z}
+          lib:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            x.py: {mtime: 2026-08-16T03:00:00Z}
+  processes:
+    - {pid: 900, exe: /usr/bin/bash, cwd: /home/tester, maps: [/usr/bin/bash], environ: ["HOME=/home/tester"], fds: [{path: /usr/bin/bash}, {path: /home/tester/.bash_history}]}
+expect:
+  plan:
+    - {candidate: /home/tester/m/a/.venv}
+    - {candidate: /home/tester/m/b/.venv}
+    - {candidate: /home/tester/m/c/.venv}
+    - {candidate: /home/tester/m/d/.venv}
+    - {candidate: /home/tester/m/e/.venv}
+    - {candidate: /home/tester/m/f/.venv, reason: filtered}
+    - {candidate: /home/tester/m/g/.venv, reason: filtered}
+    - {candidate: /home/tester/m/h/.venv, reason: filtered}
+  reclaim_exit: 1
+  actions: [/home/tester/m/a/.venv, /home/tester/m/b/.venv, /home/tester/m/c/.venv, /home/tester/m/d/.venv, /home/tester/m/e/.venv]
+  removed: [/home/tester/m/a/.venv, /home/tester/m/b/.venv, /home/tester/m/c/.venv, /home/tester/m/d/.venv, /home/tester/m/e/.venv]
+  skipped:
+    - {candidate: /home/tester/m/f/.venv, reason: filtered}
+    - {candidate: /home/tester/m/g/.venv, reason: filtered}
+    - {candidate: /home/tester/m/h/.venv, reason: filtered}
+  preserved: [/home/tester/m/f/.venv/lib/x.py, /home/tester/m/g/.venv/lib/x.py, /home/tester/m/h/.venv/lib/x.py]

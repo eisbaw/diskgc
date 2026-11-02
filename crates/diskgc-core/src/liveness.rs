@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 use crate::host::{Pid, PidNamespace};
 
+pub mod project;
 pub mod pytest;
 
 /// Linux's `PID_MAX_LIMIT` on 64-bit: no pid is larger.

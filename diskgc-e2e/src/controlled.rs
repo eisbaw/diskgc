@@ -659,6 +659,20 @@ impl<H: Host> Host for Controlled<H> {
         self.host.proc_root_lookup(pid, path, climb)
     }
 
+    fn proc_climb(
+        &self,
+        pid: Pid,
+        from: diskgc_core::host::HeldDir,
+    ) -> Result<Vec<diskgc_core::host::DevIno>, ProcError> {
+        self.before("proc_climb");
+        self.host.proc_climb(pid, from)
+    }
+
+    fn proc_mountinfo(&self, pid: Pid) -> Result<Vec<MountEntry>, ProcError> {
+        self.before("proc_mountinfo");
+        self.host.proc_mountinfo(pid)
+    }
+
     fn fs_uuid(
         &self,
         fd: &Self::Fd,
@@ -887,6 +901,7 @@ processes:
             source: "tmpfs".to_owned(),
             read_only: false,
             idmapped: false,
+            noatime: false,
             upper_dir: None,
         };
         assert_eq!(host.fs_uuid(&a.fd, &tmpfs).expect("fs_uuid"), None);

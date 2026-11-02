@@ -58,6 +58,7 @@ fn options() -> Options<'static> {
         sockets: false,
         pid_lookup: false,
         pytest_facts: false,
+        project_facts: false,
     }
 }
 

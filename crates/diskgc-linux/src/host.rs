@@ -40,12 +40,12 @@ use std::time::{Duration, Instant};
 
 use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, Dev, DevIno,
-    DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, Host, HostError,
-    LinkTarget, LockMode, Locked, LoopIdentity, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MakeUserLock,
-    MapEntry, MonoTime, MountEntry, OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace, Pressure,
-    ProcError, ProcFd, ProcLink, ProcStatus, ProcView, SecondSignal, Space, Stat, StateFile,
-    StateLock, StateWritten, Timestamp, TryLock, UidMap, Unlink, UserLock, UserLockError, WaitLock,
-    is_single_name, read_proc_view,
+    DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, HeldDir, Host,
+    HostError, LinkTarget, LockMode, Locked, LoopIdentity, MAX_COMMAND_OUTPUT_PREFIX_BYTES,
+    MakeUserLock, MapEntry, MonoTime, MountEntry, OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace,
+    Pressure, ProcError, ProcFd, ProcLink, ProcStatus, ProcView, SecondSignal, Space, Stat,
+    StateFile, StateLock, StateWritten, Timestamp, TryLock, UidMap, Unlink, UserLock,
+    UserLockError, WaitLock, is_single_name, read_proc_view,
 };
 use diskgc_core::report::Signal;
 use rustix::event::PollFlags;
@@ -668,8 +668,16 @@ impl LinuxHost {
             ));
         }
         let rel = format!("self/fd/{}", file.as_fd().as_raw_fd());
-        self.root()
-            .open(&rel, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY)
+        // O_NOATIME: diskgc's own reads never move a file's read time,
+        // which the project contracts read as evidence of use
+        // (docs/safety.md, Project dependency directories, rule 2). Linux
+        // refuses it (EPERM) on a file diskgc does not own and cannot
+        // override; the plain open then can only make a project look used.
+        let base = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY;
+        match self.root().open(&rel, base | OFlags::NOATIME) {
+            Err(e) if e.is(Errno::EPERM) => self.root().open(&rel, base),
+            answer => answer,
+        }
     }
 
     /// The directory open as `dir` (an `O_PATH` descriptor, as
@@ -2662,6 +2670,84 @@ impl Host for LinuxHost {
                 diskgc_core::host::CLIMB_LEVELS_MAX
             ),
         )))
+    }
+
+    fn proc_climb(&self, pid: Pid, from: HeldDir) -> Result<Vec<DevIno>, ProcError> {
+        let proc = self.root();
+        let pidfd = open_pidfd(pid)?;
+        let rel = format!("{pid}/{}", from.link());
+        let shown = || ProcRoot::shown(&rel);
+        // The magic link is followed (no O_NOFOLLOW): it reaches the held
+        // object itself, whatever its text says. O_DIRECTORY refuses a
+        // held file before anything is opened.
+        let held = match proc.open(&rel, OFlags::PATH | OFlags::DIRECTORY) {
+            Ok(held) => held,
+            Err(e) if is_vanished(&e) => {
+                return match poll_pidfd(pid, &pidfd, Duration::ZERO)? {
+                    PidfdPoll::Hangup => Err(ProcError::Gone),
+                    PidfdPoll::Running | PidfdPoll::Readable => Err(ProcError::from_host(e)),
+                };
+            }
+            Err(e) => return Err(ProcError::from_host(e)),
+        };
+        let id_of = |fd: &OwnedFd| -> Result<DevIno, ProcError> {
+            let stat = rustix::fs::statx(
+                fd,
+                "",
+                AtFlags::EMPTY_PATH | AtFlags::NO_AUTOMOUNT | AtFlags::STATX_DONT_SYNC,
+                STATX_MASK,
+            )
+            .map(|x| stat_from_statx(&x))
+            .map_err(|e| errno_erased(errno_of(e), "statx", shown(), "a climbed directory"))?;
+            stat.dev_ino().ok_or_else(|| {
+                ProcError::Failed(HostError::invalid(
+                    "statx",
+                    shown(),
+                    "the kernel reported no inode number",
+                ))
+            })
+        };
+        let mut chain = vec![id_of(&held)?];
+        let mut here = held;
+        for _ in 0..diskgc_core::host::CLIMB_LEVELS_MAX {
+            let up = rustix::fs::openat(
+                &here,
+                "..",
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| errno_erased(errno_of(e), "openat", shown(), "climbing `..` failed"))?;
+            let id = id_of(&up)?;
+            if Some(&id) == chain.last() {
+                return Ok(chain);
+            }
+            chain.push(id);
+            here = up;
+        }
+        Err(ProcError::Failed(HostError::invalid(
+            "climb",
+            shown(),
+            format!(
+                "no fixpoint after {} levels of `..`",
+                diskgc_core::host::CLIMB_LEVELS_MAX
+            ),
+        )))
+    }
+
+    fn proc_mountinfo(&self, pid: Pid) -> Result<Vec<MountEntry>, ProcError> {
+        let proc = self.root();
+        let pidfd = open_pidfd(pid)?;
+        let path = format!("{pid}/mountinfo");
+        match proc.read(&path) {
+            Ok(text) => parse_mountinfo(&text).map_err(|e| {
+                ProcError::Failed(HostError::invalid("parse", ProcRoot::shown(&path), e))
+            }),
+            Err(e) if is_vanished(&e) => match poll_pidfd(pid, &pidfd, Duration::ZERO)? {
+                PidfdPoll::Hangup => Err(ProcError::Gone),
+                PidfdPoll::Running | PidfdPoll::Readable => Err(ProcError::from_host(e)),
+            },
+            Err(e) => Err(ProcError::from_host(e)),
+        }
     }
 
     fn fs_uuid(&self, fd: &LinuxFd, mount: &MountEntry) -> Result<Option<String>, HostError> {
@@ -5202,6 +5288,91 @@ mod tests {
         assert!(host.read_head(&dir_fd, 10).is_err());
     }
 
+    /// TASK-79's invariant: diskgc's own content reads never move a read
+    /// time the project contracts judge. A file whose atime is older than
+    /// its mtime gets a new atime from any plain read under `relatime`
+    /// (the control); `read_head` opens with `O_NOATIME` and leaves it, and
+    /// `statx` reports the atime it left.
+    #[test]
+    fn read_head_leaves_the_files_atime_unchanged() {
+        use rustix::fs::{Timespec, Timestamps, utimensat};
+        let host = LinuxHost::new().expect("host setup");
+        let dir = TempDir::new();
+        let set_old_atime = |path: &Path| {
+            let old = Timespec {
+                tv_sec: 1_000_000_000,
+                tv_nsec: 0,
+            };
+            let now = Timespec {
+                tv_sec: 2_000_000_000,
+                tv_nsec: 0,
+            };
+            utimensat(
+                CWD,
+                path,
+                &Timestamps {
+                    last_access: old,
+                    last_modification: now,
+                },
+                rustix::fs::AtFlags::empty(),
+            )
+            .expect("utimensat");
+        };
+        let atime = |path: &Path| {
+            let fd = resolve(&host, path, Want::Any).expect("resolve").fd;
+            host.statx(Base::Dir(&fd), Path::new(""))
+                .expect("statx")
+                .atime
+                .expect("atime reported")
+        };
+        let control = dir.0.join("control.json");
+        std::fs::write(&control, b"{}").expect("write");
+        set_old_atime(&control);
+        let before = atime(&control);
+        std::fs::read(&control).expect("plain read");
+        if atime(&control) == before {
+            // A noatime (or read-only) mount for the test's directory: the
+            // control cannot show anything; nothing to assert here.
+            eprintln!("skipped: the test directory's mount records no reads");
+            return;
+        }
+        let file = dir.0.join("package.json");
+        std::fs::write(&file, b"{\"workspaces\": []}").expect("write");
+        set_old_atime(&file);
+        let before = atime(&file);
+        let fd = resolve(&host, &file, Want::Any).expect("resolve").fd;
+        assert_eq!(
+            host.read_head(&fd, 100).expect("read_head"),
+            b"{\"workspaces\": []}"
+        );
+        assert_eq!(atime(&file), before, "read_head moved the atime");
+    }
+
+    /// The climb of this process's own cwd ends at the root's fixpoint and
+    /// passes through every ancestor of it, by (device, inode).
+    #[test]
+    fn proc_climb_of_the_own_cwd_reaches_the_root() {
+        let host = LinuxHost::new().expect("host setup");
+        let chain = host
+            .proc_climb(host.own_pid(), HeldDir::Cwd)
+            .expect("climb own cwd");
+        let id = |path: &Path| {
+            let fd = resolve(&host, path, Want::Directory).expect("resolve").fd;
+            host.statx(Base::Dir(&fd), Path::new(""))
+                .expect("statx")
+                .dev_ino()
+                .expect("ino")
+        };
+        let cwd = std::env::current_dir().expect("cwd");
+        assert_eq!(chain.first(), Some(&id(&cwd)));
+        assert_eq!(chain.last(), Some(&id(Path::new("/"))));
+        assert!(chain.contains(&id(cwd.parent().expect("not /"))));
+        let err = host
+            .proc_climb(host.own_pid(), HeldDir::Fd(u32::MAX))
+            .expect_err("no such fd");
+        assert!(!matches!(err, ProcError::Gone), "{err}");
+    }
+
     /// A FIFO (or a device) is refused before it is opened: inotify reports
     /// every open of the object (`IN_OPEN`) but none for an `O_PATH` open,
     /// so a watch on the FIFO sees no open from `read_head`, while the same
@@ -6103,6 +6274,7 @@ mod tests {
                 sockets: true,
                 pid_lookup: true,
                 pytest_facts: false,
+                project_facts: false,
             },
             None,
         ) {

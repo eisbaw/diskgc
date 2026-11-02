@@ -458,6 +458,19 @@ fn source(
     };
     if let Some(contract) = where_.liveness_contract {
         liveness_contract(contract, find, problems);
+        if contract.is_project()
+            && spec
+                .checkouts
+                .as_ref()
+                .is_some_and(|c| c.0 == Checkouts::Allow)
+        {
+            problems.push(format!(
+                "`liveness_contract: {}` refuses `checkouts: allow`: an editable install can \
+                 put a real checkout in a dependency directory (docs/safety.md, Project \
+                 dependency directories)",
+                contract.name()
+            ));
+        }
     }
     if let Finds::Paths { patterns, .. } = &mut finds {
         match temp_roots::effective(origin, &spec.name, patterns.clone()) {
@@ -507,6 +520,9 @@ fn liveness_contract(contract: LivenessContract, find: &FindSpec, problems: &mut
         ));
     }
     let shapes = contract.name_shapes();
+    if shapes.is_empty() {
+        return;
+    }
     for path in find.paths.iter().flatten() {
         let ends_in = |shape: &&str| {
             path.strip_suffix(*shape)

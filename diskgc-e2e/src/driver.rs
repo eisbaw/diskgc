@@ -586,6 +586,7 @@ fn held<H: Host>(host: &H, owner: u32, dir: &Path, out: &mut Lines<'_>) -> Resul
             sockets: false,
             pid_lookup: false,
             pytest_facts: false,
+            project_facts: false,
         },
         None,
     )

@@ -91,8 +91,10 @@ pub fn plan<H: Host>(
     };
     let mut checker = Checker::for_plan(rules)
         .with_pid_lookup(find.liveness_contract.is_some())
-        .with_pytest_facts(
-            find.liveness_contract == Some(crate::profile::LivenessContract::Pytest),
+        .with_pytest_facts(find.liveness_contract == Some(crate::profile::LivenessContract::Pytest))
+        .with_project_facts(
+            find.liveness_contract
+                .is_some_and(crate::profile::LivenessContract::is_project),
         );
     let total = candidates.len();
     for (path, candidate) in candidates {
@@ -162,6 +164,15 @@ pub fn judge_walked<H: Host>(
         true,
         deadline
     ));
+    // A project contract's walk and rules 1 and 2, before the scan.
+    let prepared = super::liveness::prepare(
+        host,
+        judge,
+        found,
+        candidate.parent(),
+        &walked.record,
+        deadline,
+    )?;
     let scan = checker
         .current(host, deadline)
         .map_err(|e| e.at(&found.path))?;
@@ -178,7 +189,8 @@ pub fn judge_walked<H: Host>(
         judge.find,
         found,
         candidate.parent(),
-        &walked.record
+        &walked.record,
+        &prepared
     ));
     let tally = walked.tally();
     Ok(Ok((tally, walked.record)))
@@ -194,14 +206,14 @@ pub fn judge_walked<H: Host>(
 /// path, so its tree is theirs.
 pub fn contract_veto<'a, H: Host>(
     host: &H,
-    sources: &[(&'a Find, &'a Found)],
+    sources: &[(Judge<'a>, &'a Found)],
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
     record: &WalkRecord,
 ) -> Result<Result<(), (usize, Skip)>, Stop> {
     let Some((_, first)) = sources
         .iter()
-        .find(|(find, _)| find.liveness_contract.is_some())
+        .find(|(judge, _)| judge.find.liveness_contract.is_some())
     else {
         return Ok(Ok(()));
     };
@@ -230,8 +242,24 @@ pub fn contract_veto<'a, H: Host>(
             )));
         }
     };
+    // The project contracts' walks, before the scan.
+    let prepared = sources
+        .iter()
+        .map(|(judge, found)| {
+            super::liveness::prepare(host, judge, found, &parent.fd, record, deadline)
+        })
+        .collect::<Result<Vec<_>, Stop>>()?;
     let scan = checker
         .current(host, deadline)
         .map_err(|e| e.at(&first.path))?;
-    super::liveness::veto(host, scan, sources.iter().copied(), &parent.fd, record)
+    super::liveness::veto(
+        host,
+        scan,
+        sources
+            .iter()
+            .zip(&prepared)
+            .map(|((judge, found), prepared)| (judge.find, *found, prepared)),
+        &parent.fd,
+        record,
+    )
 }

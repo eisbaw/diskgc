@@ -1,0 +1,46 @@
+# p/src is also bind-mounted at /home/tester/mnt/src; a process has its cwd
+# there. Its link text is not under the project, but the climb from the
+# held directory meets one of the project's directories (p/src itself, by
+# device and inode): in use.
+profile_vector: 1
+profile: node-modules
+roots: [/home/tester/p]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /home/tester/mnt/src, fs: ext4, dev: "254:2", size: 10G, parent: 2, bind_of: 2, bind_root: /tester/p/src}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /usr/bin/node: {}
+    /home/tester/.bash_history: {size: 1K}
+    /home/tester/p:
+      .: {mtime: 2026-08-16T03:00:00Z}
+      package.json: {content: "{\"name\": \"p\", \"version\": \"1.0.0\"}", mtime: 2026-08-16T03:00:00Z}
+      src:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        a.js: {mtime: 2026-08-16T03:00:00Z}
+      node_modules:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        x:
+          .: {mtime: 2026-08-16T03:00:00Z}
+          i.js: {size: 4K, mtime: 2026-08-16T03:00:00Z}
+    /home/tester/mnt:
+      .: {mtime: 2026-08-16T03:00:00Z}
+  processes:
+    - {pid: 900, exe: /usr/bin/bash, cwd: /home/tester, maps: [/usr/bin/bash], environ: ["HOME=/home/tester"], fds: [{path: /usr/bin/bash}, {path: /home/tester/.bash_history}]}
+    - {pid: 901, exe: /usr/bin/bash, cwd: /home/tester/mnt/src, maps: [/usr/bin/bash], environ: ["HOME=/home/tester"], fds: [{path: /usr/bin/bash}]}
+expect:
+  plan:
+    - {candidate: /home/tester/p/node_modules, reason: in_use}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/p/node_modules, reason: in_use, process_blockers: [{pid: 901, evidence: cwd}]}
+  preserved: [/home/tester/p/node_modules/x/i.js]

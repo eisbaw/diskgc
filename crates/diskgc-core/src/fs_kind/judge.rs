@@ -232,6 +232,15 @@ impl Judge<'_> {
         if let Err(skip) = super::liveness::name_filter(self.find, found) {
             return Ok(Err(skip));
         }
+        // A project contract's instance check (a manifest beside it, no
+        // dependency directory around it): this source's own, so a
+        // non-instance is never its to delete, also in a union.
+        if let Some(contract) = self.find.liveness_contract.filter(|c| c.is_project()) {
+            judged!(
+                super::project::locate(host, contract, found, &reached.parent().fd, deadline)
+                    .map(|located| located.map(drop))
+            );
+        }
         judged!(self.version_where(host, reached.parent(), found, deadline));
         let mut walked = judged!(self.walk(host, candidate_view.candidate, found, idle, deadline));
         judged!(self.negated_mixed_filters(

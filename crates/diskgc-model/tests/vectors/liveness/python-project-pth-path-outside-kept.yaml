@@ -1,0 +1,43 @@
+# A .pth line naming a directory outside .venv (an old-style editable
+# install, `pip install -e` with a path entry): its package is read there,
+# so rule 2 counts the whole project; q/pkg/m.py was read yesterday.
+profile_vector: 1
+profile: python-venv
+roots: [/home/tester/q]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /usr/bin/python3: {}
+    /home/tester/.bash_history: {size: 1K}
+    /home/tester/q:
+      .: {mtime: 2026-08-16T03:00:00Z}
+      pyproject.toml: {mtime: 2026-08-16T03:00:00Z}
+      pkg:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        m.py: {mtime: 2026-08-16T03:00:00Z, atime: 2026-10-14T03:00:00Z}
+      ".venv":
+        .: {mtime: 2026-08-16T03:00:00Z}
+        pyvenv.cfg: {mtime: 2026-08-16T03:00:00Z}
+        lib:
+          .: {mtime: 2026-08-16T03:00:00Z}
+          x.py: {size: 4K, mtime: 2026-08-16T03:00:00Z}
+          q.pth: {mtime: 2026-08-16T03:00:00Z, content: /home/tester/q}
+  processes:
+    - {pid: 900, exe: /usr/bin/bash, cwd: /home/tester, maps: [/usr/bin/bash], environ: ["HOME=/home/tester"], fds: [{path: /usr/bin/bash}, {path: /home/tester/.bash_history}]}
+expect:
+  plan:
+    - {candidate: /home/tester/q/.venv, reason: not_idle}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/q/.venv, reason: not_idle}
+  preserved: [/home/tester/q/.venv/lib/x.py]

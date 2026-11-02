@@ -1,0 +1,74 @@
+# node-modules (TASK-79) in project trees below a supplied root, one candidate
+# per role: an idle project's dependencies (removed), ones a process holds
+# a file in (in_use), ones excluded by a negated user profile, and ones
+# holding the operator's .diskgc-keep. Every project is 60 days old.
+profile_vector: 1
+user_profiles:
+  - {"name": "pin", "find": {"roots": ["/home"], "paths": ["tester/src/pinned/node_modules"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/tester/src/pinned/node_modules"]}}
+select: "profile:node-modules && !profile:pin"
+roots: ["/home/tester/src"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /usr/bin/tool: {}
+    /home/tester/.bash_history: {size: 1K}
+    /home/tester/src:
+      .: {mtime: 2026-08-16T03:00:00Z}
+      app:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        package.json: {mtime: 2026-08-16T03:00:00Z, content: "{\"name\": \"p\", \"version\": \"1.0.0\"}"}
+        node_modules:
+          .: {mtime: 2026-08-16T03:00:00Z}
+          x:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            i.js: {size: 4K, mtime: 2026-08-16T03:00:00Z}
+      lib:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        package.json: {mtime: 2026-08-16T03:00:00Z, content: "{\"name\": \"p\", \"version\": \"1.0.0\"}"}
+        node_modules:
+          .: {mtime: 2026-08-16T03:00:00Z}
+          x:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            i.js: {size: 4K, mtime: 2026-08-16T03:00:00Z}
+      pinned:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        package.json: {mtime: 2026-08-16T03:00:00Z, content: "{\"name\": \"p\", \"version\": \"1.0.0\"}"}
+        node_modules:
+          .: {mtime: 2026-08-16T03:00:00Z}
+          x:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            i.js: {size: 4K, mtime: 2026-08-16T03:00:00Z}
+      kept:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        package.json: {mtime: 2026-08-16T03:00:00Z, content: "{\"name\": \"p\", \"version\": \"1.0.0\"}"}
+        node_modules:
+          .: {mtime: 2026-08-16T03:00:00Z}
+          x:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            i.js: {size: 4K, mtime: 2026-08-16T03:00:00Z}
+          ".diskgc-keep": {mtime: 2026-08-16T03:00:00Z}
+  processes:
+    - {pid: 900, exe: /usr/bin/bash, cwd: /home/tester, maps: [/usr/bin/bash], environ: ["HOME=/home/tester"], fds: [{path: /usr/bin/bash}, {path: /home/tester/.bash_history}]}
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: "/home/tester/src/lib/node_modules/x/i.js"}]}
+expect:
+  plan:
+    - {candidate: "/home/tester/src/app/node_modules"}
+    - {candidate: "/home/tester/src/kept/node_modules", reason: keep_marker}
+    - {candidate: "/home/tester/src/lib/node_modules", reason: in_use}
+    - {candidate: "/home/tester/src/pinned/node_modules", reason: excluded}
+  reclaim_exit: 1
+  actions: ["/home/tester/src/app/node_modules"]
+  removed: ["/home/tester/src/app/node_modules"]
+  skipped:
+    - {candidate: "/home/tester/src/kept/node_modules", reason: keep_marker}
+    - {candidate: "/home/tester/src/lib/node_modules", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/home/tester/src/pinned/node_modules", reason: excluded}
+  preserved: ["/home/tester/src/lib/node_modules/x/i.js", "/home/tester/src/pinned/node_modules/x/i.js", "/home/tester/src/kept/node_modules/x/i.js"]

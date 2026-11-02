@@ -1166,6 +1166,19 @@ impl Host for Gated {
     ) -> Result<Vec<diskgc_core::host::DevIno>, diskgc_core::host::ProcError> {
         self.0.proc_root_lookup(pid, path, climb)
     }
+    fn proc_climb(
+        &self,
+        pid: Pid,
+        from: diskgc_core::host::HeldDir,
+    ) -> Result<Vec<diskgc_core::host::DevIno>, diskgc_core::host::ProcError> {
+        self.0.proc_climb(pid, from)
+    }
+    fn proc_mountinfo(
+        &self,
+        pid: Pid,
+    ) -> Result<Vec<diskgc_core::host::MountEntry>, diskgc_core::host::ProcError> {
+        self.0.proc_mountinfo(pid)
+    }
     fn fs_uuid(
         &self,
         fd: &Self::Fd,

@@ -35,6 +35,7 @@ mod judge;
 mod liveness;
 mod pattern;
 mod plan;
+pub(crate) mod project;
 mod reclaim;
 mod source_anchor;
 mod toolchain;

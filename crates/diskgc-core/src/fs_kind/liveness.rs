@@ -12,12 +12,15 @@
 //! term's admission changes.
 //!
 //! Implemented: `nix-shell` (Owner PID on the pid in the candidate's own
-//! name) and `pytest` (the ordered decision table of
+//! name), `pytest` (the ordered decision table of
 //! [`crate::liveness::pytest::verdict`], whose facts this module gathers
 //! beside the scan's: the listing of `P`, `S`'s `.lock` and Owner PID's
-//! answer on it, `U`, and `R`'s identity). The loader refuses the project
-//! contracts until they land. The name rule alone ([`name_filter`]) also
-//! runs before the walk, beside `app_not_running`, so a name that is no
+//! answer on it, `U`, and `R`'s identity), and the project contracts
+//! `node-project` and `python-project` ([`super::project`]: their project
+//! walk and rules 1 and 2 are gathered before the scan, [`prepare`], so a
+//! large project never runs into a deletion's freshness window; rule 3 is
+//! judged on the scan). The name rule alone ([`name_filter`]) also runs
+//! before the walk, beside `app_not_running`, so a name that is no
 //! instance is `filtered` cheaply.
 
 use std::collections::HashSet;
@@ -61,6 +64,10 @@ enum Instance {
     /// `pytest`: a session `P/pytest-<N>` (its number), `P` named
     /// `pytest-of-*`.
     Session,
+    /// `node-project`, `python-project`: by name, not inside a
+    /// `node_modules`; the rest of the instance check needs I/O
+    /// ([`super::project::gather`]).
+    Project,
 }
 
 /// The most names a `pytest-of-<user>` listing may hold: more is a listing
@@ -75,9 +82,21 @@ fn instance(find: &Find, path: &Path) -> Result<Instance, Skip> {
     let name = path.file_name().map(OsStrExt::as_bytes).unwrap_or_default();
     match find.liveness_contract {
         None => Ok(Instance::Unjudged),
-        // The loader refuses these until their step lands.
-        Some(LivenessContract::NodeProject | LivenessContract::PythonProject) => {
-            Ok(Instance::Unjudged)
+        Some(contract @ (LivenessContract::NodeProject | LivenessContract::PythonProject)) => {
+            match crate::liveness::project::inside_node_modules(path) {
+                None => Ok(Instance::Project),
+                Some(outer) => Err(Skip::new(
+                    Reason::Filtered,
+                    path.to_owned(),
+                    format!(
+                        "liveness_contract {}: a nested dependency directory (inside {}): it \
+                         belongs to a package, and removing it would let Node resolve another \
+                         copy",
+                        contract.name(),
+                        outer.display()
+                    ),
+                )),
+            }
         }
         Some(LivenessContract::NixShell) => {
             rc_name_pid(name).map(Instance::RcPid).ok_or_else(|| {
@@ -120,30 +139,85 @@ pub(crate) fn name_filter(find: &Find, found: &Found) -> Result<(), Skip> {
     instance(find, &found.path).map(drop)
 }
 
+/// What a contract gathered before its process scan ([`prepare`]): for the
+/// project contracts, the instance check, the project walk and rules 1
+/// and 2, which need no scan and can take longer than a deletion's
+/// freshness window; nothing for the others.
+#[derive(Debug, Clone)]
+pub(crate) enum Prepared {
+    /// The source has no contract, or one judged on the scan alone.
+    Nothing,
+    /// The contract already refuses the candidate (`filtered`: not an
+    /// instance; `not_idle`, `producer_unknown`, ...).
+    Refused(Skip),
+    /// A project contract's walked project, for rule 3 on the scan.
+    Project(super::project::Tree),
+}
+
+/// Gathers what `judge`'s contract needs before the scan (see
+/// [`Prepared`]) for the candidate `found`, in `parent`, walked as
+/// `record`; the term's idle bound is `judge.idle`'s.
+pub(crate) fn prepare<H: Host>(
+    host: &H,
+    judge: &super::Judge<'_>,
+    found: &Found,
+    parent: &H::Fd,
+    record: &WalkRecord,
+    deadline: Option<MonoTime>,
+) -> Result<Prepared, Stop> {
+    let Some(contract) = judge.find.liveness_contract.filter(|c| c.is_project()) else {
+        return Ok(Prepared::Nothing);
+    };
+    Ok(
+        match super::project::gather(
+            host,
+            contract,
+            found,
+            parent,
+            record,
+            judge.idle.at_least,
+            judge.rules.max_entries,
+            deadline,
+        )? {
+            Ok(tree) => Prepared::Project(tree),
+            Err(skip) => Prepared::Refused(skip),
+        },
+    )
+}
+
 /// The union rule: every admitted source that found the candidate and
 /// whose contract recognises it as an instance must permit it; the first
 /// refusal stands, with the index of the source that refused (in
-/// `sources`' order). A source whose contract does not recognise the name
-/// carries no fact about a producer and does not veto (its own term
-/// filters it). `parent` is the candidate's parent directory, `record` the
-/// walk of the candidate this judgement belongs to.
+/// `sources`' order). A source whose contract does not recognise the
+/// candidate (by its name, or for a project contract its prepared
+/// instance check: `filtered`) carries no fact about a producer and does
+/// not veto (its own term filters it). Each source comes with what
+/// [`prepare`] gathered for it. `parent` is the candidate's parent
+/// directory, `record` the walk of the candidate this judgement belongs
+/// to.
 pub(crate) fn veto<'a, H: Host>(
     host: &H,
     scan: &Scan,
-    sources: impl IntoIterator<Item = (&'a Find, &'a Found)>,
+    sources: impl IntoIterator<Item = (&'a Find, &'a Found, &'a Prepared)>,
     parent: &H::Fd,
     record: &WalkRecord,
 ) -> Result<Result<(), (usize, Skip)>, Stop> {
-    for (index, (find, found)) in sources.into_iter().enumerate() {
-        if find.protect_toolchains.is_none()
-            && !matches!(
-                instance(find, &found.path),
-                Ok(Instance::RcPid(_) | Instance::Session)
-            )
-        {
-            continue;
+    for (index, (find, found, prepared)) in sources.into_iter().enumerate() {
+        // The toolchain guard judges every candidate of its source, an
+        // instance by name or not (TASK-94).
+        if find.protect_toolchains.is_none() {
+            match instance(find, &found.path) {
+                Ok(Instance::RcPid(_) | Instance::Session) => {}
+                Ok(Instance::Project) => {
+                    if matches!(prepared, Prepared::Refused(skip) if skip.reason == Reason::Filtered)
+                    {
+                        continue;
+                    }
+                }
+                Ok(Instance::Unjudged) | Err(_) => continue,
+            }
         }
-        if let Err(skip) = check(host, scan, find, found, parent, record)? {
+        if let Err(skip) = check(host, scan, find, found, parent, record, prepared)? {
             return Ok(Err((index, skip)));
         }
     }
@@ -182,6 +256,7 @@ pub(crate) fn check<H: Host>(
     found: &Found,
     parent: &H::Fd,
     record: &WalkRecord,
+    prepared: &Prepared,
 ) -> Judged<()> {
     // The toolchain guard's live half (docs/safety.md, Toolchain pins) is
     // judged from the same scan as a contract.
@@ -193,14 +268,22 @@ pub(crate) fn check<H: Host>(
         path: found.path.clone(),
         error: HostError::invalid("liveness contract", found.path.display(), why),
     };
-    if matches!(
-        contract,
-        LivenessContract::NodeProject | LivenessContract::PythonProject
-    ) {
-        return Err(bug(format!(
-            "`{}` is not implemented; the loader refuses it",
-            contract.name()
-        )));
+    if contract.is_project() {
+        if let Err(skip) = instance(find, &found.path) {
+            return Ok(Err(skip));
+        }
+        return match prepared {
+            Prepared::Refused(skip) => Ok(Err(skip.clone())),
+            Prepared::Project(tree) => {
+                let mounts = super::judge::mountinfo(host)?;
+                super::project::visible_use(scan, tree, &found.path, &mounts, contract.name())
+                    .map_err(bug)
+            }
+            Prepared::Nothing => Err(bug(format!(
+                "`{}` was judged without its project gathered first (prepare)",
+                contract.name()
+            ))),
+        };
     }
     let Some(table) = scan.pid_table() else {
         return Err(bug(
@@ -238,7 +321,7 @@ pub(crate) fn check<H: Host>(
     let magic = || host.fs_magic(parent).map_err(|e| e.to_string());
     let probe = |pid: Pid| host.pid_alive(pid);
     match instance {
-        Instance::Unjudged => unreachable!("the find has a contract"),
+        Instance::Unjudged | Instance::Project => unreachable!("judged above, or no contract"),
         Instance::RcPid(number) => Ok(nix_shell(
             scan,
             found,

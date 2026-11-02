@@ -1,0 +1,50 @@
+# MUST 1 (mped B1): a workspace member's node_modules while the root's
+# w/node_modules exists. Deleting the member's would let Node resolve the
+# root's (hoisted) copy instead, a silent switch: it is kept (filtered, like
+# a nested one) while any ancestor of its parent holds a node_modules. The
+# root's is reclaimed in this run (the member, older, is judged first and
+# kept); the member goes on a later run (next vector).
+profile_vector: 1
+profile: node-modules
+roots: [/home/tester/w]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /home/tester/.bash_history: {size: 1K}
+    /home/tester/w:
+      .: {mtime: 2026-08-16T03:00:00Z}
+      package.json: {content: "{\"name\": \"w\", \"private\": true, \"workspaces\": [\"packages/*\"]}", mtime: 2026-08-16T03:00:00Z}
+      ".git":
+        .: {mtime: 2026-08-16T03:00:00Z}
+        HEAD: {mtime: 2026-08-16T03:00:00Z}
+      packages:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        a:
+          .: {mtime: 2026-08-16T03:00:00Z}
+          package.json: {content: "{\"name\": \"p\", \"version\": \"1.0.0\"}", mtime: 2026-08-16T03:00:00Z}
+          node_modules:
+            .: {mtime: 2026-07-17T03:00:00Z}
+            z.js: {mtime: 2026-07-17T03:00:00Z}
+      node_modules:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        r.js: {mtime: 2026-08-16T03:00:00Z}
+  processes:
+    - {pid: 900, exe: /usr/bin/bash, cwd: /home/tester, maps: [/usr/bin/bash], environ: ["HOME=/home/tester"], fds: [{path: /usr/bin/bash}, {path: /home/tester/.bash_history}]}
+expect:
+  plan:
+    - {candidate: /home/tester/w/node_modules}
+    - {candidate: /home/tester/w/packages/a/node_modules, reason: filtered}
+  reclaim_exit: 1
+  actions: [/home/tester/w/node_modules]
+  removed: [/home/tester/w/node_modules]
+  skipped:
+    - {candidate: /home/tester/w/packages/a/node_modules, reason: filtered}
+  preserved: [/home/tester/w/packages/a/node_modules/z.js, /home/tester/w/packages/a/package.json]

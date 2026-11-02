@@ -109,6 +109,22 @@ pub struct Use {
     pub how: How,
 }
 
+/// An object a process holds through a magic link (an fd, its cwd, root
+/// or exe), kept with its link text and mount id for the project
+/// contracts' path tests (docs/safety.md, A process's paths); read only
+/// when a selected source has one ([`super::Options::project_facts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Held {
+    pub how: How,
+    pub id: DevIno,
+    /// `stx_mnt_id` of the object through the link, if reported.
+    pub mnt_id: Option<u64>,
+    /// The link's text, in diskgc's view (` (deleted)` included).
+    pub text: OsString,
+    /// The object is a directory: it is climbed, not path-tested.
+    pub dir: bool,
+}
+
 /// A path named in a process's initial environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvPath {
@@ -242,6 +258,8 @@ pub(crate) struct Read {
     /// Two reads gave different initial environments: neither stands, the
     /// environment is unknown to the pytest contract (as for uids).
     pub environ_unstable: bool,
+    /// What it holds, for the project contracts (empty unless asked).
+    pub held: Vec<Held>,
 }
 
 /// One process's read.
@@ -395,6 +413,15 @@ impl Read {
         }
         self.facts_unstable |= other.facts_unstable;
         self.environ_unstable |= other.environ_unstable;
+        for held in other.held {
+            if !self
+                .held
+                .iter()
+                .any(|h| h.how == held.how && h.id == held.id)
+            {
+                self.held.push(held);
+            }
+        }
     }
 }
 
@@ -437,6 +464,7 @@ pub(crate) fn gather<H: Host>(
     host: &H,
     users: &[u32],
     facts: bool,
+    project: bool,
     deadline: Option<MonoTime>,
 ) -> Result<Gathered, ScanError> {
     // `users` is the candidate ownership allowlist, not the complete set of
@@ -612,7 +640,7 @@ pub(crate) fn gather<H: Host>(
         let mut read_back = Vec::new();
         for (pid, view) in batch.iter().zip(views) {
             let entry = entries.get_mut(pid).expect("listed");
-            entry.merge(outcome(*pid, view));
+            entry.merge(outcome(*pid, view, project));
             let released = if let Some(identity) = identities.get(pid) {
                 identity_or_unsettled!('scan, host.proc_identity_released(identity))
             } else {
@@ -1131,8 +1159,8 @@ fn is_initial_namespace(uid_map: Option<&str>) -> bool {
 }
 
 /// What one process's read means for the scan.
-pub(crate) fn outcome(pid: Pid, view: Result<ProcView, ProcError>) -> Outcome {
-    match view.and_then(|view| uses_of(pid, view)) {
+pub(crate) fn outcome(pid: Pid, view: Result<ProcView, ProcError>, project: bool) -> Outcome {
+    match view.and_then(|view| uses_of(pid, view, project)) {
         Ok(read) => Outcome::Read(Box::new(read)),
         Err(ProcError::Gone) => Outcome::Gone,
         Err(e) => Outcome::Unreadable(e),
@@ -1142,8 +1170,36 @@ pub(crate) fn outcome(pid: Pid, view: Result<ProcView, ProcError>) -> Outcome {
 /// The uses in a process's view. A failed environment is kept as no
 /// evidence (`environ_failed`) when it is `Failed`; `Denied` there makes
 /// the process unreadable.
-fn uses_of(pid: Pid, view: ProcView) -> Result<Read, ProcError> {
+fn uses_of(pid: Pid, view: ProcView, project: bool) -> Result<Read, ProcError> {
     let mut read = Read::default();
+    let mut hold = |how: How, id: DevIno, target: &crate::host::LinkTarget| {
+        if project {
+            read.held.push(Held {
+                how,
+                id,
+                mnt_id: target.stat.mnt_id,
+                text: target.text.clone(),
+                dir: target.stat.file_type == Some(FileType::Directory),
+            });
+        }
+    };
+    for fd in &view.fds {
+        let id = placed(pid, &fd.target.stat, || format!("fd {}", fd.fd))?;
+        hold(How::Fd(fd.fd), id, &fd.target);
+    }
+    for (targets, which, how) in [
+        (&view.cwd, ProcLink::Cwd, How::Cwd),
+        (&view.root, ProcLink::Root, How::Root),
+        (&view.exe, ProcLink::Exe, How::Exe),
+    ] {
+        for target in targets {
+            hold(
+                how,
+                placed(pid, &target.stat, || which.name().to_owned())?,
+                target,
+            );
+        }
+    }
     for fd in &view.fds {
         let id = placed(pid, &fd.target.stat, || format!("fd {}", fd.fd))?;
         read.uses.push((id, How::Fd(fd.fd)));

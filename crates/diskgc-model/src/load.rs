@@ -504,6 +504,7 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
                 on,
                 root: upper.ino,
                 read_only: spec.read_only,
+                noatime: spec.noatime,
                 dead: spec.dead,
                 overlay: Some(dev),
                 subvolume: None,
@@ -536,6 +537,7 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
             on,
             root,
             read_only: spec.read_only,
+            noatime: spec.noatime,
             dead: spec.dead,
             overlay: None,
             subvolume,
@@ -844,8 +846,8 @@ fn create_node(
                 .size
                 .map_or(spec.content.as_ref().map_or(0, |s| s.len() as u64), |s| s.0);
             inode.mtime = mtime;
-            inode.ctime = mtime;
-            inode.btime = mtime;
+            inode.ctime = spec.ctime.map_or(mtime, |t| timestamp(t.0));
+            inode.btime = spec.btime.map_or(mtime, |t| timestamp(t.0));
             inode.atime = spec.atime.map_or(mtime, |t| timestamp(t.0));
             if let Some(uid) = spec.uid {
                 inode.uid = uid;
@@ -865,9 +867,9 @@ fn set_dir_attrs(state: &mut State, loc: Loc, attrs: &DirAttrs, model: &HostMode
     let mtime = timestamp(attrs.mtime.map_or(model.clock.0, |t| t.0));
     let inode = state.inode_mut(loc);
     inode.mtime = mtime;
-    inode.ctime = mtime;
-    inode.btime = mtime;
-    inode.atime = mtime;
+    inode.ctime = attrs.ctime.map_or(mtime, |t| timestamp(t.0));
+    inode.btime = attrs.btime.map_or(mtime, |t| timestamp(t.0));
+    inode.atime = attrs.atime.map_or(mtime, |t| timestamp(t.0));
     if let Some(uid) = attrs.uid {
         inode.uid = uid;
     }

@@ -1246,7 +1246,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let rules = rules(self.tier, owners);
         let mut checker = Checker::new(&rules, REUSE_LIMIT)
             .with_pid_lookup(self.tier.pid_lookup())
-            .with_pytest_facts(self.tier.pytest_facts());
+            .with_pytest_facts(self.tier.pytest_facts())
+            .with_project_facts(self.tier.project_facts());
         // No `_` arm: a new source kind must decide here (and in `ensure`'s
         // allowlist) how it is reclaimed. Each kind runs its own protocol
         // only: an fs tier never reaches the Cargo reclaim, a Cargo tier
@@ -2691,6 +2692,7 @@ mod best_fit_tests {
             source: "fixture".to_owned(),
             read_only: false,
             idmapped: false,
+            noatime: false,
             upper_dir: None,
         };
         vec![
@@ -2855,6 +2857,7 @@ mod best_fit_tests {
             source: "fixture".to_owned(),
             read_only: false,
             idmapped: false,
+            noatime: false,
             upper_dir: None,
         };
         let mounts = [

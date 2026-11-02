@@ -1055,8 +1055,9 @@ Model scenarios required by [safety.md](safety.md) and
 
 Status: the Owner PID (`nix-shell`) and `pytest` vectors and container
 tests below are checked in and run (TASK-112); the project-contract
-vectors and container tests (`node-project`, `python-project`) are
-specified here and land with TASK-79.
+ModelHost vectors (`node-project`, `python-project`) are checked in and
+run (TASK-79, 2026-11-02), except the rows marked *planned* in their
+table, and their container tests are planned (below).
 TASK-122's classification adds, in the same directory: one
 counterexample per withdrawn built-in of class *none*, named
 `<profile>-...-eligible` (a live or deliberately kept producer's directory
@@ -1101,7 +1102,40 @@ file of that name in `vectors/liveness/` (against the built-in), plus
 session and one holding a test's Git fixture reclaimed under `checkouts:
 allow`, `in_use` by an fd, `protected`, `keep_marker`, `pytest-05` `filtered`, a
 test directory and sessions outside the temp-prefix preset not matched).
-The project vectors land with TASK-79. Mutation record (step 3, each vector-corpus run red):
+The project vectors are in `vectors/liveness/` (`node-project-*`,
+`python-project-*`), one file per row of the project table below, plus
+`vectors/builtins/node-modules.yaml` and `python-venv.yaml` for the
+built-ins' roles (an idle project's dependencies removed, `in_use` by an
+fd, `excluded` by a negated user profile, `keep_marker`). Their mutation
+record (TASK-79, each vector-corpus run red on the named vectors): rule 2
+off (the three `read-only-use-kept` and `source-read-kept`); the
+`noatime` rule ignored (both `noatime-residual` vectors); held-directory
+climbs off (`cwd-in-vcs-metadata-kept`, `chrooted-process-kept`); the
+held-file path test off (`fd-in-sibling-dependency-dir-kept`, before the
+review round walked dependency directories); the
+project walk's changes ignored (`recent-edit-kept`, the workspace,
+version-control and vendored vectors); the project climb off (the
+workspace, pnpm-workspace, version-control and vendored vectors); the
+version-control marker off; the source's own instance check off (the
+reclaim then deleted the `filtered` candidates of `no-manifest`,
+`manifest-variants`, `no-pyvenv-cfg`, `inside-venv` and the sibling
+`node_modules`). The review round (TASK-79, 2026-11-02) wrote its vectors
+red first (12 of 415 failed before the fixes; `npm-link`,
+`editable-install` and `new-directory` guard the new rules and passed
+before them) and bit: the outer-`node_modules` check off
+(`shadowing-root`, `outer-node-modules-above-root`,
+`member-read-keeps-root`); the other-filesystem retention off
+(`bind-from-other-filesystem`); directory mtimes counted again
+(`after-root-reclaimed`); the command-line test off (the three `argv`
+vectors); the narrowing off (`ignore-sweep`, `source-read-only`,
+`interpreter-symlink`); the link-out fallback off (`npm-link`,
+`editable-install`); the interpreter-link exemption off
+(`interpreter-symlink`); the `.pth` check off (`pth-path-outside`); the
+model's read_head moving every file's atime (`pth-read-leaves-atime`);
+the above-root answer off
+(`marker-above-root`); the held-file path test off (`fd-in-vcs-metadata`,
+`bind-from-other-filesystem`); climbs off (`cwd-in-vcs-metadata`).
+Mutation record (step 3, each vector-corpus run red):
 skipping the namespace, `hidepid` or filesystem precondition; tabling only
 the first `NSpid` level; ignoring unreadable processes; ignoring the
 probe; dropping the contract check in the plan, before the delete or
@@ -1342,9 +1376,18 @@ after discovery's first (`read_dir` calls 2 to 6, one per candidate's
 check, in the dry run and in the reclaim alike).
 
 **Project dependency directories** (`node-modules`, `python-venv`; the
-project is the candidate's parent; idle bound 30 days; TASK-79's container
-probe, where reading the dependencies changed neither mtime nor ctime, is
-the counterexample these turn into cases):
+project is the candidate's parent unless a row says otherwise; idle bound
+30 days; TASK-79's container probe, where reading the dependencies changed
+neither mtime nor ctime, is the counterexample these turn into cases; in
+the model an edited file keeps its old atime, so rule 1 is pinned without
+rule 2). Rows marked *planned* need host-model features not built yet
+(spoofed link text, a process's own mount table and namespace, detached
+mounts, `map_files`, overlay lower layers); the translation through a
+process's own mount table is pinned by unit tests instead
+(`fs_kind::project::tests`: a container's executable outside the tree, a
+bind at `/work`, a `chroot` inside it, a path with a space, and the
+untranslatable cases), and a mapping is matched by identity only
+(safety.md, A process's paths):
 
 | Vector | Setup | Expected |
 |---|---|---|
@@ -1353,35 +1396,35 @@ the counterexample these turn into cases):
 | `node-project-recent-install-kept` | only `node_modules/x/i.js` changed 2 days ago | `not_idle` (the candidate's own walk counts) |
 | `node-project-install-old-mtimes-new-ctime-kept` | every mtime 60 days old (the normalised dates an install extracts); `node_modules/x/i.js` with `ctime` 2 days ago | `not_idle` |
 | `node-project-dir-atime-only-eligible` | all old; only directory atimes in the project recent (a lister) | eligible: directory atimes do not count |
-| `node-project-nested-node-modules-filtered` | `p/node_modules/a/{package.json,node_modules/b/i.js}` as well as `p/node_modules`; the project active | the nested one `filtered`, never deleted, also when the outer one is kept |
+| `node-project-nested-node-modules-filtered` | `p/node_modules/a/{package.json,node_modules/b/i.js}` as well as `p/node_modules`, roots `p` and `p/node_modules/a` (discovery never descends into a candidate, so only a root inside one finds a nested one); the project active | the nested one `filtered`, never deleted, also when the outer one is kept |
 | `node-project-workspace-member-root-active-kept` | `w/{package.json (with workspaces),src/x.js changed yesterday,packages/a/{package.json,node_modules}}`, `packages/a` itself 60 days old | `w/packages/a/node_modules` `not_idle`: judged by the workspace |
 | `node-project-vcs-top-level-is-the-project` | as above, `w` without `workspaces` but holding `.git`; `w/src` changed yesterday | `not_idle` |
 | `node-project-read-only-use-kept` | TASK-79's case: nothing changed for 60 days, `node_modules/x/i.js` read (`atime`) yesterday | `not_idle` |
 | `node-project-read-only-use-noatime-residual-eligible` | the same on a `noatime` mount | eligible: the stated residual, pinned |
 | `node-project-cwd-in-project-kept` | all old; a process with cwd `/home/tester/p/src` | `in_use`, `cwd` |
 | `node-project-fd-in-project-kept` | all old; a process with `src/a.js` open | `in_use`, `fd` |
-| `node-project-environ-names-project-kept` | all old; a process with `NODE_PATH=/home/tester/p/node_modules` | `in_use`, `environment` |
+| `node-project-environ-names-project-kept` | all old; a process with `NODE_PATH=/home/tester/p/lib` (in the project, outside the candidate) | `in_use`, `environment` |
 | `node-project-vcs-only-change-eligible` | all old except `.git/FETCH_HEAD` changed yesterday | eligible |
 | `node-project-cwd-in-vcs-metadata-kept` | all old; a process with cwd `/home/tester/p/.git` | `in_use`, `cwd`: inside by path, though the walk leaves `.git` out |
-| `node-project-fd-in-sibling-dependency-dir-kept` | all old; `p/other/node_modules/y.js` open in a process | `in_use`, `fd` |
+| `node-project-fd-in-sibling-dependency-dir-kept` | all old; `p/other/node_modules/y.js` open in a process | `in_use`, `fd` (by identity: the project walk walks every dependency directory of the candidate's name); `p/other/node_modules` itself `filtered` (no `package.json` beside it) |
 | `node-project-keep-marker-kept` | all old; `p/node_modules/.diskgc-keep` | `keep_marker`: the operator's remedy for hand-edited dependencies |
 | `node-project-symlinked-node-modules-not-candidate` | `p/node_modules` a symlink to `/home/tester/shared/node_modules` | no candidate; the target preserved |
 | `node-project-pnpm-layout-eligible` | all old; `p/node_modules/{.pnpm/x@1/node_modules/x/i.js (link: to /home/tester/.local/share/pnpm/store/v3/files/ab/cd),x (symlink to .pnpm/x@1/node_modules/x)}` | eligible; the store file preserved with one link fewer |
-| `node-project-bind-mounted-member-unknown` | the workspace member `w/packages/a` also bind-mounted at `/home/tester/a` (`bind_root: /w/packages/a`, the `mountinfo` root) and supplied as the root; `w/src` changed yesterday | `/home/tester/a/node_modules` `producer_unknown`: the climb reached a bind-mounted subdirectory |
-| `node-project-held-file-other-device-not-inside` | all old; a process holds `/home/tester/elsewhere/z` on another filesystem; its link text spoofed in the model to `/home/tester/p/z` | eligible: a device not in the tree is never inside, and nothing outside the tree is resolved |
-| `node-project-held-file-same-device-outside-eligible` | all old; a process holds `/home/tester/notes.txt` on the project's device | eligible: text outside the tree's path is not inside |
-| `node-project-container-bind-work-kept` | all old; a process with `mnt_ns: c1`, `root: /`, its mount table binding `/home/tester/p` at `/work` (mount id 968, root field `/home/tester/p`), holding `/work/src/a.js` (link text `/work/src/a.js`) | `in_use`, `fd`: translated through its mount table |
-| `node-project-container-chroot-bind-kept` | as above plus a `chroot` to `/jail` (root link text `/jail`, link text `/jail/work/src/a.js`, mount point `/work`) | `in_use`, `fd` |
-| `node-project-container-chroot-outside-eligible` | all old; the chroot process of `node-project-container-chroot-bind-kept` instead holds `/jail/notes/n.txt` (link text `/jail/notes/n.txt`), its mount table binding `/home/tester/notes` at `/notes` on the project's device | eligible: translated and outside the project |
-| `node-project-space-in-path-container-kept` | the project at `/home/tester/my proj`, all old; a container process binding it at `/work dir` (its `mountinfo` holds `/home/tester/my\040proj` and `/work\040dir`), holding `/work dir/src/a.js` | `in_use`, `fd`: mount points and root fields are unescaped first |
-| `node-project-detached-mount-retained` | all old; a process in diskgc's namespace holds a file on the project's device through a lazily detached mount whose id is absent from `mountinfo` | `in_use` (untranslatable in the same namespace) |
-| `node-project-map-files-unreadable-retained` | all old; a mapping of a project file on the project's device whose `map_files` link cannot be read and whose `maps` pair the walk did not see | `in_use` (untranslatable) |
-| `node-project-untranslatable-retained` | all old; a process in another mount namespace holding a file on the project's device whose mount id is missing from its `mountinfo` | `in_use` (cannot be translated) |
-| `node-project-held-file-suffix-mismatch-retained` | all old; a held file on the project's device whose link text has the project prefix but whose suffix resolves to another inode (renamed after open) | `in_use` (unresolvable on a tree device retains) |
+| `node-project-bind-mounted-member-unknown` | the workspace member `w/packages/a` also bind-mounted at `/home/tester/a` (`bind_root: /tester/w/packages/a`, the `mountinfo` root) and supplied as the root; `w/src` changed yesterday | `/home/tester/a/node_modules` `producer_unknown`: the climb reached a bind-mounted subdirectory |
+| `node-project-held-file-other-device-not-inside` (*planned*) | all old; a process holds `/home/tester/elsewhere/z` on another filesystem; its link text spoofed in the model to `/home/tester/p/z` | eligible: a device not in the tree is never inside, and nothing outside the tree is resolved |
+| `node-project-held-file-same-device-outside-eligible` (in `node-project-idle-eligible`: its shell holds `.bash_history`) | all old; a process holds `/home/tester/notes.txt` on the project's device | eligible: text outside the tree's path is not inside |
+| `node-project-container-bind-work-kept` (*planned*) | all old; a process with `mnt_ns: c1`, `root: /`, its mount table binding `/home/tester/p` at `/work` (mount id 968, root field `/home/tester/p`), holding `/work/src/a.js` (link text `/work/src/a.js`) | `in_use`, `fd`: translated through its mount table |
+| `node-project-container-chroot-bind-kept` (*planned*) | as above plus a `chroot` to `/jail` (root link text `/jail`, link text `/jail/work/src/a.js`, mount point `/work`) | `in_use`, `fd` |
+| `node-project-container-chroot-outside-eligible` (*planned*) | all old; the chroot process of `node-project-container-chroot-bind-kept` instead holds `/jail/notes/n.txt` (link text `/jail/notes/n.txt`), its mount table binding `/home/tester/notes` at `/notes` on the project's device | eligible: translated and outside the project |
+| `node-project-space-in-path-container-kept` (*planned*) | the project at `/home/tester/my proj`, all old; a container process binding it at `/work dir` (its `mountinfo` holds `/home/tester/my\040proj` and `/work\040dir`), holding `/work dir/src/a.js` | `in_use`, `fd`: mount points and root fields are unescaped first |
+| `node-project-detached-mount-retained` (*planned*) | all old; a process in diskgc's namespace holds a file on the project's device through a lazily detached mount whose id is absent from `mountinfo` | `in_use` (untranslatable in the same namespace) |
+| `node-project-map-files-unreadable-retained` (*planned*) | all old; a mapping of a project file on the project's device whose `map_files` link cannot be read and whose `maps` pair the walk did not see | `in_use` (untranslatable) |
+| `node-project-untranslatable-retained` (*planned*) | all old; a process in another mount namespace holding a file on the project's device whose mount id is missing from its `mountinfo` | `in_use` (cannot be translated) |
+| `node-project-held-file-suffix-mismatch-retained` (*planned*) | all old; a held file on the project's device whose link text has the project prefix but whose suffix resolves to another inode (renamed after open) | `in_use` (unresolvable on a tree device retains) |
 | `node-project-subdir-bind-held-cwd-kept` | all old; `p/src` also bind-mounted at `/mnt/src` (`bind_root`); a process with cwd `/mnt/src` | `in_use`, `cwd`: the climb meets a directory of the tree |
 | `node-project-pivot-root-process-not-under` | all old; a process whose `root` is `/srv/c` and cwd `/srv/c/work`, outside the project | eligible: its climb reaches the fixpoint without meeting the tree |
 | `node-project-ssh-agent-excused` | all old; the user's `non_dumpable` `ssh-agent` whose magic links cannot be opened | eligible: excused as In use excuses it |
-| `node-project-overlay-mapping-retained` | all old; a mapping whose `maps` device and inode are a lower layer's, of a file in the project | `in_use` (the stated availability cost) |
+| `node-project-overlay-mapping-retained` (*planned*) | all old; a mapping whose `maps` device and inode are a lower layer's, of a file in the project | `in_use` (the stated availability cost) |
 | `node-project-chrooted-process-kept` | all old; a process with `root: /home/tester`, cwd `/home/tester/p/.git`, and `p/other/node_modules/y.js` open (link text is diskgc's view) | `in_use`, `cwd` and `fd`: matched by climbing and by identity, not by the process's own path text |
 | `node-project-no-manifest-filtered` | no `package.json` in `p` | `filtered` |
 | `node-project-over-budget` | a project tree above the entry budget | `too_many_entries` |
@@ -1393,6 +1436,36 @@ the counterexample these turn into cases):
 | `python-project-no-pyvenv-cfg-filtered` | `.venv` without `pyvenv.cfg` | `filtered` |
 | `python-project-editable-checkout-refused` | `.venv/src/pkg/.git/HEAD` | `contains_checkout` |
 | `python-project-requirements-manifest` | only `requirements-dev.txt` as manifest, all old | eligible |
+| `node-project-source-read-only-eligible` | all old; `src/a.js` read (`atime`) yesterday, nothing in `node_modules` | eligible: rule 2 counts reads only in the dependency directories (narrowing PENDING Mark) |
+| `node-project-undeclared-workspace-residual-eligible` | as `node-project-workspace-member-root-active-kept`, `w/package.json` without `workspaces` and no `.git` | eligible: the stated residual (an undeclared workspace) |
+| `node-project-workspace-manifest-unparsable-unknown` | `w/package.json` not JSON above a member | `producer_unknown` |
+| `node-project-nearest-project-stops-the-climb` | `w/package.json` not JSON; the member `w/packages/a` holds its own `.git`; all old but `w/src` changed yesterday | eligible: the nearest project is the member, and nothing above it is read |
+| `node-project-pnpm-workspace-root` | `w/pnpm-workspace.yaml` instead of `workspaces`; `w/src` changed yesterday | `not_idle`: judged by the workspace |
+| `node-project-inside-venv-filtered` | `q/venv/share/app/{package.json,node_modules}`, `q/venv/pyvenv.cfg` (a venv named without a dot, which the hidden-directory exclusion does not cover) | `filtered`: inside another dependency directory |
+| `node-project-hidden-directories-not-candidates` | root `/home/tester`; `.npm/_npx/f00d/{package.json,node_modules}` and `.cursor/extensions/ext-1.0/{package.json,node_modules}` beside an idle project `p` | only `p/node_modules` found (eligible): nothing below a hidden directory under the root is a candidate |
+| `node-project-pivot-root-process-not-under` | all old; a process with `root: /srv/c`, cwd `/srv/c/work` and a file there open | eligible: its climbs reach the fixpoint without meeting the project |
+| `node-project-environ-other-view-residual` | all old; a process with `view: {/src: /home/tester/p}` and `NODE_PATH=/src/node_modules` | eligible: the stated residual (strings are bytes in the process's view) |
+| `python-project-read-only-use-noatime-residual-eligible` | `python-project-read-only-use-kept` on a `noatime` mount | eligible: the stated residual, pinned |
+| `python-project-cwd-in-project-kept` | all old; a `python3` with cwd `q/pkg` | `in_use`, `cwd` |
+| `python-project-manifest-variants` | `.venv`s beside `pyproject.toml`, `setup.py`, `setup.cfg`, `Pipfile`, `requirements.txt`; beside nothing, a `requirements.in`, only a `package.json` | the first five eligible; the last three `filtered` (a venv outside a Python project) |
+| `python-project-symlinked-venv-not-candidate` | `q/.venv` a symlink to `/home/tester/envs/shared` | no candidate; the target preserved |
+| `python-project-vendored-tree-judged-by-repository` | `r/.git`, `r/src/main.py` changed yesterday; `r/third_party/tool/{setup.py,.venv}` all old | `not_idle`: the vendored tool's project is the repository |
+| `node-project-fd-in-vcs-metadata-kept` | all old; a process holds `p/.git/HEAD` | `in_use`, `fd`: the held-file path test (the walk leaves `.git` out) |
+| `node-project-workspace-member-shadowing-root-filtered` | `w/{.git,package.json (workspaces),node_modules}` and member `packages/a/node_modules` (older), all idle | `w/node_modules` removed; the member's `filtered` (an outer `node_modules` exists: Node would switch to it) |
+| `node-project-workspace-member-after-root-reclaimed-eligible` | the same after that run: `w/node_modules` gone, `w`'s mtime and ctime yesterday (the deletion), its birth time old | the member's eligible: a directory's mtime and ctime are not activity |
+| `node-project-new-directory-is-activity-kept` | all old; `p/docs` born yesterday | `not_idle`: a directory's birth time counts |
+| `node-project-workspace-member-read-keeps-root` | as the shadowing vector, the member's `z.js` read yesterday | `w/node_modules` `not_idle`: root and members share rule 2's evidence |
+| `node-project-outer-node-modules-above-root-filtered` | `/home/tester/node_modules` above the supplied root `p` | `filtered` (checked up to the mount root) |
+| `node-project-marker-above-root-unknown` | root `w/packages`, the nearest project `w` (its `.git`) above it | `producer_unknown` |
+| `node-project-bind-from-other-filesystem-held-file-kept` | `p/data` binds `/data` of another filesystem, also mounted at `/fast`; a process holds `/fast/data/f` | `in_use`, `fd`: another filesystem than the project's, which the project's path cannot place |
+| `node-project-script-argv-kept`, `node-project-relative-argv-kept` | all old; a `node` with cwd `/` and `cmdline: [node, /home/tester/p/server.js]`, or cwd `/home/tester` and `p/server.js` | `in_use`, `command_line` |
+| `python-project-interpreter-argv-kept` | all old; `cmdline: [q/.venv/bin/python, q/server.py]` (absolute), exe `/usr/bin/python3`, cwd `/` | `in_use`, `command_line` |
+| `node-project-ignore-sweep-read-eligible` | all old; `p/.gitignore` and `p/README.md` read yesterday | eligible (narrowed rule 2, PENDING Mark) |
+| `node-project-npm-link-read-outside-kept` | `node_modules/mylib` a symlink to `/home/tester/mylib`; `src/a.js` read yesterday | `not_idle`: a link out falls back to project-wide reads |
+| `python-project-editable-install-read-outside-kept` | `.venv/lib/__editable__.q-1.0.pth`; `pkg/m.py` read yesterday | `not_idle`: an editable install falls back to project-wide reads |
+| `python-project-interpreter-symlink-no-fallback-eligible` | `.venv/bin/python` a symlink to `/usr/bin/python3`; `README.md` read yesterday | eligible: the interpreter link is not a package |
+| `python-project-pth-read-leaves-atime-eligible` | `q/.git`; `q/.venv` and `q/tools/.venv`, each with an import-only `_virtualenv.pth`, all old | both eligible: diskgc's own `.pth` reads (`O_NOATIME`) never make the second look read (the model moves a read file's atime only where Linux refuses `O_NOATIME`) |
+| `python-project-pth-path-outside-kept` | `.venv/lib/q.pth` holding `/home/tester/q`; `pkg/m.py` read yesterday | `not_idle`: a `.pth` path outside falls back to project-wide reads |
 
 **Excluded and withdrawn profiles** keep their unsafe user-probe vectors
 (`pytest-tmp-unsafe-live-no-fd` and its successors for a plain path
@@ -1408,7 +1481,12 @@ validation list): `liveness_contract_rejects_null_and_blank`,
 `nix_shell_contract_requires_the_rc_name_shape`,
 `pytest_contract_requires_the_session_layout`,
 `node_project_contract_requires_node_modules`,
-`project_contracts_refuse_checkouts_allow`.
+`python_project_contract_takes_any_directory_name`,
+`project_contracts_refuse_checkouts_allow`. The project built-ins'
+frozen definitions (depth one to five, exact name, contract, 30-day floor,
+checkouts refused, no release catalog):
+`project_dependency_profiles_have_frozen_depth_contract_and_floor`
+(golden.rs).
 
 **Properties.** The pid parser: every value from 1 to 4194304 formatted
 in decimal parses back; leading zeros, signs, values above the limit and
@@ -1553,7 +1631,9 @@ controller's pipe close, SIGINTs the worker after 5 s and `_exit`s it 10 s
 later (`WorkerGateway._terminate_execution`), so the test's worker
 ignores SIGINT and the test checks that the worker still lived after
 diskgc's runs; once it has ended the session is reclaimed, row 11).
-Planned with the project contracts (TASK-79), not yet written:
+Planned with the project contracts (TASK-79's container tests; the
+ModelHost vectors above landed first, on Mark's steer, 2026-11-02), not
+yet written:
 `node_and_python_project_read_keeps_dependencies`
 (TASK-79's probe on a `relatime` tmpfs: a run that only reads keeps the
 dependency directory; on a `noatime` mount the residual is shown),

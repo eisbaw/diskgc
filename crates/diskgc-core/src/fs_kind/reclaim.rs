@@ -438,6 +438,22 @@ fn protocol<H: Delete>(
     let mut attempts = FreshAttempts::new(deadline).scan_not_before(super::contract_scan_floor(
         admitted.iter().map(|a| (a.judge.find, a.found)),
     ));
+    // The project contracts' walks and rules 1 and 2, before the freshness
+    // loop: a large project must not run into a deletion's freshness
+    // window. Rule 3 is judged on the scan, in the veto below.
+    let prepared = admitted
+        .iter()
+        .map(|a| {
+            super::liveness::prepare(
+                host,
+                &a.judge,
+                a.found,
+                candidate.parent(),
+                &record,
+                deadline,
+            )
+        })
+        .collect::<Result<Vec<_>, Stop>>()?;
     // The delete unlinks only what this walk listed (a file created in the
     // candidate since is never unlinked): the policy learns what it saw.
     let after_walk = PolicyAt::AfterWalk {
@@ -471,7 +487,10 @@ fn protocol<H: Delete>(
             if let Err((veto_index, skip)) = super::liveness::veto(
                 host,
                 scan,
-                admitted.iter().map(|a| (a.judge.find, a.found)),
+                admitted
+                    .iter()
+                    .zip(&prepared)
+                    .map(|(a, prepared)| (a.judge.find, a.found, prepared)),
                 candidate.parent(),
                 &record,
             )

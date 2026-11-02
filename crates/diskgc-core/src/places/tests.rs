@@ -20,6 +20,7 @@ fn mount(id: u64, parent_id: u64, point: &str, dev: (u32, u32), root: &str) -> M
         source: "fixture".to_owned(),
         read_only: false,
         idmapped: false,
+        noatime: false,
         upper_dir: None,
     }
 }

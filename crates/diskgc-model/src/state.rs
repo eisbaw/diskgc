@@ -300,6 +300,8 @@ pub struct Mount {
     /// ([`crate::spec::MountSpec::bind_root`]).
     pub root: u64,
     pub read_only: bool,
+    /// Mounted `noatime` ([`crate::spec::MountSpec::noatime`]).
+    pub noatime: bool,
     /// Its server never answers ([`crate::spec::MountSpec::dead`]).
     pub dead: bool,
     /// An overlay showing an upper directory of filesystem `dev`
@@ -843,6 +845,7 @@ impl State {
             on: Some(on),
             root,
             read_only: false,
+            noatime: false,
             dead: false,
             overlay: None,
             subvolume: None,
@@ -918,6 +921,7 @@ impl State {
             on: Some(on),
             root,
             read_only: false,
+            noatime: from.noatime,
             dead: from.dead,
             overlay: from.overlay,
             subvolume: from.subvolume,
@@ -961,6 +965,7 @@ impl State {
                     fs_type,
                     read_only: m.read_only,
                     idmapped: !m.idmap.is_empty(),
+                    noatime: m.noatime,
                     upper_dir: m.upper.as_ref().map(|(shown, _)| shown.clone()),
                 }
             })
@@ -1218,7 +1223,7 @@ impl State {
             mtime: when(fs, StatxField::Mtime, inode.mtime),
             ctime: when(fs, StatxField::Ctime, inode.ctime),
             btime: when(fs, StatxField::Btime, inode.btime),
-            atime: Some(inode.atime),
+            atime: when(fs, StatxField::Atime, inode.atime),
             mnt_id: when(fs, StatxField::MntId, loc.mnt),
             mount_root: when(
                 fs,

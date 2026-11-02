@@ -292,24 +292,32 @@ impl LivenessContract {
     }
 
     /// Whether this version judges the contract. The loader refuses the
-    /// others, so nothing half-built can be selected; their own load rules
-    /// (shapes, checkouts) land with them: `node-project` and
-    /// `python-project` with TASK-112 step 6 (TASK-79).
+    /// others, so nothing half-built can be selected. Every contract is
+    /// judged since TASK-79 landed the project contracts.
     pub fn implemented(self) -> bool {
         match self {
-            Self::NixShell | Self::Pytest => true,
-            Self::NodeProject | Self::PythonProject => false,
+            Self::NixShell | Self::Pytest | Self::NodeProject | Self::PythonProject => true,
         }
+    }
+
+    /// A project dependency contract (docs/safety.md, Project dependency
+    /// directories): judged by its project's activity, refused with
+    /// `checkouts: allow`.
+    pub fn is_project(self) -> bool {
+        matches!(self, Self::NodeProject | Self::PythonProject)
     }
 
     /// The shapes every `find.paths` pattern of a source with this
     /// implemented contract must end in, whole `/`-separated segments: the
-    /// contract recognises only paths of these shapes.
+    /// contract recognises only paths of these shapes. Empty: any name
+    /// (`python-project`, whose contract itself requires `pyvenv.cfg` in
+    /// the candidate).
     pub fn name_shapes(self) -> &'static [&'static str] {
         match self {
             Self::NixShell => &["nix-shell-*-*", "nix-develop-*-*"],
             Self::Pytest => &["pytest-of-*/pytest-*"],
-            Self::NodeProject | Self::PythonProject => &[],
+            Self::NodeProject => &["node_modules"],
+            Self::PythonProject => &[],
         }
     }
 }

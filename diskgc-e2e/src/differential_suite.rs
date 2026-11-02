@@ -2003,6 +2003,7 @@ fn python_mounted_cache_vector(stacked: bool) -> Result<ProfileVector, String> {
         other_used: Bytes(0),
         parent: Some(2),
         read_only: false,
+        noatime: false,
         dead: false,
         statx_missing: Vec::new(),
     };

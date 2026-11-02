@@ -67,6 +67,8 @@ const EXCLUDED: &[&str] = &[
     // TASK-94, pending Mark's admission: development library only.
     "rustup-toolchains",
     "elan-toolchains",
+    "node-modules",
+    "python-venv",
 ];
 
 fn run_binary(

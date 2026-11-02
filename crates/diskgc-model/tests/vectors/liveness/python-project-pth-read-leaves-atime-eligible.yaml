@@ -1,0 +1,58 @@
+# diskgc reads a virtual environment's .pth files (rule 2's link-out check)
+# with O_NOATIME: its own read never moves their read time. Two .venv in one
+# repository (q/.git), each with virtualenv's import-only .pth: judging the
+# first reads both .pth files, and the second, judged after it, must still
+# see them unread. The model moves a file's atime on read_head only where
+# Linux would refuse O_NOATIME (another owner, diskgc not root).
+profile_vector: 1
+profile: python-venv
+roots: [/home/tester/q]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /usr/bin/python3: {}
+    /home/tester/.bash_history: {size: 1K}
+    /home/tester/q:
+      .: {mtime: 2026-08-16T03:00:00Z}
+      pyproject.toml: {mtime: 2026-08-16T03:00:00Z}
+      pkg:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        m.py: {mtime: 2026-08-16T03:00:00Z}
+      ".venv":
+        .: {mtime: 2026-08-16T03:00:00Z}
+        pyvenv.cfg: {mtime: 2026-08-16T03:00:00Z}
+        lib:
+          .: {mtime: 2026-08-16T03:00:00Z}
+          x.py: {size: 4K, mtime: 2026-08-16T03:00:00Z}
+          _virtualenv.pth: {mtime: 2026-08-16T03:00:00Z, content: "import _virtualenv"}
+      ".git":
+        .: {mtime: 2026-08-16T03:00:00Z}
+        HEAD: {mtime: 2026-08-16T03:00:00Z}
+      tools:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        pyproject.toml: {mtime: 2026-08-16T03:00:00Z}
+        ".venv":
+          .: {mtime: 2026-08-16T03:00:00Z}
+          pyvenv.cfg: {mtime: 2026-08-16T03:00:00Z}
+          lib:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            _virtualenv.pth: {mtime: 2026-08-16T03:00:00Z, content: "import _virtualenv"}
+  processes:
+    - {pid: 900, exe: /usr/bin/bash, cwd: /home/tester, maps: [/usr/bin/bash], environ: ["HOME=/home/tester"], fds: [{path: /usr/bin/bash}, {path: /home/tester/.bash_history}]}
+expect:
+  plan:
+    - {candidate: /home/tester/q/.venv}
+    - {candidate: /home/tester/q/tools/.venv}
+  reclaim_exit: 1
+  actions: [/home/tester/q/.venv, /home/tester/q/tools/.venv]
+  removed: [/home/tester/q/.venv, /home/tester/q/tools/.venv]
+  skipped: []
+  preserved: [/home/tester/q/pkg/m.py, /home/tester/q/tools/pyproject.toml]

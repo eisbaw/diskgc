@@ -46,11 +46,11 @@ use std::time::Duration;
 
 use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DevIno,
-    DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, Host, HostError,
-    Ids, LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MakeUserLock, MapEntry,
-    MonoTime, MountEntry, OpenHow, Pid, PidNamespace, Pressure, ProcError, ProcFd, ProcLink,
-    ProcStatus, Space, Stat, StateFile, StateLock, StateWritten, Timestamp, TryLock, Unlink,
-    UserLock, UserLockError, WaitLock, is_single_name,
+    DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, HeldDir, Host,
+    HostError, Ids, LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MakeUserLock,
+    MapEntry, MonoTime, MountEntry, OpenHow, Pid, PidNamespace, Pressure, ProcError, ProcFd,
+    ProcLink, ProcStatus, Space, Stat, StateFile, StateLock, StateWritten, Timestamp, TryLock,
+    Unlink, UserLock, UserLockError, WaitLock, is_single_name,
 };
 use diskgc_core::hostlock::USER_LOCK_NAME;
 
@@ -1507,9 +1507,17 @@ impl Host for ModelHost {
                     head.truncate(limit);
                     // A read moves the access time (as under
                     // `strictatime`, the most a kernel does), so a check
-                    // that compares two statx around a read sees it.
-                    let now = inner.state.wall_now();
-                    inner.state.inode_mut(loc).atime = now;
+                    // that compares two statx around a read sees it;
+                    // except where LinuxHost's `O_NOATIME` holds: a file
+                    // diskgc owns, or any as root (CAP_FOWNER). Linux
+                    // refuses the flag otherwise (EPERM) and LinuxHost
+                    // reads without it (TASK-79: the project contracts
+                    // judge read times diskgc must not move).
+                    let own = inner.state.own_uid;
+                    if own != 0 && inner.state.inode(loc).uid != own {
+                        let now = inner.state.wall_now();
+                        inner.state.inode_mut(loc).atime = now;
+                    }
                     (Ok(head), object, "ok".to_owned())
                 }
                 _ => (
@@ -2294,6 +2302,109 @@ impl Host for ModelHost {
                 }
             }
         })
+    }
+
+    /// The climb of a held directory: its (device, inode) as `statx`
+    /// reports it, then each ancestor's by the model's path, up to `/` (in
+    /// diskgc's view, as `..` by fd climbs on Linux). A held object that is
+    /// not a directory is refused as `O_DIRECTORY` refuses it.
+    fn proc_climb(&self, pid: Pid, from: HeldDir) -> Result<Vec<DevIno>, ProcError> {
+        let shown = format!("/proc/{pid}/{}", from.link());
+        self.call(Op::ProcClimb, Some(PathBuf::from(&shown)), None, |inner| {
+            if let Some(e) = inner.injected.take() {
+                return (
+                    Err(ProcError::from_host(HostError::errno("open", &shown, e))),
+                    None,
+                    errno_text(e),
+                );
+            }
+            let state = &inner.state;
+            let Some(proc) = state.procs.get(&pid.0) else {
+                return (Err(ProcError::Gone), None, "gone".to_owned());
+            };
+            if proc.zombie {
+                return (Err(ProcError::Gone), None, "gone (zombie)".to_owned());
+            }
+            match proc.access {
+                ProcAccess::Readable => {}
+                ProcAccess::Denied => {
+                    return (
+                        Err(ProcError::Denied(HostError::errno(
+                            "open",
+                            &shown,
+                            Errno::EACCES,
+                        ))),
+                        None,
+                        "denied".to_owned(),
+                    );
+                }
+                ProcAccess::Failed => {
+                    return (
+                        Err(ProcError::Failed(HostError::invalid(
+                            "open",
+                            &shown,
+                            "the model says it cannot be inspected",
+                        ))),
+                        None,
+                        "failed".to_owned(),
+                    );
+                }
+            }
+            let held = match from {
+                HeldDir::Cwd => Some(proc.cwd.clone()),
+                HeldDir::Root => Some(proc.root.clone()),
+                HeldDir::Fd(fd) => proc.fds.get(&fd).map(|ofd| {
+                    let ofd = &state.ofds[ofd];
+                    Ref {
+                        loc: ofd.loc,
+                        path: ofd.path.clone(),
+                    }
+                }),
+            };
+            let Some(held) = held else {
+                return (
+                    Err(ProcError::Failed(HostError::errno(
+                        "open",
+                        &shown,
+                        Errno::ENOENT,
+                    ))),
+                    None,
+                    "no such fd".to_owned(),
+                );
+            };
+            if state.inode(held.loc).entries().is_none() {
+                return (
+                    Err(ProcError::Failed(HostError::errno(
+                        "open",
+                        &shown,
+                        Errno::ENOTDIR,
+                    ))),
+                    None,
+                    errno_text(Errno::ENOTDIR),
+                );
+            }
+            let mut chain = vec![state.reported_dev_ino(held.loc)];
+            for ancestor in held.path.ancestors().skip(1) {
+                let up = state
+                    .lookup(ancestor)
+                    .unwrap_or_else(|f| model_error(format!("{shown}: {f:?}")));
+                chain.push(state.reported_dev_ino(up));
+            }
+            let text = held.path.display().to_string();
+            (Ok(chain), Some(state.dev_ino(held.loc)), text)
+        })
+    }
+
+    /// Every modelled process shares diskgc's mount namespace: its table
+    /// is diskgc's.
+    fn proc_mountinfo(&self, pid: Pid) -> Result<Vec<MountEntry>, ProcError> {
+        self.proc_call(
+            Op::ProcMountinfo,
+            pid,
+            "mountinfo",
+            |state, _| state.mountinfo(),
+            Vec::is_empty,
+        )
     }
 
     /// The model's UUID of the filesystem `mount` shows, by its mountinfo

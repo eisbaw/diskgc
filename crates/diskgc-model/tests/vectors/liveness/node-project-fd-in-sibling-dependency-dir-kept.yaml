@@ -1,0 +1,51 @@
+# A process holds p/other/node_modules/y.js open; the project walk leaves
+# out every directory named like the candidate, so the identity match misses
+# it. (p/other/node_modules is itself a candidate of node-modules, filtered:
+# its parent holds no package.json.) The held-file path test (its link text through diskgc's mount table,
+# as a path within the filesystem) places it in the project: in use.
+profile_vector: 1
+profile: node-modules
+roots: [/home/tester/p]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /usr/bin/node: {}
+    /home/tester/.bash_history: {size: 1K}
+    /home/tester/p:
+      .: {mtime: 2026-08-16T03:00:00Z}
+      package.json: {content: "{\"name\": \"p\", \"version\": \"1.0.0\"}", mtime: 2026-08-16T03:00:00Z}
+      src:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        a.js: {mtime: 2026-08-16T03:00:00Z}
+      node_modules:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        x:
+          .: {mtime: 2026-08-16T03:00:00Z}
+          i.js: {size: 4K, mtime: 2026-08-16T03:00:00Z}
+      other:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        node_modules:
+          .: {mtime: 2026-08-16T03:00:00Z}
+          y.js: {mtime: 2026-08-16T03:00:00Z}
+  processes:
+    - {pid: 900, exe: /usr/bin/bash, cwd: /home/tester, maps: [/usr/bin/bash], environ: ["HOME=/home/tester"], fds: [{path: /usr/bin/bash}, {path: /home/tester/.bash_history}]}
+    - {pid: 901, exe: /usr/bin/node, cwd: /home/tester, maps: [/usr/bin/node], environ: ["HOME=/home/tester"], fds: [{path: /usr/bin/node}, {path: /home/tester/p/other/node_modules/y.js}]}
+expect:
+  plan:
+    - {candidate: /home/tester/p/node_modules, reason: in_use}
+    - {candidate: /home/tester/p/other/node_modules, reason: filtered}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/p/node_modules, reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: /home/tester/p/other/node_modules, reason: filtered}
+  preserved: [/home/tester/p/node_modules/x/i.js, /home/tester/p/other/node_modules/y.js]

@@ -1,0 +1,53 @@
+# A package's own node_modules (p/node_modules/a/node_modules) found through
+# a root supplied inside the outer one: it lies inside another dependency
+# directory, so it is filtered and never deleted (removing it would let Node
+# resolve the hoisted copy, possibly another version), also while the outer
+# one is kept (the project changed yesterday).
+profile_vector: 1
+profile: node-modules
+roots: [/home/tester/p, /home/tester/p/node_modules/a]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /usr/bin/node: {}
+    /home/tester/.bash_history: {size: 1K}
+    /home/tester/p:
+      .: {mtime: 2026-08-16T03:00:00Z}
+      package.json: {content: "{\"name\": \"p\", \"version\": \"1.0.0\"}", mtime: 2026-08-16T03:00:00Z}
+      src:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        a.js: {mtime: 2026-10-14T03:00:00Z, atime: 2026-08-16T03:00:00Z}
+      node_modules:
+        .: {mtime: 2026-08-16T03:00:00Z}
+        x:
+          .: {mtime: 2026-08-16T03:00:00Z}
+          i.js: {size: 4K, mtime: 2026-08-16T03:00:00Z}
+        a:
+          .: {mtime: 2026-08-16T03:00:00Z}
+          package.json: {content: "{\"name\": \"p\", \"version\": \"1.0.0\"}", mtime: 2026-08-16T03:00:00Z}
+          node_modules:
+            .: {mtime: 2026-08-16T03:00:00Z}
+            b:
+              .: {mtime: 2026-08-16T03:00:00Z}
+              i.js: {mtime: 2026-08-16T03:00:00Z}
+  processes:
+    - {pid: 900, exe: /usr/bin/bash, cwd: /home/tester, maps: [/usr/bin/bash], environ: ["HOME=/home/tester"], fds: [{path: /usr/bin/bash}, {path: /home/tester/.bash_history}]}
+expect:
+  plan:
+    - {candidate: /home/tester/p/node_modules, reason: not_idle}
+    - {candidate: /home/tester/p/node_modules/a/node_modules, reason: filtered}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/p/node_modules, reason: not_idle}
+    - {candidate: /home/tester/p/node_modules/a/node_modules, reason: filtered}
+  preserved: [/home/tester/p/node_modules/x/i.js, /home/tester/p/node_modules/a/node_modules/b/i.js]

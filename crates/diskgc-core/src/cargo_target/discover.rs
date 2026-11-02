@@ -1455,6 +1455,7 @@ mod private_tmp_tests {
             source: "tmpfs".into(),
             read_only: false,
             idmapped: false,
+            noatime: false,
             upper_dir: None,
         };
         let root = MountEntry {
@@ -1467,6 +1468,7 @@ mod private_tmp_tests {
             source: "/dev/test".into(),
             read_only: false,
             idmapped: false,
+            noatime: false,
             upper_dir: None,
         };
         let bound = Path::new("/srv/bound");

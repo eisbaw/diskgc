@@ -1555,14 +1555,14 @@ on a real kernel, `LOOP_GET_STATUS64` against bound devices included.
 
 ### Producer liveness
 
-Status (TASK-112): Owner PID and the `nix-shell` and `pytest` contracts
-are implemented; the `nix-shell-rc` and `pytest-tmp` built-ins use them,
-and any user profile can require them. The project-dependency contracts
-(`node-project`, `python-project`) are designed, not implemented, and so
-are the parts of A process's paths only they use (the climbs of held
-directories and the translation of held files): the loader refuses those
-contracts until they land (TASK-79). The protocols below are normative
-for the implementation.
+Status: Owner PID and the `nix-shell` and `pytest` contracts (TASK-112),
+and the project-dependency contracts `node-project` and `python-project`
+(TASK-79), are implemented; the `nix-shell-rc`, `pytest-tmp`,
+`node-modules` and `python-venv` built-ins use them, and any user profile
+can require them. Of A process's paths, the parts only the project
+contracts use are implemented with one stated limit (below: a mapping is
+matched by identity only). The protocols below are normative for the
+implementation.
 
 The in-use scan answers "does a visible process use this candidate now?".
 It cannot answer "has the program that made this candidate finished with
@@ -1785,10 +1785,19 @@ held objects In use already matches by device and inode (a directory of
 the session bound elsewhere included, since every directory of the walk is
 matched); of the rules below it uses the process set, the strings and
 the values pytest resolves (with a climb from a resolved `--basetemp`
-value). The climbs of held directories and the translation of held files
-serve only the project contracts and land with them (TASK-79): they are
-not implemented, and nothing implemented relies on them (TASK-112 step 5,
-2026-10-24). So:
+value). The climbs of held directories and the path test of held files
+serve only the project contracts (TASK-79, 2026-11-02), which read them
+from the in-use scan only when a selected source has one: every held
+object is kept with its link text and mount id, and every held directory
+(the leader's `cwd` and `root`, each directory fd) is climbed once, right
+after the scan's settled reads (a process found gone meanwhile has ended;
+one that moved its `cwd` since is climbed from where it is now, its old
+`cwd` being in the scan's identities); the mount table and root link
+text of a process are read when it holds something through a mount
+outside diskgc's own table. One part is not implemented: a memory
+mapping is matched only by In use's identity rules, never path-tested
+(no `map_files` read), so a mapping of a file the project walk leaves out
+is not seen (a residual of the project contracts). So:
 
 - *The process set* of a contract is the processes with any of their four
   uids equal to the owner of the directory the contract judges (pytest
@@ -1872,6 +1881,24 @@ not implemented, and nothing implemented relies on them (TASK-112 step 5,
   (`in_use`). This makes a mapping whose `map_files` link cannot be read,
   and that In use's identity rules do not match, an availability cost
   with rootless containers whose files are mapped from the tree.
+
+  As implemented (TASK-79, `fs_kind::project::visible_use`): a held file
+  (an fd on a non-directory, an executable) on one of the tree's devices
+  that the walk's identities do not match is placed by its mount id in
+  diskgc's own `mountinfo`. Mount ids are unique across namespaces, so a
+  mount found there is one of diskgc's namespace and the link text is a
+  path in diskgc's view; one not found is translated through the
+  process's `/proc/<pid>/mountinfo` and root link text as above
+  (`fs_kind::project::translate`), and retains when it cannot be. A file on a mount
+  whose mount point lies under the tree is inside. A file through a
+  mount of another filesystem than the tree's (its `major:minor`) whose
+  device the tree holds (a directory of that filesystem bound under the
+  project, and also reachable elsewhere) cannot be placed by the tree's
+  path within its filesystem and retains (`in_use`; TASK-79 review,
+  Codex). Otherwise, on the tree's filesystem, text whose path within
+  the filesystem has the tree's as a prefix retains (`in_use`) without
+  resolving the suffix: both outcomes of that resolution (inside, or
+  unresolvable) retain, so it would only refine the report's detail.
 - *Strings* (environment values, command-line elements) are compared as
   bytes, after lexical normalisation as Python's `os.path.abspath` does
   (`.`, `..` and repeated `/` folded; a relative string is not made
@@ -2178,69 +2205,127 @@ own cleanup leaves in `P`; a known gap of the matching set.
 and `python-project`). An unchanged `node_modules` or `.venv` can belong
 to a project used today: a reader changes neither mtime nor ctime (TASK-79,
 container probe). The evidence therefore comes from the project, not from
-the dependency directory. Mark accepted this heuristic on 2026-10-23.
+the dependency directory alone. Mark accepted this heuristic on
+2026-10-23.
 
-*Which candidates.* A candidate with an ancestor below its source root
-that is itself a dependency directory (named `node_modules`, or holding
-`pyvenv.cfg`) is `filtered` and never deleted: a nested
+*Which candidates.* A candidate with an ancestor that is itself a
+dependency directory is `filtered` and never deleted: a nested
 `node_modules/a/node_modules` belongs to a package, and deleting it makes
 Node resolve the hoisted copy instead, possibly another version, a silent
-change rather than a failed run. The candidate's parent must hold the
-ecosystem's manifest as a regular file: `package.json` for `node-project`;
-for `python-project` one of `pyproject.toml`, `setup.py`, `setup.cfg`,
-`Pipfile` or a `requirements*.txt`, and the candidate must hold
-`pyvenv.cfg`. Without one the candidate is `filtered`. These are checked
-with `statx`.
+change rather than a failed run. An ancestor named `node_modules` counts
+anywhere on the candidate's path (by its text, so a root supplied inside
+one does not make a package's dependencies a project's); one holding a
+regular `pyvenv.cfg` counts from the root of the candidate's mount down
+to the parent. For the same reason a `node_modules` candidate is
+`filtered` while any proper ancestor of its parent, up to the root of its
+mount, holds an entry named `node_modules` (a workspace root's, a
+home-level install's): Node would resolve that one once this one is gone
+(TASK-79 review, mped). Its outer one goes first; it is judged again on a
+later run (or later in the same reclaim). The candidate's parent must
+hold the ecosystem's manifest as a regular file: `package.json` for
+`node-project`; for `python-project` one of `pyproject.toml`, `setup.py`,
+`setup.cfg`, `Pipfile` or a `requirements*.txt` (a listing of the parent,
+at most 65,536 names, only when no fixed name is there), and the
+candidate must hold a regular `pyvenv.cfg`. Without one the candidate is
+`filtered`. These are checked with `statx`, by a descent from the root of
+the source root's mount to the parent that follows no symlink and crosses
+no mount, whose source root and parent must be the ones resolved and
+judged (`changed` otherwise). The check is the source's own, before the
+eligibility walk (beside `app_not_running`): a non-instance is never its
+source's to delete, while in a union it vetoes nothing (Liveness contract
+predicate).
 
 *The project* is the nearest directory, from the candidate's parent up to
-the source root, that is a workspace root (for `node-project`: a
+the root of its mount, that is a workspace root (for `node-project`: a
 `package.json` with a `workspaces` field, or a `pnpm-workspace.yaml`) or a
 version-control top level (holding `.git`, `.hg` or `.svn`); when there is
-none, the parent. The only file content diskgc reads for these contracts
-is such a `package.json`, with `O_NOATIME`, at most 1 MiB (a larger or
-unparsable one is `producer_unknown`). A workspace member's dependencies
-are then judged by the whole workspace, whose activity can drive them.
-The climb fails closed at a bind mount: when it reaches the root of a
-mount whose `mountinfo` root field is not `/` (a subdirectory bound
-elsewhere, which can hide the real workspace root above it), the answer
-is `producer_unknown`.
+none, the parent. Only the directories up to the nearest are read. The
+only file contents diskgc reads for these contracts are such a
+`package.json`, at most 1 MiB (a larger or unparsable one is
+`producer_unknown`), and `.pth` files in a virtual environment (rule 2),
+each with `O_NOATIME`. A workspace member's dependencies are then judged
+by the whole workspace, whose activity can drive them. When the nearest
+project lies above the source root, the answer is `producer_unknown`:
+the project extends beyond what the operator let diskgc walk (so a
+dotfiles repository at `~/.git` makes every project below `~` that has no
+marker of its own `producer_unknown` under a root below `~`, and, under
+a root of `~` itself, makes the project all of `~`, which is
+`too_many_entries` or kept by its activity). The climb fails closed at a
+bind mount: when it reaches the root of a mount whose `mountinfo` root
+field is not `/` (a subdirectory bound elsewhere, which can hide the
+real workspace root above it) without finding a project, the answer is
+`producer_unknown`.
+
+*The project walk* is fd-relative, sorted, follows no symlink, crosses no
+mount (a mount under the project adds its device and is not entered) and
+is bounded by the entry budget (`too_many_entries`; a tree that cannot be
+read is `unreadable`). It leaves out VCS metadata (`.git`, `.hg`, `.svn`:
+a fetch is not project use) and walks every directory of the project
+named like the candidate, the candidate included, as a *dependency
+directory*: its reads are counted apart (rule 2), and its symlinks are
+read for links out of it.
 
 The candidate is reclaimable when, for the term's idle bound `T` (the
 source's `min_idle_for` combined with the tier's `idle_for` filters, the
 longest):
 
-1. *No change.* The newest mtime or ctime in the project tree is older
-   than `T`. Both count: package managers extract files with old,
-   normalised mtimes, so after an install only the ctime is fresh. The
-   tree is the candidate (its eligibility walk already measures it) and
-   the project walked like a candidate (fd-relative, no symlink followed,
-   no mount crossed, sorted, bounded by the same entry budget), leaving
-   out VCS metadata (`.git`, `.hg`, `.svn`: a fetch is not project use)
-   and, for cost, other directories named like the candidate. A project
-   tree over the budget is `too_many_entries`; one that cannot be read is
-   `unreadable`. Failure: `not_idle`, detail naming the newest path.
-2. *No read.* The newest atime of a regular file in the same trees is
-   older than `T`. Under the default `relatime` the kernel updates a read
-   file's atime when the old atime is at or before its mtime or ctime, or
-   more than a day old, so a project whose code or dependencies were read
-   in the last `T` keeps its dependencies even without a change.
-   Directory atimes do not count: any lister (`git status`, an indexer,
-   `rg`) refreshes them. Under `noatime` this rule says nothing. A process
-   that reads every file's content (a backup) makes every project look
-   used: dependencies are then kept, the cost side. Invariant: diskgc
-   itself never refreshes a file's atime here; it reads content only with
-   `O_NOATIME` (the files are the user's, so the flag is permitted) and
-   otherwise only lists and `statx`es. Failure: `not_idle`.
+1. *No change.* The newest change in the project, its dependency
+   directories included, is older than `T`: a non-directory's mtime or
+   ctime (both count: package managers extract files with old, normalised
+   mtimes, so after an install only the ctime is fresh), and a
+   directory's birth time (its mtime where the filesystem reports no
+   birth time). A directory's mtime and ctime do not count: removing an
+   entry moves them, so diskgc's own deletion of one dependency directory
+   would otherwise keep every other one of the project for `T` (TASK-79
+   review, mped). Failure: `not_idle`, detail naming the newest path.
+2. *No read* (narrowed scope PENDING Mark's confirmation; the
+   orchestrator's implementation of mped's recommendation, TASK-79
+   review). The newest atime of a regular file in the project's
+   dependency directories of the candidate's name (every `node_modules`,
+   or every `.venv`, the candidate included: a workspace's root and
+   members share this evidence) is older than `T`. Under the default
+   `relatime` the kernel updates a read file's atime when the old atime is
+   at or before its mtime or ctime, or more than a day old, so a project
+   whose dependencies were read in the last `T` keeps them even without a
+   change. Reads elsewhere in the project do not count: tree walkers
+   honouring ignore files, indexers and agents read `.gitignore`s and
+   `README`s daily, which kept every project for good under the
+   project-wide rule. Except when a dependency directory links out of
+   itself, so that its packages are read where they really are: a symlink
+   whose target lies outside it (`npm link`, `yarn link`, a `file:`
+   dependency; pnpm's links into `node_modules/.pnpm` stay inside, and a
+   virtual environment's `bin/python*` links to its interpreter are not
+   packages), or in a virtual environment an editable install
+   (`__editable__*`, `*.egg-link`, or a `.pth` line, other than an
+   `import` line, naming a directory outside it). Then every regular file
+   of the project counts, as before the narrowing. Directory atimes never
+   count: any lister (`git status`, an indexer, `rg`) refreshes them.
+   Under `noatime` (the project mount's per-mount option in `mountinfo`)
+   this rule says nothing. Invariant: diskgc itself never refreshes a
+   file's atime here; it reads content only with `O_NOATIME` (the files
+   are the user's, so the flag is permitted) and otherwise only lists and
+   `statx`es. Failure: `not_idle`.
 3. *No visible use.* None of the user's processes (A process's paths,
    with the project directory's owner) uses the project: the union of In
    use's device-and-inode match on every inode the walks saw, and the
    path tests of A process's paths for its `cwd`, `root`, directory fds,
-   file fds and mappings, and the string test for its environment values.
-   The path tests cover what the walk leaves out, VCS metadata and other
-   dependency directories. An unresolvable entry retains (`in_use`); a
-   process that stays unreadable makes the answer `producer_unknown`,
-   evidence `unreadable`. From the same scan as the in-use check.
-   Failure: `in_use`.
+   file fds and mappings, and the string test for its environment values
+   and its command-line elements (an element, or the value of a
+   `--flag=VALUE` element, normalised as Strings are; a relative one
+   placed against the process's working-directory link texts): a
+   consumer launched from outside the project as `node ~/p/server.js` or
+   `p/.venv/bin/python p/server.py`, its modules cached, holds nothing in
+   the project but names it (TASK-79 review, Codex and mped). The path
+   tests cover what the walk leaves out, VCS metadata. An unresolvable
+   entry retains (`in_use`); a process that stays unreadable makes the
+   answer `producer_unknown`, evidence `unreadable`. From the same scan as
+   the in-use check. Failure: `in_use`. As implemented (TASK-79): every
+   process the in-use scan read counts (the walk's owners' and, under
+   `--allow-root`, root's: a superset of the owner's, which only retains
+   more); a process that stays unreadable is already the in-use check's
+   (`in_use_unknown`), which runs first; a held directory on one of the
+   tree's devices whose climb failed retains (`in_use`), and so does a
+   process whose command line cannot be read (evidence `unreadable`).
 
 The checkout guard keeps its default, `checkouts: refuse`: an editable
 install can put a real checkout under `.venv/src`. A symlinked
@@ -2269,24 +2354,32 @@ is a `.diskgc-keep` file in the dependency directory or a `protect` entry.
 resolve different versions where no lockfile pins them; Mark accepted
 this class of loss on 2026-10-23):
 
-- a project used without any change, without an atime update (`noatime`)
+- a project used without any change, without an atime update in its
+  dependency directories (`noatime`, or a use that needed no dependency)
   and without a process visible at the check: a tool installed in a
   project directory and run from a timer, a project about to be resumed
   after the floor;
+- a long-running consumer, its modules cached, that names nothing in the
+  project in its command line, environment or held objects: started
+  through a path outside it (a symlink such as `~/bin/tool` to
+  `p/.venv/bin/tool`, an interpreter given the script on standard input,
+  a module imported through a linked path) or in another mount
+  namespace's paths (strings are compared as bytes). Its next lazy import
+  or resource read fails. A cooperative lock (below) is the only sound
+  remedy (Codex, TASK-79 review);
+- under the narrowed rule 2 (pending Mark): a project whose own code was
+  read in the last `T` while none of its dependency directories was;
 - the `relatime` boundary: the last read can be up to a day older than
   the newest atime shows; with a 30-day floor this moves the boundary by
   at most a day;
 - hand-edited dependency files, under the dated exception above;
-- use through a path outside the project (a symlink into
-  `node_modules`, `NODE_PATH`, a `.venv` activated from elsewhere) by a
-  process not running at the check, and an environment value naming the
-  project in another mount namespace's paths (strings are compared as
-  bytes);
-- a change only inside another dependency directory of the same name or
-  only in VCS metadata;
+- a project whose only change in `T` was removing entries (a directory's
+  mtime and ctime do not count, rule 1), or a change only in VCS
+  metadata;
 - a workspace that is neither declared (`workspaces`,
   `pnpm-workspace.yaml`) nor a version-control top level: its members are
-  judged by their own directories only.
+  judged by their own directories only (an outer `node_modules` still
+  keeps them, above).
 
 *Stronger alternative (not designed further).* A cooperative protocol:
 every consumer holds a shared project lock while it uses dependencies;
@@ -2304,7 +2397,14 @@ schema only with its first producer.
   deletion or a command action, under the candidate lock. In a union,
   every admitted source that found the candidate and whose contract
   recognises it must permit it
-  ([reference.md](reference.md#liveness-contract-predicate)).
+  ([reference.md](reference.md#liveness-contract-predicate)). The
+  project contracts have three parts: the instance check before the
+  eligibility walk (above); the project walk with rules 1 and 2 after the
+  candidate's walk and before the scan, in the plan and in the reclaim
+  before its freshness loop, so a large project never runs into a
+  deletion's one-second freshness window (a change between that walk and
+  the deletion is not seen, as for the candidate's own walk); and rule 3
+  from the in-use check's scan, immediately before the deletion.
 - *PID namespaces* are handled by the precondition and the any-level
   `NSpid` lookup. Neither the name nor the marker says which namespace the
   pid belongs to; the lookup does not need to know.
@@ -2341,12 +2441,16 @@ schema only with its first producer.
   it within the plan alone, which the check before deletion repeats, is a
   possible optimisation, not done), one lookup of `S`'s `.lock`
   and one safe resolution of `R`; byte comparison for every other string.
-  For the project contracts: one climb per directory a process holds,
-  once per scan; one `statx` per held file, and, only for files on one of
-  the tree's devices, a lexical translation (one read of
-  `/proc/<pid>/mountinfo` per (mount namespace, root device and inode)
-  and scan) and a suffix resolution beneath the tree; and a walk of each
-  project, bounded by the entry budget.
+  For the project contracts: one climb per directory a process holds and
+  one `cmdline` read per process, once per scan; the held objects' link
+  texts kept from the scan's own reads (no extra `statx`); a process's
+  `mountinfo` when it holds something through a mount outside diskgc's
+  table; for files on one of the tree's devices that the walk did not
+  see, a lookup in diskgc's `mountinfo`, read once per check; a descent
+  from the mount root to the candidate's parent (a few `statx` per
+  level); and a walk of each project with all its dependency directories
+  (the candidate walked again), bounded by the entry budget, repeated for
+  every candidate (not shared between candidates of one project).
 
 **Limits, stated plainly.**
 

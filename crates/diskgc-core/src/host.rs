@@ -365,9 +365,11 @@ pub struct Stat {
     pub btime: Option<Timestamp>,
     /// Last access. Updated by reads (and `execve`) as the mount's atime
     /// policy allows: `relatime` (the default) at most once a day or when
-    /// older than mtime, `noatime` never. Only the toolchain guard's
-    /// recent-use floor reads it (docs/safety.md, Toolchain pins); the idle
-    /// measure never does.
+    /// older than mtime, `noatime` never ([`MountEntry::noatime`]). Read by
+    /// the toolchain guard's recent-use floor (docs/safety.md, Toolchain
+    /// pins) and the project contracts' rule 2 (Project dependency
+    /// directories); the `fs` idle measure never reads it, and `statx`
+    /// itself never changes it.
     pub atime: Option<Timestamp>,
     /// `stx_mnt_id`: the id mountinfo uses for the mount (Linux 5.8+).
     pub mnt_id: Option<u64>,
@@ -535,6 +537,10 @@ pub struct MountEntry {
     pub source: String,
     /// `ro` among the per-mount or superblock options.
     pub read_only: bool,
+    /// `noatime` among the per-mount options: the kernel records no read
+    /// times through this mount, so an atime there says nothing about
+    /// reads (docs/safety.md, Project dependency directories, rule 2).
+    pub noatime: bool,
     /// `idmapped` among the per-mount options (Linux 5.12 on; the kernel's
     /// `show_vfsmnt_opts`): an idmapped mount shows its filesystem's owners
     /// through an id mapping, so the owner `statx` reports through it need
@@ -724,6 +730,28 @@ impl ProcLink {
 pub struct LinkTarget {
     pub text: OsString,
     pub stat: Stat,
+}
+
+/// A directory a process holds, where a climb starts ([`Host::proc_climb`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HeldDir {
+    /// Its working directory (the thread-group leader's).
+    Cwd,
+    /// Its root directory (the leader's).
+    Root,
+    /// An open file descriptor on a directory.
+    Fd(u32),
+}
+
+impl HeldDir {
+    /// The magic link's name below `/proc/<pid>/`.
+    pub fn link(self) -> String {
+        match self {
+            Self::Cwd => "cwd".to_owned(),
+            Self::Root => "root".to_owned(),
+            Self::Fd(fd) => format!("fd/{fd}"),
+        }
+    }
 }
 
 /// One open file descriptor of a process.
@@ -1247,8 +1275,13 @@ pub trait Host {
     /// [`Host::statx`]`(Base::Dir(file), "")`, never a name looked up again;
     /// anything but a regular file is refused (`Cause::Invalid`) by the
     /// fd's own type, before anything is opened (a FIFO or a device is
-    /// never opened). For small
-    /// marker files (a `CACHEDIR.TAG`'s signature), never user data.
+    /// never opened). It never moves the file's read time: `LinuxHost`
+    /// opens with `O_NOATIME`, falling back to a plain open only where
+    /// Linux refuses that flag (`EPERM`: a file diskgc neither owns nor may
+    /// override), which can only make a project look read (docs/safety.md,
+    /// Project dependency directories, rule 2). For small files diskgc
+    /// judges (a `CACHEDIR.TAG`'s signature, a pid marker, a workspace
+    /// `package.json`, a `.pth`), never other user data.
     fn read_head(&self, file: &Self::Fd, limit: usize) -> Result<Vec<u8>, HostError>;
 
     /// The regular file open as `file` (typically an `O_PATH` fd whose
@@ -1523,6 +1556,25 @@ pub trait Host {
         path: &Path,
         climb: bool,
     ) -> Result<Vec<DevIno>, ProcError>;
+
+    /// The climb of a directory the process holds (docs/safety.md, A
+    /// process's paths: Directories a process holds): the directory is
+    /// opened through its magic link (`/proc/<pid>/cwd`, `root` or
+    /// `fd/<n>`, `O_PATH | O_DIRECTORY`), which reaches the object whatever
+    /// its text says, and climbed with `..` by fd (in diskgc's view) up to
+    /// the fixpoint where `..` returns the same object, at most
+    /// [`CLIMB_LEVELS_MAX`] levels (more is an error). The answer is the
+    /// (device, inode) of the held directory, then of each ancestor.
+    /// `Gone`: the process ended (the kernel's word); any other error: the
+    /// climb is unknown. The project contracts' in-use evidence; read only
+    /// when a selected source has one ([`crate::inuse::Options`]).
+    fn proc_climb(&self, pid: Pid, from: HeldDir) -> Result<Vec<DevIno>, ProcError>;
+
+    /// The process's mount table (`/proc/<pid>/mountinfo`: mount points
+    /// relative to its root, unescaped), to translate the link text of a
+    /// file it holds through a mount outside diskgc's own table (docs/
+    /// safety.md, A process's paths). `Gone`: the process ended.
+    fn proc_mountinfo(&self, pid: Pid) -> Result<Vec<MountEntry>, ProcError>;
 
     // ---- diskgc's own state (docs/architecture.md, The Host port) ----
 

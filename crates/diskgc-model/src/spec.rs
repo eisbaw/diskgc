@@ -318,6 +318,11 @@ pub struct MountSpec {
     pub parent: Option<u64>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
+    /// Mounted `noatime`: mountinfo shows `noatime` among its per-mount
+    /// options, so atimes there say nothing about reads. The model never
+    /// moves an atime either way.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub noatime: bool,
     /// The filesystem's server never answers (a dead FUSE daemon or NFS
     /// server): `mountinfo` still lists the mount, but a call that reaches
     /// it (`openat2` to or below it, `statx`, `getdents`, a read, `statfs`,
@@ -357,6 +362,7 @@ pub enum StatxField {
     Mtime,
     Ctime,
     Btime,
+    Atime,
     MntId,
     MountRoot,
     /// `stx_subvol` (`STATX_SUBVOL`, Linux 6.10 on): reported on `btrfs`
@@ -393,11 +399,23 @@ pub struct FileSpec {
     /// File size; allocated space is the size rounded up to 4 KiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<Bytes>,
-    /// Modification time (also ctime and birth time); default `clock`.
+    /// Modification time (also ctime, btime and atime unless those are
+    /// given); default `clock`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtime: Option<WallTime>,
-    /// Last access time; default the modification time. A read of the
-    /// file (`read_head`) or link (`readlink`) sets it to the clock.
+    /// Change time when it differs from `mtime` (a package manager
+    /// extracting files with old, normalised mtimes leaves fresh ctimes);
+    /// default `mtime`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctime: Option<WallTime>,
+    /// Birth time when it differs from `mtime` (a directory made long ago
+    /// whose entries were removed since); default `mtime`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub btime: Option<WallTime>,
+    /// Last access time; default the modification time. A `readlink` of
+    /// a link sets it to the clock; a `read_head` of a file does only
+    /// where Linux refuses diskgc's `O_NOATIME` (a file of another owner
+    /// while diskgc is not root), as LinuxHost opens with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub atime: Option<WallTime>,
     /// Owner; default 1000.
@@ -442,9 +460,21 @@ pub struct DirSpec {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DirAttrs {
-    /// Modification time (also ctime and birth time); default `clock`.
+    /// Modification time (also ctime, btime and atime unless those are
+    /// given); default `clock`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtime: Option<WallTime>,
+    /// Change time when it differs from `mtime`; default `mtime`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctime: Option<WallTime>,
+    /// Birth time when it differs from `mtime` (a directory made long ago
+    /// whose entries were removed since); default `mtime`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub btime: Option<WallTime>,
+    /// Access time when it differs from `mtime` (a lister moves a
+    /// directory's); default `mtime`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atime: Option<WallTime>,
     /// Owner; default 1000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<u32>,
@@ -942,6 +972,8 @@ pub enum Op {
     ProcUids,
     ProcCmdline,
     ProcRootLookup,
+    ProcClimb,
+    ProcMountinfo,
     MayDelete,
     Unlinkat,
     Fchmod,
@@ -1001,6 +1033,8 @@ impl Op {
             Self::ProcUids => "proc_uids",
             Self::ProcCmdline => "proc_cmdline",
             Self::ProcRootLookup => "proc_root_lookup",
+            Self::ProcClimb => "proc_climb",
+            Self::ProcMountinfo => "proc_mountinfo",
             Self::MayDelete => "may_delete",
             Self::Unlinkat => "unlinkat",
             Self::Fchmod => "fchmod",
