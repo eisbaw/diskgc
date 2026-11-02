@@ -45,7 +45,7 @@ pub use roots::RootsError;
 pub use spec::{
     ActionSpec, CheckoutsSpec, Cwd, DurationSpec, EntryType, ExamplesSpec, FindSpec, KindSpec,
     LivenessClass, LivenessContract, NewestGroup, ProfileSpec, Release, RootsSpec, SourceAnchor,
-    WhereSpec, parse_profiles,
+    ToolchainManager, WhereSpec, parse_profiles,
 };
 
 /// The built-in profile library, embedded in the binary.
@@ -206,6 +206,8 @@ pub struct Where {
     pub protect_parent_link: Option<String>,
     /// Cursor's installed-extension registry, relative to the bound root.
     pub protect_cursor_extensions: Option<String>,
+    /// Keep the toolchains this manager could select (TASK-94).
+    pub protect_toolchains: Option<ToolchainManager>,
 }
 
 impl Where {
@@ -233,6 +235,10 @@ impl Where {
             (
                 PredicateName::ProtectCursorExtensions,
                 self.protect_cursor_extensions.is_some(),
+            ),
+            (
+                PredicateName::ProtectToolchains,
+                self.protect_toolchains.is_some(),
             ),
         ];
         used.into_iter()

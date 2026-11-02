@@ -756,6 +756,10 @@ pub enum Reason {
     LinkedCurrent,
     /// Listed as installed in Cursor's extension registry, or the registry cannot be trusted.
     InstalledExtension,
+    /// A toolchain its manager could select: the default, an override or a
+    /// pin file names it, or the pin state cannot be read completely
+    /// (docs/safety.md, Toolchain pins).
+    PinnedToolchain,
     /// The candidate overlaps a configured protected source match.
     Protected,
     /// A recognised instance of a source's liveness contract whose
@@ -779,7 +783,7 @@ pub enum Reason {
 impl Reason {
     /// Every reason (keep it next to [`Reason::as_str`], whose match is
     /// exhaustive: a new reason is added to both).
-    pub const ALL: [Reason; 31] = [
+    pub const ALL: [Reason; 32] = [
         Reason::Missing,
         Reason::NotOwner,
         Reason::Unreadable,
@@ -806,6 +810,7 @@ impl Reason {
         Reason::NewestVersion,
         Reason::LinkedCurrent,
         Reason::InstalledExtension,
+        Reason::PinnedToolchain,
         Reason::Protected,
         Reason::ProducerUnknown,
         Reason::RemoteBackend,
@@ -842,6 +847,7 @@ impl Reason {
             Self::NewestVersion => "newest_version",
             Self::LinkedCurrent => "linked_current",
             Self::InstalledExtension => "installed_extension",
+            Self::PinnedToolchain => "pinned_toolchain",
             Self::Protected => "protected",
             Self::ProducerUnknown => "producer_unknown",
             Self::RemoteBackend => "remote_backend",

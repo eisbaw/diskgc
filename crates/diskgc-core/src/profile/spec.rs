@@ -158,6 +158,27 @@ pub struct WhereSpec {
     pub protect_parent_link: Option<String>,
     #[serde(default, deserialize_with = "present_non_null_string")]
     pub protect_cursor_extensions: Option<String>,
+    /// Keep every toolchain this manager could select (docs/safety.md,
+    /// Toolchain pins). A written null must not remove the guard.
+    #[serde(default, deserialize_with = "present_non_null_toolchain_manager")]
+    pub protect_toolchains: Option<ToolchainManager>,
+}
+
+/// The toolchain manager whose pins `protect_toolchains` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolchainManager {
+    Rustup,
+    Elan,
+}
+
+impl ToolchainManager {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rustup => "rustup",
+            Self::Elan => "elan",
+        }
+    }
 }
 
 /// How `keep_newest` partitions names in one candidate parent.
@@ -408,6 +429,12 @@ fn present_non_null_liveness_contract<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<LivenessContract>, D::Error> {
     LivenessContract::deserialize(deserializer).map(Some)
+}
+
+fn present_non_null_toolchain_manager<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ToolchainManager>, D::Error> {
+    ToolchainManager::deserialize(deserializer).map(Some)
 }
 
 fn present_non_null_source_anchor<'de, D: Deserializer<'de>>(

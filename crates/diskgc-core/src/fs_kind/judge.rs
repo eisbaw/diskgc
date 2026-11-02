@@ -297,6 +297,9 @@ impl Judge<'_> {
                 deadline
             ));
         }
+        if let Some(manager) = self.find.protect_toolchains {
+            judged!(super::toolchain::protect(host, found, manager, deadline));
+        }
         if let Some(count) = self.find.keep_newest {
             judged!(keep_newest(host, parent, found, self.find, count, deadline));
         }
@@ -1162,7 +1165,7 @@ fn protect_cursor_extension<H: Host>(
 /// directory contains no launchers; a partial listing, an unsafe path or an
 /// unreadable entry retains the candidate: an unseen symlink might point
 /// into it. This is repeated during reclaim under its lock.
-fn protect_link_directory<H: Host>(
+pub(super) fn protect_link_directory<H: Host>(
     host: &H,
     found: &Found,
     path: &Path,

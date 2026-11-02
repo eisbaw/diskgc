@@ -46,5 +46,7 @@
   where: {protect_parent_link: current}
 - name: retention-installed
   where: {protect_cursor_extensions: extensions.json}
+- name: retention-toolchains
+  where: {protect_toolchains: rustup}
 - name: retention-mixed
   where: {has: CACHEDIR.TAG, keep_newest: 1}

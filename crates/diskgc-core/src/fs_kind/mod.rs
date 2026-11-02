@@ -37,6 +37,7 @@ mod pattern;
 mod plan;
 mod reclaim;
 mod source_anchor;
+mod toolchain;
 
 #[cfg(test)]
 mod tests;
@@ -95,6 +96,8 @@ pub struct Find {
     pub protect_link_dirs: Vec<String>,
     pub protect_parent_link: Option<String>,
     pub protect_cursor_extensions: Option<String>,
+    /// Keep every toolchain this manager could select ([`toolchain`]).
+    pub protect_toolchains: Option<crate::profile::ToolchainManager>,
 }
 
 /// One filesystem entry predicate in a selection term. `has` means a
@@ -127,6 +130,7 @@ impl Find {
             || !self.protect_link_dirs.is_empty()
             || self.protect_parent_link.is_some()
             || self.protect_cursor_extensions.is_some()
+            || self.protect_toolchains.is_some()
     }
 
     /// Conjoin a positive version filter. More retention wins when two
@@ -177,6 +181,12 @@ impl Find {
                 return Err("protect_cursor_extensions filters name different manifests".to_owned());
             }
             self.protect_cursor_extensions = Some(manifest.clone());
+        }
+        if let Some(manager) = where_.protect_toolchains {
+            if self.protect_toolchains.is_some_and(|old| old != manager) {
+                return Err("protect_toolchains filters name different managers".to_owned());
+            }
+            self.protect_toolchains = Some(manager);
         }
         Ok(())
     }
@@ -237,6 +247,7 @@ impl Find {
             protect_link_dirs: where_.protect_link_dirs.clone(),
             protect_parent_link: where_.protect_parent_link.clone(),
             protect_cursor_extensions: where_.protect_cursor_extensions.clone(),
+            protect_toolchains: where_.protect_toolchains,
         }
     }
 }

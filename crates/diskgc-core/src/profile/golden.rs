@@ -1567,3 +1567,100 @@ fn no_builtin_candidate_contains_a_contract_builtins_candidate() {
         }
     }
 }
+
+// ---- TASK-94: toolchain sources (pending Mark's admission)
+
+/// The toolchain sources' frozen definitions and match sets: one level
+/// below `.rustup/toolchains` or `.elan/toolchains` of the supplied root,
+/// directories only, the toolchain guard, a one-hour floor, a plain delete,
+/// checkouts refused and no release catalog.
+#[test]
+fn toolchain_sources_have_frozen_match_sets_and_guards() {
+    use super::ToolchainManager;
+    let library = Library::builtin().expect("built-ins");
+    let root = Path::new("/home/mark");
+    for (name, manager, dir, matched) in [
+        (
+            "rustup-toolchains",
+            ToolchainManager::Rustup,
+            ".rustup",
+            [
+                "toolchains/stable-x86_64-unknown-linux-gnu",
+                "toolchains/nightly-2025-11-21-x86_64-unknown-linux-gnu",
+                "toolchains/1.90.0-x86_64-unknown-linux-gnu",
+            ],
+        ),
+        (
+            "elan-toolchains",
+            ToolchainManager::Elan,
+            ".elan",
+            [
+                "toolchains/leanprover--lean4---v4.16.0",
+                "toolchains/leanprover--lean4---v4.30.0-rc1",
+                "toolchains/leanprover--lean4-nightly---nightly-2025-01-01",
+            ],
+        ),
+    ] {
+        let profile = library.get(name).expect("toolchain source");
+        assert!(profile.releases.is_empty(), "{name} is in no catalog");
+        let Body::Source(source) = &profile.body else {
+            panic!("{name} is a source")
+        };
+        assert_eq!(source.roots, Roots::Required);
+        assert_eq!(source.where_.protect_toolchains, Some(manager));
+        assert_eq!(
+            source.where_.predicates(),
+            [crate::kind::PredicateName::ProtectToolchains]
+        );
+        assert_eq!(
+            source.min_idle_for,
+            Some(IdleFor(Duration::from_secs(3600)))
+        );
+        assert_eq!(source.checkouts, Checkouts::Refuse);
+        assert_eq!(
+            source.liveness_class,
+            Some(LivenessClass::VerifiedHeuristic)
+        );
+        assert_eq!(
+            source.action,
+            Action::Delete {
+                make_writable: false
+            }
+        );
+        let Finds::Paths {
+            patterns,
+            exclude,
+            entry_type,
+        } = &source.finds
+        else {
+            panic!("{name} finds paths")
+        };
+        assert_eq!(patterns, &[format!("{dir}/toolchains/*")]);
+        assert!(exclude.is_empty());
+        assert_eq!(*entry_type, EntryType::Dir);
+        let find = Find::of(source, 1000).expect("filesystem source");
+        let home = root.join(dir);
+        for relative in matched {
+            assert!(
+                path_matches(Some(&[root]), &find.patterns, &home.join(relative)),
+                "{name}: {relative}"
+            );
+        }
+        for relative in [
+            "toolchains",
+            "settings.toml",
+            "update-hashes/stable-x86_64-unknown-linux-gnu",
+            "downloads/0a1b2c",
+            "tmp/0a1b2c",
+            "known-projects",
+            "toolchains/stable-x86_64-unknown-linux-gnu/bin",
+        ] {
+            assert!(
+                !path_matches(Some(&[root]), &find.patterns, &home.join(relative)),
+                "{name}: {relative}"
+            );
+        }
+        let nested = root.join("src").join(dir).join(matched[0]);
+        assert!(!path_matches(Some(&[root]), &find.patterns, &nested));
+    }
+}

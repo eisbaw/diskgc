@@ -165,6 +165,7 @@ fn version_guards_cannot_be_silently_disabled_by_present_null() {
             "protect_cursor_extensions",
             ".cursor/extensions/extensions.json",
         ),
+        ("protect_toolchains", "rustup"),
     ] {
         let source = |value: &str| {
             format!(
@@ -248,6 +249,8 @@ fn the_built_in_library_loads() {
         "pip-cache",
         "python-pycache",
         "mypy-cache",
+        "rustup-toolchains",
+        "elan-toolchains",
         "pnpm-store",
         "uv-cache",
         "yarn-cache",

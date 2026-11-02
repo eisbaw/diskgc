@@ -1,0 +1,48 @@
+# TASK-94 residual of rustup-toolchains (verified heuristic, pending
+# Mark's admission): pins diskgc does not read do not keep a toolchain.
+# Here a rust-toolchain.toml outside the bound root, one deeper than five
+# levels below it, and a shell's RUSTUP_TOOLCHAIN (a name, not a path:
+# the in-use check's environment rule matches paths only). The next
+# rustup command in those places installs the toolchain again (rustup's
+# default auto-install; it needs the network).
+profile_vector: 1
+select: profile:rustup-toolchains
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/.rustup/settings.toml: {content: "version = \"12\"\nprofile = \"default\"\n"}
+    /home/tester/.rustup/toolchains:
+      1.87.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      1.88.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      1.89.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/a/b/c/d/e/rust-toolchain.toml: {content: "[toolchain]\nchannel = \"1.88.0\"\n"}
+    /srv/proj/rust-toolchain.toml: {content: "[toolchain]\nchannel = \"1.89.0\"\n"}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester, RUSTUP_TOOLCHAIN=1.87.0-x86_64-unknown-linux-gnu], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu}
+    - {candidate: /home/tester/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu}
+    - {candidate: /home/tester/.rustup/toolchains/1.89.0-x86_64-unknown-linux-gnu}
+  reclaim_exit: 1
+  actions:
+    - /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu
+    - /home/tester/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu
+    - /home/tester/.rustup/toolchains/1.89.0-x86_64-unknown-linux-gnu
+  removed:
+    - /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu
+    - /home/tester/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu
+    - /home/tester/.rustup/toolchains/1.89.0-x86_64-unknown-linux-gnu
+  skipped: []
+  preserved:
+    - /home/tester/a/b/c/d/e/rust-toolchain.toml
+    - /srv/proj/rust-toolchain.toml

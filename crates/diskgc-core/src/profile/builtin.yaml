@@ -516,6 +516,51 @@
   verified_with: Cursor 3.1.15 extension manifest and directory names, host survey 2026-10-20
   liveness_class: verified-heuristic
 
+# Rustup and elan toolchains (TASK-94; docs/safety.md, Toolchain pins).
+# A plain delete under diskgc's own keep rule, not the managers'
+# uninstall: neither keeps a default or a project pin, and neither is on
+# PATH on a Nix machine. A verified heuristic pending Mark's admission
+# (docs/reference.md, Liveness contracts), so in no release catalog.
+- name: rustup-toolchains
+  category: rust
+  description: >-
+    Rustup toolchains below a supplied home root that no default, override,
+    rust-toolchain file under the root or Kani link selects
+  find:
+    roots: required
+    paths: [.rustup/toolchains/*]
+    type: dir
+  where:
+    protect_toolchains: rustup
+  min_idle_for: 1h
+  action: delete
+  examples:
+    root: /home/mark
+    match: [/home/mark/.rustup/toolchains/1.90.0-x86_64-unknown-linux-gnu, /home/mark/.rustup/toolchains/nightly-2025-11-21-x86_64-unknown-linux-gnu, /home/mark/.rustup/toolchains/stable-x86_64-unknown-linux-gnu]
+    no_match: [/home/mark/.rustup/toolchains, /home/mark/.rustup/settings.toml, /home/mark/.rustup/update-hashes/1.90.0-x86_64-unknown-linux-gnu, /home/mark/.rustup/downloads/0a1b2c, /home/mark/.rustup/tmp/0a1b2c, /home/mark/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin, /home/mark/src/.rustup/toolchains/stable-x86_64-unknown-linux-gnu]
+  verified_with: rustup 1.29.1 source (toolchain names, settings.toml version 12, stray update hash) and host layout (1.90.0, nightly, dated nightly linked by Kani 0.67.0), 2026-11-02
+  liveness_class: verified-heuristic
+
+- name: elan-toolchains
+  category: lean
+  description: >-
+    Elan toolchains below a supplied home root that no default, override,
+    known project or lean-toolchain file under the root selects
+  find:
+    roots: required
+    paths: [.elan/toolchains/*]
+    type: dir
+  where:
+    protect_toolchains: elan
+  min_idle_for: 1h
+  action: delete
+  examples:
+    root: /home/mark
+    match: [/home/mark/.elan/toolchains/leanprover--lean4---v4.16.0, /home/mark/.elan/toolchains/leanprover--lean4-nightly---nightly-2025-01-01]
+    no_match: [/home/mark/.elan/toolchains, /home/mark/.elan/settings.toml, /home/mark/.elan/known-projects, /home/mark/.elan/tmp/0a1b2c, /home/mark/.elan/toolchains/leanprover--lean4---v4.16.0/bin, /home/mark/src/.elan/toolchains/leanprover--lean4---v4.16.0]
+  verified_with: elan 4.2.4 source (name encoding, channel resolution, known-projects, settings.toml version 12) and host layout (v4.16.0, v4.30.0-rc1, a linked toolchain), 2026-11-02
+  liveness_class: verified-heuristic
+
 - name: idle-1h
   category: filters
   description: not used or changed for an hour, as the source's kind measures it

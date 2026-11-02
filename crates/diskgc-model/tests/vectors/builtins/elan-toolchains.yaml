@@ -1,0 +1,97 @@
+# elan-toolchains (TASK-94) keeps every toolchain elan could select from
+# what diskgc can read: the default and the directory overrides of
+# settings.toml, the lean-toolchain of every project in known-projects
+# (here one outside the bound root; a vanished one pins nothing), and the
+# lean-toolchain files under the bound root, normalised as elan does (a
+# bare `4.17.0` is leanprover/lean4:v4.17.0). A toolchain a process runs
+# from is in use. A linked toolchain (a symlink) and elan's tmp sibling
+# are never candidates. A keep marker and a negated profile keep two more.
+profile_vector: 1
+user_profiles:
+  - name: pin
+    find: {roots: [/home/tester], paths: [.elan/toolchains/leanprover--lean4---v4.14.0], type: dir}
+    action: delete
+    examples: {match: [/home/tester/.elan/toolchains/leanprover--lean4---v4.14.0]}
+select: profile:elan-toolchains && !profile:pin
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/.elan/settings.toml:
+      content: |
+        default_toolchain = "leanprover/lean4:v4.20.0"
+        telemetry = false
+        version = "12"
+
+        [overrides]
+        "/home/tester/over" = "leanprover/lean4:v4.18.0"
+    /home/tester/.elan/known-projects: {content: "/srv/work/proj\n/srv/work/gone"}
+    /home/tester/.elan/tmp/staging: {size: 8K, mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.elan/toolchains:
+      leanprover--lean4---v4.13.0: {.: {mtime: 2026-09-01T00:00:00Z}, .diskgc-keep: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      leanprover--lean4---v4.14.0: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      lean4-patched: {symlink: /home/tester/src/lean4/build/release/stage1}
+      leanprover--lean4---v4.15.0: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      leanprover--lean4---v4.16.0: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      leanprover--lean4---v4.17.0: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      leanprover--lean4---v4.18.0: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      leanprover--lean4---v4.19.0: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      leanprover--lean4---v4.20.0: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      leanprover--lean4---v4.30.0-rc1: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      leanprover--lean4-nightly---nightly-2025-01-01: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/src/lean4/build/release/stage1/bin/lean: {size: 8K, mode: "0755"}
+    /home/tester/src/proof/lean-toolchain: {content: "leanprover/lean4:v4.30.0-rc1\n"}
+    /home/tester/src/bare/lean-toolchain: {content: "4.17.0\n"}
+    /srv/work/proj/lean-toolchain: {content: "leanprover/lean4:v4.19.0\n"}
+  processes:
+    - {pid: 901, exe: /home/tester/.elan/toolchains/leanprover--lean4---v4.15.0/bin/lean, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.13.0, reason: keep_marker}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.14.0, reason: excluded}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.15.0, reason: in_use}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.16.0}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.17.0, reason: pinned_toolchain}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.18.0, reason: pinned_toolchain}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.19.0, reason: pinned_toolchain}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.20.0, reason: pinned_toolchain}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.30.0-rc1, reason: pinned_toolchain}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4-nightly---nightly-2025-01-01}
+  reclaim_exit: 1
+  actions:
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.16.0
+    - /home/tester/.elan/toolchains/leanprover--lean4-nightly---nightly-2025-01-01
+  removed:
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.16.0
+    - /home/tester/.elan/toolchains/leanprover--lean4-nightly---nightly-2025-01-01
+  skipped:
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.13.0, reason: keep_marker}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.14.0, reason: excluded}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.15.0, reason: in_use, process_blockers: [{pid: 901, evidence: exe}]}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.17.0, reason: pinned_toolchain}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.18.0, reason: pinned_toolchain}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.19.0, reason: pinned_toolchain}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.20.0, reason: pinned_toolchain}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.30.0-rc1, reason: pinned_toolchain}
+  preserved:
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.13.0/bin/lean
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.14.0/bin/lean
+    - /home/tester/.elan/toolchains/lean4-patched
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.15.0/bin/lean
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.17.0/bin/lean
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.18.0/bin/lean
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.19.0/bin/lean
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.20.0/bin/lean
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.30.0-rc1/bin/lean
+    - /home/tester/.elan/tmp/staging
+    - /home/tester/.elan/settings.toml
+    - /home/tester/.elan/known-projects
+    - /home/tester/src/lean4/build/release/stage1/bin/lean

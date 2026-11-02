@@ -1,0 +1,41 @@
+# elan-toolchains (TASK-94): a channel pin (`stable`, `beta`, `nightly`,
+# `lean-toolchain`) resolves through the network to a release diskgc
+# cannot know, so it keeps every installed toolchain of its origin. A bare
+# `stable` is leanprover/lean4's; nightlies have their own origin
+# (leanprover/lean4-nightly), which this pin does not keep.
+profile_vector: 1
+select: profile:elan-toolchains
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/.elan/settings.toml: {content: "version = \"12\"\n"}
+    /home/tester/.elan/toolchains:
+      leanprover--lean4---v4.16.0: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      leanprover--lean4---v4.30.0-rc1: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      leanprover--lean4-nightly---nightly-2025-01-01: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/src/proof/lean-toolchain: {content: "stable\n"}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.16.0, reason: pinned_toolchain}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.30.0-rc1, reason: pinned_toolchain}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4-nightly---nightly-2025-01-01}
+  reclaim_exit: 1
+  actions: [/home/tester/.elan/toolchains/leanprover--lean4-nightly---nightly-2025-01-01]
+  removed: [/home/tester/.elan/toolchains/leanprover--lean4-nightly---nightly-2025-01-01]
+  skipped:
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.16.0, reason: pinned_toolchain}
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.30.0-rc1, reason: pinned_toolchain}
+  preserved:
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.16.0/bin/lean
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.30.0-rc1/bin/lean

@@ -1,0 +1,35 @@
+# rustup-toolchains (TASK-94) fails closed: when the pin state cannot be
+# read completely, every toolchain is kept (pinned_toolchain, the detail
+# names the cause). Here a rust-toolchain.toml under the bound root is
+# not TOML; rustup itself would refuse it, but diskgc cannot tell which
+# toolchain its author meant.
+profile_vector: 1
+select: profile:rustup-toolchains
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/.rustup/settings.toml: {content: "version = \"12\"\n"}
+    /home/tester/.rustup/toolchains:
+      1.87.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/src/app/rust-toolchain.toml: {content: "[toolchain\nchannel = 1.87.0\n"}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+  preserved:
+    - /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu/bin/rustc

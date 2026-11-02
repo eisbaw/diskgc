@@ -2472,6 +2472,119 @@ GNU Autoconf 2.73 and only builds with a generated `Makefile` and a source
 external dependencies, local build-only edits or generated deliverables
 are recoverable.
 
+### Toolchain pins
+
+`rustup-toolchains` and `elan-toolchains` (TASK-94; a verified heuristic
+pending Mark's admission, development library only) delete whole toolchain
+directories (`.rustup/toolchains/*`, `.elan/toolchains/*` below a supplied
+home root) with diskgc's own `delete`, under the `protect_toolchains`
+retention guard ([reference.md](reference.md#predicates-where)). They are
+not command actions, for three reasons:
+
+- Neither manager's cleaner keeps what a project or the default still
+  selects. In an offline, disposable `diskgc-e2e-base` container, Elan
+  4.2.1 saw a valid `lean-toolchain` in an unvisited `/tmp/project` naming
+  an installed `leanprover/lean4:v4.1.0`, yet `elan toolchain gc --json`
+  reported that toolchain in `unused_toolchains`; `gc --delete`
+  uninstalled it. In a second disposable container, Rustup 1.29.0 accepted
+  `toolchain uninstall custom` after `default custom`: it warned that it
+  was removing the default and then removed it. Both checks used fresh
+  manager homes under `/tmp`, no network, and a read-only `/nix/store`
+  bind. They demonstrate that a zero-exit manager cleaner does not prove
+  preservation of defaults or pins.
+- A command action passes the candidate path; both uninstall commands take
+  a manager name (elan stores `leanprover/lean4:v4.1.0` as
+  `leanprover--lean4---v4.1.0`), so it would need a name binding, and the
+  keep rule below would still be diskgc's.
+- Neither tool is on `PATH` on a Nix machine (the development host has
+  neither, inside or outside the project's dev shell), where a command
+  profile is always `missing`.
+
+What the uninstall does beyond the directory, a plain delete leaves:
+rustup 1.29.1 also removes `update-hashes/NAME`; left behind, rustup
+removes that stray hash with a warning on its next install of the name
+(source read). elan 4.2.4 keeps no per-toolchain state outside the
+directory. A linked toolchain (`rustup toolchain link`, `elan toolchain
+link`) is a symlink and never a candidate.
+
+**What keeps a toolchain.** The guard reads, at every judgement (the plan,
+the tally and again under the candidate's lock), never from the index:
+
+1. the candidate's place: it must lie directly in a directory named
+   `toolchains`, whose parent is the manager's home, and its name must be
+   UTF-8;
+2. the home's `settings.toml` (at most 1 MiB, version `"12"`, the only
+   version rustup 1.29 and elan 4.2 write): `default_toolchain` and every
+   `[overrides]` value;
+3. elan only: every project in the home's `known-projects` (absolute
+   directories, one per line, which elan records when it runs in a
+   project; elan's own gc reads the same list) by its `lean-toolchain`; a
+   project or file that is gone pins nothing;
+4. every pin file below the bound root at relative depths 1 through 5
+   (`rust-toolchain`, `rust-toolchain.toml`; `lean-toolchain`), found by
+   the discovery walk (no symlink followed, no mount crossed, network
+   mounts never opened), at most 64 KiB each;
+5. rustup only: every symlink directly in each directory below `.kani` of
+   the bound root (Kani links its pinned nightly as
+   `.kani/<version>/toolchain`), checked by the link guard
+   (`linked_current`).
+
+Each file is reached without a symlink or mount crossing, must be a
+regular file and must not change while read. What cannot be read
+completely keeps the candidate (`pinned_toolchain`, the detail naming the
+file and the cause): a missing or malformed `settings.toml`, another
+version, a pin file or known project that cannot be reached or read, or
+text diskgc cannot parse. A pin file without a channel (a
+`rust-toolchain.toml` that lists only components) pins nothing, as the
+default applies.
+
+**What a name selects.** The managers resolve a name partly from the
+network; diskgc compares what it can offline and keeps more where it
+cannot tell:
+
+- rustup: an official name (`stable`, `beta`, `nightly` or a version,
+  then an optional `YYYY-MM-DD`, then an optional, possibly partial,
+  target triple) selects every directory with the same channel and date;
+  the triple is ignored, so `stable-gnu` keeps `stable-x86_64-unknown-
+  linux-gnu`, and `nightly` keeps `nightly-<triple>` but not a dated
+  nightly; `1.90.0` and `1.90` are different channels. Any other name
+  compares whole. A `path` toolchain keeps a directory of its last name.
+- elan (4.2.4's `lookup_unresolved_toolchain_desc`): `origin:release` or a
+  bare release of `leanprover/lean4`; a release starting with `nightly`
+  belongs to the origin's `-nightly` repository; one starting with a digit
+  gains `v`; the directory is the name with `/` written `--` and `:`
+  written `---`. A channel (`stable`, `beta`, `nightly`,
+  `lean-toolchain`) resolves through the network, so it keeps every
+  release of its origin. A name that looks like a path is a path
+  toolchain, as for rustup.
+
+**Pinning limits** (the residuals of its row in
+[Liveness contracts](reference.md#liveness-contracts)). diskgc cannot see
+every pin, and deletes a toolchain only a pin it does not read selects:
+
+- a pin file outside the supplied roots, deeper than five levels below
+  one, behind a mount, in a directory diskgc cannot list, or itself a
+  symlink; elan's `known-projects` covers its projects anywhere, rustup
+  has no such list;
+- a pin in the environment or on a command line: `RUSTUP_TOOLCHAIN` or
+  `ELAN_TOOLCHAIN` of a shell (a name, not a path, so the in-use check's
+  environment rule does not match it), `cargo +NAME`, `rustup run NAME`,
+  a CI file;
+- a tool that pins a toolchain by its own means: Kani's link is read;
+  another tool's (an editor configured with a toolchain's full path, a
+  script calling `~/.rustup/toolchains/NAME/bin/cargo`) is not;
+- Lean 3's `leanpkg.toml` is not read.
+
+In each case the manager installs the toolchain again on its next use
+(rustup's `auto-install` is on by default since 1.28; elan always), which
+needs the network, and loses components and targets added by hand;
+a tool configured with the full path fails until it is reinstalled.
+Nothing is lost that cannot be downloaded again. The idle measure says
+little here: a toolchain's files change when it is installed or updated,
+not when it is used, so `min_idle_for: 1h` only covers an install in
+flight, and use is seen only through a running process (its executable,
+mappings or initial `PATH`).
+
 ### Deletion
 
 For the `delete` action of kind `fs` (`fs_kind` in the core). A dry run,
@@ -3742,48 +3855,6 @@ byte count, `.links` phase, hang-up interruption, the daemon's refusal of
 confirmed by the container scenarios.
 
 ## Command actions
-
-### Rustup and Elan toolchains (unshipped)
-
-There is no built-in `rustup` or `elan` toolchain profile. A generic
-`command` profile is not a safe substitute: it can pass a candidate path to
-an executable, but `rustup toolchain uninstall` and `elan toolchain uninstall`
-take manager names. An Elan name such as `leanprover/lean4:v4.1.0` is stored
-as `leanprover--lean4---v4.1.0`; a linked toolchain can instead be a symlink.
-The candidate directory name alone is not an authoritative uninstall target.
-
-The managers also cannot certify all pins from their own metadata. A project
-root supplied to diskgc may contain `rust-toolchain`, `rust-toolchain.toml`,
-or `lean-toolchain`; another project or a tool (for example, Kani) may pin a
-toolchain outside those roots. Rustup also has defaults and directory
-overrides. The [Rustup override rules](https://rust-lang.github.io/rustup/overrides.html)
-describe the distinct precedence of the environment, directory overrides,
-project files and defaults. Elan's `toolchain gc --help` in 4.2.1 says a
-project-file pin counts only after Elan has been used in that directory.
-Its [4.2.1 changelog](https://github.com/leanprover/elan/blob/v4.2.1/CHANGELOG.md)
-states the same limit. Neither manager can certify an unseen tool-created
-pin. A configured-root scan can narrow this uncertainty but cannot erase it.
-
-In an offline, disposable `diskgc-e2e-base` container, Elan 4.2.1 saw a
-valid `lean-toolchain` in an unvisited `/tmp/project` naming an installed
-`leanprover/lean4:v4.1.0`, yet `elan toolchain gc --json` reported that
-toolchain in `unused_toolchains`; `gc --delete` uninstalled it. In a second
-disposable container, Rustup 1.29.0 accepted `toolchain uninstall custom`
-after `default custom`: it warned that it was removing the default and then
-removed it. Both checks used fresh manager homes under `/tmp`, no network,
-and a read-only `/nix/store` bind. They demonstrate that a zero-exit manager
-cleaner does not prove preservation of defaults or pins.
-
-A shippable toolchain source needs a manager-backed identifier tied to the
-candidate, a complete pin inventory, explicit authorization of each
-uninstall target, and a recheck while the candidate lock and host lock are
-held. A default or pinned toolchain must be kept even when its name was
-authorized. The recheck must include defaults, directory overrides, every
-configured project root, linked toolchains and declared tool-created pins;
-unknown or unreadable pin state must keep the candidate. Its manager binary
-and home must be bound at preflight and at action time. TASK-94 tracks this
-work. Its real-machine dry-run acceptance criterion remains unverified under
-the current instruction to test only on fake filesystems and in containers.
 
 - **Trusted, arbitrary command execution.** diskgc runs the filesystem
   checks on the candidate *before* the command (ownership of every entry,

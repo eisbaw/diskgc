@@ -1161,6 +1161,7 @@ fn negated_retention_guards_are_rejected_even_in_mixed_filters() {
             "retention-installed",
             PredicateName::ProtectCursorExtensions,
         ),
+        ("retention-toolchains", PredicateName::ProtectToolchains),
         ("retention-mixed", PredicateName::KeepNewest),
     ] {
         let written = format!("!filter:{name}");
@@ -1240,6 +1241,7 @@ fn predicate_table_matches_the_reference() {
             (PredicateName::KeepNewest, vec![Kind::Fs]),
             (PredicateName::ProtectLinks, vec![Kind::Fs]),
             (PredicateName::ProtectCursorExtensions, vec![Kind::Fs]),
+            (PredicateName::ProtectToolchains, vec![Kind::Fs]),
         ]
     );
 }

@@ -63,10 +63,11 @@ pub enum PredicateName {
     KeepNewest,
     ProtectLinks,
     ProtectCursorExtensions,
+    ProtectToolchains,
 }
 
 impl PredicateName {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::IdleFor,
         Self::Has,
         Self::HasDir,
@@ -78,13 +79,17 @@ impl PredicateName {
         Self::KeepNewest,
         Self::ProtectLinks,
         Self::ProtectCursorExtensions,
+        Self::ProtectToolchains,
     ];
 
     /// Classify every predicate explicitly so adding a new one requires a
     /// decision about whether `!filter:` may complement it.
     pub const fn is_retention_guard(self) -> bool {
         match self {
-            Self::KeepNewest | Self::ProtectLinks | Self::ProtectCursorExtensions => true,
+            Self::KeepNewest
+            | Self::ProtectLinks
+            | Self::ProtectCursorExtensions
+            | Self::ProtectToolchains => true,
             Self::IdleFor
             | Self::Has
             | Self::HasDir
@@ -110,6 +115,7 @@ impl PredicateName {
             Self::KeepNewest => "keep_newest",
             Self::ProtectLinks => "protect_links",
             Self::ProtectCursorExtensions => "protect_cursor_extensions",
+            Self::ProtectToolchains => "protect_toolchains",
         }
     }
 
@@ -126,7 +132,8 @@ impl PredicateName {
             | Self::LivenessContract
             | Self::KeepNewest
             | Self::ProtectLinks
-            | Self::ProtectCursorExtensions => &[Kind::Fs],
+            | Self::ProtectCursorExtensions
+            | Self::ProtectToolchains => &[Kind::Fs],
         }
     }
 

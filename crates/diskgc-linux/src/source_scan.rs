@@ -853,6 +853,17 @@ pub(crate) const PRODUCTION_DEPENDENCIES: &[(&str, &[&str])] = &[
             "workspace: serde-saphyr = { version = \"=2.0.0\", default-features = false, features = [\"deserialize\"] }",
             "serde_json.workspace = true",
             "workspace: serde_json = \"1\"",
+            // Reviewed for TASK-94 (the `protect_toolchains` guard reads
+            // rustup's and elan's settings.toml and rust-toolchain.toml):
+            // toml_edit with only `parse`, no `display` (writer), `serde`
+            // or `debug`. It parses a string it is given and opens nothing:
+            // no crate it adds (toml_edit, toml_parser, toml_datetime,
+            // winnow, indexmap, hashbrown, equivalent) names std::fs,
+            // std::process or OpenOptions; winnow reads $COLUMNS only in
+            // its `debug` feature, left off. All were already in the lock
+            // through proc-macro-crate.
+            "toml_edit.workspace = true",
+            "workspace: toml_edit = { version = \"0.25\", default-features = false, features = [\"parse\"] }",
         ],
     ),
     (

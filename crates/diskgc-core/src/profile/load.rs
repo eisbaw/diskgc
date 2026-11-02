@@ -781,6 +781,7 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
         protect_link_dirs: spec.protect_link_dirs.clone(),
         protect_parent_link: spec.protect_parent_link.clone(),
         protect_cursor_extensions: spec.protect_cursor_extensions.clone(),
+        protect_toolchains: spec.protect_toolchains,
     }
 }
 

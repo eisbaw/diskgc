@@ -272,6 +272,12 @@ fn where_json(where_: &Where) -> Json {
             "protect_cursor_extensions",
             opt_str(where_.protect_cursor_extensions.as_deref()),
         ),
+        (
+            "protect_toolchains",
+            Json::opt(where_.protect_toolchains, |manager| {
+                Json::str(manager.name())
+            }),
+        ),
     ])
 }
 
@@ -497,6 +503,9 @@ fn yaml_where(where_: &Where) -> Option<String> {
             "protect_cursor_extensions: {}",
             yaml_scalar(manifest)
         ));
+    }
+    if let Some(manager) = where_.protect_toolchains {
+        parts.push(format!("protect_toolchains: {}", manager.name()));
     }
     (!parts.is_empty()).then(|| format!("{{{}}}", parts.join(", ")))
 }

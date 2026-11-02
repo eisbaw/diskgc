@@ -1,0 +1,41 @@
+# elan-toolchains (TASK-94) fails closed: a project elan recorded in
+# known-projects whose lean-toolchain cannot be read keeps every
+# toolchain (pinned_toolchain). A recorded project that is gone pins
+# nothing (elan's own gc ignores it too).
+profile_vector: 1
+select: profile:elan-toolchains
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/.elan/settings.toml: {content: "version = \"12\"\n"}
+    /home/tester/.elan/known-projects: {content: "/srv/gone\n/srv/locked\n"}
+    /home/tester/.elan/toolchains:
+      leanprover--lean4---v4.16.0: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, lean: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+    /srv/locked/lean-toolchain: {content: "leanprover/lean4:v4.9.0\n", mode: "0000"}
+  events:
+    # The model does not apply a file's mode to reads: the kernel's EACCES
+    # on the read of the mode-000 file is injected (the dry run and the
+    # reclaim each read it once: the candidate is kept at its first
+    # judgement).
+    - {at: {op: read_head, path: /srv/locked/lean-toolchain, nth: 1, when: before}, fail: EACCES}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.16.0, reason: pinned_toolchain}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/.elan/toolchains/leanprover--lean4---v4.16.0, reason: pinned_toolchain}
+  preserved:
+    - /home/tester/.elan/toolchains/leanprover--lean4---v4.16.0/bin/lean
