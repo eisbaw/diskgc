@@ -438,6 +438,113 @@ fn command_cache_builtins_have_golden_match_sets() {
     nothing_locked_or_deleted(&host);
 }
 
+/// TASK-40 (pending Mark's admission): the language and package cache
+/// sources find one candidate per hub repository, extracted crate, header
+/// version or Electron download below the home root, only directories, and
+/// only where the tool's completion marker is a regular file. Siblings the
+/// tools keep beside them (download locks, the token, `.crate` files, the
+/// index, a flat zip) and deeper or shallower directories never match.
+#[test]
+fn language_cache_builtins_have_golden_match_sets() {
+    const OLD: &str = "mtime: 2026-09-01T00:00:00Z";
+    let old_dir = |path: &str, marker: Option<&str>| {
+        let marker = marker.map_or(String::new(), |m| format!(", \"{m}\": {{size: 4, {OLD}}}"));
+        format!("  {path}: {{.: {{{OLD}}}, data: {{size: 1K, {OLD}}}{marker}}}\n")
+    };
+    let hub = "/home/mark/.cache/huggingface/hub";
+    let src = "/home/mark/.cargo/registry/src";
+    let gyp = "/home/mark/.cache/node-gyp";
+    let electron = "/home/mark/.cache/electron";
+    let mut tree = String::new();
+    for repo in ["models--org--m", "datasets--org--set", "spaces--org--demo"] {
+        tree += &old_dir(&format!("{hub}/{repo}"), None);
+    }
+    tree += &old_dir(&format!("{hub}/.locks/models--org--m"), None);
+    tree += &old_dir(&format!("{hub}/models--org--m/blobs"), None);
+    tree += &old_dir("/home/mark/.cache/huggingface/xet/chunk-cache", None);
+    tree += &old_dir("/home/mark/.cache/huggingface/assets/models--org--m", None);
+    tree += &format!("  {hub}/models--file: {{size: 1K, {OLD}}}\n");
+    tree += &format!("  /home/mark/.cache/huggingface/token: {{size: 1K, {OLD}}}\n");
+    for krate in [
+        "index.crates.io-1949cf8c6b5b557f/serde-1.0.228",
+        "github.com-1ecc6299db9ec823/libc-0.2.150",
+    ] {
+        tree += &old_dir(&format!("{src}/{krate}"), Some(".cargo-ok"));
+    }
+    tree += &old_dir(
+        &format!("{src}/index.crates.io-1949cf8c6b5b557f/partial-0.1.0"),
+        None,
+    );
+    tree += &format!(
+        "  {src}/index.crates.io-1949cf8c6b5b557f/marker-dir-0.1.0: {{.: {{{OLD}}}, .cargo-ok: {{.: {{{OLD}}}}}}}\n"
+    );
+    tree += &old_dir(
+        "/home/mark/.cargo/registry/cache/index.crates.io-1949cf8c6b5b557f",
+        Some(".cargo-ok"),
+    );
+    tree += &old_dir(
+        "/home/mark/.cargo/git/checkouts/repo-0123456789abcdef/abc1234",
+        Some(".cargo-ok"),
+    );
+    for version in ["20.18.1", "iojs-3.3.1"] {
+        tree += &old_dir(&format!("{gyp}/{version}"), Some("installVersion"));
+    }
+    tree += &old_dir(&format!("{gyp}/23.6.0"), None);
+    tree += &old_dir("/home/mark/.node-gyp/18.0.0", Some("installVersion"));
+    tree += &old_dir(
+        "/home/mark/.cache/node-gyp-other/20.18.1",
+        Some("installVersion"),
+    );
+    tree += &old_dir(
+        &format!("{electron}/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f"),
+        None,
+    );
+    tree += &format!("  {electron}/electron-v30.0.0-linux-x64.zip: {{size: 1K, {OLD}}}\n");
+    tree += &old_dir("/home/mark/.cache/electron-builder/winCodeSign", None);
+    let host = host(&yaml(&tree));
+    for (profile, expected) in [
+        (
+            "huggingface-hub-repos",
+            vec![
+                format!("{hub}/datasets--org--set"),
+                format!("{hub}/models--org--m"),
+                format!("{hub}/spaces--org--demo"),
+            ],
+        ),
+        (
+            "cargo-registry-src",
+            vec![
+                format!("{src}/github.com-1ecc6299db9ec823/libc-0.2.150"),
+                format!("{src}/index.crates.io-1949cf8c6b5b557f/serde-1.0.228"),
+            ],
+        ),
+        (
+            "node-gyp-headers",
+            vec![format!("{gyp}/20.18.1"), format!("{gyp}/iojs-3.3.1")],
+        ),
+        (
+            "electron-download-cache",
+            vec![format!(
+                "{electron}/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f"
+            )],
+        ),
+    ] {
+        let report = dry_run(
+            &host,
+            &built_in_request(&format!("profile:{profile}"), "/home/mark"),
+        );
+        let mut actual: Vec<_> = plan(&report).into_iter().map(|(path, _)| path).collect();
+        actual.sort();
+        assert_eq!(actual, expected, "{profile}");
+        assert!(
+            report.plan.iter().all(|p| p.reason.is_none()),
+            "{profile}: {:#?}",
+            report.plan
+        );
+    }
+    nothing_locked_or_deleted(&host);
+}
+
 /// The shipped version sources rank only matching siblings and protect all
 /// configured installed pointers, including a relative link into an old
 /// version. Every candidate is still visible in the plan with its reason.

@@ -1,0 +1,68 @@
+# cargo-registry-src (TASK-40, pending Mark's admission): one candidate per
+# extracted crate, `.cargo/registry/src/<registry>/<crate>-<version>` below a
+# supplied home root, and only one Cargo finished extracting (a regular
+# `.cargo-ok`). One per role: match, in use (a rustc reading a source),
+# negated, keep marker, fresh (the one-hour floor), and an interrupted
+# extraction without `.cargo-ok` (never a candidate). The downloaded
+# `.crate` files Cargo extracts again from, the index, installed binaries
+# and Cargo's cache lock files are never candidates.
+profile_vector: 1
+user_profiles:
+  - {"name": "pin", "find": {"roots": ["/home/tester"], "paths": [".cargo/registry/src/index.crates.io-0123456789abcdef/pinned-1.0.0"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/pinned-1.0.0"]}}
+select: "profile:cargo-registry-src && !profile:pin"
+roots: ["/home/tester"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/rustc: {mode: "0755"}
+    /home/tester/src/app/Cargo.toml: {size: 1K}
+    /home/tester/.cargo/.package-cache: {size: 0, mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cargo/.package-cache-mutate: {size: 0, mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cargo/.global-cache: {size: 8K, mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cargo/bin/cargo-tool: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cargo/registry/cache/index.crates.io-0123456789abcdef/old-1.0.0.crate: {size: 8K, mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cargo/registry/index/index.crates.io-0123456789abcdef/.cache/ol/d/old: {size: 1K, mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/old-1.0.0: {.: {mtime: 2026-09-01T00:00:00Z}, .cargo-ok: {content: "{\"v\":1}", mtime: 2026-09-01T00:00:00Z}, Cargo.toml: {size: 1K, mtime: 2026-09-01T00:00:00Z}, src: {.: {mtime: 2026-09-01T00:00:00Z}, lib.rs: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/built-2.0.0: {.: {mtime: 2026-09-01T00:00:00Z}, .cargo-ok: {content: "{\"v\":1}", mtime: 2026-09-01T00:00:00Z}, src: {.: {mtime: 2026-09-01T00:00:00Z}, lib.rs: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/pinned-1.0.0: {.: {mtime: 2026-09-01T00:00:00Z}, .cargo-ok: {content: "{\"v\":1}", mtime: 2026-09-01T00:00:00Z}, src: {.: {mtime: 2026-09-01T00:00:00Z}, lib.rs: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/kept-1.0.0: {.: {mtime: 2026-09-01T00:00:00Z}, .cargo-ok: {content: "{\"v\":1}", mtime: 2026-09-01T00:00:00Z}, .diskgc-keep: {mtime: 2026-09-01T00:00:00Z}, src: {.: {mtime: 2026-09-01T00:00:00Z}, lib.rs: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/fresh-1.0.0: {.cargo-ok: {content: "{\"v\":1}"}, src: {lib.rs: {size: 8K}}}
+    /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/partial-1.0.0: {.: {mtime: 2026-09-01T00:00:00Z}, src: {.: {mtime: 2026-09-01T00:00:00Z}, lib.rs: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/.cargo/registry/src/my-registry-fedcba9876543210/other-0.1.0: {.: {mtime: 2026-09-01T00:00:00Z}, .cargo-ok: {content: "{\"v\":1}", mtime: 2026-09-01T00:00:00Z}, src: {.: {mtime: 2026-09-01T00:00:00Z}, lib.rs: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+  processes:
+    - {pid: 901, exe: /usr/bin/rustc, cwd: /home/tester/src/app, maps: [/usr/bin/rustc], environ: [HOME=/home/tester], fds: [{path: "/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/built-2.0.0/src/lib.rs"}]}
+expect:
+  plan:
+    - {candidate: "/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/built-2.0.0", reason: in_use}
+    - {candidate: "/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/fresh-1.0.0", reason: not_idle}
+    - {candidate: "/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/kept-1.0.0", reason: keep_marker}
+    - {candidate: "/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/old-1.0.0"}
+    - {candidate: "/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/pinned-1.0.0", reason: excluded}
+    - {candidate: "/home/tester/.cargo/registry/src/my-registry-fedcba9876543210/other-0.1.0"}
+  reclaim_exit: 1
+  actions: ["/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/old-1.0.0", "/home/tester/.cargo/registry/src/my-registry-fedcba9876543210/other-0.1.0"]
+  removed: ["/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/old-1.0.0", "/home/tester/.cargo/registry/src/my-registry-fedcba9876543210/other-0.1.0"]
+  skipped:
+    - {candidate: "/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/built-2.0.0", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/fresh-1.0.0", reason: not_idle}
+    - {candidate: "/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/kept-1.0.0", reason: keep_marker}
+    - {candidate: "/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/pinned-1.0.0", reason: excluded}
+  preserved:
+    - /home/tester/.cargo/.package-cache
+    - /home/tester/.cargo/.package-cache-mutate
+    - /home/tester/.cargo/.global-cache
+    - /home/tester/.cargo/bin/cargo-tool
+    - /home/tester/.cargo/registry/cache/index.crates.io-0123456789abcdef/old-1.0.0.crate
+    - /home/tester/.cargo/registry/index/index.crates.io-0123456789abcdef/.cache/ol/d/old
+    - /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/built-2.0.0/src/lib.rs
+    - /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/pinned-1.0.0/src/lib.rs
+    - /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/kept-1.0.0/src/lib.rs
+    - /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/fresh-1.0.0/src/lib.rs
+    - /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/partial-1.0.0/src/lib.rs

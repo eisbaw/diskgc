@@ -1,0 +1,38 @@
+# Residuals of huggingface-hub-repos (TASK-40, verified heuristic, pending
+# Mark's admission). (1) A run that found the repository in its cache
+# (hf_hub_download returns a cached pointer without taking a lock) and
+# opens its files one at a time, the configuration first and the weights
+# later, holds nothing in it in between, so the repository is deleted and
+# that run fails once. A download in progress writes fresh blobs, which the
+# one-hour floor keeps (not_idle) unless it stalls longer. (2) A directory
+# made with local_dir by huggingface_hub before 0.23, whose large files are
+# symlinks into the blobs, is never followed and stays, dangling until
+# downloaded again.
+# Downloading again needs the network (HF_HUB_OFFLINE runs fail); a gated,
+# private or removed repository cannot be downloaded again.
+profile_vector: 1
+select: profile:huggingface-hub-repos
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/python3: {mode: "0755"}
+    /home/tester/.cache/huggingface/hub/models--org--m: {.: {mtime: 2026-09-01T00:00:00Z}, blobs: {.: {mtime: 2026-09-01T00:00:00Z}, b1: {size: 8K, mtime: 2026-09-01T00:00:00Z}}, snapshots: {.: {mtime: 2026-09-01T00:00:00Z}, r1: {.: {mtime: 2026-09-01T00:00:00Z}, config.json: {symlink: ../../blobs/b1, mtime: 2026-09-01T00:00:00Z}}}}
+    /home/tester/work/model/model.safetensors: {symlink: /home/tester/.cache/huggingface/hub/models--org--m/blobs/b1}
+  processes:
+    - {pid: 4242, exe: /usr/bin/python3, cwd: /home/tester/work, maps: [/usr/bin/python3], environ: [HOME=/home/tester], fds: [{path: /usr/bin/python3}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.cache/huggingface/hub/models--org--m}
+  reclaim_exit: 1
+  actions: [/home/tester/.cache/huggingface/hub/models--org--m]
+  removed: [/home/tester/.cache/huggingface/hub/models--org--m]
+  skipped: []
+  preserved: [/home/tester/work/model/model.safetensors]

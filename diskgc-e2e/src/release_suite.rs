@@ -73,6 +73,11 @@ const EXCLUDED: &[&str] = &[
     // library only.
     "teams-for-linux-electron-cache",
     "figma-linux-electron-cache",
+    // TASK-40, pending Mark's admission: development library only.
+    "huggingface-hub-repos",
+    "cargo-registry-src",
+    "node-gyp-headers",
+    "electron-download-cache",
 ];
 
 fn run_binary(

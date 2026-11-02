@@ -1,0 +1,55 @@
+# node-gyp-headers (TASK-40, pending Mark's admission): one candidate per
+# Node.js header version that node-gyp finished installing (a regular
+# `installVersion`) in its default dev directory below a supplied home
+# root. One per role: match, in use (a compiler reading a header), negated,
+# keep marker, fresh (the one-hour floor), and a directory without
+# `installVersion` (not node-gyp's, or an install in progress), which is
+# never a candidate. Nor is a regular file beside the versions.
+profile_vector: 1
+user_profiles:
+  - {"name": "pin", "find": {"roots": ["/home/tester"], "paths": [".cache/node-gyp/18.20.0"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/tester/.cache/node-gyp/18.20.0"]}}
+select: "profile:node-gyp-headers && !profile:pin"
+roots: ["/home/tester"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/cc1plus: {mode: "0755"}
+    /home/tester/src/addon/build/Makefile: {size: 1K}
+    /home/tester/.cache/node-gyp/README: {size: 1K, mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cache/node-gyp/20.18.1: {.: {mtime: 2026-09-01T00:00:00Z}, installVersion: {content: "11\n", mtime: 2026-09-01T00:00:00Z}, include: {.: {mtime: 2026-09-01T00:00:00Z}, node: {.: {mtime: 2026-09-01T00:00:00Z}, node.h: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}}
+    /home/tester/.cache/node-gyp/22.12.0: {.: {mtime: 2026-09-01T00:00:00Z}, installVersion: {content: "11\n", mtime: 2026-09-01T00:00:00Z}, include: {.: {mtime: 2026-09-01T00:00:00Z}, node: {.: {mtime: 2026-09-01T00:00:00Z}, node.h: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}}
+    /home/tester/.cache/node-gyp/18.20.0: {.: {mtime: 2026-09-01T00:00:00Z}, installVersion: {content: "11\n", mtime: 2026-09-01T00:00:00Z}, include: {.: {mtime: 2026-09-01T00:00:00Z}, node: {.: {mtime: 2026-09-01T00:00:00Z}, node.h: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}}
+    /home/tester/.cache/node-gyp/16.20.2: {.: {mtime: 2026-09-01T00:00:00Z}, installVersion: {content: "11\n", mtime: 2026-09-01T00:00:00Z}, .diskgc-keep: {mtime: 2026-09-01T00:00:00Z}, include: {.: {mtime: 2026-09-01T00:00:00Z}, node: {.: {mtime: 2026-09-01T00:00:00Z}, node.h: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}}
+    /home/tester/.cache/node-gyp/24.11.0: {installVersion: {content: "11\n"}, include: {node: {node.h: {size: 8K}}}}
+    /home/tester/.cache/node-gyp/23.6.0: {.: {mtime: 2026-09-01T00:00:00Z}, include: {.: {mtime: 2026-09-01T00:00:00Z}, node: {.: {mtime: 2026-09-01T00:00:00Z}, node.h: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}}
+  processes:
+    - {pid: 901, exe: /usr/bin/cc1plus, cwd: /home/tester/src/addon/build, maps: [/usr/bin/cc1plus], environ: [HOME=/home/tester], fds: [{path: "/home/tester/.cache/node-gyp/22.12.0/include/node/node.h"}]}
+expect:
+  plan:
+    - {candidate: "/home/tester/.cache/node-gyp/16.20.2", reason: keep_marker}
+    - {candidate: "/home/tester/.cache/node-gyp/18.20.0", reason: excluded}
+    - {candidate: "/home/tester/.cache/node-gyp/20.18.1"}
+    - {candidate: "/home/tester/.cache/node-gyp/22.12.0", reason: in_use}
+    - {candidate: "/home/tester/.cache/node-gyp/24.11.0", reason: not_idle}
+  reclaim_exit: 1
+  actions: ["/home/tester/.cache/node-gyp/20.18.1"]
+  removed: ["/home/tester/.cache/node-gyp/20.18.1"]
+  skipped:
+    - {candidate: "/home/tester/.cache/node-gyp/16.20.2", reason: keep_marker}
+    - {candidate: "/home/tester/.cache/node-gyp/18.20.0", reason: excluded}
+    - {candidate: "/home/tester/.cache/node-gyp/22.12.0", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/home/tester/.cache/node-gyp/24.11.0", reason: not_idle}
+  preserved:
+    - /home/tester/.cache/node-gyp/README
+    - /home/tester/.cache/node-gyp/16.20.2/include/node/node.h
+    - /home/tester/.cache/node-gyp/18.20.0/include/node/node.h
+    - /home/tester/.cache/node-gyp/22.12.0/include/node/node.h
+    - /home/tester/.cache/node-gyp/23.6.0/include/node/node.h
+    - /home/tester/.cache/node-gyp/24.11.0/include/node/node.h

@@ -1,0 +1,36 @@
+# Residual of cargo-registry-src (TASK-40, verified heuristic, pending
+# Mark's admission): a cargo build holds a shared flock on
+# $CARGO_HOME/.package-cache-mutate while it reads extracted sources (Cargo's
+# CacheLockMode::Shared), but that lock file lies outside the candidate and
+# diskgc does not take Cargo's MutateExclusive lock. Between two rustc
+# invocations nothing in the crate is held, so it is deleted: a rustc that
+# starts on it fails once; the next build extracts it again from its .crate
+# (offline) or downloads it.
+profile_vector: 1
+select: profile:cargo-registry-src
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/cargo: {mode: "0755"}
+    /home/tester/src/app/Cargo.toml: {size: 1K}
+    /home/tester/.cargo/.package-cache-mutate: {size: 0, mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cargo/registry/cache/index.crates.io-0123456789abcdef/dep-1.0.0.crate: {size: 8K, mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0: {.: {mtime: 2026-09-01T00:00:00Z}, .cargo-ok: {content: "{\"v\":1}", mtime: 2026-09-01T00:00:00Z}, src: {.: {mtime: 2026-09-01T00:00:00Z}, lib.rs: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+  processes:
+    - {pid: 4242, exe: /usr/bin/cargo, cwd: /home/tester/src/app, maps: [/usr/bin/cargo], environ: [HOME=/home/tester], fds: [{path: /home/tester/.cargo/.package-cache-mutate}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0}
+  reclaim_exit: 1
+  actions: [/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0]
+  removed: [/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0]
+  skipped: []
+  preserved: [/home/tester/.cargo/.package-cache-mutate, /home/tester/.cargo/registry/cache/index.crates.io-0123456789abcdef/dep-1.0.0.crate]

@@ -1331,8 +1331,11 @@ fn profiles_show_of_an_unknown_name_is_exit_2() {
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
     let stderr = text(&out.stderr);
+    // The development library also offers `cargo-registry-src`; the
+    // release catalog does not hold it.
     assert!(
-        stderr.contains("no profile is named `cargo`; close names: `cargo-target`"),
+        stderr.contains("no profile is named `cargo`; close names: ")
+            && stderr.contains("`cargo-target`"),
         "{stderr}"
     );
     let out = diskgc(&["profiles", "show", "idle-5d", "--json"]);

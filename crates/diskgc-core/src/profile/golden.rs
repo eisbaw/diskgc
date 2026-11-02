@@ -1778,3 +1778,163 @@ fn toolchain_sources_have_frozen_match_sets_and_guards() {
         assert!(!path_matches(Some(&[root]), &find.patterns, &nested));
     }
 }
+
+// ---- TASK-40: language and package caches (pending Mark's admission)
+
+/// The TASK-40 sources' frozen definitions and match sets: fixed patterns
+/// below a supplied home root, directories only, the one completion
+/// marker where the tool writes one, a one-hour floor, a plain delete,
+/// checkouts refused, a verified heuristic and no release catalog. A
+/// changed pattern, marker, floor or action needs a new built-in name once
+/// Mark admits one.
+#[test]
+fn language_cache_sources_have_frozen_definitions_and_match_sets() {
+    use crate::kind::PredicateName;
+    let library = Library::builtin().expect("built-ins");
+    let root = Path::new("/home/mark");
+    let hub = ".cache/huggingface/hub";
+    let crates = ".cargo/registry/src/index.crates.io-1949cf8c6b5b557f";
+    let electron =
+        ".cache/electron/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f";
+    /// Name, patterns, completion marker, paths matched, paths not matched.
+    type Case<'a> = (
+        &'a str,
+        &'a [&'a str],
+        Option<&'a str>,
+        Vec<String>,
+        Vec<String>,
+    );
+    let cases: [Case; 4] = [
+        (
+            "huggingface-hub-repos",
+            &[
+                ".cache/huggingface/hub/models--*",
+                ".cache/huggingface/hub/datasets--*",
+                ".cache/huggingface/hub/spaces--*",
+            ],
+            None,
+            vec![
+                format!("{hub}/models--org--m"),
+                format!("{hub}/datasets--org--set"),
+                format!("{hub}/spaces--org--demo"),
+            ],
+            vec![
+                hub.to_owned(),
+                format!("{hub}/.locks"),
+                format!("{hub}/.locks/models--org--m"),
+                format!("{hub}/models--org--m/blobs"),
+                format!("{hub}/CACHEDIR.TAG"),
+                format!("{hub}/version.txt"),
+                ".cache/huggingface/token".to_owned(),
+                ".cache/huggingface/stored_tokens".to_owned(),
+                ".cache/huggingface/xet".to_owned(),
+                ".cache/huggingface/assets/models--org--m".to_owned(),
+                format!("src/{hub}/models--org--m"),
+            ],
+        ),
+        (
+            "cargo-registry-src",
+            &[".cargo/registry/src/*/*"],
+            Some(".cargo-ok"),
+            vec![
+                format!("{crates}/serde-1.0.228"),
+                ".cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.150".to_owned(),
+            ],
+            vec![
+                ".cargo/registry/src".to_owned(),
+                crates.to_owned(),
+                format!("{crates}/serde-1.0.228/src"),
+                ".cargo/registry/cache/index.crates.io-1949cf8c6b5b557f/serde-1.0.228.crate"
+                    .to_owned(),
+                ".cargo/registry/index/index.crates.io-1949cf8c6b5b557f/.cache".to_owned(),
+                ".cargo/git/checkouts/repo-0123456789abcdef/abc1234".to_owned(),
+                ".cargo/bin".to_owned(),
+                format!("src/{crates}/serde-1.0.228"),
+            ],
+        ),
+        (
+            "node-gyp-headers",
+            &[".cache/node-gyp/*"],
+            Some("installVersion"),
+            vec![
+                ".cache/node-gyp/20.18.1".to_owned(),
+                ".cache/node-gyp/iojs-3.3.1".to_owned(),
+            ],
+            vec![
+                ".cache/node-gyp".to_owned(),
+                ".cache/node-gyp/20.18.1/include".to_owned(),
+                ".node-gyp/20.18.1".to_owned(),
+                ".electron-gyp/33.4.5".to_owned(),
+                "src/.cache/node-gyp/20.18.1".to_owned(),
+            ],
+        ),
+        (
+            "electron-download-cache",
+            &[".cache/electron/*"],
+            None,
+            vec![electron.to_owned()],
+            vec![
+                ".cache/electron".to_owned(),
+                format!("{electron}/electron-v33.4.5-linux-x64.zip"),
+                ".cache/electron-builder/winCodeSign".to_owned(),
+                ".config/Electron".to_owned(),
+                format!("src/{electron}"),
+            ],
+        ),
+    ];
+    for (name, patterns, marker, matched, unmatched) in cases {
+        let profile = library.get(name).expect("TASK-40 source");
+        assert!(profile.releases.is_empty(), "{name} is in no catalog");
+        let Body::Source(source) = &profile.body else {
+            panic!("{name} is a source")
+        };
+        assert_eq!(source.roots, Roots::Required, "{name}");
+        assert_eq!(
+            source.finds,
+            Finds::Paths {
+                patterns: patterns.iter().map(|p| (*p).to_owned()).collect(),
+                exclude: Vec::new(),
+                entry_type: EntryType::Dir,
+            },
+            "{name}"
+        );
+        assert_eq!(source.where_.has.as_deref(), marker, "{name}");
+        let predicates: &[PredicateName] = if marker.is_some() {
+            &[PredicateName::Has]
+        } else {
+            &[]
+        };
+        assert_eq!(source.where_.predicates(), predicates, "{name}");
+        assert_eq!(
+            source.min_idle_for,
+            Some(IdleFor(Duration::from_secs(3600))),
+            "{name}"
+        );
+        assert_eq!(source.checkouts, Checkouts::Refuse, "{name}");
+        assert_eq!(
+            source.liveness_class,
+            Some(LivenessClass::VerifiedHeuristic),
+            "{name}"
+        );
+        assert_eq!(
+            source.action,
+            Action::Delete {
+                make_writable: false
+            },
+            "{name}"
+        );
+        let find = Find::of(source, 1000).expect("filesystem source");
+        for relative in &matched {
+            assert!(
+                path_matches(Some(&[root]), &find.patterns, &root.join(relative)),
+                "{name} should match {relative}"
+            );
+        }
+        for relative in &unmatched {
+            assert!(
+                !path_matches(Some(&[root]), &find.patterns, &root.join(relative)),
+                "{name} should not match {relative}"
+            );
+        }
+    }
+}

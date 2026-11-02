@@ -472,7 +472,7 @@ fn list_text_is_one_aligned_table() {
 fn unknown_names_get_close_names() {
     let library = Library::builtin().expect("built-ins");
     for (name, want) in [
-        ("cargo", &["cargo-target"][..]),
+        ("cargo", &["cargo-registry-src", "cargo-target"][..]),
         ("profile:cargo-target", &["cargo-target"]),
         ("cargo-targets", &["cargo-target"]),
         ("idle-5d", &["idle-1d", "idle-2d", "idle-3d", "idle-7d"]),
@@ -483,7 +483,7 @@ fn unknown_names_get_close_names() {
     }
     assert_eq!(
         unknown_name(&library, "cargo"),
-        "no profile is named `cargo`; close names: `cargo-target`"
+        "no profile is named `cargo`; close names: `cargo-registry-src`, `cargo-target`"
     );
     assert_eq!(
         unknown_name(&library, "nope"),

@@ -1,0 +1,61 @@
+# huggingface-hub-repos (TASK-40, pending Mark's admission): one candidate
+# per repository directory (models--*, datasets--*, spaces--*) of the hub
+# cache below a supplied home root, one per role: match, in use (a mapped
+# weights blob), negated, keep marker, and fresh (the one-hour floor). The
+# hub's download locks, its CACHEDIR.TAG, the login token beside the hub and
+# the xet chunk cache are never candidates.
+profile_vector: 1
+user_profiles:
+  - {"name": "pin", "find": {"roots": ["/home/tester"], "paths": [".cache/huggingface/hub/models--org--pinned"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/tester/.cache/huggingface/hub/models--org--pinned"]}}
+select: "profile:huggingface-hub-repos && !profile:pin"
+roots: ["/home/tester"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/python3: {mode: "0755"}
+    /home/tester/.cache/huggingface/token: {size: 1K, mode: "0600", mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cache/huggingface/xet/chunk-cache/a: {size: 8K, mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cache/huggingface/hub/CACHEDIR.TAG: {cachedir_tag: true, mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cache/huggingface/hub/.locks/models--org--old/b1.lock: {size: 0, mtime: 2026-09-01T00:00:00Z}
+    /home/tester/.cache/huggingface/hub/models--org--old: {.: {mtime: 2026-09-01T00:00:00Z}, blobs: {.: {mtime: 2026-09-01T00:00:00Z}, b1: {size: 8K, mtime: 2026-09-01T00:00:00Z}}, refs: {.: {mtime: 2026-09-01T00:00:00Z}, main: {size: 1K, mtime: 2026-09-01T00:00:00Z}}, snapshots: {.: {mtime: 2026-09-01T00:00:00Z}, r1: {.: {mtime: 2026-09-01T00:00:00Z}, model.safetensors: {symlink: ../../blobs/b1, mtime: 2026-09-01T00:00:00Z}}}}
+    /home/tester/.cache/huggingface/hub/datasets--org--set: {.: {mtime: 2026-09-01T00:00:00Z}, blobs: {.: {mtime: 2026-09-01T00:00:00Z}, d1: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/.cache/huggingface/hub/spaces--org--demo: {.: {mtime: 2026-09-01T00:00:00Z}, blobs: {.: {mtime: 2026-09-01T00:00:00Z}, s1: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/.cache/huggingface/hub/models--org--loaded: {.: {mtime: 2026-09-01T00:00:00Z}, blobs: {.: {mtime: 2026-09-01T00:00:00Z}, w1: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/.cache/huggingface/hub/models--org--pinned: {.: {mtime: 2026-09-01T00:00:00Z}, blobs: {.: {mtime: 2026-09-01T00:00:00Z}, p1: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/.cache/huggingface/hub/models--org--kept: {.: {mtime: 2026-09-01T00:00:00Z}, .diskgc-keep: {mtime: 2026-09-01T00:00:00Z}, blobs: {.: {mtime: 2026-09-01T00:00:00Z}, k1: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/.cache/huggingface/hub/models--org--fresh: {blobs: {f1: {size: 8K}}}
+  processes:
+    - {pid: 901, exe: /usr/bin/python3, cwd: /home/tester, maps: [/usr/bin/python3, /home/tester/.cache/huggingface/hub/models--org--loaded/blobs/w1], environ: [HOME=/home/tester], fds: [{path: /usr/bin/python3}]}
+expect:
+  plan:
+    - {candidate: "/home/tester/.cache/huggingface/hub/datasets--org--set"}
+    - {candidate: "/home/tester/.cache/huggingface/hub/models--org--fresh", reason: not_idle}
+    - {candidate: "/home/tester/.cache/huggingface/hub/models--org--kept", reason: keep_marker}
+    - {candidate: "/home/tester/.cache/huggingface/hub/models--org--loaded", reason: in_use}
+    - {candidate: "/home/tester/.cache/huggingface/hub/models--org--old"}
+    - {candidate: "/home/tester/.cache/huggingface/hub/models--org--pinned", reason: excluded}
+    - {candidate: "/home/tester/.cache/huggingface/hub/spaces--org--demo"}
+  reclaim_exit: 1
+  actions: ["/home/tester/.cache/huggingface/hub/datasets--org--set", "/home/tester/.cache/huggingface/hub/models--org--old", "/home/tester/.cache/huggingface/hub/spaces--org--demo"]
+  removed: ["/home/tester/.cache/huggingface/hub/datasets--org--set", "/home/tester/.cache/huggingface/hub/models--org--old", "/home/tester/.cache/huggingface/hub/spaces--org--demo"]
+  skipped:
+    - {candidate: "/home/tester/.cache/huggingface/hub/models--org--fresh", reason: not_idle}
+    - {candidate: "/home/tester/.cache/huggingface/hub/models--org--kept", reason: keep_marker}
+    - {candidate: "/home/tester/.cache/huggingface/hub/models--org--loaded", reason: in_use, process_blockers: [{pid: 901, evidence: map}]}
+    - {candidate: "/home/tester/.cache/huggingface/hub/models--org--pinned", reason: excluded}
+  preserved:
+    - /home/tester/.cache/huggingface/token
+    - /home/tester/.cache/huggingface/xet/chunk-cache/a
+    - /home/tester/.cache/huggingface/hub/CACHEDIR.TAG
+    - /home/tester/.cache/huggingface/hub/.locks/models--org--old/b1.lock
+    - /home/tester/.cache/huggingface/hub/models--org--loaded/blobs/w1
+    - /home/tester/.cache/huggingface/hub/models--org--pinned/blobs/p1
+    - /home/tester/.cache/huggingface/hub/models--org--kept/blobs/k1
+    - /home/tester/.cache/huggingface/hub/models--org--fresh/blobs/f1

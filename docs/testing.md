@@ -1076,6 +1076,17 @@ that disabling the rule turns that vector red; the fail-closed rules each
 have a vector of their own. The name grammars are pure and tested beside
 the guard with properties. Container tests with real rustup and elan wait
 for Mark's admission.
+
+The TASK-40 language and package caches (`huggingface-hub-repos`,
+`cargo-registry-src`, `node-gyp-headers`, `electron-download-cache`;
+pending Mark's admission) have their builtins vectors (match, in use,
+negated, keep marker, the one-hour floor, and for the two with a
+completion marker a directory without it), one residual vector each in
+`liveness/`, the frozen definitions in `profile/golden.rs`
+(`language_cache_sources_have_frozen_definitions_and_match_sets`) and a
+ModelHost match set with the tools' sibling entries as negatives
+(`language_cache_builtins_have_golden_match_sets` in `fs_dry_run.rs`).
+Container tests with the real tools wait for Mark's admission.
 The Owner PID cases below are checked-in vectors against the
 `nix-shell-rc` built-in in `crates/diskgc-model/tests/vectors/liveness/`,
 one file per row and named after it (step 3 wrote them against a user

@@ -1,0 +1,33 @@
+# Residual of electron-download-cache (TASK-40, verified heuristic, pending
+# Mark's admission): on a cache hit @electron/get checks that the zip exists
+# and returns its cached path; electron's install script opens it to
+# extract only afterwards. In between nothing is held, so the directory is
+# deleted and that install fails once; the next install downloads it again
+# (it needs the network). A fresh download is moved in with its new mtime,
+# which the one-hour floor keeps (not_idle).
+profile_vector: 1
+select: profile:electron-download-cache
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/node: {mode: "0755"}
+    /home/tester/src/app/node_modules/electron/install.js: {size: 1K}
+    /home/tester/.cache/electron/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f: {.: {mtime: 2026-09-01T00:00:00Z}, electron-v33.4.5-linux-x64.zip: {size: 8K, mtime: 2026-09-01T00:00:00Z}}
+  processes:
+    - {pid: 4242, exe: /usr/bin/node, cwd: /home/tester/src/app/node_modules/electron, maps: [/usr/bin/node], environ: [HOME=/home/tester], fds: [{path: /home/tester/src/app/node_modules/electron/install.js}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.cache/electron/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f}
+  reclaim_exit: 1
+  actions: [/home/tester/.cache/electron/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f]
+  removed: [/home/tester/.cache/electron/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f]
+  skipped: []
+  preserved: [/home/tester/src/app/node_modules/electron/install.js]

@@ -253,6 +253,11 @@ fn the_built_in_library_loads() {
         "mypy-cache",
         "rustup-toolchains",
         "elan-toolchains",
+        // TASK-40, pending Mark's admission.
+        "huggingface-hub-repos",
+        "cargo-registry-src",
+        "node-gyp-headers",
+        "electron-download-cache",
         "pnpm-store",
         "uv-cache",
         "yarn-cache",

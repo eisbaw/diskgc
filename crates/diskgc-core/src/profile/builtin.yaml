@@ -110,6 +110,83 @@
   verified_with: Go 1.26.7, go env GOMODCACHE on 2026-10-20
   liveness_class: verified-heuristic
 
+# TASK-40 language and package caches below a supplied home root. Verified
+# heuristics pending Mark's admission (docs/reference.md, Liveness
+# contracts), so in no release catalog; never released, so a definition may
+# still change under its name. Plain deletes: none of these tools has a
+# cleaner that takes the measured directory. One candidate per entry the
+# tool fetches as a unit, so idle tiers can reclaim the stale ones; the
+# one-hour floor keeps entries a run is fetching or unpacking.
+- name: huggingface-hub-repos
+  category: caches
+  description: Hugging Face hub cache repositories (models, datasets, spaces) below a supplied home root
+  find:
+    roots: required
+    paths: [".cache/huggingface/hub/models--*", ".cache/huggingface/hub/datasets--*", ".cache/huggingface/hub/spaces--*"]
+    type: dir
+  min_idle_for: 1h
+  action: delete
+  examples:
+    root: /home/mark
+    match: [/home/mark/.cache/huggingface/hub/models--desklib--ai-text-detector-v1.01, /home/mark/.cache/huggingface/hub/datasets--org--set, /home/mark/.cache/huggingface/hub/spaces--org--demo]
+    no_match: [/home/mark/.cache/huggingface/hub, /home/mark/.cache/huggingface/hub/.locks, /home/mark/.cache/huggingface/hub/.locks/models--org--m, /home/mark/.cache/huggingface/hub/models--org--m/blobs, /home/mark/.cache/huggingface/token, /home/mark/.cache/huggingface/xet, /home/mark/.cache/huggingface/datasets, /home/mark/src/.cache/huggingface/hub/models--org--m]
+  verified_with: huggingface_hub 1.9.1 source (HF_HUB_CACHE default, repo_folder_name, cached pointer returned without a lock, download locks under .locks) and host hub layout, 2026-11-02
+  liveness_class: verified-heuristic
+
+- name: cargo-registry-src
+  category: rust
+  description: Crate sources Cargo extracted from its registry cache below a supplied home root
+  find:
+    roots: required
+    paths: [".cargo/registry/src/*/*"]
+    type: dir
+  # Cargo writes .cargo-ok when an extraction completes; without it the
+  # directory is an interrupted extraction or not Cargo's.
+  where: {has: .cargo-ok}
+  min_idle_for: 1h
+  action: delete
+  examples:
+    root: /home/mark
+    match: [/home/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228, /home/mark/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.150]
+    no_match: [/home/mark/.cargo/registry/src, /home/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f, /home/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src, /home/mark/.cargo/registry/cache/index.crates.io-1949cf8c6b5b557f/serde-1.0.228, /home/mark/.cargo/registry/index/index.crates.io-1949cf8c6b5b557f, /home/mark/.cargo/git/checkouts/repo-0123456789abcdef/abc1234, /home/mark/.cargo/bin, /home/mark/src/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228]
+  verified_with: Cargo source at master 2026-11-02 (unpack_package and .cargo-ok, CacheLockMode, global cache tracker sync of removed entries) and host registry layout under cargo 1.99.1
+  liveness_class: verified-heuristic
+
+- name: node-gyp-headers
+  category: python / js
+  description: Node.js headers node-gyp installed in its default dev directory below a supplied home root
+  find:
+    roots: required
+    paths: [".cache/node-gyp/*"]
+    type: dir
+  # node-gyp writes installVersion with a completed install and installs a
+  # version again when it is missing.
+  where: {has: installVersion}
+  min_idle_for: 1h
+  action: delete
+  examples:
+    root: /home/mark
+    match: [/home/mark/.cache/node-gyp/20.18.1, /home/mark/.cache/node-gyp/23.6.0]
+    no_match: [/home/mark/.cache/node-gyp, /home/mark/.cache/node-gyp/20.18.1/include, /home/mark/.node-gyp/20.18.1, /home/mark/.electron-gyp/33.4.5, /home/mark/src/.cache/node-gyp/20.18.1]
+  verified_with: node-gyp 11.5.0 source bundled with npm of Node.js 22.23.3 (env-paths cache dev dir, installVersion check, install of a missing version) and host layout, 2026-11-02
+  liveness_class: verified-heuristic
+
+- name: electron-download-cache
+  category: python / js
+  description: Electron release downloads in @electron/get's default cache below a supplied home root
+  find:
+    roots: required
+    paths: [".cache/electron/*"]
+    type: dir
+  min_idle_for: 1h
+  action: delete
+  examples:
+    root: /home/mark
+    match: [/home/mark/.cache/electron/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f]
+    no_match: [/home/mark/.cache/electron, /home/mark/.cache/electron/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f/electron-v33.4.5-linux-x64.zip, /home/mark/.cache/electron-builder/winCodeSign, /home/mark/.config/Electron, /home/mark/src/.cache/electron/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f]
+  verified_with: "@electron/get 5.1.0 source (env-paths cache root, SHA-256 URL directory, cache-hit path returned to the caller) and host layout (electron v33.4.5 zip), 2026-11-02"
+  liveness_class: verified-heuristic
+
 # Project roots are supplied by policy. Explicit depths avoid an unbounded
 # recursive walk and let a matching outer cache own any nested cache.
 - name: python-pycache
