@@ -490,6 +490,50 @@
     no_match: [/home/mark/.config/microsoft-edge/Default, /home/mark/.config/microsoft-edge/Default/Service Worker/CacheStorage, /home/mark/.config/microsoft-edge/Default/WebStorage]
   verified_with: Microsoft Edge 132.0.2957.127 (host Last Version and cache layout; 2026-10-20)
   liveness_class: sound
+
+# Electron application caches (TASK-78). An Electron app writes the
+# Chromium SingletonLock in its user-data directory only if it calls
+# app.requestSingleInstanceLock(); these two call it at startup, before
+# any window or session exists, and never release it themselves (app
+# sources read, docs/reference.md, Built-in profile library; Electron
+# itself drops it at quit, before the sessions close: a residual). Cursor/VS Code,
+# draw.io (its --export mode skips the lock) and Saleae Logic 2 do not, so
+# they have no profile. Only the named cache directories of the default
+# session and of persistent partitions; never the user-data directory,
+# Local Storage, IndexedDB, Service Worker storage or Cookies.
+# Development library only: the app names await Mark's admission, so in
+# no release catalog.
+- name: teams-for-linux-electron-cache
+  category: electron
+  description: teams-for-linux HTTP, compiled code and GPU caches of its default session and partitions
+  find:
+    roots: required
+    paths: [.config/teams-for-linux/Cache, .config/teams-for-linux/Code Cache, .config/teams-for-linux/GPUCache, ".config/teams-for-linux/Partitions/*/Cache", ".config/teams-for-linux/Partitions/*/Code Cache", ".config/teams-for-linux/Partitions/*/GPUCache"]
+    type: dir
+  where: {app_not_running: .config/teams-for-linux/SingletonLock}
+  action: delete
+  examples:
+    root: /home/mark
+    match: [/home/mark/.config/teams-for-linux/Cache, /home/mark/.config/teams-for-linux/Code Cache, /home/mark/.config/teams-for-linux/GPUCache, /home/mark/.config/teams-for-linux/Partitions/teams-4-linux/Cache, /home/mark/.config/teams-for-linux/Partitions/teams-4-linux/Code Cache]
+    no_match: [/home/mark/.config/teams-for-linux, /home/mark/.config/teams-for-linux/Local Storage, /home/mark/.config/teams-for-linux/Partitions/teams-4-linux, /home/mark/.config/teams-for-linux/Partitions/teams-4-linux/IndexedDB, /home/mark/.config/teams-for-linux/Partitions/teams-4-linux/Service Worker/CacheStorage, /home/mark/.config/teams-for-linux/Cookies, /home/mark/.config/teams-for-linux/DawnGraphiteCache, /home/mark/.config/teams-for-linux/Partitions/a/b/Cache]
+  verified_with: teams-for-linux 2.23.0 on Electron 43.6.0 (nixpkgs; app.asar read, requestSingleInstanceLock at module load before ready) and host user-data layout, 2026-11-02
+  liveness_class: sound
+
+- name: figma-linux-electron-cache
+  category: electron
+  description: figma-linux HTTP, compiled code and GPU caches of its default session
+  find:
+    roots: required
+    paths: [.config/figma-linux/Cache, .config/figma-linux/Code Cache, .config/figma-linux/GPUCache]
+    type: dir
+  where: {app_not_running: .config/figma-linux/SingletonLock}
+  action: delete
+  examples:
+    root: /home/mark
+    match: [/home/mark/.config/figma-linux/Cache, /home/mark/.config/figma-linux/Code Cache, /home/mark/.config/figma-linux/GPUCache]
+    no_match: [/home/mark/.config/figma-linux, /home/mark/.config/figma-linux/Local Storage, /home/mark/.config/figma-linux/IndexedDB, /home/mark/.config/figma-linux/Service Worker/CacheStorage, /home/mark/.config/figma-linux/Cookies, /home/mark/.config/figma-linux/Partitions/x/Cache]
+  verified_with: figma-linux 0.11.5 on Electron 43.6.0 (nixpkgs; main.js read, requestSingleInstanceLock in the app constructor before ready) and host user-data layout, 2026-11-02
+  liveness_class: sound
 - name: cursor-agent-versions
   category: agents
   description: Old Cursor agent CLI version directories below a supplied home root

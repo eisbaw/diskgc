@@ -69,6 +69,10 @@ const EXCLUDED: &[&str] = &[
     "elan-toolchains",
     "node-modules",
     "python-venv",
+    // TASK-78, pending Mark's admission of the app names: development
+    // library only.
+    "teams-for-linux-electron-cache",
+    "figma-linux-electron-cache",
 ];
 
 fn run_binary(

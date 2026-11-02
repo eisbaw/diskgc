@@ -1,0 +1,41 @@
+# figma-linux-electron-cache: the app is not running (its user-data
+# directory holds no SingletonLock); one candidate per role. Site data
+# beside the caches is never a candidate and survives. The running app
+# (in_use through its lock) is figma-linux-electron-cache-running.yaml.
+profile_vector: 1
+user_profiles:
+  - {"name": "pin", "find": {"roots": ["/home"], "paths": ["tester/.config/figma-linux/GPUCache"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/tester/.config/figma-linux/GPUCache"]}}
+select: "profile:figma-linux-electron-cache && !profile:pin"
+roots: ["/home/tester"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    "/home/tester/.config/figma-linux/Cache": {"Cache_Data": {".": {}, "data_0": {"size": "8K"}}}
+    "/home/tester/.config/figma-linux/Code Cache": {"js": {".": {}, "index": {"size": "8K"}}, ".diskgc-keep": {}}
+    "/home/tester/.config/figma-linux/GPUCache": {"data_1": {"size": "8K"}}
+    "/home/tester/.config/figma-linux/IndexedDB/https_www.figma.com_0.indexeddb.leveldb": {"000003.log": {"size": "8K"}}
+    "/home/tester/.config/figma-linux/Cookies": {"size": "8K"}
+expect:
+  plan:
+    - {candidate: "/home/tester/.config/figma-linux/Cache"}
+    - {candidate: "/home/tester/.config/figma-linux/Code Cache", reason: keep_marker}
+    - {candidate: "/home/tester/.config/figma-linux/GPUCache", reason: excluded}
+  reclaim_exit: 1
+  actions: ["/home/tester/.config/figma-linux/Cache"]
+  removed: ["/home/tester/.config/figma-linux/Cache"]
+  skipped:
+    - {candidate: "/home/tester/.config/figma-linux/Code Cache", reason: keep_marker}
+    - {candidate: "/home/tester/.config/figma-linux/GPUCache", reason: excluded}
+  preserved:
+    - "/home/tester/.config/figma-linux/Code Cache/js/index"
+    - "/home/tester/.config/figma-linux/GPUCache/data_1"
+    - "/home/tester/.config/figma-linux/IndexedDB/https_www.figma.com_0.indexeddb.leveldb/000003.log"
+    - "/home/tester/.config/figma-linux/Cookies"

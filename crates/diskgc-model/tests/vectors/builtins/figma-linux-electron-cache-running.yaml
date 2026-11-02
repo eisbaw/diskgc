@@ -1,0 +1,44 @@
+# figma-linux-electron-cache: the app is running (its SingletonLock names
+# a live pid), so every cache of its user-data directory is retained as
+# in_use and nothing is deleted, although no process holds a file in them.
+# A stopped app's lock is absent; a stale lock retains too (model test
+# electron_app_cache.rs).
+profile_vector: 1
+select: "profile:figma-linux-electron-cache"
+roots: ["/home/tester"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  hostname: model-host
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    "/home/tester/.config/figma-linux/SingletonLock": {"symlink": "model-host-42"}
+    "/home/tester/.config/figma-linux/Cache": {"Cache_Data": {".": {}, "data_0": {"size": "8K"}}}
+    "/home/tester/.config/figma-linux/Code Cache": {"js": {".": {}, "index": {"size": "8K"}}}
+    "/home/tester/.config/figma-linux/GPUCache": {"data_1": {"size": "8K"}}
+    "/home/tester/.config/figma-linux/Local Storage/leveldb": {"000003.log": {"size": "8K"}}
+  processes:
+    - {pid: 42, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: "/home/tester/.config/figma-linux/Cache", reason: in_use}
+    - {candidate: "/home/tester/.config/figma-linux/Code Cache", reason: in_use}
+    - {candidate: "/home/tester/.config/figma-linux/GPUCache", reason: in_use}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: "/home/tester/.config/figma-linux/Cache", reason: in_use}
+    - {candidate: "/home/tester/.config/figma-linux/Code Cache", reason: in_use}
+    - {candidate: "/home/tester/.config/figma-linux/GPUCache", reason: in_use}
+  preserved:
+    - "/home/tester/.config/figma-linux/Cache/Cache_Data/data_0"
+    - "/home/tester/.config/figma-linux/Code Cache/js/index"
+    - "/home/tester/.config/figma-linux/GPUCache/data_1"
+    - "/home/tester/.config/figma-linux/Local Storage/leveldb/000003.log"

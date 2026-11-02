@@ -1,0 +1,59 @@
+# teams-for-linux-electron-cache: the app is not running (its user-data
+# directory holds no SingletonLock). The default session's and a
+# partition's caches are candidates, one per role; site data, cookies and
+# Service Worker storage beside them are never candidates and survive; a
+# partition's Code Cache that is a symlink is not followed; `!profile:pin`
+# excludes one partition's GPUCache.
+profile_vector: 1
+user_profiles:
+  - {"name": "pin", "find": {"roots": ["/home"], "paths": ["tester/.config/teams-for-linux/Partitions/teams-4-linux/GPUCache"], "type": "any"}, "action": "delete", "examples": {"match": ["/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/GPUCache"]}}
+select: "profile:teams-for-linux-electron-cache && !profile:pin"
+roots: ["/home/tester"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    "/home/tester/.config/teams-for-linux/Cache": {"Cache_Data": {".": {}, "data_0": {"size": "8K"}}}
+    "/home/tester/.config/teams-for-linux/Code Cache": {"js": {".": {}, "index": {"size": "8K"}}}
+    "/home/tester/.config/teams-for-linux/GPUCache": {"data_1": {"size": "8K"}, ".diskgc-keep": {}}
+    "/home/tester/.config/teams-for-linux/Local Storage/leveldb": {"000003.log": {"size": "8K"}}
+    "/home/tester/.config/teams-for-linux/Cookies": {"size": "8K"}
+    "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/Cache": {"Cache_Data": {".": {}, "data_0": {"size": "8K"}}}
+    "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/Code Cache": {"symlink": "/home/tester/elsewhere/code-cache"}
+    "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/GPUCache": {"data_1": {"size": "8K"}}
+    "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/IndexedDB/https_teams.microsoft.com_0.indexeddb.leveldb": {"000003.log": {"size": "8K"}}
+    "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/Service Worker/CacheStorage": {"site": {"size": "8K"}}
+    "/home/tester/elsewhere/code-cache": {"js": {"size": "8K"}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: "/home/tester/.config/teams-for-linux/Code Cache/js/index"}]}
+expect:
+  plan:
+    - {candidate: "/home/tester/.config/teams-for-linux/Cache"}
+    - {candidate: "/home/tester/.config/teams-for-linux/Code Cache", reason: in_use}
+    - {candidate: "/home/tester/.config/teams-for-linux/GPUCache", reason: keep_marker}
+    - {candidate: "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/Cache"}
+    - {candidate: "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/GPUCache", reason: excluded}
+  reclaim_exit: 1
+  actions: ["/home/tester/.config/teams-for-linux/Cache", "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/Cache"]
+  removed: ["/home/tester/.config/teams-for-linux/Cache", "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/Cache"]
+  skipped:
+    - {candidate: "/home/tester/.config/teams-for-linux/Code Cache", reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: "/home/tester/.config/teams-for-linux/GPUCache", reason: keep_marker}
+    - {candidate: "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/GPUCache", reason: excluded}
+  preserved:
+    - "/home/tester/.config/teams-for-linux/Code Cache/js/index"
+    - "/home/tester/.config/teams-for-linux/GPUCache/data_1"
+    - "/home/tester/.config/teams-for-linux/Local Storage/leveldb/000003.log"
+    - "/home/tester/.config/teams-for-linux/Cookies"
+    - "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/Code Cache"
+    - "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/GPUCache/data_1"
+    - "/home/tester/elsewhere/code-cache/js"
+    - "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/IndexedDB/https_teams.microsoft.com_0.indexeddb.leveldb/000003.log"
+    - "/home/tester/.config/teams-for-linux/Partitions/teams-4-linux/Service Worker/CacheStorage/site"

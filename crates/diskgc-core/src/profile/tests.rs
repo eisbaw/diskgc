@@ -227,6 +227,8 @@ fn the_built_in_library_loads() {
         "chrome-browser-cache",
         "chromium-browser-cache",
         "edge-browser-cache",
+        "teams-for-linux-electron-cache",
+        "figma-linux-electron-cache",
         "claude-code-versions",
         "codex-releases",
         "cursor-agent-versions",

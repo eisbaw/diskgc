@@ -2231,6 +2231,7 @@ remain a release decision under TASK-67.
 | lean | `elan-toolchains` | development library only, pending Mark's admission: toolchain directories `.elan/toolchains/*` below a supplied home root that `protect_toolchains: elan` and `protect_link_dirs` do not keep ([safety.md](safety.md#toolchain-pins)); `min_idle_for: 1h` | `delete` |
 | editors | `cursor-extensions` | version directories under `.cursor/extensions` of a supplied home root; keep the two newest of each extension id and every installed directory in `extensions.json` | `delete` |
 | browsers | `brave-browser-cache`, `chrome-browser-cache`, `chromium-browser-cache`, `edge-browser-cache` | Only `Cache` and `Code Cache` directories in `Default` and `Profile *` under the corresponding browser's `.cache` directory below a supplied home root; each source requires its own `.config/.../SingletonLock` to be absent | `delete` |
+| electron | `teams-for-linux-electron-cache`, `figma-linux-electron-cache` | development library only, pending Mark's admission of the app names: only `Cache`, `Code Cache` and `GPUCache` directories in the app's user-data directory `.config/<app>` below a supplied home root (teams-for-linux also in each `Partitions/*`); each source requires its own `.config/<app>/SingletonLock` to be absent | `delete` |
 | caches | `pip-cache`, `go-build-cache`, `npm-cache`, `ccache` | the tool's cache dir (roots required) | `command` with the tool's own cleaner |
 | caches | `go-mod-cache` | `go/pkg/mod` below a supplied home root | `delete` with `make_writable` |
 | python / js | `uv-cache`, `pnpm-store`, `yarn-cache` | the tool's cache dir (roots required) | `command` (`uv cache clean`, `pnpm store prune`, `yarn cache clean`) |
@@ -2310,11 +2311,35 @@ write a PID that appears absent in diskgc's namespace. They match only
 never match. A custom browser user-data or disk-cache directory is outside
 these built-ins. The lock check
 is specific to the default browser configuration; do not treat it as a
-general process check for arbitrary Electron applications. The surveyed
-Cursor and teams-for-linux installations have cache directories but no
-`SingletonLock` in their application roots, so their profiles are deferred
-until a reliable app-liveness signal is available. Firefox `cache2` also
-needs a different guard and is outside this Chromium-family set.
+general process check for arbitrary Electron applications. Firefox
+`cache2` needs a different guard and is outside this Chromium-family set.
+
+The Electron application caches (TASK-78) use the same presence marker in
+the app's own user-data directory. Electron writes `SingletonLock` there
+only when the app calls `app.requestSingleInstanceLock()`, so each app is
+admitted only after its own sources show that it takes the lock at
+startup, before any window or session exists (Electron runs the main
+script's top level before `ready`, before the GPU process and any
+network context), quits when it does not get it, and never calls
+`releaseSingleInstanceLock()` (Electron itself removes the lock at
+`quit`, before the sessions close; see the residuals). Read 2026-11-02, all on Electron 43.6.0
+from nixpkgs, whose binary carries Chromium's `SingletonLock`:
+
+| App | Version read | Single-instance lock | Profile |
+|---|---|---|---|
+| teams-for-linux | 2.23.0 (`app.asar`) | at module load, after pinning `userData`; a second instance quits | `teams-for-linux-electron-cache` |
+| figma-linux | 0.11.5 (`main/main.js`) | in the app object's constructor, whose manager arguments touch only settings, logs, themes and extensions, no session; a second instance quits | `figma-linux-electron-cache` |
+| Cursor (and VS Code) | 3.1.15 (`out/main.js`) | none: single instance through VS Code's own IPC socket | none |
+| draw.io | 31.1.8 (`app.asar`) | only for the GUI: `--export` runs a hidden window in the same user-data directory without it | none |
+| Saleae Logic 2 | 2.4.44 (`app.asar`) | none | none |
+| Claude desktop | not installed on the dev host | unverified | none |
+
+They match only `Cache`, `Code Cache` and `GPUCache` (teams-for-linux
+also in each persistent partition, `Partitions/*`); the user-data
+directory, `Local Storage`, `IndexedDB`, `Service Worker` storage,
+`Cookies` and the `Dawn*Cache` directories never match. A custom
+`--user-data-dir`, a Flatpak or Snap install (another directory) and
+another app version are outside what was read.
 
 - `pytest-tmp` ships with the `pytest` liveness contract, one session per
   candidate (TASK-112 step 5). The former source (withdrawn after TASK-65)
@@ -2428,6 +2453,7 @@ its task notes.
 | `nix-shell-rc` | legacy `nix-shell` and `nix develop` (Nix 2.34.8 on the host, 2.34.9 pinned by `nix_shell_rc_lifecycle_is_pinned`): the directory's pid is the shell's own for both, interactive and `-c`; `nix develop`'s directory is referenced by nothing after start; legacy `nix-shell`'s is the `TMPDIR` of the shell and its children and its rc trap removes it except after `SIGKILL` (safety.md) | `liveness_contract: nix-shell`, `min_idle_for: 1h` | sound, under Owner PID's preconditions | A consumer that outlives the shell and keeps only a path string (Owner PID's scope). `min_idle_for: 1h` narrows it and is not part of the contract's soundness: a detached child that wrote in the directory within the hour keeps it `not_idle`. | Shipped (TASK-112 step 4) after the lifecycle verification (both commands, interactive and `-c`, normal exit, `SIGHUP` and `SIGKILL`, a detached child outliving the shell, a shell in a private PID namespace sharing `/tmp`), with its vectors and container tests. Matching set as in the library row. Small in bytes, large in count. In the 0.1 catalog (TASK-65). |
 | `pytest-tmp` | pytest 9.1.1 (sources read; lifecycle pinned by `pytest_lifecycle_is_pinned`; the contract by `pytest_live_policy_none_session_in_shell_root_is_kept` and `pytest_live_basetemp_session_is_kept`), pytest-xdist 3.8.0 with execnet 2.1.2 (`pytest_orphan_xdist_worker_keeps_session`: a worker outlives its killed controller by about 15 s, then execnet ends it) | `liveness_contract: pytest`, `min_idle_for: 1h`, `checkouts: allow`; one candidate per session | verified heuristic: lock rows sound; the rank row producer-equivalent or stricter (it never permits a session pytest's own next cleanup, with the default retention, would keep; while a pytest of the same user runs it needs a session older than pytest's dead-lock age, Mark 2026-10-23); the unused-root row heuristic, and it does remove sessions above the rank that pytest keeps | Those of safety.md (pytest sessions), each with its vector. `min_idle_for: 1h` covers pytest's startup window between the session's `mkdir` and its `.lock` (microseconds), with a wide margin for a stalled start; it is not part of the contract's soundness. | Shipped (TASK-112 step 5), admitted by Mark, 2026-10-23. Matching set as in the library row. Every verdict of the decision table names its row in the detail; the checks before the table (safety.md) name none. Container tests: `pytest_lifecycle_is_pinned`, `pytest_live_policy_none_session_in_shell_root_is_kept`, `pytest_live_basetemp_session_is_kept`, `pytest_orphan_xdist_worker_keeps_session`. In the 0.1 catalog (TASK-65, Mark 2026-10-24). |
 | `brave-browser-cache`, `chrome-browser-cache`, `chromium-browser-cache`, `edge-browser-cache` | Chromium-family browsers, default user-data directory | `app_not_running` | sound (presence marker) | A browser that starts between the last lock check and the unlink finds its `Cache` or `Code Cache` missing, which Chromium treats as an empty cache. | Shipped (TASK-74). |
+| `teams-for-linux-electron-cache`, `figma-linux-electron-cache` | teams-for-linux 2.23.0 and figma-linux 0.11.5 on Electron 43.6.0 (sources read, TASK-78: `app.requestSingleInstanceLock()` before `ready`, a second instance quits, no `releaseSingleInstanceLock()`), default user-data directory | `app_not_running` | sound (presence marker) | As the browsers': an app that starts between the last lock check and the unlink finds a cache missing, which Chromium treats as an empty cache. Electron removes the lock at `quit`, before its sessions close, so a cache can be deleted during an app's last moments of shutdown, with the same consequence; the in-use check narrows that window only while the closing app holds files in the cache open. Only for the versions read: a later version that stops taking the lock, or takes it after opening a session, falls outside the contract. | Shipped (TASK-78) to the development library only: in no catalog until Mark admits the app names. Container tests with the real apps: not yet written (a follow-up of TASK-78). |
 | `cargo-target` | Cargo (1.90.0, 1.99.1, nightly-2026-10-16) | the kind's lock protocol, `checkouts: allow` | delegated (producer lock) | A program built in the target and running from it is protected by process heuristics only: Cargo holds no lock while it runs (PRD, Limits). | Shipped; in the 0.1 catalog. |
 | `docker-build-cache`, `docker-dangling`, `docker-unreferenced` | Docker Engine 29.8.2 and Buildx 0.37.2 in digest-pinned dind | the bound engine's own prune (`docker builder prune --all`, `docker image prune`, `docker image prune --all`); the daemon keeps what a build or container references | delegated | `docker-unreferenced` also removes tagged images that no container references; a later `docker run` pulls them again, or they are rebuilt when they were built locally and never pushed. | Shipped; not in 0.1 (Docker actions are outside its scope). |
 | `pip-cache`, `uv-cache`, `go-build-cache`, `npm-cache`, `pnpm-store`, `yarn-cache`, `ccache`, `platformio-cache`, `jest-cache` | pip 26.1.2, uv 0.13.0, Go 1.26.8, npm 11.19.0, pnpm 12.9.0, Yarn 1.22.22, ccache 4.14.1, PlatformIO 6.1.19, Jest 30.2.0, each cleaner run in a Nix container on the exact measured directory | the tool's own cleaner (Built-in profile library); in use, `checkouts: refuse` | delegated | No worse than the user running that cleaner: what it does to a run in flight is the tool's (Jest's `--clearCache` and `ccache --clear` remove the directory's contents outright; `pnpm store prune` removes only packages no project references). A uv environment installed with the non-default `link-mode = "symlink"` points into the cache and breaks until reinstalled. Rebuilding needs the network. | Shipped; not in 0.1 (command actions are outside its scope). |

@@ -807,6 +807,13 @@ under the candidate lock, and immediately before deletion or a command
 action after the process scan. A browser started after the last check can
 still race deletion; Chromium's symlink is not a lock diskgc can acquire to
 exclude that startup.
+An Electron application writes the same lock in its user-data directory
+only if it asks for it (`app.requestSingleInstanceLock()`); a built-in
+relies on it only for an app whose sources show it takes the lock before
+any window or session and never releases it itself ([reference.md](reference.md#built-in-profile-library)).
+Electron removes the lock when the app emits `quit`, before its sessions
+close, so a cache can still be written during the app's last moments of
+shutdown after the lock is gone: the same kind of race as a startup.
 
 **Every process, and only once settled.** The scan works in rounds: it
 lists the processes, then reads every one it has not read yet and every
