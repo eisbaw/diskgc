@@ -3,10 +3,10 @@ id: TASK-304
 title: >-
   VM test on a real kernel: btrfs on two loop members, an idmapped bind, a
   loop-backed image in a protected match, a live overlay root with snaps
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-01T17:45:00Z'
-updated_date: '2026-11-01T19:50:00Z'
+updated_date: '2026-11-02T00:41:00Z'
 labels:
   - test
   - vm
@@ -25,4 +25,6 @@ From the TASK-299 review (mped S5, 2026-11-01): the Linux side of the loop ident
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-01: in progress in tmp/worktrees/t304 (branch t304-vm-real-kernel).
+
+2026-11-02: merged with the real-kernel VM test after one review round on the product fixes (verification note on the merge).
 <!-- SECTION:NOTES:END -->
