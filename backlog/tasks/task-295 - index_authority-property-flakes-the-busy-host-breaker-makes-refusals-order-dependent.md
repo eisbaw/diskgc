@@ -3,10 +3,10 @@ id: TASK-295
 title: >-
   index_authority property flakes: the busy-host breaker makes refusals
   order-dependent
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-01T12:37:00Z'
-updated_date: '2026-11-02T11:33:00Z'
+updated_date: '2026-11-02T14:01:00Z'
 labels:
   - test
   - index
@@ -26,4 +26,6 @@ Found by the TASK-267 implementer (2026-11-01): index_authority::the_index_is_ne
 Evidence preserved at tmp/evidence-t267/ (failure log + replay).
 
 2026-11-02: in progress in tmp/worktrees/t295 (branch t295-test-flakes).
+
+2026-11-02: merged (ff), test-only.
 <!-- SECTION:NOTES:END -->

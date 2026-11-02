@@ -4,10 +4,10 @@ title: >-
   e2e fragility: watch_tally_only_never_deletes_and_a_second_watch_exits_2 fails
   under host I/O pressure (tally brake engages before the first batch, empty
   snapshot)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-02T00:42:00Z'
-updated_date: '2026-11-02T11:33:00Z'
+updated_date: '2026-11-02T14:01:00Z'
 labels:
   - test
   - flaky
@@ -25,4 +25,6 @@ Found by the TASK-304 implementer (2026-11-02): under host I/O pressure (PSI 23-
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-02: in progress in tmp/worktrees/t295 (branch t295-test-flakes).
+
+2026-11-02: merged (ff), test-only.
 <!-- SECTION:NOTES:END -->
