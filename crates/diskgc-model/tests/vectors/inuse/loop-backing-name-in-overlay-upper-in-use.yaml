@@ -1,0 +1,39 @@
+# TASK-305 (5), the reverse alias through an overlay's upper layer: a loop
+# device holds /data/images/held.img (on `/`), and the same inode has a
+# second name in the upper directory of the overlay /merged. The overlay
+# shows that name under its own device, so the device's identity
+# (254:1:ino) matches nothing the walk through /merged sees, and deleting
+# scratch-held through the overlay unlinks the upper name. Once the plain
+# name is gone too, the image loses its data when the device detaches. The
+# walk reads each regular file's upper entry (upperdir= + its path below
+# the overlay), whose identity is the device's: in_use. scratch-plain's
+# upper file is no loop's: reclaimed (the narrow rule's control).
+profile_vector: 1
+user_profiles:
+  - {"name": "scratch-probe", "find": {"roots": ["/merged/cache"], "paths": ["scratch-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/merged/cache/scratch-a"]}}
+profile: scratch-probe
+path: /merged/cache
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  loops:
+    - {dev: "7:1", backing: /data/images/held.img, readable: true}
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 60, at: /merged, fs: overlay, dev: "0:60", size: 1G, parent: 1, overlay_upper: /data/upper}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /data/images/held.img: {size: 1M}
+    /data/upper/cache/scratch-held: {disk.img: {link: /data/images/held.img}}
+    /data/upper/cache/scratch-plain: {f: {size: 4K}}
+expect:
+  plan:
+    - {candidate: /merged/cache/scratch-held, reason: in_use}
+    - {candidate: /merged/cache/scratch-plain}
+  reclaim_exit: 1
+  actions: [/merged/cache/scratch-plain]
+  removed: [/merged/cache/scratch-plain]
+  skipped:
+    - {candidate: /merged/cache/scratch-held, reason: in_use, process_blockers: []}
+  preserved: [/data/images/held.img, /data/upper/cache/scratch-held/disk.img]

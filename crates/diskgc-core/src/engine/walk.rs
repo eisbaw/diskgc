@@ -31,6 +31,10 @@
 //! ([`super::container_storage`]) refuses the candidate
 //! (`contains_special`).
 //!
+//! On an overlay with an upper layer, each admitted regular file's name in
+//! that layer is read as well ([`super::UpperName`], [`overlay`]; TASK-305),
+//! for the in-use check's loop rules.
+//!
 //! The first entry that fails stops the walk. Host errors on the way are
 //! classified in one place, [`host_failure`]: fail closed, never treated as
 //! empty.
@@ -39,9 +43,7 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::host::{
-    Base, DirListing, Errno, FileType, Host, HostError, MonoTime, MountEntry, Stat, Timestamp,
-};
+use crate::host::{Base, DirListing, Errno, FileType, Host, HostError, MonoTime, Stat, Timestamp};
 use crate::resolve::{ResolveError, Unsafe};
 
 use super::frames::{OpenFailed, OpenFailure, Stack};
@@ -332,6 +334,16 @@ pub fn walk<H: Host>(
         }
         Err(e) => return Err(host_failure(path(), "stat", &e)),
     };
+    // On an overlay, its upper layer: what a deletion through it changes
+    // (TASK-307, TASK-305).
+    let upper = if candidate.fs_type() == "overlay" {
+        match mounts.iter().find(|m| m.id == candidate.mount_id) {
+            Some(mount) => overlay::upper_of(host, &mounts, mount),
+            None => overlay::Upper::Unreached("its mount is not in the mount table".to_owned()),
+        }
+    } else {
+        overlay::Upper::None
+    };
     // The candidate's own subvolume, which every directory below must be
     // in (no nested subvolume, TASK-286, TASK-307); a directory candidate
     // in another than its parent directory is itself the top of one.
@@ -347,15 +359,15 @@ pub fn walk<H: Host>(
             Volume::of(&parent),
             Some(candidate.fs_type()),
         )?;
-        if candidate.fs_type() == "overlay" {
-            overlay = overlay_state(host, &mounts, candidate, &stat, &parent)?;
-        }
+        overlay = overlay_state(host, &upper, candidate.path, &stat, &parent)?;
     }
     let mut walker = Walker {
         host,
         candidate,
         volume: Volume::of(&stat),
         overlay,
+        upper,
+        upper_unread: None,
         rules,
         deadline,
         mount_points,
@@ -411,58 +423,47 @@ pub fn walk<H: Host>(
         } else {
             walker.newest_change
         },
+        upper: match &walker.upper {
+            overlay::Upper::None => None,
+            overlay::Upper::Reached(layer) => Some(layer.shown(walker.upper_unread)),
+            overlay::Upper::Unreached(why) => Some(super::UpperLayer::Unreached(why.clone())),
+        },
     })
 }
 
-/// The overlay proof for a directory candidate on an overlay mount
-/// ([`overlay`]): its upper entry must be in its directory's upper
-/// subvolume, and its directories are checked against its own.
-fn overlay_state<H: Host>(
-    host: &H,
-    mounts: &[MountEntry],
-    candidate: &Candidate<'_, H::Fd>,
+/// The overlay proof for a directory candidate at `path` on an overlay
+/// mount whose upper layer is `upper` ([`overlay`]): its upper entry must
+/// be in its directory's upper subvolume, and its directories are checked
+/// against its own.
+fn overlay_state<F>(
+    host: &impl Host<Fd = F>,
+    upper: &overlay::Upper<F>,
+    path: &Path,
     stat: &Stat,
     parent: &Stat,
-) -> Result<overlay::State<H::Fd>, Skip> {
-    let path = candidate.path;
-    let upper = match mounts.iter().find(|m| m.id == candidate.mount_id) {
-        Some(mount) => overlay::upper_of(host, mounts, mount),
-        None => overlay::Upper::Unreached("its mount is not in the mount table".to_owned()),
-    };
+) -> Result<overlay::State, Skip> {
     match upper {
         overlay::Upper::None => Ok(overlay::State::Off),
+        overlay::Upper::Reached(layer) if !layer.has_subvolumes() => Ok(overlay::State::Off),
         overlay::Upper::Unreached(why) => {
-            overlay::unreached(path, stat.subvol, parent.subvol, &why)?;
+            overlay::unreached(path, stat.subvol, parent.subvol, why)?;
             Ok(overlay::State::Unreached {
-                why,
+                why: why.clone(),
                 candidate: stat.subvol,
             })
         }
-        overlay::Upper::Reached {
-            root,
-            fs_type,
-            at,
-            mount_point,
-        } => {
+        overlay::Upper::Reached(layer) => {
             let unproved = |why: String| overlay::unproved(path, &why);
-            let Some(own) =
-                overlay::upper_volume(host, &root, &mount_point, path).map_err(unproved)?
-            else {
+            let Some(own) = overlay::upper_volume(host, layer, path).map_err(unproved)? else {
                 // Lower-only: so is everything below it.
                 return Ok(overlay::State::Off);
             };
             let dir = path.parent().unwrap_or(path);
-            let outer = overlay::upper_volume(host, &root, &mount_point, dir)
+            let outer = overlay::upper_volume(host, layer, dir)
                 .map_err(unproved)?
                 .ok_or_else(|| unproved("its upper entry's directory has none".to_owned()))?;
-            overlay::upper_boundary(path, own, outer, &fs_type, &at)?;
-            Ok(overlay::State::Upper {
-                root,
-                fs_type,
-                at,
-                mount_point,
-                candidate: own,
-            })
+            overlay::upper_boundary(path, own, outer, &layer.fs_type, &layer.at)?;
+            Ok(overlay::State::Upper { candidate: own })
         }
     }
 }
@@ -473,8 +474,13 @@ struct Walker<'w, H: Host> {
     /// The candidate's own subvolume: a directory below in another one is
     /// a nested subvolume ([`super::same_subvolume`]).
     volume: Volume,
-    /// On an overlay, the upper layer's proof ([`overlay`]).
-    overlay: overlay::State<H::Fd>,
+    /// On an overlay, the upper layer's subvolume proof ([`overlay`]).
+    overlay: overlay::State,
+    /// On an overlay, its upper layer, where each regular file's upper
+    /// name is read ([`super::UpperName`]).
+    upper: overlay::Upper<H::Fd>,
+    /// Why some regular file's upper name could not be read (the first).
+    upper_unread: Option<String>,
     rules: &'w Rules<'w>,
     deadline: Option<MonoTime>,
     mount_points: Vec<PathBuf>,
@@ -568,8 +574,21 @@ impl<H: Host> Walker<'_, H> {
         }
     }
 
-    /// Checks one entry (the rules in the module docs) and counts it.
+    /// Checks one entry (the rules in the module docs), counts it and, on
+    /// an overlay, reads a regular file's upper name.
     fn admit(
+        &mut self,
+        name: OsString,
+        stat: &Stat,
+        path: impl Fn() -> PathBuf,
+    ) -> Result<Entry, WalkStop> {
+        let mut entry = self.check(name, stat, &path)?;
+        entry.upper = self.upper_name(&entry.identity, &path)?;
+        Ok(entry)
+    }
+
+    /// Checks one entry (the rules in the module docs) and counts it.
+    fn check(
         &mut self,
         name: OsString,
         stat: &Stat,
@@ -598,22 +617,29 @@ impl<H: Host> Walker<'_, H> {
                 self.volume,
                 Some(self.candidate.fs_type()),
             )?;
-            match &self.overlay {
-                overlay::State::Off => {}
-                overlay::State::Upper {
-                    root,
-                    fs_type,
-                    at,
-                    mount_point,
-                    candidate,
-                } => {
-                    let upper = overlay::upper_volume(self.host, root, mount_point, &path())
+            match (&self.overlay, &self.upper) {
+                (overlay::State::Off, _) => {}
+                (overlay::State::Upper { candidate }, overlay::Upper::Reached(layer)) => {
+                    let upper = overlay::upper_volume(self.host, layer, &path())
                         .map_err(|why| overlay::unproved(&path(), &why))?;
                     if let Some(upper) = upper {
-                        overlay::upper_boundary(&path(), upper, *candidate, fs_type, at)?;
+                        overlay::upper_boundary(
+                            &path(),
+                            upper,
+                            *candidate,
+                            &layer.fs_type,
+                            &layer.at,
+                        )?;
                     }
                 }
-                overlay::State::Unreached { why, candidate } => {
+                // Not made: `State::Upper` comes only from a reached layer.
+                (overlay::State::Upper { .. }, _) => {
+                    return Err(overlay::unproved(
+                        &path(),
+                        "the upper layer it was proved in is not held (an internal error)",
+                    ));
+                }
+                (overlay::State::Unreached { why, candidate }, _) => {
                     overlay::unreached(&path(), stat.subvol, *candidate, why)?;
                 }
             }
@@ -708,7 +734,41 @@ impl<H: Host> Walker<'_, H> {
             identity,
             bytes,
             listing,
+            upper: super::UpperName::None,
         })
+    }
+
+    /// A regular file's name in its overlay's upper layer (TASK-305): what
+    /// a loop device opened by a plain name of the file identifies it by
+    /// ([`super::UpperName`]). Only regular files back a loop device (the
+    /// walk refuses block devices); diskgc out of file descriptors is an
+    /// error of the run.
+    fn upper_name(
+        &mut self,
+        identity: &Identity,
+        path: impl Fn() -> PathBuf,
+    ) -> Result<super::UpperName, WalkStop> {
+        if identity.file_type != FileType::Regular {
+            return Ok(super::UpperName::None);
+        }
+        match &self.upper {
+            overlay::Upper::None => Ok(super::UpperName::None),
+            // The record says why (`UpperLayer::Unreached`).
+            overlay::Upper::Unreached(_) => Ok(super::UpperName::Unknown),
+            overlay::Upper::Reached(layer) => {
+                let (name, unread) =
+                    overlay::upper_name(self.host, layer, &path()).map_err(|error| {
+                        WalkStop::Failed {
+                            path: layer.name_of(&path()),
+                            error,
+                        }
+                    })?;
+                if self.upper_unread.is_none() {
+                    self.upper_unread = unread;
+                }
+                Ok(name)
+            }
+        }
     }
 }
 

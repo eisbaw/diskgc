@@ -1036,9 +1036,11 @@ at enumeration, which stops the run or excludes the tier. btrfs without
 `stx_subvol` keeps the device rule alone. What lies inside a subvolume is
 taken like anything on its mount. Directories only: overlayfs without
 `xino` shows a file of a lower layer under that layer's device, never a
-directory. Tested on a real kernel by `vm-real-kernel` (btrfs,
-bcachefs and an overlay with a btrfs upper layer,
-[testing.md](testing.md)).
+directory. The walk reaches the same upper layer for each regular file
+too, whose upper name the loop rules match
+([safety.md](safety.md#in-use), Upper-layer names, TASK-305). Tested on a
+real kernel by `vm-real-kernel` (btrfs, bcachefs and an overlay with a
+btrfs upper layer, [testing.md](testing.md)).
 
 Deleting needs the same filesystem proved. Writing diskgc's own state
 needs the opposite proved: the snapshot is guarded (Snapshot: Never at the

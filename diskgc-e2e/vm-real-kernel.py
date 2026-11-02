@@ -840,6 +840,187 @@ done
     run(f"umount /mnt/ov /mnt/ov2 /mnt/ovb && losetup -d {loop}")
 
 
+def overlay_oracle(tag: str, before: dict[str, str], after: dict[str, str], candidates: set[str],
+                   untouched: tuple[str, ...]) -> None:
+    """The deletion oracle through an overlay: every non-directory entry of
+    CANDIDATES is gone (a lower-only directory may stay: deleting through
+    it copies it up, a change the walk then stops at, see scenario 8),
+    nothing outside them is, nothing is added, and every entry below the
+    UNTOUCHED prefixes (layers, other names) is exactly as it was."""
+    def inside(p: str) -> bool:
+        return any(p == c or p.startswith(c + "/") for c in candidates)
+    gone = {p for p in before if p not in after}
+    added = sorted(set(after) - set(before))
+    files = {p for p in before if inside(p) and not before[p].startswith("d ")}
+    moved = sorted(p for p in before if p.startswith(untouched) and after.get(p) != before[p])
+    save(f"{tag}.oracle", "gone:\n" + "\n".join(sorted(gone)) + "\nadded:\n" + "\n".join(added)
+         + "\nchanged below untouched:\n" + "\n".join(moved) + "\n")
+    assert all(inside(p) for p in gone), (tag, sorted(p for p in gone if not inside(p)))
+    assert files <= gone, (tag, sorted(files - gone))
+    assert not added and not moved, (tag, added, moved)
+
+
+# ---- 9. A loop image with a second name in an overlay's upper layer ----
+# safety.md, In use, Loop devices (TASK-305): an overlay shows a file of its
+# upper layer under its own device or the upper layer's anonymous one, so a
+# loop device opened by a plain name of the file identifies it by an
+# identity the walk through the overlay never sees, and deleting through
+# the overlay unlinks the upper name. The walk reads each regular file's
+# upper entry (upperdir= plus its path below the overlay) and the in-use
+# check matches that identity too. First the kernel facts the rule rests
+# on are probed on scratch overlays: the identity the overlay shows (with
+# and without xino), an unlink of an upper name, and an unlink of a
+# lower-only name (TASK-305 item 4: a whiteout, the lower name survives).
+def scenario_overlay_upper_loop() -> None:
+    loop = run("""
+install -d -m 0755 /work/s9 /mnt/ovb /mnt/ov /mnt/ov2 /mnt/ovx /mnt/ovxi
+truncate -s 300M /work/s9/upper.img
+L=$(losetup -f --show /work/s9/upper.img)
+mkfs.btrfs -q -f "$L" >/dev/null
+mount "$L" /mnt/ovb
+for d in upper work upper2 work2 upperx workx upperxi workxi; do install -d -m 0755 /mnt/ovb/$d; done
+for d in /mnt/ovb/images /mnt/ovb/upper/cache /mnt/ovb/upper/cache2 /mnt/ovb/upper2/cache \
+    /mnt/ovb/upperx/p /mnt/ovb/upperxi/p /work/s9/images /work/s9/lower/cache /work/s9/lower/cache2 \
+    /work/s9/lower2/cache /work/s9/lowerx /work/s9/lowerx/p /work/s9/lowerxi; do
+  install -d -m 0755 -o 1000 -g 1000 $d
+done
+ln -s /mnt/ovb /work/s9/ovlink
+echo "$L"
+""").strip()
+    # Fixtures before the overlays are mounted (a layer changed under a
+    # mounted overlay is undefined). held.img has three names on the btrfs:
+    # its own and one in each of the upper directories cache and cache2.
+    run("""
+truncate -s 16M /mnt/ovb/images/held.img
+U=/mnt/ovb/upper
+mkdir $U/cache/scratch-held $U/cache2/scratch-held
+ln /mnt/ovb/images/held.img $U/cache/scratch-held/disk.img
+ln /mnt/ovb/images/held.img $U/cache2/scratch-held/disk.img
+mkdir $U/cache/scratch-plain $U/cache2/scratch-plain
+echo p > $U/cache/scratch-plain/f && echo p > $U/cache2/scratch-plain/f
+truncate -s 16M /work/s9/images/low.img
+mkdir /work/s9/lower/cache/scratch-lower && ln /work/s9/images/low.img /work/s9/lower/cache/scratch-lower/disk.img
+mkdir /work/s9/lower/cache2/scratch-lowonly && echo l > /work/s9/lower/cache2/scratch-lowonly/f
+mkdir /mnt/ovb/upper2/cache/scratch-file && echo f > /mnt/ovb/upper2/cache/scratch-file/f
+mkdir -p /mnt/ovb/upper2/cache/scratch-dirs/a/b
+for x in x xi; do
+  echo u > /mnt/ovb/upper$x/p/pure && ln /mnt/ovb/upper$x/p/pure /mnt/ovb/upper$x/p/pure-link
+done
+echo l > /work/s9/lowerx/p/low && ln /work/s9/lowerx/p/low /work/s9/lowerx/p/low-link
+""", TESTER)
+    run("mount -t overlay overlay -o lowerdir=/work/s9/lower,upperdir=/mnt/ovb/upper,workdir=/mnt/ovb/work /mnt/ov && "
+        "mount -t overlay overlay -o lowerdir=/work/s9/lower2,upperdir=/work/s9/ovlink/upper2,workdir=/work/s9/ovlink/work2 /mnt/ov2 && "
+        "mount -t overlay overlay -o lowerdir=/work/s9/lowerx,upperdir=/mnt/ovb/upperx,workdir=/mnt/ovb/workx /mnt/ovx && "
+        "mount -t overlay overlay -o lowerdir=/work/s9/lowerxi,upperdir=/mnt/ovb/upperxi,workdir=/mnt/ovb/workxi,xino=on /mnt/ovxi")
+    save("s9-mounts.txt", run("grep ' overlay ' /proc/self/mountinfo; cat /sys/module/overlay/parameters/xino_auto"))
+
+    # The premises, on this kernel. stat: device (decimal), inode, links.
+    def ident(path: str) -> list[str]:
+        return run(f"stat -c '%d %i %h' {path}").split()
+    facts: list[str] = []
+
+    def note(line: str) -> None:
+        facts.append(line)
+        save("s9-premises.txt", "\n".join(facts) + "\n")
+    for x in ("x", "xi"):
+        shown, upper = ident(f"/mnt/ov{x}/p/pure"), ident(f"/mnt/ovb/upper{x}/p/pure")
+        note(f"(a) ov{x}: overlay shows {shown}, upper name {upper}")
+        # (a) the overlay never shows the upper filesystem's device for it.
+        assert shown[0] != upper[0], facts
+    # (b) an unlink through the overlay removes the upper name.
+    run("rm /mnt/ovx/p/pure", TESTER)
+    gone = run("test -e /mnt/ovb/upperx/p/pure && echo present || echo gone").strip()
+    left = ident("/mnt/ovb/upperx/p/pure-link")
+    note(f"(b) after rm /mnt/ovx/p/pure: upper name {gone}, its other link {left}")
+    assert gone == "gone" and left[2] == "1", facts
+    # (4) an unlink through the overlay of a lower-only name writes a
+    # whiteout over it and leaves the lower name.
+    before_low = ident("/work/s9/lowerx/p/low")
+    run("rm /mnt/ovx/p/low", TESTER)
+    after_low = ident("/work/s9/lowerx/p/low")
+    whiteout = run("stat -c '%F %t:%T' /mnt/ovb/upperx/p/low").strip()
+    note(f"(4) after rm /mnt/ovx/p/low: lower name {before_low} -> {after_low}, upper entry {whiteout!r}")
+    assert after_low == before_low and before_low[2] == "2", facts
+    assert whiteout == "character special file 0:0", facts
+
+    held = run("losetup -f --show /mnt/ovb/images/held.img").strip()
+    low = run("losetup -f --show /work/s9/images/low.img").strip()
+    save("s9-loops.txt", run("losetup -l"))
+
+    # Root opens the devices: the upper name of held.img is its identity,
+    # in_use; the candidate with an upper file of no loop's, and the
+    # lower-only ones (a lower name of low.img among them), reclaim.
+    cfg = config("s9-root", ["/mnt/ov/cache"], owners=True)
+    code, out, _ = ensure("s9-root-dry", ROOT, cfg, "/mnt/ov", "--dry-run")
+    plan = plan_of(report(out, 0, "dry_run"))
+    assert plan == {
+        "/mnt/ov/cache/scratch-held": "in_use",
+        "/mnt/ov/cache/scratch-plain": None,
+        "/mnt/ov/cache/scratch-lower": None,
+    }, plan
+    roots = ("/mnt/ov/cache", "/mnt/ovb/images", "/mnt/ovb/upper/cache/scratch-held", "/work/s9/lower", "/work/s9/images")
+    before = tree(*roots)
+    code, out, _ = ensure("s9-root", ROOT, cfg, "/mnt/ov")
+    result = report(out, 1, "exhausted")
+    assert acted(result) == {"/mnt/ov/cache/scratch-plain", "/mnt/ov/cache/scratch-lower"}, (result["actions"], result["skipped"])
+    overlay_oracle("s9-root", before, tree(*roots), acted(result), roots[1:])
+    run("test ! -e /mnt/ov/cache/scratch-plain")  # upper-only: removed whole
+    row = row_of(result, "/mnt/ov/cache/scratch-held")
+    assert row["reason"] == "in_use", row
+    assert "/mnt/ovb/upper/cache/scratch-held/disk.img" in (row["detail"] or "") and "upper layer" in row["detail"], row
+    held_names = run("stat -c '%h' /mnt/ovb/images/held.img").strip()
+    assert held_names == "3", held_names
+    # Item 4 through diskgc: the lower name of low.img survives the
+    # candidate's deletion, its device still reads it.
+    low_after = ident("/work/s9/lower/cache/scratch-lower/disk.img")
+    assert low_after == ident("/work/s9/images/low.img") and low_after[2] == "2", low_after
+    assert loop_backing(low) == "/work/s9/images/low.img", loop_backing(low)
+    run(f"dd if={low} of=/dev/null bs=4096 count=1 status=none")
+    passed("9a overlay upper alias (root)", f"{held}: scratch-held in_use ({row['detail']}); scratch-plain and the "
+           f"lower-only scratch-lower reclaimed; low.img's lower name kept ({low_after}), {low} still reads")
+
+    # A user outside disk, the plain name deleted: the doubt covers the
+    # btrfs of the deleted name's directory, and so every candidate with an
+    # upper file there; a lower-only candidate (ext4) reclaims.
+    run(f"losetup -d {low}")
+    run("rm /mnt/ovb/images/held.img", TESTER)
+    backing = loop_backing(held)
+    assert backing == "/mnt/ovb/images/held.img (deleted)", backing
+    cfg = config("s9-user", ["/mnt/ov/cache2"])
+    roots = ("/mnt/ov/cache2", "/mnt/ovb/upper/cache2/scratch-held", "/mnt/ovb/upper/cache2/scratch-plain",
+             "/work/s9/lower/cache2")
+    before = tree(*roots)
+    code, out, _ = ensure("s9-user", TESTER, cfg, "/mnt/ov")
+    result = report(out, 1, "exhausted")
+    assert acted(result) == {"/mnt/ov/cache2/scratch-lowonly"}, (result["actions"], result["skipped"])
+    overlay_oracle("s9-user", before, tree(*roots), acted(result), roots[1:])
+    kept = {c: r for c, r in outcomes(result).items() if c != "/mnt/ov/cache2/scratch-lowonly"}
+    assert kept == {
+        "/mnt/ov/cache2/scratch-held": ("in_use_unknown", "loop_device"),
+        "/mnt/ov/cache2/scratch-plain": ("in_use_unknown", "loop_device"),
+    }, result["skipped"]
+    passed("9b overlay upper alias (tester, deleted name)", f"'{backing}': the candidates with upper files on its "
+           f"btrfs in doubt ({row_of(result, '/mnt/ov/cache2/scratch-held')['detail']}); the lower-only one reclaimed")
+
+    # An upper layer diskgc cannot reach by its upperdir= (through a
+    # symlink): a candidate holding a regular file is in doubt while a
+    # device has an identity; one holding only directories reclaims.
+    cfg = config("s9-unreached", ["/mnt/ov2/cache"], owners=True)
+    roots = ("/mnt/ov2/cache", "/mnt/ovb/upper2/cache/scratch-file", "/work/s9/lower2")
+    before = tree(*roots)
+    code, out, _ = ensure("s9-unreached", ROOT, cfg, "/mnt/ov2")
+    result = report(out, 1, "exhausted")
+    assert acted(result) == {"/mnt/ov2/cache/scratch-dirs"}, (result["actions"], result["skipped"])
+    overlay_oracle("s9-unreached", before, tree(*roots), acted(result), roots[1:])
+    row = row_of(result, "/mnt/ov2/cache/scratch-file")
+    assert (row["reason"], row["unknown_cause"]) == ("in_use_unknown", "loop_device"), row
+    assert "upper layer cannot be read" in (row["detail"] or ""), row
+    run("test -f /mnt/ovb/upper2/cache/scratch-file/f")
+    passed("9c overlay upper alias (unreached upper layer)", f"scratch-file in doubt ({row['detail']}); "
+           "scratch-dirs reclaimed")
+    run(f"umount /mnt/ov /mnt/ov2 /mnt/ovx /mnt/ovxi && losetup -d {held} && umount /mnt/ovb && losetup -d {loop}")
+
+
 # ---- 5. udisksctl loop-setup by a user outside disk ----
 def scenario_udisks() -> None:
     # D-Bus activated; started here as the first udisksctl call would.
@@ -915,7 +1096,8 @@ def scenario_hidepid() -> None:
 failures: list[str] = []
 for scenario in (scenario_btrfs, scenario_loop_in_candidate, scenario_loop_deleted_name,
                  scenario_loop_partition, scenario_idmapped, scenario_live_overlay,
-                 scenario_bcachefs, scenario_overlay_upper, scenario_udisks, scenario_hidepid,
+                 scenario_bcachefs, scenario_overlay_upper, scenario_overlay_upper_loop,
+                 scenario_udisks, scenario_hidepid,
                  scenario_root_scan):
     name = scenario.__name__.removeprefix("scenario_")
     began = time.monotonic()

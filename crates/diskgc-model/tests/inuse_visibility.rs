@@ -521,6 +521,108 @@ fn a_device_identity_on_an_overlay_doubts_every_candidate_off_it() {
     assert_eq!(skip.reason, Reason::InUse, "{skip}");
 }
 
+/// TASK-305 (5), the reverse alias through an overlay's upper layer: the
+/// device opened `/data/images/held.img` on `/`, whose inode has a second
+/// name `/data/upper/v/img` in the upper directory of the overlay
+/// `/merged`. The overlay shows that name under its own device, so neither
+/// the device's exact identity nor a deleted name's filesystem scope
+/// reaches it, and deleting `/merged/v` unlinks the upper name. The walk
+/// reads each regular file's upper entry (`upperdir=` and its path below
+/// the overlay) and the check matches that identity too: `in_use` where the
+/// device answers, `in_use_unknown` where only its deleted name's
+/// filesystem is known. A candidate whose upper files are no loop's, or
+/// whose upper layer is on another filesystem, reclaims; where the upper
+/// layer cannot be reached, a candidate holding a regular file is in doubt
+/// while a device has an identity, one holding only directories is not.
+#[test]
+fn a_loop_backing_with_a_name_in_an_overlays_upper_layer_keeps_its_candidate() {
+    let text = |loops: &str, overlay: &str| {
+        yaml(
+            loops,
+            "  /data/images/held.img: {size: 1M}\n  /data/upper/v/img: {link: /data/images/held.img}\n  /data/upper/plain/f: {size: 1K}\n  /data/upper/dirs/a/b: {.: {}}\n  /tmp/up/w/f: {size: 1K}",
+        )
+        .replacen(
+            "  - {id: 30,",
+            &format!("  - {{id: 60, at: /merged, fs: overlay, dev: \"0:60\", size: 1G, parent: 1, {overlay}}}\n  - {{id: 30,"),
+            1,
+        )
+        .replacen(
+            "size: 1G, parent: 1}\n",
+            "size: 1G, parent: 1}\n  - {id: 61, at: /other, fs: overlay, dev: \"0:61\", size: 1G, parent: 1, overlay_upper: /tmp/up}\n",
+            1,
+        )
+    };
+    let reader = "loops:\n  - {dev: \"7:1\", backing: /data/images/held.img, readable: true}";
+    let plain = "overlay_upper: /data/upper";
+    // The device's own word: exact, by the upper name's identity.
+    let host = common::host(&text(reader, plain));
+    let skip = check_at(&host, "/merged", "/merged/v").expect_err("in use");
+    assert_eq!(skip.reason, Reason::InUse, "{skip}");
+    assert!(
+        skip.detail.contains("loop device 7:1") && skip.detail.contains("/data/upper/v/img"),
+        "{skip}"
+    );
+    let host = common::host(&text(reader, plain));
+    assert_eq!(
+        check_at(&host, "/merged", "/merged/plain"),
+        Ok(()),
+        "no loop's"
+    );
+    // A deleted name, a device diskgc cannot open: the doubt covers the
+    // filesystem of the name's surviving directory, the upper names on it
+    // included; an overlay whose upper layer is elsewhere is clear.
+    let deleted = "loops:\n  - {dev: \"7:1\", backing: /data/images/held.img}\nevents:\n  - {at: {op: loop_backing_files, when: before}, remove: /data/images/held.img}";
+    let host = common::host(&text(deleted, plain));
+    let skip = loop_unknown(check_at(&host, "/merged", "/merged/v"), "deleted name");
+    assert!(
+        skip.detail.contains("the filesystem of /data/images"),
+        "{skip}"
+    );
+    let host = common::host(&text(deleted, plain));
+    assert_eq!(
+        check_at(&host, "/other", "/other/w"),
+        Ok(()),
+        "upper elsewhere"
+    );
+    // The upper layer cannot be reached by its upperdir= (relative): a
+    // regular file's other name cannot be told.
+    let unreached = "overlay_upper: /data/upper, overlay_upperdir_shown: data/upper";
+    let host = common::host(&text(reader, unreached));
+    let skip = loop_unknown(check_at(&host, "/merged", "/merged/plain"), "unreached");
+    assert!(
+        skip.detail.contains("loop device 7:1")
+            && skip.detail.contains("/merged/plain/f is a regular file")
+            && skip.detail.contains("upperdir= data/upper"),
+        "{skip}"
+    );
+    let host = common::host(&text(reader, unreached));
+    assert_eq!(
+        check_at(&host, "/merged", "/merged/dirs"),
+        Ok(()),
+        "no file"
+    );
+    // No loop device: the unreached upper layer costs nothing.
+    let host = common::host(&text("", unreached));
+    assert_eq!(
+        check_at(&host, "/merged", "/merged/plain"),
+        Ok(()),
+        "no device"
+    );
+    // A device opened through the overlay itself (a live root's snap): its
+    // identity is the overlay's view, which every name there shows, so the
+    // unread upper layer adds no doubt on it; the file is matched exactly.
+    let through = "loops:\n  - {dev: \"7:1\", backing: /merged/v/img, readable: true}";
+    let host = common::host(&text(through, unreached));
+    assert_eq!(
+        check_at(&host, "/merged", "/merged/plain"),
+        Ok(()),
+        "opened through the overlay"
+    );
+    let host = common::host(&text(through, unreached));
+    let skip = check_at(&host, "/merged", "/merged/v").expect_err("in use");
+    assert_eq!(skip.reason, Reason::InUse, "{skip}");
+}
+
 /// A device diskgc cannot open whose name was deleted: another link of the
 /// file can only be on the filesystem of the name's surviving directory,
 /// so candidates there are `in_use_unknown` and others are clear (mped

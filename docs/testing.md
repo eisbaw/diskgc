@@ -1954,6 +1954,21 @@ architecture.md, Filesystem matching):
    are reclaimed, the lower layer untouched. A second overlay names its
    upper layer through a symlink, which diskgc does not follow: only a
    directory whose `stx_subvol` differs from its candidate's is refused.
+9. An overlay with a btrfs upper layer and an ext4 lower layer
+   (TASK-305). First the kernel facts: the overlay shows an upper file
+   under another device than its upper name's, with and without
+   `xino=on`; an unlink through it removes the upper name; and an unlink
+   of a lower-only name writes a whiteout and leaves the lower name. An
+   image has a hard link in the upper layer and is attached by its plain
+   name: root keeps the candidate holding the link `in_use`, naming the
+   upper name, and reclaims one with an upper file of no device's and a
+   lower-only one holding another attached image's lower name, which
+   survives and still reads. With the plain name deleted, `tester`'s
+   candidates with upper files on that btrfs are
+   `in_use_unknown`/`loop_device` and a lower-only one reclaims. Where the
+   upper layer cannot be reached (`upperdir=` through a symlink), root's
+   candidate holding a regular file is `in_use_unknown`, one holding only
+   directories reclaims.
 0. Root's scan on a real kernel, with every guest process visible
    (kernel threads included), clears an unheld candidate (TASK-306); the
    kernel-thread facts the rule rests on (environ `ESRCH`, no fd, map,

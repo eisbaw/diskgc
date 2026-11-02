@@ -164,6 +164,24 @@ impl LoopBackings {
             .find(|backing| backing.scope.covers(mount_id, &devices))
     }
 
+    /// The first device whose file may be the unread upper-layer name of a
+    /// regular file of a candidate on the overlay mount `mount_id`
+    /// (TASK-305): one whose identity is known, or whose doubt is a
+    /// filesystem's (a deleted name's). Not one opened through that
+    /// overlay itself ([`Scope::AllBut`] naming the mount): its identity is
+    /// the overlay's view of the file, which every name of it there shows
+    /// (`ovl_getattr` of the same real inode), so it is matched exactly.
+    /// The other devices already doubt the candidate by its mount or
+    /// everywhere, or hold a file no candidate can (another user's, as the
+    /// overlay shows its upper owner; an object in no directory).
+    pub fn identified(&self, mount_id: u64) -> Option<&LoopBacking> {
+        self.backings.iter().find(|backing| match &backing.scope {
+            Scope::Filesystem(_) => true,
+            Scope::AllBut(own) if own.contains(&mount_id) => false,
+            _ => backing.identity.is_some(),
+        })
+    }
+
     /// The loop device holding the file `id`, if the device said so.
     pub fn held_by(&self, id: DevIno) -> Option<Dev> {
         self.backings

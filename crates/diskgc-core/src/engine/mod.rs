@@ -341,6 +341,82 @@ pub struct Entry {
     /// directory table). Some exactly when `identity.file_type` is a
     /// directory.
     listing: Option<usize>,
+    /// For a regular file on an overlay with an upper layer: its name
+    /// there ([`UpperName`]).
+    pub upper: UpperName,
+}
+
+/// The upper-layer name of a regular file the walk met on an overlay
+/// (TASK-305; docs/safety.md, In use: Loop devices). The overlay shows a
+/// file of its upper layer under its own device or the layer's anonymous
+/// one, never the identity a plain name of the file has, and an unlink
+/// through the overlay removes the upper name: so the in-use check matches
+/// that name's identity as well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpperName {
+    /// Not a regular file on an overlay with an upper layer, or one with no
+    /// upper entry (lower-only: deleting it through the overlay writes a
+    /// whiteout and leaves the lower name).
+    None,
+    /// The upper entry's (device, inode), as `statx` of its name in the
+    /// upper layer shows it.
+    Known(DevIno),
+    /// Whether it has an upper entry, and which, cannot be told (the upper
+    /// layer or the entry in it cannot be reached).
+    Unknown,
+}
+
+/// The upper layer of an overlay a walked candidate lies on, for the
+/// in-use check's messages and doubt ([`UpperName`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpperLayer {
+    /// Reached by the overlay's `upperdir=`.
+    Reached {
+        /// `upperdir=` joined with the overlay mount's root field: the
+        /// upper directory of the overlay's mount point.
+        at: PathBuf,
+        /// The overlay's mount point.
+        mount_point: PathBuf,
+        /// Why some regular file's upper name is [`UpperName::Unknown`]
+        /// (the first one met).
+        unread: Option<String>,
+    },
+    /// Not reached (why): every regular file's upper name is
+    /// [`UpperName::Unknown`].
+    Unreached(String),
+}
+
+impl UpperLayer {
+    /// The upper name of what the overlay shows at `path`, where the layer
+    /// was reached.
+    pub fn name_of(&self, path: &Path) -> Option<PathBuf> {
+        match self {
+            Self::Reached {
+                at, mount_point, ..
+            } => Some(upper_path(at, mount_point, path)),
+            Self::Unreached(_) => None,
+        }
+    }
+
+    /// Why some regular file's upper name cannot be told, if one cannot.
+    pub fn unread(&self) -> Option<&str> {
+        match self {
+            Self::Reached { unread, .. } => unread.as_deref(),
+            Self::Unreached(why) => Some(why),
+        }
+    }
+}
+
+/// The name in an upper layer reached at `at` of what the overlay mounted
+/// at `mount_point` shows at `path` (the layer mirrors the overlay's names
+/// for every entry it holds); `path` itself when it is not below the mount
+/// point.
+fn upper_path(at: &Path, mount_point: &Path, path: &Path) -> PathBuf {
+    match path.strip_prefix(mount_point) {
+        Ok(rel) if rel.as_os_str().is_empty() => at.to_owned(),
+        Ok(rel) => at.join(rel),
+        Err(_) => path.to_owned(),
+    }
 }
 
 /// The kind of an IPC entry.
@@ -376,6 +452,9 @@ pub struct WalkRecord {
     entries: usize,
     bytes: u64,
     newest_change: Option<Timestamp>,
+    /// On an overlay with an upper layer: that layer (each regular file's
+    /// [`Entry::upper`]).
+    upper: Option<UpperLayer>,
 }
 
 impl WalkRecord {
@@ -428,6 +507,30 @@ impl WalkRecord {
     pub fn objects(&self) -> impl Iterator<Item = DevIno> + '_ {
         std::iter::once(self.root.identity.id)
             .chain(self.listings.iter().flatten().map(|e| e.identity.id))
+    }
+
+    /// The upper layer of the overlay the candidate lies on, if it is on
+    /// one with an upper layer ([`UpperName`]).
+    pub fn upper_layer(&self) -> Option<&UpperLayer> {
+        self.upper.as_ref()
+    }
+
+    /// The (device, inode) shown through the overlay and the upper name's
+    /// of every regular file with a known upper name ([`UpperName::Known`]).
+    pub fn upper_names(&self) -> impl Iterator<Item = (DevIno, DevIno)> + '_ {
+        self.all_entries().filter_map(|entry| match entry.upper {
+            UpperName::Known(upper) => Some((entry.identity.id, upper)),
+            UpperName::None | UpperName::Unknown => None,
+        })
+    }
+
+    /// The first regular file, in record order, whose upper name cannot be
+    /// told ([`UpperName::Unknown`]): its (device, inode) through the
+    /// overlay.
+    pub fn upper_unknown(&self) -> Option<DevIno> {
+        self.all_entries()
+            .find(|entry| entry.upper == UpperName::Unknown)
+            .map(|entry| entry.identity.id)
     }
 
     /// Every socket and FIFO in the record, with its path below the
@@ -556,6 +659,7 @@ impl WalkRecord {
             entries,
             bytes,
             newest_change: self.newest_change,
+            upper: self.upper.clone(),
         })
     }
 }

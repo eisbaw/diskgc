@@ -719,7 +719,11 @@ impl Scan {
     ///    would give a harness evidence that does not exist);
     /// 2. a process uses one of the record's objects (fd, cwd, root, exe,
     ///    mapping; a FIFO held open is found here), or one of them is the
-    ///    backing file of a configured loop device: `in_use`;
+    ///    backing file of a configured loop device: `in_use`; on an overlay
+    ///    the loop rules also match each regular file's upper-layer name
+    ///    ([`crate::engine::UpperName`], TASK-305), and one that cannot be
+    ///    read leaves the candidate `in_use_unknown` while a device has an
+    ///    identity or a deleted name's filesystem;
     /// 3. a process's initial environment names a path inside the
     ///    candidate: `in_use`;
     /// 4. a socket in the record is bound in diskgc's network namespace, or
@@ -740,11 +744,41 @@ impl Scan {
         if let Some(skip) = self.unknown(path) {
             return Err(skip);
         }
-        if let Some(backing) = self.loops.doubt(candidate.mount_id(), record.objects()) {
+        // On an overlay, a regular file's upper-layer name is another name
+        // of it under another identity, which a deletion through the
+        // overlay removes (TASK-305): (shown, upper) pairs.
+        let uppers: Vec<(DevIno, DevIno)> = record.upper_names().collect();
+        let objects = record
+            .objects()
+            .chain(uppers.iter().map(|(_, upper)| *upper));
+        if let Some(backing) = self.loops.doubt(candidate.mount_id(), objects) {
             return Err(Skip::in_use_unknown(
                 path.to_owned(),
                 UnknownCause::LoopDevice,
                 backing.why.clone(),
+            ));
+        }
+        if let Some(shown) = record.upper_unknown()
+            && let Some(backing) = self.loops.identified(candidate.mount_id())
+        {
+            let file = below(path, &record.path_of(shown).unwrap_or_default());
+            let why = record
+                .upper_layer()
+                .and_then(crate::engine::UpperLayer::unread)
+                .unwrap_or("not read");
+            return Err(Skip::in_use_unknown(
+                path.to_owned(),
+                UnknownCause::LoopDevice,
+                format!(
+                    "{} is a regular file on an overlay whose upper layer cannot be read for it \
+                     ({why}), so whether it is another name of the file loop device {} holds \
+                     ({}) cannot be told, and a deletion through the overlay removes an upper \
+                     name. Detach the device (`losetup -d`, `udisksctl loop-delete`), or run \
+                     diskgc where it can read the upper layer",
+                    file.display(),
+                    backing.device,
+                    backing.text.display()
+                ),
             ));
         }
         let by_inode = MAPS_BY_INODE.contains(&candidate.fs_type());
@@ -792,6 +826,25 @@ impl Scan {
                         candidate.fs_type()
                     ),
                     Some(blocker(*pid, ProcessEvidence::InodeMap)),
+                );
+            }
+        }
+        for (shown, upper) in &uppers {
+            if let Some(device) = self.loops.held_by(*upper) {
+                let at = below(path, &record.path_of(*shown).unwrap_or_default());
+                let name = record
+                    .upper_layer()
+                    .and_then(|layer| layer.name_of(&at))
+                    .unwrap_or_else(|| at.clone());
+                return in_use(
+                    at,
+                    format!(
+                        "loop device {device} is backed by its name in the overlay's upper layer, \
+                         {} ({upper}): the kernel holds it open, a deletion through the overlay \
+                         removes that name, and its data is lost when the device detaches",
+                        name.display()
+                    ),
+                    None,
                 );
             }
         }
