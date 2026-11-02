@@ -892,9 +892,13 @@ fn rejected_outer_source_where_does_not_weaken_term_negation_or_config_protect()
 }
 
 proptest! {
+    // Failures persist to selection_reference.proptest-regressions beside this file
+    // (proptest's default; commit it): the fixed seed replays `just
+    // check`'s cases, and a persisted one also reruns a case only `just
+    // soak`'s larger count reached.
     #![proptest_config(ProptestConfig {
         cases: std::env::var("DISKGC_PROPERTY_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(32),
-        rng_seed: RngSeed::Fixed(0x16_2026), failure_persistence: None, ..ProptestConfig::default()
+        rng_seed: RngSeed::Fixed(0x16_2026), ..ProptestConfig::default()
     })]
 
     #[test]

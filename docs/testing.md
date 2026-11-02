@@ -1644,7 +1644,15 @@ removed (the TASK-121 discipline).
   tally refused it, whose sizing walk checks no owners, keep markers or
   sockets and so can name another of a candidate's refusals than the
   eligibility walk's first, a reporting difference only (TASK-261: the
-  sizing walk's refusal reason differs from the eligibility walk's)). Two stated exceptions to "what
+  sizing walk's refusal reason differs from the eligibility walk's), or
+  the busy-host breaker skipped it unchecked: the breaker counts
+  `in_use_unknown` ends in a row and any other end resets the count, so
+  where it trips depends on the order the index gives the queue; the
+  candidate is still refused, and this property's generated models'
+  only cause of `in_use_unknown` (a process diskgc cannot read) is
+  host-wide, which each case asserts, so the breaker never changes what
+  is deleted there (TASK-295; saved case
+  `a_reordered_queue_moves_the_busy_host_breaker`)). Two stated exceptions to "what
   that run's own discovery finds", both outside the generated models:
   re-matching a unit looks names up on the way down instead of listing,
   so a directory over the listing limit is not refused there
@@ -1673,6 +1681,14 @@ removed (the TASK-121 discipline).
 
 A failing case shrinks to a minimal model, printed as YAML; developers save
 it under `crates/diskgc-model/tests/regressions/`, where it is replayed.
+Property tests also persist each failing seed (proptest's default; an
+integration test's goes to `<test>.proptest-regressions` beside it),
+committed so the seed reruns first; a few suites turn it off
+(`grep -rn 'failure_persistence: None' crates`), as a runner that fails
+on purpose must. A seed regenerates its case only while the
+strategies are unchanged, and is not written inside the Nix sandbox's
+read-only source, so the saved YAML stays the portable artifact
+(TASK-295).
 Regression files pin the host-model schema and are migrated when it
 changes.
 
@@ -2185,7 +2201,13 @@ filesystem, processes and mounts from the developer's system.
   tmpfs as the watched filesystem and the deletion oracle on every run:
   - (diskgc-e2e `watch_suite.rs`, TASK-32 and TASK-236:
     `watch_process_reclaims_to_target_then_stays_quiet_and_stops_on_sigterm`,
-    `watch_tally_only_never_deletes_and_a_second_watch_exits_2`,
+    `watch_tally_only_never_deletes_and_a_second_watch_exits_2` (its
+    snapshot must hold every candidate, so it binds a quiet PSI file
+    over each of `/proc/pressure/{io,memory,cpu}` in its container:
+    `/proc/pressure` is the host's, and I/O on the machine running the
+    suite engaged the brake before the first batch, TASK-310; the brake
+    itself is tested by `pressure_brake_doubles_the_sleep_and_skips_batches`
+    and `background_tally_backs_off_under_io_pressure`),
     `watch_tally_pauses_while_another_process_holds_the_host_lock`;
     TASK-257: `watch_second_signal_leaves_a_stubborn_child_holding_the_host_lock`,
     a second SIGTERM during a TERM-ignoring command child's grace: exit 0

@@ -247,13 +247,63 @@ pub fn watch_process_reclaims_to_target_then_stays_quiet_and_stops_on_sigterm(
     verdict.assert_clean()
 }
 
+/// The pressure files the background tally's brake reads
+/// (`LinuxHost::pressure`, `diskgc-linux/src/host.rs`).
+const PSI_RESOURCES: [&str; 3] = ["io", "memory", "cpu"];
+
+/// Makes the background tally's pressure brake independent of the host
+/// (TASK-310): `/proc/pressure` is host-wide, not per container, so I/O
+/// on the machine running the suite engaged the brake before the tally's
+/// first batch and the snapshot held nothing. Binds a quiet PSI file (every average `0.00`, in the kernel's
+/// format) over each of `/proc/pressure/{io,memory,cpu}` in this test's
+/// disposable container, and reads each back to prove the bind took.
+/// diskgc still reads PSI, through its own `/proc` descriptor, and so
+/// still takes its PSI-present path; it reads no pressure. The brake
+/// itself is tested where pressure is made on purpose: scripted PSI on the
+/// model (`pressure_brake_doubles_the_sleep_and_skips_batches`) and the
+/// guest's own pressure in a kernel VM
+/// (`background_tally_backs_off_under_io_pressure`).
+///
+/// Returns whether the kernel has PSI. Without it (no
+/// `/proc/pressure/io`), there is no brake to quiet: diskgc logs that the
+/// duty cycle alone applies.
+fn quiet_pressure(ctx: &Ctx) -> Result<bool, String> {
+    if !Path::new("/proc/pressure/io").exists() {
+        eprintln!("info: no /proc/pressure/io: the kernel has no PSI, the brake is off");
+        return Ok(false);
+    }
+    const QUIET: &str = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n\
+                         full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
+    for resource in PSI_RESOURCES {
+        let target = format!("/proc/pressure/{resource}");
+        let quiet = ctx.records.write_file(
+            &format!("quiet-psi-{resource}"),
+            QUIET.as_bytes(),
+            0o444,
+            crate::ROOT,
+        )?;
+        rustix::mount::mount_bind(&quiet, &target).map_err(|e| {
+            format!("bind a quiet PSI file over {target} in the test container: {e}")
+        })?;
+        let seen = fs::read_to_string(&target).map_err(|e| format!("read {target} back: {e}"))?;
+        ensure!(
+            seen == QUIET,
+            "{target} is not the quiet file after the bind: {seen:?}"
+        );
+    }
+    eprintln!("info: quiet PSI bound over /proc/pressure/{{io,memory,cpu}}");
+    Ok(true)
+}
+
 /// TASK-32 AC #3: `--tally-only` with available space far below any
 /// threshold deletes nothing (deletion oracle with no eligible path),
-/// writes no record, and writes its snapshot at the stop. A second
-/// `watch` for the same filesystem and user exits 2 after its 10 s wait
-/// (TASK-30 AC #1, watch's half).
+/// writes no record, and writes its snapshot at the stop, holding every
+/// candidate: its tally runs with the host's pressure taken out
+/// ([`quiet_pressure`]). A second `watch` for the same filesystem and user
+/// exits 2 after its 10 s wait (TASK-30 AC #1, watch's half).
 pub fn watch_tally_only_never_deletes_and_a_second_watch_exits_2(ctx: &Ctx) -> TestResult {
     let (watched, junk) = fixture(ctx)?;
+    let psi = quiet_pressure(ctx)?;
     // Nearly full: a script would reclaim here; tally-only must not.
     let now = avail()?;
     fill(&watched, "filler", now.saturating_sub(MIB))?;
@@ -294,6 +344,23 @@ pub fn watch_tally_only_never_deletes_and_a_second_watch_exits_2(ctx: &Ctx) -> T
         first.stdout
     );
     ensure!(snapshot_written(), "no snapshot in {STATE_DIR}");
+    // The quiet PSI was read: no brake, no failed reading (which would
+    // run unbraked for another reason), and no "no PSI" fallback either.
+    ensure!(
+        !first.stderr.contains("pressure brake engaged"),
+        "the brake engaged under quiet PSI: {}",
+        first.stderr
+    );
+    ensure!(
+        !first.stderr.contains("a pressure reading failed"),
+        "a quiet PSI reading failed: {}",
+        first.stderr
+    );
+    ensure!(
+        psi != first.stderr.contains("no pressure stall information"),
+        "PSI on the kernel: {psi}; diskgc: {}",
+        first.stderr
+    );
     ensure!(
         first.stderr.contains(&format!("written: {JUNK} unit(s)")),
         "the snapshot holds the candidates: {}",

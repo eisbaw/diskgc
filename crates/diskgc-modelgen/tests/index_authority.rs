@@ -24,14 +24,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use diskgc_core::engine::Reason;
+use diskgc_core::engine::{Reason, UnknownCause};
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::{Host, MonoTime};
 use diskgc_core::index::{
     BUDGET_BYTES, Birth, Discovered, Finder, Identity, Index, MountKey, Refusal, Tally,
 };
 use diskgc_core::profile::{Library, parse_profiles};
-use diskgc_core::report::Report;
+use diskgc_core::report::{Report, SkipEntry};
 use diskgc_core::snapshot::RunIndex;
 use diskgc_core::tally::TallyState;
 use diskgc_core::units::parse_size;
@@ -491,17 +491,46 @@ fn acted(report: &Report) -> BTreeSet<PathBuf> {
     report.actions.iter().map(|a| a.candidate.clone()).collect()
 }
 
+/// Whether `skip` is one the busy-host breaker made: after three
+/// candidates in a row of a tier end `in_use_unknown`, the tier's rest is
+/// skipped `in_use_unknown` unchecked (docs/safety.md, In use: Freshness).
+/// The detail is the only mark of it in the report;
+/// [`a_reordered_queue_moves_the_busy_host_breaker`] fails if it changes.
+fn breaker_skip(skip: &SkipEntry) -> bool {
+    skip.reason == Reason::InUseUnknown
+        && skip
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.starts_with("not checked: "))
+}
+
 /// The skips other than `stale` (which only the corrupted index makes),
 /// by candidate, each skip of it once (a path skipped twice in a run shows
-/// twice): its reason, unless the run's synchronous tally gave it
-/// (`None`). The tally's sizing walk checks no owners, keep markers or
-/// IPC, so for a candidate refused for two reasons at once it can report
-/// another one than the eligibility walk's first (an other user's
-/// directory of mode `0333`: `unreadable` there, `not_owner` here), and
-/// which walk judged a candidate depends on the index (sized as a single
-/// or not, in a block). Which reason is reported never changes whether it
-/// is deleted (docs/safety.md, The eligibility walk). Narrowed only until
-/// TASK-261 makes the sizing walk report the eligibility walk's reason.
+/// twice): its reason, unless no walk of the run judged it (`None`):
+///
+/// - the run's synchronous tally refused it. The tally's sizing walk checks
+///   no owners, keep markers or IPC, so for a candidate refused for two
+///   reasons at once it can report another one than the eligibility walk's
+///   first (an other user's directory of mode `0333`: `unreadable` there,
+///   `not_owner` here), and which walk judged a candidate depends on the
+///   index (sized as a single or not, in a block). Narrowed only until
+///   TASK-261 makes the sizing walk report the eligibility walk's reason.
+/// - the busy-host breaker skipped it unchecked ([`breaker_skip`]). The
+///   breaker counts `in_use_unknown` ends in a row, and any other end
+///   resets the count, so where it trips depends on the order the
+///   candidates are taken in, which is what the index changes (TASK-295).
+///   The candidate is still refused, never deleted: only the reason a
+///   check would have named is not known.
+///
+/// Which reason is reported never changes whether a candidate is deleted
+/// (docs/safety.md, The eligibility walk); that is asserted separately and
+/// exactly ([`acted`], [`unlinked`]). This holds because every generated
+/// cause of `in_use_unknown` here (a process diskgc cannot read) is
+/// host-wide: each candidate that reaches the in-use check ends
+/// `in_use_unknown` in either order, so the breaker only replaces a
+/// refusal. A cause that depends on the candidate (a loop device, a
+/// candidate-specific scan failure) would let it change what is deleted;
+/// [`host_wide_unknowns`] checks the premise in every case.
 fn refused(report: &Report) -> BTreeMap<PathBuf, Vec<Option<&'static str>>> {
     let mut by_path: BTreeMap<PathBuf, Vec<Option<&'static str>>> = BTreeMap::new();
     for skip in report.skipped.iter().filter(|s| s.reason != Reason::Stale) {
@@ -512,10 +541,11 @@ fn refused(report: &Report) -> BTreeMap<PathBuf, Vec<Option<&'static str>>> {
             .detail
             .as_deref()
             .is_some_and(|d| d.contains("refused by this run's tally"));
+        let judged = !sized && !breaker_skip(skip);
         by_path
             .entry(candidate)
             .or_default()
-            .push((!sized).then(|| skip.reason.as_str()));
+            .push(judged.then(|| skip.reason.as_str()));
     }
     for reasons in by_path.values_mut() {
         reasons.sort();
@@ -524,24 +554,134 @@ fn refused(report: &Report) -> BTreeMap<PathBuf, Vec<Option<&'static str>>> {
 }
 
 /// Whether two runs' [`refused`] agree: the same candidates, each skipped
-/// as often, and for the same reasons unless a run's tally gave one.
+/// as often, and for the same reasons except where a run did not judge
+/// one: the index never hides a refusal, only the reason an unjudged one
+/// names. An unjudged skip (`None`) stands in for one reason of the other
+/// run's, not for all of a path's: a path skipped twice, once unjudged,
+/// still has its other reason compared.
 fn same_refusals(
     a: &BTreeMap<PathBuf, Vec<Option<&'static str>>>,
     b: &BTreeMap<PathBuf, Vec<Option<&'static str>>>,
 ) -> bool {
     a.len() == b.len()
         && a.iter().all(|(path, reasons)| {
-            b.get(path).is_some_and(|other| {
-                other.len() == reasons.len()
-                    && (reasons.contains(&None) || other.contains(&None) || reasons == other)
-            })
+            b.get(path)
+                .is_some_and(|other| same_reasons(reasons, other))
         })
 }
 
+/// [`same_refusals`] for one path: equally many skips, and after pairing
+/// the reasons both name, each one left over on either side is matched by
+/// an unjudged skip of the other.
+fn same_reasons(a: &[Option<&'static str>], b: &[Option<&'static str>]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut b_left: Vec<&str> = b.iter().flatten().copied().collect();
+    let mut a_left = 0;
+    for reason in a.iter().flatten() {
+        match b_left.iter().position(|r| r == reason) {
+            Some(i) => {
+                b_left.swap_remove(i);
+            }
+            None => a_left += 1,
+        }
+    }
+    let unjudged = |side: &[Option<&str>]| side.iter().filter(|r| r.is_none()).count();
+    a_left <= unjudged(b) && b_left.len() <= unjudged(a)
+}
+
+/// The premise of [`refused`]'s breaker wildcard, checked: every
+/// `in_use_unknown` the breaker did not make has a cause that holds for
+/// the whole host (a process diskgc cannot read), so the breaker only
+/// replaces refusals and never changes what is deleted. A generator that
+/// adds a candidate-dependent cause (a loop device) fails here, by name,
+/// instead of as a flake of the deleted set.
+fn host_wide_unknowns(report: &Report) -> Result<(), String> {
+    match report.skipped.iter().find(|s| {
+        s.reason == Reason::InUseUnknown
+            && !breaker_skip(s)
+            && s.unknown_cause != Some(UnknownCause::UnreadableProcess)
+    }) {
+        None => Ok(()),
+        Some(skip) => Err(format!(
+            "in_use_unknown with cause {:?}, not host-wide: the breaker wildcard in `refused` \
+             no longer holds: {skip:#?}",
+            skip.unknown_cause
+        )),
+    }
+}
+
+/// The property's assertions for one prepared model (with its view,
+/// extras and the host lock already applied) and one corruption: shared by
+/// the generator below and the saved cases it found.
+fn check(model: &HostModel, extras: &Extras, corruption: &Corruption) -> Result<(), TestCaseError> {
+    let request = request(SELECTIONS[corruption.select]);
+    let correct_host = ModelHost::new(model).expect("model loads");
+    let correct = executor::ensure(&correct_host, &request, &[1000], &mut |_| {});
+    let host = ModelHost::new(model).expect("model loads");
+    let mut index = RunIndex::of(corrupted(&host, model, &request.tier, corruption));
+    let mut lines = Vec::new();
+    let report = executor::ensure_with_index(&host, &request, &[1000], &mut index, &mut |l| {
+        lines.push(l.to_owned())
+    });
+    let explain = || {
+        format!(
+            "{}\nextras: {extras:#?}\ncorruption: {corruption:#?}\ncorrect: {correct:#?}\ncorrupted: \
+         {report:#?}\nlog:\n  {}",
+            model.to_yaml(),
+            lines.join("\n  ")
+        )
+    };
+    for (run, r) in [("correct", &correct), ("corrupted", &report)] {
+        if let Err(why) = host_wide_unknowns(r) {
+            prop_assert!(false, "premise ({run} run): {why}\n{}", explain());
+        }
+    }
+    // Nothing a correct run refuses or does not find is deleted, and
+    // no entry is unlinked that the correct run did not unlink.
+    prop_assert!(
+        acted(&report).is_subset(&acted(&correct)),
+        "deleted beyond the correct run:\n{}",
+        explain()
+    );
+    prop_assert!(
+        unlinked(&host).is_subset(&unlinked(&correct_host)),
+        "unlinked beyond the correct run:\n{}",
+        explain()
+    );
+    // The model is still: the index costs nothing either (its queue
+    // only reorders; what it misses, the tier's discovery finds).
+    prop_assert_eq!(
+        acted(&report),
+        acted(&correct),
+        "deleted set differs:\n{}",
+        explain()
+    );
+    prop_assert!(
+        same_refusals(&refused(&report), &refused(&correct)),
+        "refusals differ:\n{}",
+        explain()
+    );
+    prop_assert_eq!(
+        report.exit_code(),
+        correct.exit_code(),
+        "exit code differs:\n{}",
+        explain()
+    );
+    Ok(())
+}
+
 proptest! {
+    // Failures persist to index_authority.proptest-regressions beside this
+    // file (proptest's default), to be committed so a found seed reruns
+    // first (as snapshot_props, TASK-279). TASK-295's case predates this
+    // (persistence was off, so its seed was never written); it is saved as
+    // a model under crates/diskgc-model/tests/regressions/ and replayed by
+    // name, which also survives a change of the strategies above (a seed
+    // regenerates its case only while they are unchanged).
     #![proptest_config(ProptestConfig {
         cases: cases(),
-        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
@@ -556,33 +696,83 @@ proptest! {
             model
         };
         let model = provisioned(with_extras(model, &extras));
-        let request = request(SELECTIONS[corruption.select]);
-        let correct_host = ModelHost::new(&model).expect("model loads");
-        let correct = executor::ensure(&correct_host, &request, &[1000], &mut |_| {});
-        let host = ModelHost::new(&model).expect("model loads");
-        let mut index = RunIndex::of(corrupted(&host, &model, &request.tier, &corruption));
-        let mut lines = Vec::new();
-        let report = executor::ensure_with_index(
-            &host, &request, &[1000], &mut index, &mut |l| lines.push(l.to_owned()),
-        );
-        let explain = || format!(
-            "{}\nextras: {extras:#?}\ncorruption: {corruption:#?}\ncorrect: {correct:#?}\ncorrupted: \
-             {report:#?}\nlog:\n  {}",
-            model.to_yaml(),
-            lines.join("\n  ")
-        );
-        // Nothing a correct run refuses or does not find is deleted, and
-        // no entry is unlinked that the correct run did not unlink.
-        prop_assert!(acted(&report).is_subset(&acted(&correct)), "{}", explain());
-        prop_assert!(unlinked(&host).is_subset(&unlinked(&correct_host)), "{}", explain());
-        // The model is still: the index costs nothing either (its queue
-        // only reorders; what it misses, the tier's discovery finds).
-        prop_assert_eq!(acted(&report), acted(&correct), "{}", explain());
-        prop_assert!(
-            same_refusals(&refused(&report), &refused(&correct)),
-            "{}",
-            explain()
-        );
-        prop_assert_eq!(report.exit_code(), correct.exit_code(), "{}", explain());
+        check(&model, &extras, &corruption)?;
     }
+}
+
+/// TASK-295, the case the property found (TASK-267's `just check`): a
+/// process diskgc cannot read makes every candidate that reaches the in-use
+/// check `in_use_unknown`, and after three in a row the busy-host breaker
+/// skips the rest of the tier unchecked. The corrupted index's queue takes
+/// `z4x` (refused `not_idle`) before the breaker trips; the correct run's
+/// discovery order reaches it after, so it is skipped unchecked there.
+#[test]
+fn a_reordered_queue_moves_the_busy_host_breaker() {
+    let model = diskgc_model::load::parse_yaml(include_str!(
+        "../../diskgc-model/tests/regressions/task295-breaker-order.yaml"
+    ))
+    .expect("saved model");
+    let unit = |path, who, hint, hint_in_run, shift_days| Unit {
+        path,
+        who,
+        id: Id::Right,
+        sized: true,
+        hint,
+        hint_in_run,
+        shift_days,
+    };
+    let corruption = Corruption {
+        units: vec![
+            unit(44, Who::Right, None, false, 19),
+            unit(
+                52,
+                Who::OtherProfile,
+                Some(Reason::TooManyEntries),
+                true,
+                21,
+            ),
+            unit(36, Who::Right, None, true, 34),
+            unit(6, Who::OtherHash, None, false, -2),
+        ],
+        listed: true,
+        budget: Some(5771),
+        lumps: false,
+        select: 1,
+    };
+    let extras = Extras {
+        links: Vec::new(),
+        keeps: Vec::new(),
+        modes: Vec::new(),
+    };
+    // The breaker trips in the correct run; if its skips stop being
+    // recognised, the wildcard above has gone dead and this case fails.
+    let request = request(SELECTIONS[corruption.select]);
+    let correct = executor::ensure(
+        &ModelHost::new(&model).expect("model loads"),
+        &request,
+        &[1000],
+        &mut |_| {},
+    );
+    assert!(
+        correct.skipped.iter().any(breaker_skip),
+        "the busy-host breaker no longer trips here, or its skips are no longer recognised: \
+         {correct:#?}"
+    );
+    if let Err(failure) = check(&model, &extras, &corruption) {
+        panic!("{failure}");
+    }
+}
+
+/// An unjudged skip stands in for one reason, not for all of a path's
+/// ([`same_reasons`]; review of TASK-295: the old rule let one `None`
+/// excuse every reason of a path skipped twice).
+#[test]
+fn an_unjudged_skip_excuses_one_reason_only() {
+    let (keep, idle, owner) = (Some("keep_marker"), Some("not_idle"), Some("not_owner"));
+    assert!(same_reasons(&[keep, idle], &[idle, keep]));
+    assert!(same_reasons(&[None, keep], &[idle, keep]));
+    assert!(same_reasons(&[None, None], &[idle, owner]));
+    assert!(!same_reasons(&[None, keep], &[idle, owner]));
+    assert!(!same_reasons(&[keep], &[keep, None]));
+    assert!(!same_reasons(&[keep], &[idle]));
 }

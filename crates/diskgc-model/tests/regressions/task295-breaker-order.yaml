@@ -1,0 +1,112 @@
+host_model: 1
+clock: "2026-10-15T03:00:00Z"
+mounts:
+- id: 1
+  at: /
+  fs: ext4
+  dev: 0:1
+  size: 100G
+- id: 30
+  at: /tmp
+  fs: tmpfs
+  dev: 0:42
+  size: 1G
+  parent: 1
+- id: 31
+  at: /tmp/gen/r_4j_s/c-
+  fs: tmpfs
+  dev: 0:43
+  size: 64M
+  parent: 30
+tree:
+  /run/diskgc/lock:
+    uid: 0
+    gid: 0
+  /tmp/gen:
+    ".":
+      mtime: "2026-10-02T05:06:13Z"
+      uid: 1000
+    .ao_-:
+      type: socket
+    .h:
+      ".":
+        mtime: "2026-09-25T15:20:16Z"
+        uid: 1001
+      .b9:
+        size: "59779"
+        mtime: "2026-09-21T15:23:06Z"
+        uid: 1000
+      .c:
+        size: "37889"
+        mtime: "2026-10-10T14:17:41Z"
+        uid: 1000
+    r_4j_s:
+      ".":
+        mtime: "2026-09-21T16:55:55Z"
+        uid: 1000
+      .d:
+        size: "31131"
+        mtime: "2026-10-13T05:41:44Z"
+        uid: 1000
+      .sg_w:
+        size: "60529"
+        mtime: "2026-09-15T15:00:56Z"
+        uid: 1000
+      .w--_:
+        size: "41435"
+        mtime: "2026-10-14T19:39:08Z"
+        uid: 1000
+      c-:
+        ".":
+          mtime: "2026-10-06T19:15:52Z"
+          uid: 1000
+        k__-:
+          size: "34879"
+          mtime: "2026-10-06T08:03:24Z"
+          uid: 1000
+      h_:
+        ".":
+          mtime: "2026-09-17T13:25:01Z"
+          uid: 1000
+        .q1:
+          type: socket
+        z_-9:
+          size: "61914"
+          mtime: "2026-10-06T23:55:06Z"
+          uid: 1000
+      z4x:
+        ".":
+          mtime: "2026-09-16T20:13:30Z"
+          uid: 1000
+        .j13j:
+          size: "49682"
+          mtime: "2026-10-14T20:53:49Z"
+          uid: 1000
+        .t1y:
+          size: "63588"
+          mtime: "2026-09-30T23:24:37Z"
+          uid: 1000
+        .ysoo4:
+          size: "57298"
+          mtime: "2026-09-27T18:18:44Z"
+          uid: 1000
+        kn-r-:
+          size: "21651"
+          mtime: "2026-09-22T18:29:23Z"
+          uid: 1000
+        wie_:
+          size: "17602"
+          mtime: "2026-10-07T09:48:34Z"
+          uid: 1000
+  /usr/bin/tool:
+    size: 1M
+processes:
+- pid: 4000
+  exe: /usr/bin/tool
+  cwd: /tmp/gen
+  environ:
+  - PATH=/usr/bin
+  maps:
+  - /usr/bin/tool
+  proc: failed
+

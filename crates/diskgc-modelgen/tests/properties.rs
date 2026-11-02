@@ -33,11 +33,12 @@ fn property_config() -> ProptestConfig {
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(32);
+    // Failures persist to properties.proptest-regressions beside this file
+    // (proptest's default; commit it so a found seed reruns first). A seed
+    // regenerates its case only while the strategies are unchanged; the
+    // shrunk YAML below is the portable regression artifact.
     ProptestConfig {
         cases,
-        failure_persistence: None,
-        // A seed is printed by proptest on failure; the YAML below is the
-        // portable regression artifact after shrinking.
         ..ProptestConfig::default()
     }
 }
@@ -565,6 +566,7 @@ fn planted_unchecked_unlink(model: &HostModel) -> Result<(), TestCaseError> {
 
 #[test]
 fn planted_unchecked_unlink_shrinks_to_saved_yaml_and_replays() {
+    // This run fails on purpose: nothing of it is persisted.
     let mut runner = TestRunner::new(ProptestConfig {
         cases: 32,
         failure_persistence: None,
