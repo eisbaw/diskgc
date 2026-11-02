@@ -1,10 +1,12 @@
 ---
 id: TASK-94
-title: 'Profiles: rustup and elan toolchains (command action, pressure tier)'
+title: >-
+  Profiles: rustup and elan toolchains (plain delete with diskgc's pin-aware
+  keep rule; dev library, pending Mark's admission)
 status: In Progress
 assignee: []
 created_date: 2026-10-19 11:48
-updated_date: '2026-11-02T15:24:00Z'
+updated_date: '2026-11-02T17:12:00Z'
 labels:
   - home
 dependencies:
@@ -34,4 +36,6 @@ Why: ~/.rustup/toolchains (5.2 GiB) and ~/.elan/toolchains (3.8 GiB) on the dev 
 2026-10-20 isolated offline container counterexamples (Nix-packaged Elan 4.2.1, Rustup 1.29.0; diskgc-e2e-base image, fresh /tmp homes, --network none, /nix/store read-only): Elan recognizes an installed leanprover/lean4:v4.1.0 directory while an unvisited project has lean-toolchain pointing to it, but gc --json classifies it unused and gc --delete uninstalls it. Rustup accepts toolchain uninstall custom while custom is default: warns and removes it. Thus manager GC/uninstall exit success does not preserve project pins/defaults. No profile shipped. Need manager-name-to-object binding, complete pin/default/override inventory and explicit per-name authorization, lock-time recheck, and disposable fixture that exercises these properties. AC2 real-machine dry run remains barred by the user no-host-testing instruction. See docs/safety.md toolchain subsection.
 
 2026-11-02: Mark steer: profiles + MockFS first. In progress in tmp/worktrees/t94 (branch t94-toolchains).
+
+2026-11-02 (review round): design changed from a command action to a plain delete with diskgc's own keep rule (the managers' uninstall protects neither defaults nor pins, and takes a toolchain name, not a path; neither tool is on PATH on Nix hosts). Mark's admission must cover this design and its residuals (safety.md 'Toolchain pins'), not only the liveness class.
 <!-- SECTION:NOTES:END -->
