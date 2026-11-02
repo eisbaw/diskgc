@@ -1,10 +1,10 @@
 ---
 id: TASK-40
 title: 'Library: language and package caches, verified'
-status: To Do
+status: In Progress
 assignee: []
-created_date: '2026-10-16 22:41'
-updated_date: '2026-10-24 07:45'
+created_date: 2026-10-16 22:41
+updated_date: '2026-11-02T20:42:00Z'
 labels:
   - wave-4
   - config
@@ -29,6 +29,11 @@ Why: per-tool caches need the tool's own cleaner pointed at the right directory.
 - [x] #3 Profiles whose tool cannot be verified offline in the harness (e.g. Gradle, Maven) stay planned, not shipped
 <!-- AC:END -->
 
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Definition of Done in docs/testing.md
+<!-- DOD:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -49,9 +54,6 @@ Real-host read-only diskgc ensure --dry-run --no-index on 2026-10-20, using the 
 Orchestrator 2026-10-23 (COMPASS consult): parked back to To Do to cut WIP. Library breadth waits for the producer-liveness cornerstone (D3: 'idle' = newest mtime/ctime cannot tell an active read-mostly tree from an abandoned one).
 
 Orchestrator 2026-10-24 (COMPASS round 2): only Gradle and Maven remain; split them into a low-priority task when this is next touched and close the rest.
-<!-- SECTION:NOTES:END -->
 
-## Definition of Done
-<!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
-<!-- DOD:END -->
+2026-11-02: Mark: 'yes faster' (one review round, model-level blockers only, merge to dev library). In progress in tmp/worktrees/t40.
+<!-- SECTION:NOTES:END -->
