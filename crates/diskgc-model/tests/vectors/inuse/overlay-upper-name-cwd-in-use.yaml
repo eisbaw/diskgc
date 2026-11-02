@@ -1,0 +1,35 @@
+# TASK-305 review (Codex 1, mped): a process that works in the upper directory /data/upper/cache/scratch-held/sub
+# uses the file by its upper-layer name, under the upper filesystem's
+# (device, inode); the walk through the overlay /merged sees the overlay's
+# identity, and deleting scratch-held there removes the upper name. The
+# in-use check matches each entry's upper name too: in_use (cwd).
+# scratch-free has upper entries no process uses: reclaimed.
+profile_vector: 1
+user_profiles:
+  - {"name": "scratch-probe", "find": {"roots": ["/merged/cache"], "paths": ["scratch-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/merged/cache/scratch-a"]}}
+profile: scratch-probe
+path: /merged/cache
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 60, at: /merged, fs: overlay, dev: "0:60", size: 1G, parent: 1, overlay_upper: /data/upper}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {}
+    /data/upper/cache/scratch-held: {f: {size: 4K}, sub: {g: {size: 4K}}}
+    /data/upper/cache/scratch-free: {f: {size: 4K}}
+  processes:
+    - {pid: 10, exe: /usr/bin/tool, cwd: /data/upper/cache/scratch-held/sub, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /merged/cache/scratch-free}
+    - {candidate: /merged/cache/scratch-held, reason: in_use}
+  reclaim_exit: 1
+  actions: [/merged/cache/scratch-free]
+  removed: [/merged/cache/scratch-free]
+  skipped:
+    - {candidate: /merged/cache/scratch-held, reason: in_use, process_blockers: [{pid: 10, evidence: cwd}]}
+  preserved: [/data/upper/cache/scratch-held/f, /data/upper/cache/scratch-held/sub/g]

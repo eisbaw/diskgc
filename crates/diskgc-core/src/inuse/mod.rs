@@ -707,6 +707,59 @@ impl Scan {
             .collect()
     }
 
+    /// `in_use_unknown` for a candidate whose file may be another name of
+    /// a loop device's backing file that the walk cannot see (docs/safety.md,
+    /// In use: Upper-layer names, and eCryptfs names): a regular file on an
+    /// overlay whose upper name cannot be read, or one on an eCryptfs mount
+    /// whose lower directory's filesystem may hold that file.
+    fn loop_alias_unknown<F>(
+        &self,
+        candidate: &Candidate<'_, F>,
+        record: &WalkRecord,
+    ) -> Option<Skip> {
+        let path = candidate.path();
+        let unknown = |why: String| {
+            Some(Skip::in_use_unknown(
+                path.to_owned(),
+                UnknownCause::LoopDevice,
+                why,
+            ))
+        };
+        if let Some(shown) = record.upper_unknown()
+            && let Some(backing) = self.loops.identified(candidate.mount_id())
+        {
+            let file = below(path, &record.path_of(shown).unwrap_or_default());
+            let why = record
+                .upper_layer()
+                .and_then(crate::engine::UpperLayer::unread)
+                .unwrap_or("not read");
+            return unknown(format!(
+                "{} is a regular file on an overlay whose upper layer cannot be read for it \
+                 ({why}), so whether it is another name of the file loop device {} holds ({}) \
+                 cannot be told, and a deletion through the overlay removes an upper name. \
+                 Detach the device (`losetup -d`, `udisksctl loop-delete`), or run diskgc where \
+                 it can read the upper layer",
+                file.display(),
+                backing.device,
+                backing.text.display()
+            ));
+        }
+        if candidate.fs_type() == "ecryptfs"
+            && record.holds_a_file()
+            && let Some((backing, why)) = self.loops.ecryptfs_alias(candidate.mount_id())
+        {
+            return unknown(format!(
+                "loop device {} is backed by {}, which may be another name of a file of the \
+                 candidate: eCryptfs shows the files of its lower directory under its own \
+                 device, and a deletion through it removes the lower name ({why}). Detach the \
+                 device (`losetup -d`, `udisksctl loop-delete`)",
+                backing.device,
+                backing.text.display()
+            ));
+        }
+        None
+    }
+
     /// Judges `candidate`, whose eligibility walk gave `record`, against
     /// this scan (no I/O; freshness is the caller's, see [`Checker`]). In
     /// order, the first that applies:
@@ -717,13 +770,13 @@ impl Scan {
     ///    not be read): `in_use_unknown` (it could be using anything, and
     ///    whether it does cannot be told; TASK-190: not `in_use`, which
     ///    would give a harness evidence that does not exist);
-    /// 2. a process uses one of the record's objects (fd, cwd, root, exe,
-    ///    mapping; a FIFO held open is found here), or one of them is the
-    ///    backing file of a configured loop device: `in_use`; on an overlay
-    ///    the loop rules also match each regular file's upper-layer name
-    ///    ([`crate::engine::UpperName`], TASK-305), and one that cannot be
-    ///    read leaves the candidate `in_use_unknown` while a device has an
-    ///    identity or a deleted name's filesystem;
+    /// 2. a process uses one of the record's objects or, on an overlay,
+    ///    an entry's upper-layer name ([`crate::engine::UpperName`]) (fd,
+    ///    cwd, root, exe, mapping; a FIFO held open is found here), or one
+    ///    of them is the backing file of a configured loop device: `in_use`;
+    ///    a loop device's file that may be an unread upper name or an
+    ///    eCryptfs lower name: `in_use_unknown` (docs/safety.md, In use:
+    ///    Upper-layer names, eCryptfs names);
     /// 3. a process's initial environment names a path inside the
     ///    candidate: `in_use`;
     /// 4. a socket in the record is bound in diskgc's network namespace, or
@@ -744,54 +797,45 @@ impl Scan {
         if let Some(skip) = self.unknown(path) {
             return Err(skip);
         }
-        // On an overlay, a regular file's upper-layer name is another name
-        // of it under another identity, which a deletion through the
-        // overlay removes (TASK-305): (shown, upper) pairs.
-        let uppers: Vec<(DevIno, DevIno)> = record.upper_names().collect();
-        let objects = record
-            .objects()
-            .chain(uppers.iter().map(|(_, upper)| *upper));
-        if let Some(backing) = self.loops.doubt(candidate.mount_id(), objects) {
+        // Each identity matched, with the one the walk saw for messages: on
+        // an overlay, an entry's upper-layer name is another name of it
+        // under another identity, which a deletion through the overlay
+        // removes (docs/safety.md, In use: Upper-layer names).
+        let matched: Vec<(DevIno, DevIno)> = record.matched().collect();
+        if let Some(backing) = self
+            .loops
+            .doubt(candidate.mount_id(), matched.iter().map(|(id, _)| *id))
+        {
             return Err(Skip::in_use_unknown(
                 path.to_owned(),
                 UnknownCause::LoopDevice,
                 backing.why.clone(),
             ));
         }
-        if let Some(shown) = record.upper_unknown()
-            && let Some(backing) = self.loops.identified(candidate.mount_id())
-        {
-            let file = below(path, &record.path_of(shown).unwrap_or_default());
-            let why = record
-                .upper_layer()
-                .and_then(crate::engine::UpperLayer::unread)
-                .unwrap_or("not read");
-            return Err(Skip::in_use_unknown(
-                path.to_owned(),
-                UnknownCause::LoopDevice,
-                format!(
-                    "{} is a regular file on an overlay whose upper layer cannot be read for it \
-                     ({why}), so whether it is another name of the file loop device {} holds \
-                     ({}) cannot be told, and a deletion through the overlay removes an upper \
-                     name. Detach the device (`losetup -d`, `udisksctl loop-delete`), or run \
-                     diskgc where it can read the upper layer",
-                    file.display(),
-                    backing.device,
-                    backing.text.display()
-                ),
-            ));
+        if let Some(skip) = self.loop_alias_unknown(candidate, record) {
+            return Err(skip);
         }
         let by_inode = MAPS_BY_INODE.contains(&candidate.fs_type());
-        for id in record.objects() {
-            let at = || below(path, &record.path_of(id).unwrap_or_default());
+        for (id, shown) in matched {
+            let at = || below(path, &record.path_of(shown).unwrap_or_default());
+            // The upper name, where `id` is one: said in the message.
+            let named = || {
+                (id != shown)
+                    .then(|| record.upper_layer().and_then(|layer| layer.name_of(&at())))
+                    .flatten()
+                    .map_or_else(String::new, |name| {
+                        format!(" in the overlay's upper layer, {}", name.display())
+                    })
+            };
             if let Some(u) = self.uses.get(&id).and_then(|uses| uses.first()) {
                 return in_use(
                     at(),
                     format!(
-                        "pid {} ({}) has it {} ({id})",
+                        "pid {} ({}) has it {}{} ({id})",
                         u.pid,
                         self.command(u.pid),
-                        u.how
+                        u.how,
+                        named()
                     ),
                     Some(blocker(
                         u.pid,
@@ -809,8 +853,12 @@ impl Scan {
                 return in_use(
                     at(),
                     format!(
-                        "loop device {device} is backed by it ({id}): the kernel holds it open, \
-                         and its data is lost when the device detaches"
+                        "loop device {device} is backed by {} ({id}): the kernel holds it open, \
+                         and its data is lost when the device detaches",
+                        match named() {
+                            name if name.is_empty() => "it".to_owned(),
+                            name => format!("its name{name}"),
+                        }
                     ),
                     None,
                 );
@@ -819,32 +867,14 @@ impl Scan {
                 return in_use(
                     at(),
                     format!(
-                        "pid {pid} ({}) maps an object with its inode number {} ({} maps may \
+                        "pid {pid} ({}) maps an object with its inode number {}{} ({} maps may \
                          show another device)",
                         self.command(*pid),
                         id.ino,
+                        named(),
                         candidate.fs_type()
                     ),
                     Some(blocker(*pid, ProcessEvidence::InodeMap)),
-                );
-            }
-        }
-        for (shown, upper) in &uppers {
-            if let Some(device) = self.loops.held_by(*upper) {
-                let at = below(path, &record.path_of(*shown).unwrap_or_default());
-                let name = record
-                    .upper_layer()
-                    .and_then(|layer| layer.name_of(&at))
-                    .unwrap_or_else(|| at.clone());
-                return in_use(
-                    at,
-                    format!(
-                        "loop device {device} is backed by its name in the overlay's upper layer, \
-                         {} ({upper}): the kernel holds it open, a deletion through the overlay \
-                         removes that name, and its data is lost when the device detaches",
-                        name.display()
-                    ),
-                    None,
                 );
             }
         }

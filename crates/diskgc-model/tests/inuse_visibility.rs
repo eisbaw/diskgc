@@ -621,6 +621,130 @@ fn a_loop_backing_with_a_name_in_an_overlays_upper_layer_keeps_its_candidate() {
     let host = common::host(&text(through, unreached));
     let skip = check_at(&host, "/merged", "/merged/v").expect_err("in use");
     assert_eq!(skip.reason, Reason::InUse, "{skip}");
+    // A name on the overlay but a plain filesystem's identity (the device
+    // opened another name; the printed one is another namespace's): not
+    // the overlay's view, so the unread upper layer leaves it in doubt.
+    let plain = "loops:\n  - {dev: \"7:1\", backing: /merged/v/img, file: /data/images/held.img, readable: true}";
+    let host = common::host(&text(plain, unreached));
+    loop_unknown(
+        check_at(&host, "/merged", "/merged/plain"),
+        "plain identity, name on the overlay",
+    );
+}
+
+/// TASK-305 review (Codex 2, mped): an `upperdir=` that reaches another
+/// directory than the layer. Root mounted an empty tmpfs over
+/// `/data/upper` after the overlay was made: a lookup there finds no
+/// upper entry, which reads as lower-only, and the deletion through the
+/// overlay removes the real upper name of the loop's image. The table
+/// lists a namespace's mounts in the order they were made (64-bit unique
+/// ids; the cover's 32-bit id, 5, is lower than the overlay's, as Linux
+/// reuses the lowest free one), so a mount listed after the overlay at or
+/// above `upperdir=` makes the layer unreached: in doubt. And an
+/// `upperdir=` reaching the overlay itself is no layer either.
+#[test]
+fn an_upperdir_covered_since_or_reaching_the_overlay_is_not_trusted() {
+    let text = |overlay: &str, events: &str| {
+        yaml(
+            &format!(
+                "loops:\n  - {{dev: \"7:1\", backing: /data/images/held.img, readable: true}}{events}"
+            ),
+            "  /data/images/held.img: {size: 1M}\n  /data/upper/v/img: {link: /data/images/held.img}\n  /data/upper/up/x: {size: 1K}",
+        )
+        .replacen(
+            "  - {id: 30,",
+            &format!("  - {{id: 60, at: /merged, fs: overlay, dev: \"0:60\", size: 1G, parent: 1, {overlay}}}\n  - {{id: 30,"),
+            1,
+        )
+    };
+    let cover = "\nevents:\n  - {at: {op: mountinfo, nth: 1, when: before}, mount: {id: 5, at: /data/upper, fs: tmpfs, dev: \"0:5\", size: 1G}}";
+    let host = common::host(&text("overlay_upper: /data/upper", cover));
+    let skip = loop_unknown(check_at(&host, "/merged", "/merged/v"), "covered");
+    assert!(
+        skip.detail
+            .contains("mount 5 at /data/upper was made after the overlay"),
+        "{skip}"
+    );
+    let host = common::host(&text("overlay_upper: /data/upper", ""));
+    let skip = check_at(&host, "/merged", "/merged/v").expect_err("uncovered");
+    assert_eq!(skip.reason, Reason::InUse, "{skip}");
+    let host = common::host(&text(
+        "overlay_upper: /data/upper, overlay_upperdir_shown: /merged/up",
+        "",
+    ));
+    let skip = loop_unknown(check_at(&host, "/merged", "/merged/v"), "through itself");
+    assert!(
+        skip.detail.contains("reaches overlay mount /merged"),
+        "{skip}"
+    );
+}
+
+/// TASK-305 review (Codex 3): eCryptfs shows the files of its lower
+/// directory (`/home/.ecryptfs/u/.Private`, mountinfo's source) under its
+/// own device, and a deletion through it removes the lower name. A device
+/// opened by the lower (ciphertext) name has that name's identity, which
+/// nothing the walk through `/home/u` shows: a candidate holding a file
+/// there is in doubt while an owner's (or an unknown owner's) file on the
+/// lower directory's filesystem backs a device. Root's snap image on the
+/// same filesystem does not block the home; nor does an image on another
+/// filesystem; a candidate of directories only is clear.
+#[test]
+fn a_loop_backing_on_an_ecryptfs_lower_filesystem_doubts_its_candidates() {
+    let text = |loops: &str| {
+        yaml(
+            loops,
+            "  /home/.ecryptfs/u/.Private/ECRYPTFS_FNEK_X: {size: 1M}\n  /var/lib/snapd/snaps/core_1.snap: {size: 1M, uid: 0, gid: 0}\n  /home/u/c/f: {size: 1K}\n  /home/u/d/e: {.: {}}",
+        )
+        .replacen(
+            "  - {id: 30,",
+            "  - {id: 61, at: /home/u, fs: ecryptfs, dev: \"0:61\", size: 1G, parent: 1, source: /home/.ecryptfs/u/.Private}\n  - {id: 30,",
+            1,
+        )
+    };
+    let own = "loops:\n  - {dev: \"7:1\", backing: /home/.ecryptfs/u/.Private/ECRYPTFS_FNEK_X, readable: true}";
+    let host = common::host(&text(own));
+    let skip = loop_unknown(check_at(&host, "/home/u", "/home/u/c"), "own image");
+    assert!(
+        skip.detail.contains("loop device 7:1") && skip.detail.contains("eCryptfs"),
+        "{skip}"
+    );
+    let host = common::host(&text(own));
+    assert_eq!(check_at(&host, "/home/u", "/home/u/d"), Ok(()), "no file");
+    for (loops, what) in [
+        (
+            "loops:\n  - {dev: \"7:2\", backing: /var/lib/snapd/snaps/core_1.snap, readable: true}",
+            "root's snap",
+        ),
+        (
+            "loops:\n  - {dev: \"7:3\", backing: /tmp/keep, readable: true}",
+            "another filesystem",
+        ),
+    ] {
+        let host = common::host(&text(loops));
+        assert_eq!(check_at(&host, "/home/u", "/home/u/c"), Ok(()), "{what}");
+    }
+}
+
+/// TASK-305 review (mped S1): a live overlay root with an upper layer
+/// diskgc cannot reach (casper's `/cow`), run by root: the casper squashfs
+/// on the ISO (iso9660) and a snap opened through the overlay have
+/// identities, but no other name of a file of the ISO can be in an upper
+/// layer (no write path, and links do not cross filesystems), and the
+/// snap's identity is the overlay's own view: the overlay's candidates are
+/// judged, not in doubt.
+#[test]
+fn a_live_root_with_an_unreachable_upper_layer_is_not_doubted_by_its_medium() {
+    let text = yaml(
+        "own_uid: 0\nloops:\n  - {dev: \"7:0\", backing: /live/var/lib/snapd/snaps/core_1.snap}",
+        "  /cow/upper/var/lib/snapd/snaps/core_1.snap: {size: 1M, uid: 0, gid: 0}\n  /cow/upper/home/u/c/f: {size: 1K}\n  /cdrom/casper/filesystem.squashfs: {size: 1M, uid: 0, gid: 0}",
+    )
+    .replacen(
+        "  - {id: 30,",
+        "  - {id: 2, at: /cdrom, fs: iso9660, dev: \"11:0\", size: 4G, parent: 1}\n  - {id: 60, at: /live, fs: overlay, dev: \"0:60\", size: 1G, parent: 1, overlay_upper: /cow/upper, overlay_upperdir_shown: /run/gone/upper}\n  - {id: 61, at: /rofs, fs: squashfs, dev: \"7:1\", size: 1G, parent: 1, read_only: true, loop_backing: /cdrom/casper/filesystem.squashfs}\n  - {id: 30,",
+        1,
+    );
+    let host = common::host(&text);
+    assert_eq!(check_at(&host, "/live/home/u", "/live/home/u/c"), Ok(()));
 }
 
 /// A device diskgc cannot open whose name was deleted: another link of the

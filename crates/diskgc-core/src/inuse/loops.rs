@@ -55,6 +55,11 @@
 //!      again first (`d_path` follows renames, so a rename racing the
 //!      lookup shows the new name), up to [`LOOP_REREADS`] times.
 //!
+//! Names of a backing file the walk cannot see by identity, an overlay's
+//! upper names and eCryptfs's lower names, are judged with the walk record
+//! ([`LoopBackings::identified`], [`LoopBackings::ecryptfs_alias`];
+//! docs/safety.md, In use: Upper-layer names, eCryptfs names).
+//!
 //! Each device is kept with its own [`Scope`] and cause; a candidate is
 //! `in_use_unknown` for the first one whose scope covers it
 //! ([`LoopBackings::doubt`]).
@@ -69,6 +74,7 @@ use std::path::{Path, PathBuf};
 
 use super::ScanError;
 use super::scan::with_descriptor_advice;
+use crate::engine::SUBVOLUME_FILESYSTEMS;
 use crate::host::{Dev, DevIno, Host, HostError, LoopIdentity, MountEntry};
 use crate::places::{may_show_other_owners, mount_for, stored_elsewhere};
 use crate::resolve::{Want, resolve_in};
@@ -124,6 +130,48 @@ pub struct LoopBacking {
     /// What the report says of it: the note (scope [`Scope::Nowhere`]
     /// without an identity) or the `in_use_unknown` detail (any other).
     pub why: String,
+    /// Where the table lists a mount of the identity's device: its type
+    /// (`None`: an anonymous device no mount lists, as a btrfs subvolume's
+    /// or an overlay layer's).
+    pub identity_fs: Option<String>,
+    /// For a known identity, where an eCryptfs mount is listed: the owner
+    /// of the file its name reaches, when that file is the device's (the
+    /// same identity) on a mount that shows owners as stored; `None`:
+    /// unknown.
+    pub owner: Option<u32>,
+}
+
+/// Filesystem types with no write path: no upper layer or lower directory
+/// that diskgc deletes through can lie on one, and a hard link never
+/// crosses filesystems, so a device backed by one of their files holds no
+/// other name of it there.
+pub const NO_WRITE_TYPES: &[&str] = &["iso9660", "squashfs", "erofs", "cramfs"];
+
+impl LoopBacking {
+    /// Whether its identity lies on a filesystem with no write path
+    /// ([`NO_WRITE_TYPES`]).
+    fn read_only_fs(&self) -> bool {
+        self.identity_fs
+            .as_deref()
+            .is_some_and(|t| NO_WRITE_TYPES.contains(&t))
+    }
+
+    /// Whether its identity's device is a listed mount's of a filesystem
+    /// that keeps its own files (not an overlay's or eCryptfs's own view).
+    fn plain_identity(&self) -> bool {
+        self.identity_fs
+            .as_deref()
+            .is_some_and(|t| !stored_elsewhere(t))
+    }
+}
+
+/// The lower directory of an eCryptfs mount, from mountinfo's source
+/// field: the device `statx` shows for it and its filesystem's type, or
+/// why it cannot be told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EcryptfsLower {
+    pub mount_id: u64,
+    pub lower: Result<(Dev, String), String>,
 }
 
 /// The configured loop devices as the in-use check uses them, every one
@@ -131,6 +179,11 @@ pub struct LoopBacking {
 #[derive(Debug, Clone, Default)]
 pub struct LoopBackings {
     pub backings: Vec<LoopBacking>,
+    /// Every eCryptfs mount's lower directory, read when a device is
+    /// configured (docs/safety.md, In use: eCryptfs names).
+    pub ecryptfs: Vec<EcryptfsLower>,
+    /// The run's owners.
+    pub owners: Vec<u32>,
 }
 
 impl LoopBackings {
@@ -166,19 +219,73 @@ impl LoopBackings {
 
     /// The first device whose file may be the unread upper-layer name of a
     /// regular file of a candidate on the overlay mount `mount_id`
-    /// (TASK-305): one whose identity is known, or whose doubt is a
-    /// filesystem's (a deleted name's). Not one opened through that
-    /// overlay itself ([`Scope::AllBut`] naming the mount): its identity is
-    /// the overlay's view of the file, which every name of it there shows
-    /// (`ovl_getattr` of the same real inode), so it is matched exactly.
-    /// The other devices already doubt the candidate by its mount or
-    /// everywhere, or hold a file no candidate can (another user's, as the
-    /// overlay shows its upper owner; an object in no directory).
+    /// (docs/safety.md, In use: Upper-layer names): one whose identity is
+    /// known, or whose doubt is a filesystem's (a deleted name's). Not one
+    /// on a filesystem with no write path ([`NO_WRITE_TYPES`]: a live
+    /// medium), nor one opened through that overlay itself, unless its
+    /// identity is a plain filesystem's: its identity is then the
+    /// overlay's view of the file, which every name there shows, so it is
+    /// matched exactly. The other devices already doubt the candidate by
+    /// its mount or everywhere, or hold a file no candidate can.
     pub fn identified(&self, mount_id: u64) -> Option<&LoopBacking> {
-        self.backings.iter().find(|backing| match &backing.scope {
-            Scope::Filesystem(_) => true,
-            Scope::AllBut(own) if own.contains(&mount_id) => false,
-            _ => backing.identity.is_some(),
+        self.backings.iter().find(|backing| {
+            if backing.read_only_fs() {
+                return false;
+            }
+            match &backing.scope {
+                Scope::Filesystem(_) => true,
+                Scope::AllBut(own) if own.contains(&mount_id) && !backing.plain_identity() => false,
+                _ => backing.identity.is_some(),
+            }
+        })
+    }
+
+    /// The first device whose file may be another name, on the lower
+    /// directory's filesystem, of a file of a candidate on the eCryptfs
+    /// mount `mount_id` (docs/safety.md, In use: eCryptfs names), with
+    /// why: a known identity on that filesystem whose file is an owner's
+    /// or whose owner cannot be told, or a deleted name on it. A file of
+    /// another user (root's snaps on the same filesystem) is not: the walk
+    /// admits only owners' entries, and eCryptfs shows its lower owner.
+    pub fn ecryptfs_alias(&self, mount_id: u64) -> Option<(&LoopBacking, String)> {
+        let lower = &self.ecryptfs.iter().find(|e| e.mount_id == mount_id)?.lower;
+        let on_lower = |dev: Dev, anonymous: bool| match lower {
+            Ok((lower_dev, fs_type)) => {
+                dev == *lower_dev
+                    || (anonymous && SUBVOLUME_FILESYSTEMS.contains(&fs_type.as_str()))
+            }
+            Err(_) => true,
+        };
+        let shown_lower = || match lower {
+            Ok((dev, fs_type)) => format!("its lower directory is on {fs_type} device {dev}"),
+            Err(why) => format!("its lower directory cannot be told: {why}"),
+        };
+        self.backings.iter().find_map(|backing| {
+            let anonymous = backing.identity_fs.is_none();
+            match (&backing.scope, backing.identity) {
+                (Scope::Filesystem(dev), _) if on_lower(*dev, false) => Some((
+                    backing,
+                    format!("its name was deleted there; {}", shown_lower()),
+                )),
+                (_, Some(id))
+                    if !backing.read_only_fs()
+                        && backing.owner.is_none_or(|uid| self.owners.contains(&uid))
+                        && on_lower(id.dev, anonymous) =>
+                {
+                    Some((
+                        backing,
+                        format!(
+                            "its identity {id} is {}; {}",
+                            backing.owner.map_or_else(
+                                || "a file whose owner cannot be told".to_owned(),
+                                |uid| format!("a file of uid {uid}, an owner of this run")
+                            ),
+                            shown_lower()
+                        ),
+                    ))
+                }
+                _ => None,
+            }
         })
     }
 
@@ -209,12 +316,80 @@ pub fn read<H: Host>(host: &H, owners: &[u32]) -> Result<LoopBackings, ScanError
         return Ok(backings);
     }
     let mounts = host.mountinfo().map_err(run_error)?;
+    backings.owners = owners.to_vec();
     for (device, text) in listed {
         if let Some(backing) = judge(host, &mounts, owners, device, text)? {
             backings.backings.push(backing);
         }
     }
+    backings.ecryptfs = ecryptfs_lowers(host, &mounts)?;
     Ok(backings)
+}
+
+/// Every eCryptfs mount's lower directory: mountinfo's source field (the
+/// path the mount was given, `ecryptfs_mount`'s `kern_path`) reached by
+/// the safe lookup, its `statx` device and filesystem type.
+fn ecryptfs_lowers<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+) -> Result<Vec<EcryptfsLower>, ScanError> {
+    let mut lowers = Vec::new();
+    for mount in mounts.iter().filter(|m| m.fs_type == "ecryptfs") {
+        let source = Path::new(&mount.source);
+        let lower = if !source.is_absolute() {
+            Err(format!(
+                "its source {} is not an absolute path",
+                mount.source
+            ))
+        } else {
+            match resolve_in(host, mounts, source, Want::Directory) {
+                Ok(dir) => Ok((dir.stat.dev, dir.mount.fs_type)),
+                Err(crate::resolve::ResolveError::Host(e)) if e.is_out_of_descriptors() => {
+                    return Err(run_error(e));
+                }
+                Err(e) => Err(format!("{} cannot be reached ({e})", mount.source)),
+            }
+        };
+        lowers.push(EcryptfsLower {
+            mount_id: mount.id,
+            lower,
+        });
+    }
+    Ok(lowers)
+}
+
+/// The type of a listed mount of `dev` (mountinfo's device), if one is.
+fn listed_type(mounts: &[MountEntry], dev: Dev) -> Option<String> {
+    mounts
+        .iter()
+        .find(|mount| mount.dev == dev)
+        .map(|mount| mount.fs_type.clone())
+}
+
+/// The owner of the file the device's printed name reaches, when it is
+/// the device's own file (identity `id`) on a mount that shows owners as
+/// stored: `None` otherwise. Only read where an eCryptfs mount is listed.
+fn owner_of<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    text: &Path,
+    id: DevIno,
+) -> Result<Option<u32>, ScanError> {
+    if !mounts.iter().any(|m| m.fs_type == "ecryptfs") || !text.is_absolute() {
+        return Ok(None);
+    }
+    match resolve_in(host, mounts, text, Want::Any) {
+        Ok(resolved)
+            if resolved.stat.dev_ino() == Some(id) && !may_show_other_owners(&resolved.mount) =>
+        {
+            Ok(resolved.stat.uid)
+        }
+        Ok(_) => Ok(None),
+        Err(crate::resolve::ResolveError::Host(e)) if e.is_out_of_descriptors() => {
+            Err(run_error(e))
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 fn run_error(e: HostError) -> ScanError {
@@ -264,12 +439,15 @@ fn judge<H: Host>(
                     alias.why
                 ),
             };
+            let owner = owner_of(host, mounts, &first, id)?;
             return Ok(Some(LoopBacking {
                 device,
                 text: first,
                 identity: Some(id),
                 scope: alias.scope,
                 why,
+                identity_fs: listed_type(mounts, id.dev),
+                owner,
             }));
         }
         LoopIdentity::Detached => return Ok(None),
@@ -290,6 +468,8 @@ fn judge<H: Host>(
             identity: None,
             scope: judged.scope,
             why,
+            identity_fs: None,
+            owner: None,
         }
     };
     let mut text = first;
@@ -600,6 +780,8 @@ mod tests {
             identity: None,
             scope,
             why: format!("device {minor}"),
+            identity_fs: None,
+            owner: None,
         };
         let object = |minor| DevIno {
             dev: Dev { major: 254, minor },
@@ -618,6 +800,7 @@ mod tests {
                 backing(2, Scope::Mounts([40].into())),
                 backing(3, Scope::AllBut([60, 40].into())),
             ],
+            ..LoopBackings::default()
         };
         let doubt = |mount, objects: &[DevIno]| {
             backings
@@ -632,6 +815,7 @@ mod tests {
         assert_eq!(backings.notes().collect::<Vec<_>>(), ["device 0"]);
         let all = LoopBackings {
             backings: vec![backing(4, Scope::Everywhere)],
+            ..LoopBackings::default()
         };
         assert_eq!(all.everywhere().map(|b| b.device.minor), Some(4));
         assert_eq!(

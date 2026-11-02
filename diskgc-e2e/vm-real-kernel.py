@@ -880,6 +880,7 @@ mkfs.btrfs -q -f "$L" >/dev/null
 mount "$L" /mnt/ovb
 for d in upper work upper2 work2 upperx workx upperxi workxi; do install -d -m 0755 /mnt/ovb/$d; done
 for d in /mnt/ovb/images /mnt/ovb/upper/cache /mnt/ovb/upper/cache2 /mnt/ovb/upper2/cache \
+    /mnt/ovb/upper/cache3 /mnt/ovb/upper2/cache3 \
     /mnt/ovb/upperx/p /mnt/ovb/upperxi/p /work/s9/images /work/s9/lower/cache /work/s9/lower/cache2 \
     /work/s9/lower2/cache /work/s9/lowerx /work/s9/lowerx/p /work/s9/lowerxi; do
   install -d -m 0755 -o 1000 -g 1000 $d
@@ -907,6 +908,18 @@ for x in x xi; do
   echo u > /mnt/ovb/upper$x/p/pure && ln /mnt/ovb/upper$x/p/pure /mnt/ovb/upper$x/p/pure-link
 done
 echo l > /work/s9/lowerx/p/low && ln /work/s9/lowerx/p/low /work/s9/lowerx/p/low-link
+mkdir -p $U/cache/scratch-fd $U/cache/scratch-cwd/sub /work/s9/lower/cache/scratch-map
+echo f > $U/cache/scratch-fd/f && echo c > $U/cache/scratch-cwd/sub/f
+cp "$(dirname "$(awk '/libc.so/{print $6; exit}' /proc/self/maps)")/libm.so.6" /work/s9/lower/cache/scratch-map/lib.so
+# A Cargo-target-shaped tree for the walk's cost (TASK-305 review, mped
+# S2): the same 20000 files in a reached and an unreached upper layer.
+for u in $U/cache3 /mnt/ovb/upper2/cache3; do
+  mkdir -p $u/scratch-target/debug
+  for d in $(seq 1 200); do
+    mkdir -p $u/scratch-target/debug/deps/u$d
+    for f in $(seq 1 100); do : > $u/scratch-target/debug/deps/u$d/f$f.o; done
+  done
+done
 """, TESTER)
     run("mount -t overlay overlay -o lowerdir=/work/s9/lower,upperdir=/mnt/ovb/upper,workdir=/mnt/ovb/work /mnt/ov && "
         "mount -t overlay overlay -o lowerdir=/work/s9/lower2,upperdir=/work/s9/ovlink/upper2,workdir=/work/s9/ovlink/work2 /mnt/ov2 && "
@@ -943,6 +956,32 @@ echo l > /work/s9/lowerx/p/low && ln /work/s9/lowerx/p/low /work/s9/lowerx/p/low
     assert after_low == before_low and before_low[2] == "2", facts
     assert whiteout == "character special file 0:0", facts
 
+    # Processes that use files by their upper-layer names (TASK-305
+    # review, Codex 1): one holds an upper file open, one works in an
+    # upper directory, one maps a copied-up library by its upper name. The
+    # overlay shows that library under its lower origin's inode, so the
+    # walk's identity and the mapping's inode differ.
+    run("touch /mnt/ov/cache/scratch-map/lib.so", TESTER)  # copy-up
+    copied = (ident("/mnt/ov/cache/scratch-map/lib.so"), ident("/mnt/ovb/upper/cache/scratch-map/lib.so"))
+    note(f"(c) copied-up lib.so: overlay shows {copied[0]}, upper name {copied[1]}")
+    assert copied[0][:2] != copied[1][:2] and copied[0][1] != copied[1][1], facts
+    holders = {
+        "fd": "exec 3< /mnt/ovb/upper/cache/scratch-fd/f; exec sleep 900",
+        "cwd": "cd /mnt/ovb/upper/cache/scratch-cwd/sub && exec sleep 900",
+        "map": "LD_PRELOAD=/mnt/ovb/upper/cache/scratch-map/lib.so exec sleep 900",
+    }
+    for kind, command in holders.items():
+        cx(f"echo $$ > {EV}/s9-{kind}.pid; {command}", TESTER, detach=True)
+    machine.wait_until_succeeds(
+        f"podman exec {CTR} /bin/sh -c 'for k in fd cwd map; do test -s {EV}/s9-$k.pid || exit 1; done; "
+        f"grep -q scratch-map/lib.so /proc/$(cat {EV}/s9-map.pid)/maps'", timeout=30)
+    save("s9-holders.txt", run(
+        f"for k in fd cwd map; do p=$(cat {EV}/s9-$k.pid); echo \"$k pid $p: $(ls -l /proc/$p/fd | grep scratch || true) "
+        f"cwd $(readlink /proc/$p/cwd) $(grep scratch /proc/$p/maps | head -1)\"; done"))
+
+    def stop_holders() -> None:
+        cx(f"for k in fd cwd map; do test -s {EV}/s9-$k.pid && kill $(cat {EV}/s9-$k.pid); done; true")
+
     held = run("losetup -f --show /mnt/ovb/images/held.img").strip()
     low = run("losetup -f --show /work/s9/images/low.img").strip()
     save("s9-loops.txt", run("losetup -l"))
@@ -957,17 +996,47 @@ echo l > /work/s9/lowerx/p/low && ln /work/s9/lowerx/p/low /work/s9/lowerx/p/low
         "/mnt/ov/cache/scratch-held": "in_use",
         "/mnt/ov/cache/scratch-plain": None,
         "/mnt/ov/cache/scratch-lower": None,
+        "/mnt/ov/cache/scratch-fd": "in_use",
+        "/mnt/ov/cache/scratch-cwd": "in_use",
+        "/mnt/ov/cache/scratch-map": "in_use",
     }, plan
-    roots = ("/mnt/ov/cache", "/mnt/ovb/images", "/mnt/ovb/upper/cache/scratch-held", "/work/s9/lower", "/work/s9/images")
+
+    # A decoy over the printed upperdir= (Codex 2): root binds an empty
+    # directory over /mnt/ovb/upper after the overlay was made. Lookups
+    # there find nothing; the table lists the bind after the overlay, so
+    # the layer is not trusted and scratch-held is in doubt.
+    run("install -d -m 0755 /work/s9/decoy && mount --bind /work/s9/decoy /mnt/ovb/upper")
+    order = run("awk '$5==\"/mnt/ov\" || $5==\"/mnt/ovb/upper\" {print NR, $1, $5}' /proc/self/mountinfo")
+    save("s9-decoy-order.txt", order)
+    code, out, _ = ensure("s9-decoy-dry", ROOT, cfg, "/mnt/ov", "--dry-run")
+    decoy = report(out, 0, "dry_run")
+    run("umount /mnt/ovb/upper")
+    assert plan_of(decoy)["/mnt/ov/cache/scratch-held"] == "in_use_unknown", decoy["plan"]
+    passed("9d overlay upper decoy (root)", f"bind over upperdir= listed after the overlay ({order.strip()!r}): "
+           "scratch-held in_use_unknown")
+    roots = ("/mnt/ov/cache", "/mnt/ovb/images", "/mnt/ovb/upper/cache/scratch-held",
+             "/mnt/ovb/upper/cache/scratch-fd", "/mnt/ovb/upper/cache/scratch-cwd",
+             "/mnt/ovb/upper/cache/scratch-map", "/work/s9/lower", "/work/s9/images")
     before = tree(*roots)
     code, out, _ = ensure("s9-root", ROOT, cfg, "/mnt/ov")
     result = report(out, 1, "exhausted")
+    stop_holders()
     assert acted(result) == {"/mnt/ov/cache/scratch-plain", "/mnt/ov/cache/scratch-lower"}, (result["actions"], result["skipped"])
+    evidence = {k: [b["evidence"] for b in row_of(result, f"/mnt/ov/cache/scratch-{k}")["process_blockers"] or []]
+                for k in ("fd", "cwd", "map")}
+    # A map shows the device of the inode's superblock, which on btrfs need
+    # not be the one statx shows: the exact match (map) or the upper
+    # inode number (inode_map); never the overlay's view, whose inode is
+    # the lower origin's.
+    assert evidence["fd"] == ["fd"] and evidence["cwd"] == ["cwd"], evidence
+    assert evidence["map"] in (["map"], ["inode_map"]), evidence
+    passed("9a processes by upper-layer names (root)", f"scratch-fd/cwd/map in_use by {evidence}: "
+           f"{row_of(result, '/mnt/ov/cache/scratch-map')['detail']}")
     overlay_oracle("s9-root", before, tree(*roots), acted(result), roots[1:])
     run("test ! -e /mnt/ov/cache/scratch-plain")  # upper-only: removed whole
     row = row_of(result, "/mnt/ov/cache/scratch-held")
     assert row["reason"] == "in_use", row
-    assert "/mnt/ovb/upper/cache/scratch-held/disk.img" in (row["detail"] or "") and "upper layer" in row["detail"], row
+    assert "upper layer, /mnt/ovb/upper/cache/scratch-held/disk.img" in (row["detail"] or ""), row
     held_names = run("stat -c '%h' /mnt/ovb/images/held.img").strip()
     assert held_names == "3", held_names
     # Item 4 through diskgc: the lower name of low.img survives the
@@ -1018,7 +1087,22 @@ echo l > /work/s9/lowerx/p/low && ln /work/s9/lowerx/p/low /work/s9/lowerx/p/low
     run("test -f /mnt/ovb/upper2/cache/scratch-file/f")
     passed("9c overlay upper alias (unreached upper layer)", f"scratch-file in doubt ({row['detail']}); "
            "scratch-dirs reclaimed")
-    run(f"umount /mnt/ov /mnt/ov2 /mnt/ovx /mnt/ovxi && losetup -d {held} && umount /mnt/ovb && losetup -d {loop}")
+    # The cost of reading upper names (mped S2): dry runs over the same
+    # 20000-file tree through the reached overlay (an upper lookup per
+    # entry) and the unreached one (none), three each; recorded, not
+    # asserted.
+    run(f"losetup -d {held}")
+    timing: dict[str, list[int]] = {}
+    for name, mnt in (("reached", "/mnt/ov"), ("unreached", "/mnt/ov2")):
+        cfg_t = config(f"s9-cost-{name}", [f"{mnt}/cache3"])
+        for i in range(3):
+            code, out, _ = ensure(f"s9-cost-{name}-{i}", TESTER, cfg_t, mnt, "--dry-run")
+            result = report(out, 0, "dry_run")
+            assert plan_of(result) == {f"{mnt}/cache3/scratch-target": None}, result["plan"]
+            timing.setdefault(name, []).append(result["duration_ms"])
+    save("s9-cost.txt", f"20000 files, 201 directories; dry-run duration_ms: {timing}\n")
+    passed("9e upper-name cost (measured)", f"20000-file tree, dry-run ms: {timing}")
+    run(f"umount /mnt/ov /mnt/ov2 /mnt/ovx /mnt/ovxi && umount /mnt/ovb && losetup -d {loop}")
 
 
 # ---- 5. udisksctl loop-setup by a user outside disk ----

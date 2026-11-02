@@ -1963,12 +1963,19 @@ architecture.md, Filesystem matching):
    name: root keeps the candidate holding the link `in_use`, naming the
    upper name, and reclaims one with an upper file of no device's and a
    lower-only one holding another attached image's lower name, which
-   survives and still reads. With the plain name deleted, `tester`'s
+   survives and still reads. Processes of `tester` that hold an upper
+   file open, work in an upper directory, or map a copied-up library by
+   its upper name (the overlay shows it under its lower origin's inode)
+   keep their candidates `in_use` for root. A bind of an empty directory
+   over `upperdir=` after the overlay was made leaves the candidate
+   holding the link `in_use_unknown`. With the plain name deleted, `tester`'s
    candidates with upper files on that btrfs are
    `in_use_unknown`/`loop_device` and a lower-only one reclaims. Where the
    upper layer cannot be reached (`upperdir=` through a symlink), root's
    candidate holding a regular file is `in_use_unknown`, one holding only
-   directories reclaims.
+   directories reclaims. Last, the dry-run time of a 20000-file tree
+   through the reached overlay (an upper lookup per entry) and the
+   unreached one is recorded, not asserted.
 0. Root's scan on a real kernel, with every guest process visible
    (kernel threads included), clears an unheld candidate (TASK-306); the
    kernel-thread facts the rule rests on (environ `ESRCH`, no fd, map,

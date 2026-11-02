@@ -1989,6 +1989,7 @@ fn python_mounted_cache_vector(stacked: bool) -> Result<ProfileVector, String> {
             major: 0,
             minor: 77,
         }),
+        source: None,
         bind_of: None,
         bind_root: None,
         overlay_upper: None,

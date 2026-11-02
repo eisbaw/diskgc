@@ -341,28 +341,23 @@ pub struct Entry {
     /// directory table). Some exactly when `identity.file_type` is a
     /// directory.
     listing: Option<usize>,
-    /// For a regular file on an overlay with an upper layer: its name
-    /// there ([`UpperName`]).
+    /// On an overlay with an upper layer: its name there ([`UpperName`]).
     pub upper: UpperName,
 }
 
-/// The upper-layer name of a regular file the walk met on an overlay
-/// (TASK-305; docs/safety.md, In use: Loop devices). The overlay shows a
-/// file of its upper layer under its own device or the layer's anonymous
-/// one, never the identity a plain name of the file has, and an unlink
-/// through the overlay removes the upper name: so the in-use check matches
-/// that name's identity as well.
+/// An entry's name in the upper layer of the overlay the walk met it on
+/// (docs/safety.md, In use: Upper-layer names; TASK-305): another name of
+/// the same object under another identity, which a deletion through the
+/// overlay removes, so the in-use check matches it as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpperName {
-    /// Not a regular file on an overlay with an upper layer, or one with no
-    /// upper entry (lower-only: deleting it through the overlay writes a
-    /// whiteout and leaves the lower name).
+    /// Not on an overlay with an upper layer, a symlink, or no upper entry
+    /// (lower-only: a deletion through the overlay leaves the lower name).
     None,
     /// The upper entry's (device, inode), as `statx` of its name in the
     /// upper layer shows it.
     Known(DevIno),
-    /// Whether it has an upper entry, and which, cannot be told (the upper
-    /// layer or the entry in it cannot be reached).
+    /// Whether it has an upper entry, and which, cannot be told.
     Unknown,
 }
 
@@ -388,12 +383,12 @@ pub enum UpperLayer {
 
 impl UpperLayer {
     /// The upper name of what the overlay shows at `path`, where the layer
-    /// was reached.
+    /// was reached and `path` is below its mount point.
     pub fn name_of(&self, path: &Path) -> Option<PathBuf> {
         match self {
             Self::Reached {
                 at, mount_point, ..
-            } => Some(upper_path(at, mount_point, path)),
+            } => upper_path(at, mount_point, path),
             Self::Unreached(_) => None,
         }
     }
@@ -409,14 +404,15 @@ impl UpperLayer {
 
 /// The name in an upper layer reached at `at` of what the overlay mounted
 /// at `mount_point` shows at `path` (the layer mirrors the overlay's names
-/// for every entry it holds); `path` itself when it is not below the mount
+/// for every entry it holds); `None` when `path` is not below the mount
 /// point.
-fn upper_path(at: &Path, mount_point: &Path, path: &Path) -> PathBuf {
-    match path.strip_prefix(mount_point) {
-        Ok(rel) if rel.as_os_str().is_empty() => at.to_owned(),
-        Ok(rel) => at.join(rel),
-        Err(_) => path.to_owned(),
-    }
+fn upper_path(at: &Path, mount_point: &Path, path: &Path) -> Option<PathBuf> {
+    let rel = path.strip_prefix(mount_point).ok()?;
+    Some(if rel.as_os_str().is_empty() {
+        at.to_owned()
+    } else {
+        at.join(rel)
+    })
 }
 
 /// The kind of an IPC entry.
@@ -515,22 +511,36 @@ impl WalkRecord {
         self.upper.as_ref()
     }
 
-    /// The (device, inode) shown through the overlay and the upper name's
-    /// of every regular file with a known upper name ([`UpperName::Known`]).
-    pub fn upper_names(&self) -> impl Iterator<Item = (DevIno, DevIno)> + '_ {
-        self.all_entries().filter_map(|entry| match entry.upper {
-            UpperName::Known(upper) => Some((entry.identity.id, upper)),
-            UpperName::None | UpperName::Unknown => None,
+    /// The identities the in-use check matches, each with the one shown
+    /// through the walk's mount (for messages): per entry, the candidate
+    /// first, its upper name's where known ([`UpperName::Known`]), then its
+    /// own.
+    pub fn matched(&self) -> impl Iterator<Item = (DevIno, DevIno)> + '_ {
+        self.all_entries().flat_map(|entry| {
+            let shown = entry.identity.id;
+            let upper = match entry.upper {
+                UpperName::Known(upper) if upper != shown => Some((upper, shown)),
+                _ => None,
+            };
+            upper.into_iter().chain(std::iter::once((shown, shown)))
         })
     }
 
     /// The first regular file, in record order, whose upper name cannot be
     /// told ([`UpperName::Unknown`]): its (device, inode) through the
-    /// overlay.
+    /// overlay. Only a regular file backs a loop device.
     pub fn upper_unknown(&self) -> Option<DevIno> {
         self.all_entries()
-            .find(|entry| entry.upper == UpperName::Unknown)
+            .find(|entry| {
+                entry.upper == UpperName::Unknown && entry.identity.file_type == FileType::Regular
+            })
             .map(|entry| entry.identity.id)
+    }
+
+    /// Whether the record holds a regular file.
+    pub fn holds_a_file(&self) -> bool {
+        self.all_entries()
+            .any(|entry| entry.identity.file_type == FileType::Regular)
     }
 
     /// Every socket and FIFO in the record, with its path below the

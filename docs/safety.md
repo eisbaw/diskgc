@@ -1432,41 +1432,84 @@ no candidate, on one filesystem, on some mounts, on all but some mounts,
 or anywhere); a candidate is `in_use_unknown` for the first device whose
 scope covers it.
 
-**Upper-layer names** (TASK-305). A regular file an overlay shows from
-its upper layer has another name there, which the overlay shows under its
-own device (all layers on one filesystem, or `xino`) or the upper layer's
+**Upper-layer names** (TASK-305). An entry an overlay shows from its
+upper layer has another name there, which the overlay shows under its own
+device (all layers on one filesystem, or `xino`) or the upper layer's
 anonymous one, never the upper filesystem's (`ovl_map_dev_ino`; the inode
-is the upper one's, or the copy-up origin's). An unlink through the
-overlay removes that upper name (`ovl_remove_upper`, or a whiteout renamed
-over a copied-up one), while a lower-only name is left alone under a
-whiteout (Linux 6.18 `fs/overlayfs/dir.c`; overlayfs unlinks, removes and
-renames only on its upper mount). So a device opened by a plain name of a
-file whose other name lies in the upper directory matches nothing the
-walk through the overlay sees, by identity or by a deleted name's
-filesystem, and deleting the candidate would remove that name. The walk
-therefore reads, for each regular file of a candidate on an overlay with
-an upper layer, its upper entry: the overlay's `upperdir=` (mountinfo's
-superblock options, as for subvolume boundaries) joined with the file's
-path below the overlay's mount point, reached beneath that directory with
-no symlink followed and no mount crossed. Its (device, inode) counts as
-one of the candidate's objects for the loop rules: a device's identity
-(`in_use`, naming the upper name) and a deleted name's filesystem
-(`in_use_unknown`). No upper entry is a lower-only file. Where the upper
-layer or an entry in it cannot be read (an `upperdir=` that is relative or
-through a symlink, a directory diskgc may not search: Docker's layers lie
-below `/var/lib/docker`, root's and `0710`, checked on the development
-host), a candidate holding a regular
-file is `in_use_unknown` (`unknown_cause: loop_device`) while any device
-has an identity or a deleted name's filesystem, but one opened through
-that overlay itself (its identity is the overlay's view of the file,
-which every name there shows: matched exactly); the other devices already
-doubt it by its mount, or hold a file of another user, which the overlay
-shows with its stored owner, or one no directory names. A candidate
-holding only directories is not in doubt: no directory backs a loop
-device. Out of file descriptors there is an error of the run. Limits: the
-`upperdir=` limits of subvolume boundaries
+is the upper one's, or a copied-up file's lower origin's). An unlink
+through the overlay removes that upper name (`ovl_remove_upper`, or a
+whiteout renamed over a copied-up one), while a lower-only name is left
+alone under a whiteout (Linux 6.18 `fs/overlayfs/dir.c`; overlayfs
+unlinks, removes and renames only on its upper mount). So a process using
+the upper name (an open file, a working directory, a mapping) or a device
+opened by it shows an identity the walk through the overlay never sees,
+and deleting the candidate would remove that name. The walk therefore
+reads each entry's upper entry (every type but a symlink): the overlay's
+`upperdir=` (mountinfo's superblock options, as for subvolume boundaries)
+joined with the entry's path below the overlay's mount point, reached
+beneath that directory with no symlink followed and no mount crossed. The
+in-use check matches its (device, inode) as it matches the entry's own:
+against processes' uses (a mapping on an overlay also by the upper
+inode's number, as maps show the inode's superblock device, which on
+btrfs is not the one `statx` shows), a device's identity (`in_use`,
+naming the upper name) and a deleted name's filesystem (`in_use_unknown`).
+No upper entry is a lower-only entry.
+
+The upper layer is not trusted, and every upper name is unknown, where
+`upperdir=` is relative or reaches nothing diskgc may search (through a
+symlink; Docker's layers lie below `/var/lib/docker`, root's and `0710`,
+checked on the development host), where it reaches an overlay (an upper
+layer never is one, and this overlay itself would show its own
+identities), or where a mount listed after the overlay lies at
+`upperdir=` or above it: made after the overlay, it may be a decoy
+covering the layer, whose lookups would find nothing and read as
+lower-only (Codex 2). The table lists a namespace's mounts in the order
+of their 64-bit unique ids, which are never reused (Linux 6.18
+`fs/namespace.c`: `mnt_add_to_ns`, `m_start`); the 32-bit mount id is
+allocated lowest-free (`mnt_alloc_id`, `xa_alloc`) and is reused, so it
+orders nothing. An unknown upper name of a regular file leaves its
+candidate `in_use_unknown` (`unknown_cause: loop_device`) while a device
+has an identity or a deleted name's filesystem, except a device on a
+filesystem with no write path (`iso9660`, `squashfs`, `erofs`, `cramfs`:
+no upper layer lies on one, and links do not cross filesystems; a live
+medium) and one opened through that overlay whose identity is the
+overlay's own view (which every name there shows: matched exactly); the
+other devices already doubt it by its mount, or hold a file of another
+user, which the overlay shows with its stored owner, or one no directory
+names. A candidate holding only directories is not in doubt: no
+directory backs a loop device. Out of file descriptors there is an error
+of the run. Limits: an unknown upper name is not matched against
+processes (that would doubt every candidate on an overlay whose layer
+diskgc cannot read, whatever runs; a process using an upper name of such
+an overlay is not seen); a decoy made by moving an
+older mount (`mount --move` keeps its unique id) over `upperdir=`, or
+made before diskgc's mount namespace was copied from its parent (a copy
+numbers mounts depth first, so the cover can be listed first), is not
+detected, and in such a copy an upper layer's own mount listed after the
+overlay makes the layer untrusted (fail closed); `upperdir=` is the
+mounter's string at mount time
 ([architecture.md](architecture.md#filesystem-matching)); and an upper
 entry linked after the walk is the check-to-delete race (limit 5).
+
+**eCryptfs names** (TASK-305 review, Codex 3). eCryptfs shows the files
+of its lower directory (mountinfo's source field, the path its mount was
+given) under its own device with the lower inode's number
+(`ecryptfs_getattr`), and an unlink through it removes the lower name
+(`ecryptfs_do_unlink`). A device opened by the lower (ciphertext) name
+has that name's identity, which nothing the walk through the eCryptfs
+mount shows. So a candidate on an eCryptfs mount that holds a regular
+file is `in_use_unknown` (`unknown_cause: loop_device`) while a device's
+identity lies on the lower directory's filesystem (its device, or an
+anonymous device where that filesystem has subvolumes) and its file is
+one of the run's owners' or of an owner that cannot be told (the printed
+name reaching the same identity on a mount that shows owners as stored
+tells it), or a deleted backing name's filesystem is the lower one's; or
+while the lower directory cannot be reached. Root's snap images on the
+filesystem of an Ubuntu encrypted home do not block it: the walk admits
+only owners' entries, and eCryptfs shows its lower owners. Limits: a
+ciphertext file in a nested subvolume of a lower directory on btrfs
+whose device the table lists; and the other stacking types (`aufs`,
+`shiftfs`) are not covered.
 
 **Limits of the loop rules** (each 0 events: a static configuration that
 needs a mount only root makes in diskgc's mount namespace, or one in
@@ -1475,11 +1518,12 @@ convergence call; pending Mark's ruling, TASK-305). The rules read what
 the mount table shows; these hide behind what it does not:
 - a decoy of another user's mounted over a real file of an owner's hides
   it (above);
-- the reverse alias (Codex 1) through an overlay's lower directory: a
-  device attached through a plain filesystem to an image whose other name
-  lies in a lower directory, the candidate reached through the overlay,
-  which shows that name under another identity. (Through the upper
-  directory it is matched: Upper-layer names, above, TASK-305.);
+- the reverse alias (Codex 1) through an overlay's lower directory, not a
+  hole as far as checked, pending Mark's ruling on TASK-305 item 4: a
+  deletion through the overlay of a lower-only name writes a whiteout and
+  leaves the lower name (Linux 6.18 source, and `vm-real-kernel` scenario
+  9 on Linux 6.18.56). Through the upper directory the name is matched
+  (Upper-layer names, above);
 - an overlay visible only in another mount namespace (Codex 2): its layer
   identity is in no table here and its printed name can look plain, the
   "other namespaces" class of Not protected, not excluded;

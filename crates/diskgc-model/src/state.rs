@@ -316,6 +316,9 @@ pub struct Mount {
     /// reports through the mount it lies on (its subvolume's on btrfs), from
     /// which a nested subvolume's own overrides. `None` for any other mount.
     pub upper: Option<(PathBuf, Dev)>,
+    /// mountinfo's source field, where the spec gives one
+    /// ([`crate::spec::MountSpec::source`]); else the type.
+    pub source: Option<String>,
 }
 
 /// The id Linux shows for an id the mapping of an idmapped mount does not
@@ -842,6 +845,7 @@ impl State {
             subvolume: None,
             idmap: Vec::new(),
             upper: None,
+            source: None,
         });
         Ok(())
     }
@@ -917,6 +921,7 @@ impl State {
             // A bind of an idmapped mount is idmapped alike.
             idmap: from.idmap.clone(),
             upper: from.upper.clone(),
+            source: from.source.clone(),
         });
         Ok(())
     }
@@ -949,7 +954,7 @@ impl State {
                         .on
                         .map_or(Some(PathBuf::from("/")), |on| self.path_of(on))
                         .unwrap_or_else(|| PathBuf::from("/(detached)")),
-                    source: fs_type.clone(),
+                    source: m.source.clone().unwrap_or_else(|| fs_type.clone()),
                     fs_type,
                     read_only: m.read_only,
                     idmapped: !m.idmap.is_empty(),

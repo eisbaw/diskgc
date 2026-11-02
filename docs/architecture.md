@@ -1017,9 +1017,12 @@ reached by that name (relative, through a symlink, unreadable), a
 directory whose `stx_subvol` through the overlay differs from its
 candidate's, or a candidate whose differs from its directory's, is
 `contains_mount` (fail closed: a lower-only candidate below a merged
-directory is refused there too, where layers differ). Limits: `upperdir=` is the
-mounter's string at mount time, in its namespace, so an upper layer
-moved since, or covered by a mount made since, is not detected; and
+directory is refused there too, where layers differ). So is one whose
+`upperdir=` reaches an overlay, or lies at or below a mount listed after
+the overlay (made since, perhaps a decoy covering the layer: safety.md,
+In use, Upper-layer names). Limits: `upperdir=` is the mounter's string
+at mount time, in its namespace, so an upper layer moved since, or
+covered by an older mount moved over it, is not detected; and
 before Linux 6.10 (no `stx_subvol`) an unreachable btrfs upper layer's
 nested subvolume goes unseen. diskgc never
 removes one: such a directory matched as a candidate (or as a Cargo
@@ -1036,8 +1039,8 @@ at enumeration, which stops the run or excludes the tier. btrfs without
 `stx_subvol` keeps the device rule alone. What lies inside a subvolume is
 taken like anything on its mount. Directories only: overlayfs without
 `xino` shows a file of a lower layer under that layer's device, never a
-directory. The walk reaches the same upper layer for each regular file
-too, whose upper name the loop rules match
+directory. The walk reaches the same upper layer for each entry too,
+whose upper name the in-use check matches
 ([safety.md](safety.md#in-use), Upper-layer names, TASK-305). Tested on a
 real kernel by `vm-real-kernel` (btrfs, bcachefs and an overlay with a
 btrfs upper layer, [testing.md](testing.md)).

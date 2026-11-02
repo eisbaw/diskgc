@@ -233,6 +233,10 @@ pub struct MountSpec {
     pub fs: String,
     /// Device number `major:minor`. Reuse requires `bind_of`.
     pub dev: DevSpec,
+    /// mountinfo's source field (default: the type). For `ecryptfs`, the
+    /// lower directory the mount was given. Only the table shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// Bind the filesystem of an earlier mount (its root, or `bind_root`).
     /// The device and filesystem metadata must match that mount.
     #[serde(default, skip_serializing_if = "Option::is_none")]

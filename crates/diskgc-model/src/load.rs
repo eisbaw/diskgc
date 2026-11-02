@@ -509,6 +509,7 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
                 subvolume: None,
                 idmap: Vec::new(),
                 upper: Some((shown, layer)),
+                source: spec.source.clone(),
             });
             paths.insert(spec.id, spec.at.clone());
             continue;
@@ -540,6 +541,7 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
             subvolume,
             idmap: spec.idmap.iter().map(|id| (id.stored, id.shown)).collect(),
             upper: None,
+            source: spec.source.clone(),
         });
         paths.insert(spec.id, spec.at.clone());
     }

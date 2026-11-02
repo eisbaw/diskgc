@@ -1133,6 +1133,13 @@
           "description": "Filesystem size.",
           "$ref": "#/$defs/Bytes"
         },
+        "source": {
+          "description": "mountinfo's source field (default: the type). For `ecryptfs`, the\nlower directory the mount was given. Only the table shows it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "statx_missing": {
           "description": "`statx` fields the filesystem does not answer (kernel capabilities):\nthey come back as `None`.",
           "type": "array",
