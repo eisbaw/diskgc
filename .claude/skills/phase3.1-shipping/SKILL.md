@@ -475,6 +475,21 @@ they never override the Invariants.
   merge --ff-only in one command after the last backlog commit. Judged
   by: failed fast-forwards (target 0). Status: new.
 
+- 2026-11-02, COMPASS #3: the TASK-287/288/291 merge skipped `just e2e`
+  and a stale e2e test broke master (fixed f8fa269). -> No code merge
+  without `just e2e` on the merge commit's tree (the implementer's run on
+  the final commit, or the orchestrator's before merging); test-only
+  merges need at least the fast suite. Judged by: post-merge suite
+  failures traced to a skipped gate (target 0). Status: new.
+- 2026-11-02, COMPASS #3: the first real-kernel VM run found two product
+  bugs (root never reclaims; bcachefs subvolumes deleted) after many
+  model-tested review rounds; model and reviewers share kernel beliefs.
+  -> A change below the Host port, or to a model field encoding a kernel
+  fact, needs a real-kernel observation (vm-real-kernel) in its note,
+  with the kernel version. E2E stages clean up after themselves and
+  check a per-stage disk budget (TASK-311). Judged by: real-kernel bugs
+  found after merge (target 0). Status: new.
+
 ### Gotchas
 
 <!-- - YYYY-MM-DD: fact (evidence). -->

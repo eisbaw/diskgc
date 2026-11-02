@@ -3,10 +3,10 @@ id: TASK-295
 title: >-
   index_authority property flakes: the busy-host breaker makes refusals
   order-dependent
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-01T12:37:00Z'
-updated_date: '2026-11-02T00:44:00Z'
+updated_date: '2026-11-02T11:33:00Z'
 labels:
   - test
   - index
