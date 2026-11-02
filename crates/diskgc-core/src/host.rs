@@ -342,7 +342,11 @@ pub struct Timestamp {
 /// The result of `statx`. Every field except `dev` is `None` unless the
 /// kernel marked it as answered (its bit in `stx_mask`, or for
 /// `mount_root` the `STATX_ATTR_MOUNT_ROOT` bit in `stx_attributes_mask`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Equality ignores `atime`: every "unchanged while read" check compares
+/// two `statx` of one object, and reading it (`read_head`, `readlink`)
+/// itself moves its access time under `relatime` or `strictatime`.
+#[derive(Debug, Clone)]
 pub struct Stat {
     /// The device of the filesystem holding the object (always reported).
     pub dev: Dev,
@@ -375,6 +379,88 @@ pub struct Stat {
     /// device (docs/architecture.md, Filesystem matching: Subvolume
     /// boundaries; TASK-307).
     pub subvol: Option<u64>,
+}
+
+impl PartialEq for Stat {
+    fn eq(&self, other: &Self) -> bool {
+        // Destructured, so a new field must decide whether it counts.
+        let Self {
+            dev,
+            file_type,
+            perm,
+            nlink,
+            uid,
+            gid,
+            ino,
+            size,
+            blocks,
+            mtime,
+            ctime,
+            btime,
+            atime: _,
+            mnt_id,
+            mount_root,
+            subvol,
+        } = self;
+        *dev == other.dev
+            && *file_type == other.file_type
+            && *perm == other.perm
+            && *nlink == other.nlink
+            && *uid == other.uid
+            && *gid == other.gid
+            && *ino == other.ino
+            && *size == other.size
+            && *blocks == other.blocks
+            && *mtime == other.mtime
+            && *ctime == other.ctime
+            && *btime == other.btime
+            && *mnt_id == other.mnt_id
+            && *mount_root == other.mount_root
+            && *subvol == other.subvol
+    }
+}
+
+impl Eq for Stat {}
+
+#[cfg(test)]
+mod stat_tests {
+    use super::*;
+
+    /// A read between two `statx` of one object moves only its atime:
+    /// "unchanged while read" must still hold (the regression of TASK-94's
+    /// first review round, where readlink's atime update made every
+    /// current link "changed while read" on a real kernel).
+    #[test]
+    fn stat_equality_ignores_the_access_time() {
+        let stat = |atime| Stat {
+            dev: Dev {
+                major: 254,
+                minor: 1,
+            },
+            file_type: Some(FileType::Symlink),
+            perm: Some(0o777),
+            nlink: Some(1),
+            uid: Some(1000),
+            gid: Some(1000),
+            ino: Some(7),
+            size: Some(3),
+            blocks: Some(0),
+            mtime: Some(Timestamp { secs: 1, nanos: 0 }),
+            ctime: Some(Timestamp { secs: 1, nanos: 0 }),
+            btime: None,
+            atime,
+            mnt_id: Some(2),
+            mount_root: Some(false),
+            subvol: None,
+        };
+        assert_eq!(
+            stat(Some(Timestamp { secs: 1, nanos: 0 })),
+            stat(Some(Timestamp { secs: 99, nanos: 0 }))
+        );
+        let mut moved = stat(None);
+        moved.mtime = Some(Timestamp { secs: 2, nanos: 0 });
+        assert_ne!(stat(None), moved);
+    }
 }
 
 impl Stat {

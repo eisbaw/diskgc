@@ -1308,7 +1308,12 @@ impl Host for ModelHost {
                 }
             });
             match result {
-                Ok((loc, target)) => (Ok(target), Some(inner.state.dev_ino(loc)), "ok".to_owned()),
+                Ok((loc, target)) => {
+                    // `readlink` moves the link's access time, as a read does.
+                    let now = inner.state.wall_now();
+                    inner.state.inode_mut(loc).atime = now;
+                    (Ok(target), Some(inner.state.dev_ino(loc)), "ok".to_owned())
+                }
                 Err(e) => (
                     Err(HostError::errno("readlink", &shown, e)),
                     None,
@@ -1500,6 +1505,11 @@ impl Host for ModelHost {
                         content.clone()
                     };
                     head.truncate(limit);
+                    // A read moves the access time (as under
+                    // `strictatime`, the most a kernel does), so a check
+                    // that compares two statx around a read sees it.
+                    let now = inner.state.wall_now();
+                    inner.state.inode_mut(loc).atime = now;
                     (Ok(head), object, "ok".to_owned())
                 }
                 _ => (

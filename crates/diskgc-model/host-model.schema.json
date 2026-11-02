@@ -766,7 +766,7 @@
       "type": "object",
       "properties": {
         "atime": {
-          "description": "Last access time; default the modification time. The model's reads\nnever change it (as under `noatime`).",
+          "description": "Last access time; default the modification time. A read of the\nfile (`read_head`) or link (`readlink`) sets it to the clock.",
           "anyOf": [
             {
               "$ref": "#/$defs/WallTime"

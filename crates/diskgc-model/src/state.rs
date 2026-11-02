@@ -67,7 +67,7 @@ pub struct Inode {
     pub mtime: Timestamp,
     pub ctime: Timestamp,
     pub btime: Timestamp,
-    /// Last access; the model's reads never change it.
+    /// Last access; a read or `readlink` sets it to the clock.
     pub atime: Timestamp,
     /// The nested btrfs subvolume it belongs to
     /// ([`crate::spec::DirAttrs::subvolume`]): the device `statx` reports.
