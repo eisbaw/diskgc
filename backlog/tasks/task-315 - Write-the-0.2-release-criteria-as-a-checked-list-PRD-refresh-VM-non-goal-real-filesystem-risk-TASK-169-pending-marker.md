@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-11-02T11:33:00Z'
-updated_date: '2026-11-02T14:48:00Z'
+updated_date: '2026-11-02T15:02:00Z'
 labels:
   - release
   - docs
@@ -38,4 +38,6 @@ Mark 2026-11-02: 'ensure we tackle these findings ... we need more real-world VM
 PRD: factual refreshes (VM non-goal dropped, Build-and-test row, real-filesystem risk rewritten, pending markers repointed to TASK-296/305/308, document map); 0.2 scope stated as Mark's open decision. Reviews: mped-architect and qa-test-runner (read-only, frozen diff); their blockers fixed in the same branch.
 
 2026-11-02: merged (ff), docs and backlog only; just check exit 0 (run 1 hit the TASK-317 flake).
+
+2026-11-02 (COMPASS #4): the 'Done tasks reconciled' criterion now has a carrier task (the reconcile task filed today); also limit lines and units VM carriers filed.
 <!-- SECTION:NOTES:END -->
