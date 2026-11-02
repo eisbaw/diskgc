@@ -3,10 +3,10 @@ id: TASK-311
 title: >-
   e2e cleans up after itself: containers, harness images, VM disks, gcroots,
   disk guard per stage
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-02T11:33:00Z'
-updated_date: '2026-11-02T11:34:00Z'
+updated_date: '2026-11-02T13:27:00Z'
 labels:
   - test
   - infra
@@ -25,4 +25,6 @@ Mark 2026-11-02: 'ensure we tackle these findings ... we need more real-world VM
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-02: in progress in tmp/worktrees/t311 (branch t311-e2e-cleanup).
+
+2026-11-02: merged (ff). Not done: vm-cold-scale and cold crane dependency budgets unmeasured; nix develop leaks two empty /tmp dirs per invocation (Nix 2.34.8, upstream).
 <!-- SECTION:NOTES:END -->
