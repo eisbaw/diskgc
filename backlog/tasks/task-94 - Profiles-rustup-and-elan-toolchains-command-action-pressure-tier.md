@@ -1,10 +1,10 @@
 ---
 id: TASK-94
 title: 'Profiles: rustup and elan toolchains (command action, pressure tier)'
-status: To Do
+status: In Progress
 assignee: []
-created_date: '2026-10-19 11:48'
-updated_date: '2026-10-20 06:15'
+created_date: 2026-10-19 11:48
+updated_date: '2026-11-02T15:24:00Z'
 labels:
   - home
 dependencies:
@@ -32,4 +32,6 @@ Why: ~/.rustup/toolchains (5.2 GiB) and ~/.elan/toolchains (3.8 GiB) on the dev 
 2026-10-20 TASK94 safety audit: No profile shipped. Neither rustup nor elan is on the host or project Nix dev-shell PATH. Existing command actions substitute only candidate path, while uninstall requires the exact manager toolchain identifier; Elan identifiers can include origin/channel (leanprover/lean4:v4.16.0) and linked toolchains can be symlinks. Rustup documents that its settings.toml schema is private, so default and directory overrides require manager CLI queries; pins also come from rust-toolchain and rust-toolchain.toml under every configured project root, plus path-based references. Elan GC is experimental and only tracks project pins for directories Elan previously visited; it cannot certify all configured roots. A safe profile needs a toolchain-specific source and exact name binding, complete fail-closed pin/default checks and locked recheck, plus pinned offline manager fixtures proving uninstall and preservation. AC2 requires a real-machine dry run, which the current user instruction forbids; do not mark Done or ship until that conflict is resolved or AC2 is revised.
 
 2026-10-20 isolated offline container counterexamples (Nix-packaged Elan 4.2.1, Rustup 1.29.0; diskgc-e2e-base image, fresh /tmp homes, --network none, /nix/store read-only): Elan recognizes an installed leanprover/lean4:v4.1.0 directory while an unvisited project has lean-toolchain pointing to it, but gc --json classifies it unused and gc --delete uninstalls it. Rustup accepts toolchain uninstall custom while custom is default: warns and removes it. Thus manager GC/uninstall exit success does not preserve project pins/defaults. No profile shipped. Need manager-name-to-object binding, complete pin/default/override inventory and explicit per-name authorization, lock-time recheck, and disposable fixture that exercises these properties. AC2 real-machine dry run remains barred by the user no-host-testing instruction. See docs/safety.md toolchain subsection.
+
+2026-11-02: Mark steer: profiles + MockFS first. In progress in tmp/worktrees/t94 (branch t94-toolchains).
 <!-- SECTION:NOTES:END -->
