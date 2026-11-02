@@ -1373,7 +1373,8 @@ while it is bound, `loop/backing_file`; read-only) and judges each:
    place leaves every candidate in doubt. Bind and idmapped mounts and
    btrfs subvolumes show one identity for a file by every name, and keep
    the exact match.
-2. Otherwise only the path the kernel prints (`d_path`) is left, and it
+2. Otherwise (diskgc cannot ask the device; pending Mark's confirmation,
+   TASK-296) only the path the kernel prints (`d_path`) is left, and it
    proves nothing about identity: a mount made over the file's directory
    after the device opened it makes a fresh lookup reach another file (a
    decoy, Codex 3), and a name diskgc cannot look up may have another
@@ -1470,8 +1471,8 @@ entry linked after the walk is the check-to-delete race (limit 5).
 **Limits of the loop rules** (each 0 events: a static configuration that
 needs a mount only root makes in diskgc's mount namespace, or one in
 another namespace; decided 2026-11-01 for TASK-299 on the orchestrator's
-convergence call, Mark may veto). The rules read what the mount table
-shows; these hide behind what it does not:
+convergence call; pending Mark's ruling, TASK-305). The rules read what
+the mount table shows; these hide behind what it does not:
 - a decoy of another user's mounted over a real file of an owner's hides
   it (above);
 - the reverse alias (Codex 1) through an overlay's lower directory: a
@@ -1490,8 +1491,9 @@ shows; these hide behind what it does not:
 So a user outside the `disk` group whose own image is attached as a loop
 device (the common udisks case) reclaims no `fs` or Cargo candidate until
 the device is detached: loud and fail closed, the cost of a decoy that
-nothing else rules out. A listing that fails, a `dev` that does not parse,
-a backing file or device that cannot be read for another reason (not an
+nothing else rules out (pending Mark's confirmation, TASK-296). A listing
+that fails, a `dev` that does not parse, a backing file or device that
+cannot be read for another reason (not an
 `EACCES`, `EPERM` or a missing node) is an error of the run (exit 3 if
 the goal is not met), never a shorter list; a device detached during the
 listing is left out. No configured device costs one directory listing per
