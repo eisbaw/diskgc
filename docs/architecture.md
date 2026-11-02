@@ -1285,7 +1285,8 @@ and `diskgc --version` follows it
 - **Master** carries the next minor release with a pre-release suffix
   (`0.2.0-dev`). Every build of it names its commit.
 - **A release** drops the suffix in exactly one commit, the one tagged
-  `v$VERSION` (annotated). Its `release-candidate` package is then the
+  `v$VERSION` (annotated) once the release's criteria (below) are
+  ticked. Its `release-candidate` package is then the
   release; it prints the version alone, and its shipped binary is its
   tested one (no stamp). `just release-verify` fails on a plain version
   whose `HEAD` is not that tag or whose tree is dirty, and passes a
@@ -1304,6 +1305,150 @@ and `diskgc --version` follows it
   commit sets the row's
   `tag`, and a tagged row is never edited again (a test pins 0.1's to
   what v0.1.0 shipped).
+
+#### 0.2 release criteria
+
+The one list of what must hold before `v0.2.0` is tagged (TASK-315);
+the next release replaces it. It lives here, not in the draft release
+notes, because the notes are cut from
+[reference.md](reference.md#release-notes-next-release-draft) into the
+package's `RELEASE-NOTES.md` and ship to users, and because this
+procedure already owns the tagging steps the list ends with. Where each
+item stands (last runs, what is missing) is in its task's notes, not
+here.
+
+**The RC commit** is the commit that drops the `-dev` suffix and sets
+the `0.2` row's `tag`, made on a `release-0.2` branch as 0.1's was on
+`release-0.1`. Every decision below is ticked before it is cut: a
+ruling that changes the row or a safety rule would void the evidence.
+An RC commit that fails an item is never tagged; its fix lands as a
+`-dev` change, and a new RC commit is cut.
+
+**Evidence** is a line in the RC commit's verification note
+(`git notes --ref=verification`) that starts with the item's key and
+gives the exact command, its exit code, the environment (free disk,
+load, kernel where it matters) and what it covered; async QA adds its
+`qa: pass|fail <UTC>` line as for any commit. Evidence from an earlier
+commit counts when the only changes since are the version and the
+row's `tag`; the mutation sweep and fuzzing also carry over per source,
+by the hashes their lines record, and are run again only for sources
+that changed. A box is ticked on master afterwards, citing the note;
+the tag message and the RC note are the release's record. Which build
+an item tests is part of its evidence: the gate-lifted
+`release-candidate` artifact for the release suites, docs, notes and
+walks; the development build for `e2e-full`'s main suites and the VM
+checks; the source for mutation and fuzzing. A passing development
+build or a built candidate approves nothing; only Mark's go releases.
+
+Decisions (Mark), before the RC commit:
+
+- [ ] **Scope** (TASK-276). Is 0.2 the descriptor's provisional `0.2`
+  row (`crates/diskgc-core/src/releases.json`), with or without a
+  reclaiming `watch`, and with which catalog; does the NixOS module
+  ship? Recorded in TASK-276's notes; the row, the PRD's Scope and the
+  draft notes then follow it. A `/tmp` built-in new to the catalog
+  first needs its producer's lifecycle verified and a live-session
+  counterexample tested ([safety.md](safety.md#producer-liveness)).
+- [ ] **0.1.0 exposure** (TASK-276). The draft notes' Changes since
+  0.1.0 say per fix whether 0.1.0 has the flaw. Either a 0.1.x from
+  `release-0.1` (with its own list; a backport branch is bumped to
+  `0.1.1-dev` before any build of it counts as evidence) or 0.2
+  supersedes 0.1.0 with a notice to its users. Recorded in TASK-276's
+  notes.
+- [ ] **Pending safety rulings.** TASK-296 (refusal under `hidepid` and
+  outside the initial PID namespace; the udisks loop-device cost),
+  TASK-305 (the loop rules' alias limits, and its item (5)'s
+  fail-closed rule), TASK-308 (idmapped mounts in the ownership walk).
+  Recorded in each task's notes; then `grep -rnE 'TASK-(296|305|308)'
+  PRD.md docs/` finds no pending marker for them, and the PRD's Safety
+  boundaries and [safety.md](safety.md) say what was ruled.
+- [ ] **Mutation bar** (proposed, pending Mark): every source of
+  TASK-177's deletion-path scope swept, with no unclassified survivor:
+  each missed mutant is equivalent, with the reason written, or has a
+  filed test or weakness task. 0.1 swept the selection and executor
+  sources and ran the deletion path asynchronously, blocking only on a
+  found hole (TASK-67, ruling of 2026-10-25).
+- [ ] **Contract review** (proposed, pending Mark) of what 0.2 adds to
+  the CLI contract (PRD, Irreversibility map): `watch --tally-only`'s
+  flags, exit codes and lock paths, the snapshot's paths, and whether
+  the report's `index` block (still `null`, TASK-244) is frozen as
+  `null` or filled first. 0.1 shipped only with its contract review
+  green.
+
+Evidence on the RC commit:
+
+- [ ] **e2e-full green.** `nix flake check --no-build`, then
+  `nix develop -c just e2e-full` in a detached worktree of the RC
+  commit: exit 0. It runs the release suites on Nix and Debian against
+  the artifact and `vm-real-kernel` as a stage. A failure is
+  investigated to its cause before a rerun counts; a passing rerun does
+  not resolve an intermittent (TASK-238 and TASK-239 failed the 0.1
+  candidate's full tier this way). A failure Mark waives is named in
+  the note and the tag message. Key: `e2e-full:` (each stage's exit,
+  suite counts, log directory).
+- [ ] **vm-real-kernel green**, read from that run's stage output, not
+  run again: every scenario passed, none `UNAVAILABLE`, with the
+  guest's kernel version and the wall time (TASK-312). Key:
+  `vm-real-kernel:`.
+- [ ] **Tally pressure VM.** `nix develop -c just e2e-vm-tally-pressure`
+  (not an `e2e-full` stage): exit 0, since 0.2 ships the background
+  tally's pressure brake. Key: `vm-tally-pressure:`.
+- [ ] **Soak.** `nix develop -c just soak`: exit 0 (its row in
+  [testing.md](testing.md#commands) says before a release). Key:
+  `soak:`.
+- [ ] **Deletion-path mutation sweep** at the bar above (pending Mark,
+  as the bar is): the command (`just mutants` once TASK-177 adds the
+  scope), each source's hash, the report directories, each survivor's
+  classification. Key: `mutants:`.
+- [ ] **Fuzz.** `nix develop -c just fuzz all 1800` (every target,
+  1,800 s each), no crash; a crash is fixed with a saved regression and
+  the run repeated. Key: `fuzz:`, with each target's source hash.
+- [ ] **Docs match the binary** on the artifact (the shipping skill's
+  release step): `nix build -o tmp/rc .#release-candidate`, then
+  `nix develop -c just docs-vs-binary tmp/rc/bin/diskgc` (on the host,
+  read-only) and again with `--container NAME` in a walk environment
+  where that package is installed: no mismatch left in either. Key:
+  `docs-vs-binary:`, with `artifact:` (store path, the binary's
+  sha256).
+- [ ] **Release notes list the limits.** The draft's Known limits say,
+  in a user's terms: overlay copy-up ending a reclaim part-way
+  (TASK-309); the per-user and index locks untested on NFS (TASK-314);
+  what rests on the model only ([testing.md](testing.md), Not covered
+  end-to-end); the in-use blind spots (TASK-303); and what the rulings
+  above leave as limits. The RC commit removes every candidate-only
+  line (the draft status, "Do not deploy the candidate built from
+  master"): 0.1.0's `RELEASE-NOTES.md` shipped saying "Status: draft"
+  (TASK-319 makes the cut fail on it). Checked by reading
+  `share/doc/diskgc/RELEASE-NOTES.md` in the artifact. Key:
+  `release-notes:`.
+- [ ] **Install and upgrade walk** from the artifact, in a disposable
+  container or VM, never on a developer's host: a clean install walked
+  as a non-root user with nothing provisioned, through a real
+  (non-dry) run of each shipped command, and an upgrade from 0.1.0's
+  package, built from its tag, with its configuration and state. The
+  note says what the walk could not show. Key: `install-walk:`, with
+  the dump directory.
+- [ ] **Shipped units under a live systemd.** The artifact's `watch`
+  templates run under systemd as PID 1 (a VM): a `--tally-only`
+  instance starts and writes its snapshot, a reclaiming instance (if
+  the row refuses it) exits 2 and is not restarted
+  (`RestartPreventExitStatus=2`). The NixOS VM test runs the
+  development package's instances only (testing.md, Deployment units).
+  Key: `units:`.
+- [ ] **Done tasks reconciled.** The Done tasks on 0.2's surfaces with
+  unticked acceptance criteria (TASK-316's list: the index, tally,
+  snapshot, `watch` and units tasks) are each ticked with proof,
+  reopened, or carried by a named task. Recorded in those tasks' notes.
+
+At tag time:
+
+- [ ] **Go** (Mark) on the RC commit, every item above ticked or named
+  in the tag message as accepted by him.
+- [ ] **release-verify.** After `git tag -a v0.2.0` on the RC commit,
+  `nix develop -c just release-verify` exits 0 (a plain version,
+  `HEAD` at its tag, a clean tree), `git cat-file -t v0.2.0` says
+  `tag`, and the `0.2` row's `tag` is `v0.2.0`; the last two are
+  checked by hand until TASK-319. Key: `release-verify:`.
 
 ### The `watch` units
 

@@ -2516,8 +2516,9 @@ line says it was reproduced.
   (reproduced on master before the fix, in the model). 0.1.0: yes; its
   cached matches had the same
   blind spot, which its own documentation named (static reading).
-- TASK-263 (pending Mark's confirmation; TASK-298): whose tiers rely on
-  the in-use check (`fs`, `cargo-target`), `ensure` below `--min-free`,
+- TASK-263 (pending Mark's confirmation, TASK-296; TASK-298): whose
+  tiers rely on the in-use check (`fs`, `cargo-target`), `ensure` below
+  `--min-free`,
   its dry run and a reclaiming `watch` are refused (exit 2, `cause:
   safety`) under `hidepid` or in a PID namespace other than the initial
   one, so in a container: the in-use check cannot see every process
@@ -2527,9 +2528,11 @@ line says it was reproduced.
   processes it could see, so a Cargo target whose program ran outside the
   container (Cargo holds no lock while it runs) could be deleted (static
   reading).
-- TASK-169: a candidate holding the backing file of a configured loop
-  device (`udisksctl loop-setup`, `losetup`, mounted or not) is `in_use`
-  where diskgc can ask the device (root, the `disk` group); where it
+- TASK-169 (the case where diskgc cannot ask the device is pending
+  Mark's confirmation, TASK-296): a candidate holding the backing file
+  of a configured loop device (`udisksctl loop-setup`, `losetup`,
+  mounted or not) is `in_use` where diskgc can ask the device (root,
+  the `disk` group); where it
   cannot, a device whose file may be the user's keeps every candidate
   `in_use_unknown` (a deleted one: those on its filesystem) until it is
   detached ([safety.md](safety.md#in-use), Loop devices). 0.1.0: yes; it
@@ -2766,7 +2769,7 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   ([safety.md](safety.md#in-use), Visibility). Under `hidepid` it hides
   more, and diskgc does not reclaim there ([safety.md](safety.md#in-use),
   Visibility: a process list that cannot be complete).
-- **In-use blind spots under review (TASK-169).** Kernel-held references
+- **In-use blind spots under review (TASK-303).** Kernel-held references
   without a `/proc` descriptor or mapping (io_uring registered files,
   overlay upper and work directories; a loop device's backing file is
   seen, [safety.md](safety.md#in-use), Loop devices),

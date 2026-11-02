@@ -10,7 +10,7 @@ lives in exactly one place:
 |---|---|
 | [docs/reference.md](docs/reference.md) | CLI, exit codes, JSON output, configuration, profile schema, selection grammar, built-in profile library |
 | [docs/safety.md](docs/safety.md) | every deletion protocol: filesystem checks, Cargo, Docker, Nix, command actions, path traversal, validation, host lock, privileges, deadlines |
-| [docs/architecture.md](docs/architecture.md) | index, tally, reclaim walk, measuring space, implementation, deployment |
+| [docs/architecture.md](docs/architecture.md) | index, tally, reclaim walk, measuring space, implementation, deployment, release procedure and criteria |
 | [docs/testing.md](docs/testing.md) | test layers, required scenarios, race tests, interlock, `just` recipes |
 | [docs/diskgc-design.svg](docs/diskgc-design.svg) | one-page overview diagram |
 
@@ -84,12 +84,16 @@ kinds), and where those guarantees end. The protocols are in
 - Only files a source profile found, that a tier selected, and that no
   `protect` entry or `!profile` overlaps, are ever deleted.
 - Only files whose every entry belongs to the user diskgc runs as (or to
-  an explicit `owners:` list under `--allow-root`).
+  an explicit `owners:` list under `--allow-root`), as the mount shows
+  the owner: an idmapped mount that root made can show another
+  account's files as the user's ([safety.md](docs/safety.md), Ownership
+  of every entry; pending Mark's ruling, TASK-308).
 - Not if a visible process has any of the candidate's files open, mapped,
   as its working directory, or (heuristically) named in its initial
   environment, nor if one of its files backs a configured loop device
   (or, where diskgc cannot ask the device, could; pending Mark's
-  confirmation, TASK-169);
+  confirmation, TASK-296; the configurations the loop rules cannot see
+  await his ruling, TASK-305);
   not if the candidate directory is `flock`ed by someone
   else (a locked *file* inside is only caught as an open file of a visible
   process), nor if it contains a mount, a `.diskgc-keep` file, a Cargo
@@ -106,8 +110,8 @@ kinds), and where those guarantees end. The protocols are in
   container), when a tier relies on diskgc's own in-use check: a
   reclaiming `ensure` whose space is already there still exits 0, but
   its dry run, a reclaim below `--min-free` and a reclaiming `watch` are
-  refused ([safety.md](docs/safety.md#in-use); pending Mark's
-  confirmation, TASK-263, TASK-298).
+  refused ([safety.md](docs/safety.md#in-use); TASK-263, TASK-298;
+  pending Mark's confirmation, TASK-296).
 - Nor, for a source with a liveness contract, unless that contract
   permits it ([safety.md](docs/safety.md#producer-liveness)); a `/tmp` or
   cache built-in ships only with a contract whose class admits it, and
@@ -243,7 +247,12 @@ with an admissible liveness contract), as a
 static binary with a tmpfiles drop-in and an example config. It ships only
 with the Cargo race tests, the journeys for its users and the contract
 review green; `watch`, the index, `survey`, Docker, Nix and command actions
-come later. **v1** is the full scope below. ("v1" names the product
+come later. **0.2**'s scope is Mark's open decision (TASK-276): the
+release descriptor holds a provisional row for it, and whether 0.2 is
+that row, with or without a reclaiming `watch`, is not decided. Its
+release criteria are one checked list
+([architecture.md](docs/architecture.md#02-release-criteria)).
+**v1** is the full scope below. ("v1" names the product
 release; the config schema has its own `version: 1`.)
 
 In scope (v1): `ensure`, `watch` (including `--tally-only`), `check`,
@@ -272,7 +281,7 @@ binary + YAML for CI.
 - Running as root by default; command actions as root; Podman as the
   Docker backend; rootless Docker; non-default Docker builders; non-Linux;
   Linux older than 5.8.
-- FUSE or `LD_PRELOAD` simulation for tests; a VM test suite, for now.
+- FUSE or `LD_PRELOAD` simulation for tests.
 - Defence against a hostile local user racing diskgc.
 
 ## Prior art and why it is not enough
@@ -306,7 +315,7 @@ whatever the profile.
 | Docker | One bound backend per kind (local endpoint, default builder, storage root) | Tally, preflight and prune must act on the same thing. |
 | Privileges | Non-root by default | Removes the "root runs commands from YAML" hazard. |
 | Thresholds | Command-line flags; `ensure` target defaults to `--min-free` | Same config for laptop and CI; no surprise deletions. |
-| Build and test | Rust, Nix flake, static musl binary; pure planner + executor over a `Host` port; YAML host model; rootless-container e2e | Rules tested as data, races deterministic, nothing tested on the live system. |
+| Build and test | Rust, Nix flake, static musl binary; pure planner + executor over a `Host` port; YAML host model; rootless-container e2e; NixOS VM checks for what a container cannot reach (pinned kernels, loop devices, btrfs, bcachefs, `hidepid`) | Rules tested as data, races deterministic, nothing tested on the live system. |
 
 ## Open questions
 
@@ -358,14 +367,18 @@ where they apply ([safety.md](docs/safety.md) for Cargo, Docker and Nix).
   the fingerprints (`.fingerprint/`, or `build/<pkg>/<hash>/fingerprint` on the
   per-unit layout) being deleted first; resolved by race test 6.
 - **`hidepid` and private PID namespaces** hide processes from the in-use
-  check, so diskgc refuses to reclaim there (TASK-263, pending Mark's
-  confirmation): hardened hosts (`ProtectProc=`) and containers must run
-  it on the host.
+  check, so diskgc refuses to reclaim there (TASK-263; pending Mark's
+  confirmation, TASK-296): hardened hosts (`ProtectProc=`) and
+  containers must run it on the host.
 - **Docker containerd root discovery** for filesystem matching must be
   settled during implementation; unknown layouts are skipped as
   `unsupported_backend`.
-- **No real block filesystems, network filesystems or kernel versions in
-  e2e**; those cases rest on the model.
+- **Real filesystems and kernels in e2e are a sample.** The VM checks
+  reclaim on btrfs, bcachefs, ext4 and overlays on one pinned kernel
+  (`vm-real-kernel`) and run the in-use scan on a few others; xfs,
+  network filesystems (NFS, TASK-314) and other kernels are not run and
+  rest on the model ([testing.md](docs/testing.md), Not covered
+  end-to-end).
 - **Lock stalling.** Any local user can hold `/run/diskgc/lock`.
   Without it, a user's reclaims take a per-user lock instead, which
   serialises only that user's own; two users reclaiming one filesystem

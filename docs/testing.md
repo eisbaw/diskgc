@@ -2330,10 +2330,17 @@ filesystem, processes and mounts from the developer's system.
   package comparison check and the Nix/Debian container application checks.
   This packaging proof does not approve the candidate for distribution.
 
-**Not covered end-to-end (for now):** deletion on real block filesystems
-(ext4 or xfs as separate mounts, btrfs), network filesystems, and live
-systemd (planned: Deployment units, below). A private ext4 VM disk covers
-the 40k dry-plan cost only. Rootless container behavior follows the test
+**Not covered end-to-end (for now):** deletion on xfs and on network
+filesystems (an NFS server and client in a VM is TASK-314), and a
+reclaiming `watch` under a live systemd (no release package runs one
+until TASK-276 decides; the NixOS VM test of Deployment units, below,
+runs the development package's `--tally-only` instances, and its
+reclaiming one exits 2 at the sandbox gate). Deletion on btrfs,
+bcachefs and ext4 runs only in the `vm-real-kernel` scenarios above,
+on that check's one kernel: ext4 on the guest's disk and on loop
+devices, btrfs and bcachefs on loop devices; ext4 and xfs as separate
+mounts of their own devices are TASK-314 too. A private ext4 VM disk covers the 40k
+dry-plan cost only. Rootless container behavior follows the test
 host's kernel; the pinned VM cases above cover the listed kernels. Other
 cases rest on model tests with model-only fields.
 

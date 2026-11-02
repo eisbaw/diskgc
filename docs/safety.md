@@ -1258,7 +1258,7 @@ note can see them:
   it, the host's, another container's, the user's own, can use a
   candidate unseen, root or not.
 
-The rule (pending Mark's confirmation): the in-use check runs only where
+The rule (pending Mark's confirmation, TASK-296): the in-use check runs only where
 its process list can be complete, the held `/proc` without `hidepid` and
 diskgc in the initial PID namespace. These are the facts of Owner PID's preconditions 3 and 4,
 read the same way through the held `/proc`: `self/ns/pid` is the initial
