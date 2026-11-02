@@ -49,6 +49,7 @@ pub(crate) fn stat_from_statx(x: &rustix::fs::Statx) -> Stat {
         mtime: answered(StatxFlags::MTIME).then(|| timestamp(x.stx_mtime)),
         ctime: answered(StatxFlags::CTIME).then(|| timestamp(x.stx_ctime)),
         btime: answered(StatxFlags::BTIME).then(|| timestamp(x.stx_btime)),
+        atime: answered(StatxFlags::ATIME).then(|| timestamp(x.stx_atime)),
         mnt_id: answered(StatxFlags::MNT_ID).then_some(x.stx_mnt_id),
         mount_root: attribute(StatxAttributes::MOUNT_ROOT),
         subvol: answered(STATX_SUBVOL).then_some(x.stx_subvol),

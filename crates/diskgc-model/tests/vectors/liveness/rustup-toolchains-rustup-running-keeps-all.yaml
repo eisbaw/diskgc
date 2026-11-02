@@ -1,0 +1,36 @@
+# rustup-toolchains (TASK-94): while rustup runs, every toolchain is kept:
+# it may be installing or updating one, and a component download runs
+# outside the toolchain directory without holding anything in it. Here a
+# proxy: ~/.cargo/bin/cargo is a hard link of ~/.cargo/bin/rustup (the
+# same inode), auto-installing a toolchain before it hands over.
+profile_vector: 1
+select: profile:rustup-toolchains
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/.cargo/bin/rustup: {size: 8K, mode: "0755"}
+    /home/tester/.cargo/bin/cargo: {link: /home/tester/.cargo/bin/rustup}
+    /home/tester/.rustup/settings.toml: {content: "version = \"12\"\n"}
+    /home/tester/.rustup/toolchains:
+      1.87.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+  processes:
+    - {pid: 901, exe: /home/tester/.cargo/bin/cargo, cwd: /, maps: [/home/tester/.cargo/bin/cargo], environ: [HOME=/home/tester], fds: [{path: /home/tester/.cargo/bin/cargo}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+  preserved:
+    - /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu/bin/rustc

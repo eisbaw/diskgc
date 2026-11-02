@@ -671,6 +671,7 @@ pub(crate) mod tests {
             mtime: None,
             ctime: None,
             btime: None,
+            atime: None,
             mnt_id,
             mount_root,
             subvol: None,

@@ -1579,11 +1579,12 @@ fn toolchain_sources_have_frozen_match_sets_and_guards() {
     use super::ToolchainManager;
     let library = Library::builtin().expect("built-ins");
     let root = Path::new("/home/mark");
-    for (name, manager, dir, matched) in [
+    for (name, manager, dir, links, matched) in [
         (
             "rustup-toolchains",
             ToolchainManager::Rustup,
             ".rustup",
+            &[".rustup/toolchains", ".kani/*"][..],
             [
                 "toolchains/stable-x86_64-unknown-linux-gnu",
                 "toolchains/nightly-2025-11-21-x86_64-unknown-linux-gnu",
@@ -1594,6 +1595,7 @@ fn toolchain_sources_have_frozen_match_sets_and_guards() {
             "elan-toolchains",
             ToolchainManager::Elan,
             ".elan",
+            &[".elan/toolchains"][..],
             [
                 "toolchains/leanprover--lean4---v4.16.0",
                 "toolchains/leanprover--lean4---v4.30.0-rc1",
@@ -1610,8 +1612,12 @@ fn toolchain_sources_have_frozen_match_sets_and_guards() {
         assert_eq!(source.where_.protect_toolchains, Some(manager));
         assert_eq!(
             source.where_.predicates(),
-            [crate::kind::PredicateName::ProtectToolchains]
+            [
+                crate::kind::PredicateName::ProtectLinks,
+                crate::kind::PredicateName::ProtectToolchains
+            ]
         );
+        assert_eq!(source.where_.protect_link_dirs, links);
         assert_eq!(
             source.min_idle_for,
             Some(IdleFor(Duration::from_secs(3600)))

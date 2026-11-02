@@ -744,9 +744,13 @@ fn where_(spec: &WhereSpec, problems: &mut Vec<String>) -> Where {
     }
     for dir in &spec.protect_link_dirs {
         literal_without_uid("protect_link_dirs", dir, problems);
-        if pattern(dir).is_err() || dir.contains('*') {
+        // One whole `*` segment may stand for every directory of a level
+        // (`.kani/*`); any other `*` is refused.
+        let stars = dir.split('/').filter(|segment| segment.contains('*'));
+        let star_ok = stars.clone().all(|segment| segment == "*") && stars.count() <= 1;
+        if pattern(dir).is_err() || !star_ok {
             problems.push(format!(
-                "`protect_link_dirs: {dir}` must be a literal directory path relative to the bound root"
+                "`protect_link_dirs: {dir}` must be a directory path relative to the bound root, literal but for at most one whole `*` segment"
             ));
         }
     }

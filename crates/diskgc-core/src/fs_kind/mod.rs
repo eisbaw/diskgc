@@ -98,6 +98,10 @@ pub struct Find {
     pub protect_cursor_extensions: Option<String>,
     /// Keep every toolchain this manager could select ([`toolchain`]).
     pub protect_toolchains: Option<crate::profile::ToolchainManager>,
+    /// The source's bound roots in the term that selects it (set by the
+    /// tier; empty: only the root a candidate was found under). The
+    /// toolchain guard walks every one for pin files.
+    pub bound_roots: Vec<std::path::PathBuf>,
 }
 
 /// One filesystem entry predicate in a selection term. `has` means a
@@ -248,6 +252,7 @@ impl Find {
             protect_parent_link: where_.protect_parent_link.clone(),
             protect_cursor_extensions: where_.protect_cursor_extensions.clone(),
             protect_toolchains: where_.protect_toolchains,
+            bound_roots: Vec::new(),
         }
     }
 }

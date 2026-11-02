@@ -135,10 +135,12 @@ pub(crate) fn veto<'a, H: Host>(
     record: &WalkRecord,
 ) -> Result<Result<(), (usize, Skip)>, Stop> {
     for (index, (find, found)) in sources.into_iter().enumerate() {
-        if !matches!(
-            instance(find, &found.path),
-            Ok(Instance::RcPid(_) | Instance::Session)
-        ) {
+        if find.protect_toolchains.is_none()
+            && !matches!(
+                instance(find, &found.path),
+                Ok(Instance::RcPid(_) | Instance::Session)
+            )
+        {
             continue;
         }
         if let Err(skip) = check(host, scan, find, found, parent, record)? {
@@ -181,6 +183,9 @@ pub(crate) fn check<H: Host>(
     parent: &H::Fd,
     record: &WalkRecord,
 ) -> Judged<()> {
+    // The toolchain guard's live half (docs/safety.md, Toolchain pins) is
+    // judged from the same scan as a contract.
+    judged!(super::toolchain::live(host, scan, find, found));
     let Some(contract) = find.liveness_contract else {
         return Ok(Ok(()));
     };

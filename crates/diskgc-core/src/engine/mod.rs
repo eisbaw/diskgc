@@ -1174,6 +1174,7 @@ mod tests {
             mtime: None,
             ctime: None,
             btime: Some(Timestamp { secs: 10, nanos: 5 }),
+            atime: None,
             mnt_id: Some(30),
             mount_root: Some(false),
             subvol: None,

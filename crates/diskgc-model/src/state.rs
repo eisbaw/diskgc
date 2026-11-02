@@ -67,6 +67,8 @@ pub struct Inode {
     pub mtime: Timestamp,
     pub ctime: Timestamp,
     pub btime: Timestamp,
+    /// Last access; the model's reads never change it.
+    pub atime: Timestamp,
     /// The nested btrfs subvolume it belongs to
     /// ([`crate::spec::DirAttrs::subvolume`]): the device `statx` reports.
     pub subvolume: Option<Dev>,
@@ -91,6 +93,7 @@ impl Inode {
             mtime: now,
             ctime: now,
             btime: now,
+            atime: now,
             subvolume: None,
             subvol: None,
         }
@@ -1215,6 +1218,7 @@ impl State {
             mtime: when(fs, StatxField::Mtime, inode.mtime),
             ctime: when(fs, StatxField::Ctime, inode.ctime),
             btime: when(fs, StatxField::Btime, inode.btime),
+            atime: Some(inode.atime),
             mnt_id: when(fs, StatxField::MntId, loc.mnt),
             mount_root: when(
                 fs,

@@ -2478,8 +2478,10 @@ are recoverable.
 pending Mark's admission, development library only) delete whole toolchain
 directories (`.rustup/toolchains/*`, `.elan/toolchains/*` below a supplied
 home root) with diskgc's own `delete`, under the `protect_toolchains`
-retention guard ([reference.md](reference.md#predicates-where)). They are
-not command actions, for three reasons:
+retention guard and the link guard (`protect_link_dirs`), whose
+schema is in [reference.md](reference.md#predicates-where). This section is
+the one home of the guard's rules and limits. They are not command
+actions, for three reasons:
 
 - Neither manager's cleaner keeps what a project or the default still
   selects. In an offline, disposable `diskgc-e2e-base` container, Elan
@@ -2495,7 +2497,7 @@ not command actions, for three reasons:
 - A command action passes the candidate path; both uninstall commands take
   a manager name (elan stores `leanprover/lean4:v4.1.0` as
   `leanprover--lean4---v4.1.0`), so it would need a name binding, and the
-  keep rule below would still be diskgc's.
+  keep rules below would still be diskgc's.
 - Neither tool is on `PATH` on a Nix machine (the development host has
   neither, inside or outside the project's dev shell), where a command
   profile is always `missing`.
@@ -2503,87 +2505,141 @@ not command actions, for three reasons:
 What the uninstall does beyond the directory, a plain delete leaves:
 rustup 1.29.1 also removes `update-hashes/NAME`; left behind, rustup
 removes that stray hash with a warning on its next install of the name
-(source read). elan 4.2.4 keeps no per-toolchain state outside the
-directory. A linked toolchain (`rustup toolchain link`, `elan toolchain
-link`) is a symlink and never a candidate.
+(source read). elan 4.2.4 keeps nothing else.
 
-**What keeps a toolchain.** The guard reads, at every judgement (the plan,
-the tally and again under the candidate's lock), never from the index:
+**Only what the manager can install again.** A candidate must be a
+toolchain its manager installed from a release and can install again;
+anything else is kept (`pinned_toolchain`, "custom toolchain: the manager
+cannot reinstall it"), because deleting it loses work no download
+restores:
 
-1. the candidate's place: it must lie directly in a directory named
-   `toolchains`, whose parent is the manager's home, and its name must be
-   UTF-8;
-2. the home's `settings.toml` (at most 1 MiB, version `"12"`, the only
-   version rustup 1.29 and elan 4.2 write): `default_toolchain` and every
-   `[overrides]` value;
-3. elan only: every project in the home's `known-projects` (absolute
-   directories, one per line, which elan records when it runs in a
-   project; elan's own gc reads the same list) by its `lean-toolchain`; a
-   project or file that is gone pins nothing;
-4. every pin file below the bound root at relative depths 1 through 5
-   (`rust-toolchain`, `rust-toolchain.toml`; `lean-toolchain`), found by
-   the discovery walk (no symlink followed, no mount crossed, network
-   mounts never opened), at most 64 KiB each;
-5. rustup only: every symlink directly in each directory below `.kani` of
-   the bound root (Kani links its pinned nightly as
-   `.kani/<version>/toolchain`), checked by the link guard
-   (`linked_current`).
+- rustup: an official name as rustup 1.29.1's own grammar reads it (a
+  channel `stable`, `beta`, `nightly` or a version `M.m[.p][-beta[.N]]`,
+  then an optional `-YYYY-MM-DD`) with a full target triple (at least
+  three `-`-separated parts). espup's `esp`, a hand-made `nightly-local`
+  or a copied stage1 directory is custom.
+- elan: a directory that decodes (`---` is `:`, `--` is `/`) to a name
+  whose elan 4.2.4 normal form is exactly that directory: `owner/repo:`
+  and a release. A real `lean4-patched` directory, or an old elan's
+  `---stable`, is custom.
 
-Each file is reached without a symlink or mount crossing, must be a
-regular file and must not change while read. What cannot be read
-completely keeps the candidate (`pinned_toolchain`, the detail naming the
-file and the cause): a missing or malformed `settings.toml`, another
-version, a pin file or known project that cannot be reached or read, or
-text diskgc cannot parse. A pin file without a channel (a
-`rust-toolchain.toml` that lists only components) pins nothing, as the
-default applies.
+A linked toolchain (`rustup toolchain link`, `elan toolchain link`) is a
+symlink and never a candidate itself; the link guard over `toolchains/`
+keeps what it leads to (`linked_current`), so `link custom <dir>` with
+`default custom` keeps `<dir>` when it is an installed toolchain.
+
+**What keeps a toolchain.** Read afresh at every judgement (the plan, the
+tally, again under the candidate's lock and right before the delete), never
+from the index. Anything that cannot be read completely keeps every
+candidate of the source (`pinned_toolchain`; the detail counts the places
+and names the first):
+
+1. *Recent use* (`not_idle`): an entry of the candidate's `bin/` whose
+   access time is within 14 days. `relatime`, the Linux default, updates a
+   file's atime when it is read or executed, at most once a day, so a day
+   is the measure's grain; two weeks span a holiday or a project's
+   release cycle, after which losing an unused toolchain costs one
+   download. Under `noatime` the atime stays at install time: the floor
+   then holds only for two weeks after an install, and the rules below
+   decide alone. An atime the kernel does not report keeps it.
+2. *Settings*: the home's `settings.toml` (beside `toolchains/`, at most
+   1 MiB, version `"12"`, the only one rustup 1.29 and elan 4.2 write, and
+   no top-level key diskgc has not read): `default_toolchain` and every
+   `[overrides]` value. For rustup without a default of its own, the
+   system fallback `/etc/rustup/settings.toml` (its `default_toolchain`,
+   as rustup's `get_default` reads it; missing or not readable is none,
+   as for rustup).
+3. *elan's projects*: every project in the home's `known-projects`
+   (absolute directories, one per line, which elan records when it runs
+   in a project; elan's own gc reads the same list), by its
+   `lean-toolchain`; a project or file that is gone pins nothing.
+4. *Pin files below every bound root* of the source in its term:
+   `rust-toolchain`, `rust-toolchain.toml` (`lean-toolchain`) at relative
+   depths 1 through 5, at most 64 KiB each. The walk follows no
+   symlinked directory and crosses local mounts (it only reads pin
+   files). A network, FUSE or automount mount is never opened (screened
+   from mountinfo: not walked). A directory it cannot list, an entry it
+   cannot stat, or a pin file it finds but cannot read or parse is
+   uncertainty.
+5. *Live processes*, from the in-use check's scan (each visible process
+   of the user): a running manager (an executable named `rustup`,
+   `rustup-init`, `elan` or `elan-init`, or the manager's own binary,
+   `~/.cargo/bin/rustup` or `~/.elan/bin/elan`, under a proxy's name:
+   the same inode) keeps every toolchain of that manager, since it may
+   be installing or updating one outside the toolchain directory without
+   holding anything in it; `RUSTUP_TOOLCHAIN` / `ELAN_TOOLCHAIN` in a
+   process's initial environment is a pin; and the pin files above each
+   process's working directory, every ancestor up to `/` (the managers'
+   own lookup, which stops at the first; reading all keeps more), are
+   pins, whatever their depth or mount. A process whose environment could
+   not be read gives no evidence, as for the in-use check's environment
+   rule. A process whose root is not diskgc's has working-directory text
+   of another view: it is not looked up. A pin file above a working
+   directory that cannot be read safely (one on a network or FUSE mount
+   included) is uncertainty.
+6. *Links*: the link guard's `protect_link_dirs` (`toolchains/` itself,
+   and for rustup `.kani/*`, every symlink directly in each Kani
+   installation, such as `.kani/kani-0.67.0/toolchain`).
+
+A pin file is read as its manager reads it: rustup's one-line legacy
+`rust-toolchain` is a channel, or a path toolchain when absolute; any
+other is TOML whose `[toolchain]` `channel` or `path` (relative to the
+file's directory) names the toolchain, and one with only components pins
+nothing. elan reads the first line. A symlinked pin file is followed,
+safely, to its target; a dangling one pins nothing. A path toolchain is
+resolved like a link (symlinks read one by one, a `..` after a named
+component refused as unsure) and keeps the toolchain it leads into.
 
 **What a name selects.** The managers resolve a name partly from the
 network; diskgc compares what it can offline and keeps more where it
 cannot tell:
 
-- rustup: an official name (`stable`, `beta`, `nightly` or a version,
-  then an optional `YYYY-MM-DD`, then an optional, possibly partial,
-  target triple) selects every directory with the same channel and date;
-  the triple is ignored, so `stable-gnu` keeps `stable-x86_64-unknown-
-  linux-gnu`, and `nightly` keeps `nightly-<triple>` but not a dated
-  nightly; `1.90.0` and `1.90` are different channels. Any other name
-  compares whole. A `path` toolchain keeps a directory of its last name.
-- elan (4.2.4's `lookup_unresolved_toolchain_desc`): `origin:release` or a
-  bare release of `leanprover/lean4`; a release starting with `nightly`
-  belongs to the origin's `-nightly` repository; one starting with a digit
-  gains `v`; the directory is the name with `/` written `--` and `:`
-  written `---`. A channel (`stable`, `beta`, `nightly`,
-  `lean-toolchain`) resolves through the network, so it keeps every
-  release of its origin. A name that looks like a path is a path
-  toolchain, as for rustup.
+- rustup: an official name selects every directory with the same channel
+  and date; the triple is ignored (rustup completes a partial one from
+  the host), so `stable-gnu` keeps `stable-x86_64-unknown-linux-gnu`, and
+  `nightly` keeps `nightly-<triple>` but not a dated nightly. `1.0`
+  through `1.8` are rustup's aliases of `1.0.0` through `1.8.0`; `1.90`
+  and `1.90.0` are different channels. Any other name compares whole.
+- elan: `origin:release` or a bare release of `leanprover/lean4`; a
+  release starting with `nightly` belongs to the origin's `-nightly`
+  repository, one starting with a digit gains `v`. A channel (`stable`,
+  `beta`, `nightly`) keeps every release of its origin. A pin naming
+  another repository's `lean-toolchain` (`leanprover-community/
+  mathlib4:lean-toolchain`) is fetched and resolved again by elan: while
+  one is seen, every elan toolchain is kept.
 
-**Pinning limits** (the residuals of its row in
-[Liveness contracts](reference.md#liveness-contracts)). diskgc cannot see
-every pin, and deletes a toolchain only a pin it does not read selects:
+**Pinning limits** (the residuals of the profiles' row in
+[Liveness contracts](reference.md#liveness-contracts)). diskgc deletes a
+toolchain that only something it does not read selects:
 
-- a pin file outside the supplied roots, deeper than five levels below
-  one, behind a mount, in a directory diskgc cannot list, or itself a
-  symlink; elan's `known-projects` covers its projects anywhere, rustup
-  has no such list;
-- a pin in the environment or on a command line: `RUSTUP_TOOLCHAIN` or
-  `ELAN_TOOLCHAIN` of a shell (a name, not a path, so the in-use check's
-  environment rule does not match it), `cargo +NAME`, `rustup run NAME`,
-  a CI file;
+- a pin file outside every bound root, deeper than five levels below one,
+  or on a network or FUSE mount, that no live process works below;
+- a toolchain named only on a command line or in a script (`cargo +NAME`,
+  `rustup run NAME`, a CI file) while nothing runs it; a `PATH` or
+  `RUSTUP_TOOLCHAIN` exported after a shell started, invisible until a
+  child inherits it; `RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS`;
+- a process in another root or mount namespace, or one whose
+  environment diskgc cannot read;
 - a tool that pins a toolchain by its own means: Kani's link is read;
   another tool's (an editor configured with a toolchain's full path, a
-  script calling `~/.rustup/toolchains/NAME/bin/cargo`) is not;
-- Lean 3's `leanpkg.toml` is not read.
+  script calling `~/.rustup/toolchains/NAME/bin/cargo`) is not, nor Lean
+  3's `leanpkg.toml`;
+- stale state keeps more, not less: an `[overrides]` entry for a
+  directory that is gone, an old `.kani/<version>` installation, a
+  `known-projects` line or a forgotten `rust-toolchain.toml` keep their
+  toolchains until removed; a dangling link below the root inside
+  `toolchains/` or `.kani/*` keeps every candidate (the link guard).
 
-In each case the manager installs the toolchain again on its next use
-(rustup's `auto-install` is on by default since 1.28; elan always), which
-needs the network, and loses components and targets added by hand;
+In each deleting case the manager installs the toolchain again on its next
+use (rustup's `auto-install` is on by default since 1.28; elan always),
+which needs the network and loses components and targets added by hand;
 a tool configured with the full path fails until it is reinstalled.
-Nothing is lost that cannot be downloaded again. The idle measure says
-little here: a toolchain's files change when it is installed or updated,
-not when it is used, so `min_idle_for: 1h` only covers an install in
-flight, and use is seen only through a running process (its executable,
-mappings or initial `PATH`).
+Nothing is lost that cannot be downloaded again.
+
+**Cost.** The pin walk lists every directory to depth four below each
+bound root and reads the pin files it finds, at every judgement of a
+candidate; the live half reads the pin files above each process's
+working directory, each directory once per judgement.
 
 ### Deletion
 

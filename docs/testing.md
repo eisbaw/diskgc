@@ -1068,16 +1068,12 @@ profiles' executable evidence
 built-ins' own vectors are in `vectors/withdrawn/` and every other vector
 that selected one uses its probe profile (TASK-122).
 The toolchain profiles (`rustup-toolchains`, `elan-toolchains`, TASK-94;
-pending Mark's admission) have their builtins vectors (every keep rule:
-default, override, pin file, legacy one-line `rust-toolchain`, elan's
-`known-projects`, Kani's link; exact name comparison; a linked toolchain
-and the managers' sibling directories never candidates) and, in
-`liveness/`, the fail-closed and residual vectors their row names: pins
-diskgc cannot see (outside the root, too deep, `RUSTUP_TOOLCHAIN`), a
-running tool's mapping and a shell's `PATH`, an unknown `settings.toml`
-version, an unparsable pin file, an unreadable known project, and an elan
-channel pin. Their name rules have unit tests beside the guard
-(`fs_kind/toolchain.rs`). Container tests with real rustup and elan wait
+pending Mark's admission) follow the same design: one vector per rule of
+safety.md (Toolchain pins) in `builtins/` and `liveness/`, each holding
+exactly one toolchain that rule alone keeps beside one it does not, so
+that disabling the rule turns that vector red; the fail-closed rules each
+have a vector of their own. The name grammars are pure and tested beside
+the guard with properties. Container tests with real rustup and elan wait
 for Mark's admission.
 The Owner PID cases below are checked-in vectors against the
 `nix-shell-rc` built-in in `crates/diskgc-model/tests/vectors/liveness/`,

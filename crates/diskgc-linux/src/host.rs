@@ -5523,6 +5523,7 @@ mod tests {
                 mtime: None,
                 ctime: None,
                 btime: None,
+                atime: None,
                 mnt_id: None,
                 mount_root: None,
                 subvol: None,

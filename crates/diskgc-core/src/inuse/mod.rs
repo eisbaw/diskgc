@@ -48,7 +48,8 @@ use crate::outcome::Stop;
 use crate::resolve::{ResolveError, Want, open_beneath};
 
 pub use scan::{
-    EnvPath, Excuse, HeldDeleted, How, MAX_LISTINGS, REREAD_PAUSES, Seen, Unreadable, Use,
+    EnvPath, Excuse, HeldDeleted, How, MAX_LISTINGS, REREAD_PAUSES, Seen, TOOLCHAIN_VARS,
+    Unreadable, Use,
 };
 
 /// How old a scan may be when the deletion it cleared starts

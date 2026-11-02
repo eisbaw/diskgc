@@ -44,7 +44,7 @@ jiff = { version = "0.2", default-features = false, features = ["std"] }
 # TOML reading only (no writer): rustup's and elan's settings.toml and the
 # rust-toolchain.toml pin files the `protect_toolchains` guard reads
 # (TASK-94). Already in the lock through proc-macro-crate.
-toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
+toml_edit = { version = "=0.25.17", default-features = false, features = ["parse"] }
 proptest = "1"
 getrandom = "0.4"
 

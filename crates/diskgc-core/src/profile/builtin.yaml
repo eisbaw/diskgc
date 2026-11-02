@@ -521,6 +521,7 @@
 # uninstall: neither keeps a default or a project pin, and neither is on
 # PATH on a Nix machine. A verified heuristic pending Mark's admission
 # (docs/reference.md, Liveness contracts), so in no release catalog.
+# Never released, so its definition may still change under its name.
 - name: rustup-toolchains
   category: rust
   description: >-
@@ -532,6 +533,9 @@
     type: dir
   where:
     protect_toolchains: rustup
+    # A `rustup toolchain link` alias, and Kani's link to the nightly it
+    # pins (`.kani/<version>/toolchain`), keep what they lead to.
+    protect_link_dirs: [.rustup/toolchains, .kani/*]
   min_idle_for: 1h
   action: delete
   examples:
@@ -552,6 +556,8 @@
     type: dir
   where:
     protect_toolchains: elan
+    # An `elan toolchain link` alias keeps what it leads to.
+    protect_link_dirs: [.elan/toolchains]
   min_idle_for: 1h
   action: delete
   examples:

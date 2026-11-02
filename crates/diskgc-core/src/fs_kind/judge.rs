@@ -266,12 +266,7 @@ impl Judge<'_> {
             ));
         }
         for dir in &self.find.protect_link_dirs {
-            judged!(protect_link_directory(
-                host,
-                found,
-                &found.root.join(dir),
-                deadline
-            ));
+            judged!(protect_link_dir_pattern(host, found, dir, deadline));
         }
         if let Some(name) = &self.find.protect_parent_link {
             let Some(parent) = found.path.parent().and_then(Path::parent) else {
@@ -298,7 +293,13 @@ impl Judge<'_> {
             ));
         }
         if let Some(manager) = self.find.protect_toolchains {
-            judged!(super::toolchain::protect(host, found, manager, deadline));
+            judged!(super::toolchain::protect(
+                host,
+                found,
+                manager,
+                &self.find.bound_roots,
+                deadline
+            ));
         }
         if let Some(count) = self.find.keep_newest {
             judged!(keep_newest(host, parent, found, self.find, count, deadline));
@@ -1043,52 +1044,16 @@ fn protect_cursor_extension<H: Host>(
             ))));
         }
     };
-    let opened = match resolve_in(host, &mounts, path, Want::Any) {
-        Ok(opened) => opened,
-        Err(error) => {
+    let bytes = match read_small_stable_file(host, &mounts, path, MAX_MANIFEST_BYTES) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
             return Ok(Err(retain(format!(
-                "cannot reach Cursor registry {}: {error}",
+                "Cursor registry {} is missing",
                 path.display()
             ))));
         }
+        Err(why) => return Ok(Err(retain(format!("Cursor registry: {why}")))),
     };
-    if opened.stat.file_type != Some(FileType::Regular) {
-        return Ok(Err(retain(format!(
-            "Cursor registry {} is not a regular file",
-            path.display()
-        ))));
-    }
-    let bytes = match host.read_head(&opened.fd, MAX_MANIFEST_BYTES + 1) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return Ok(Err(retain(format!(
-                "cannot read Cursor registry {}: {error}",
-                path.display()
-            ))));
-        }
-    };
-    if bytes.len() > MAX_MANIFEST_BYTES {
-        return Ok(Err(retain(format!(
-            "Cursor registry {} exceeds the {} byte limit",
-            path.display(),
-            MAX_MANIFEST_BYTES
-        ))));
-    }
-    let after = match resolve_in(host, &mounts, path, Want::Any) {
-        Ok(after) => after,
-        Err(error) => {
-            return Ok(Err(retain(format!(
-                "cannot recheck Cursor registry {}: {error}",
-                path.display()
-            ))));
-        }
-    };
-    if opened.stat != after.stat {
-        return Ok(Err(retain(format!(
-            "Cursor registry {} changed while read",
-            path.display()
-        ))));
-    }
     let entries: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(entries) => entries,
         Err(error) => {
@@ -1158,6 +1123,132 @@ fn protect_cursor_extension<H: Host>(
         }
     }
     Ok(Ok(()))
+}
+
+/// The bytes of a small regular file reached from `/` without a symlink
+/// or mount crossing (network and FUSE mounts are screened before anything
+/// there is opened), unchanged while read: `Ok(None)` when it, or a
+/// directory on its way, does not exist (`ENOENT`, `ENOTDIR`); `Err` with
+/// the cause otherwise (not a regular file, over `limit` bytes, changed,
+/// unreadable).
+pub(super) fn read_small_stable_file<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    path: &Path,
+    limit: usize,
+) -> Result<Option<Vec<u8>>, String> {
+    let opened = match resolve_in(host, mounts, path, Want::Any) {
+        Ok(opened) => opened,
+        Err(ResolveError::Missing { .. }) => return Ok(None),
+        Err(error) => return Err(format!("cannot reach {}: {error}", path.display())),
+    };
+    if opened.stat.file_type != Some(FileType::Regular) {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    let bytes = host
+        .read_head(&opened.fd, limit + 1)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    if bytes.len() > limit {
+        return Err(format!("{} exceeds the {limit} byte limit", path.display()));
+    }
+    let after = resolve_in(host, mounts, path, Want::Any)
+        .map_err(|error| format!("cannot recheck {}: {error}", path.display()))?;
+    if after.stat != opened.stat {
+        return Err(format!("{} changed while read", path.display()));
+    }
+    Ok(Some(bytes))
+}
+
+/// A `protect_link_dirs` entry, relative to the bound root: a literal
+/// directory, or one with a single `*` segment (`.kani/*`), which stands
+/// for every directory of that level (listed afresh at each judgement; a
+/// non-directory there is passed over). Each directory is a launcher
+/// directory ([`protect_link_directory`]). A level that cannot be listed
+/// retains the candidate; one that does not exist holds no launchers.
+fn protect_link_dir_pattern<H: Host>(
+    host: &H,
+    found: &Found,
+    dir: &str,
+    deadline: Option<MonoTime>,
+) -> Judged<()> {
+    let Some((above, below)) = split_star(dir) else {
+        return protect_link_directory(host, found, &found.root.join(dir), deadline);
+    };
+    let retain = |detail: String| Skip::new(Reason::LinkedCurrent, found.path.clone(), detail);
+    let parent_path = found.root.join(above);
+    check_deadline(host, deadline, &parent_path)?;
+    let mounts = match host.mountinfo() {
+        Ok(mounts) => mounts,
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot check launcher mounts: {error}"
+            ))));
+        }
+    };
+    let parent = match resolve_in(host, &mounts, &parent_path, Want::Directory) {
+        Ok(parent) => parent,
+        Err(ResolveError::Missing { .. }) => return Ok(Ok(())),
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot reach launcher directories {}: {error}",
+                parent_path.display()
+            ))));
+        }
+    };
+    let names = match host.read_dir(&parent.fd, engine::DEFAULT_MAX_ENTRIES) {
+        Ok(DirListing::Names(names)) => names,
+        Ok(DirListing::TooMany) => {
+            return Ok(Err(retain(format!(
+                "{} has too many entries to check for launchers",
+                parent_path.display()
+            ))));
+        }
+        Err(error) => {
+            return Ok(Err(retain(format!(
+                "cannot list {}: {error}",
+                parent_path.display()
+            ))));
+        }
+    };
+    for name in names {
+        let at = parent_path.join(&name);
+        check_deadline(host, deadline, &at)?;
+        if is_mount_point(&mounts, &at) {
+            return Ok(Err(retain(format!(
+                "{} is a mount point: its launchers are not checked",
+                at.display()
+            ))));
+        }
+        let stat = match host.statx(Base::Dir(&parent.fd), Path::new(&name)) {
+            Ok(stat) => stat,
+            Err(error) => {
+                return Ok(Err(retain(format!(
+                    "cannot stat {}: {error}",
+                    at.display()
+                ))));
+            }
+        };
+        if stat.file_type == Some(FileType::Directory) {
+            judged!(protect_link_directory(
+                host,
+                found,
+                &at.join(below),
+                deadline
+            ));
+        }
+    }
+    Ok(Ok(()))
+}
+
+/// A path with one whole `*` segment, split around it (`a/*/b`: `a`,
+/// `b`); `None` when it has none.
+pub(crate) fn split_star(dir: &str) -> Option<(&str, &str)> {
+    let segments: Vec<&str> = dir.split('/').collect();
+    let star = segments.iter().position(|segment| *segment == "*")?;
+    let above_len: usize = segments[..star].iter().map(|s| s.len() + 1).sum();
+    let above = dir.get(..above_len.saturating_sub(1)).unwrap_or_default();
+    let below = dir.get(above_len + 2..).unwrap_or_default();
+    Some((above, below))
 }
 
 /// Every entry in a launcher directory must be listed and statted. The
@@ -1379,6 +1470,41 @@ fn resolve_link_chain<H: Host>(
     root: &Path,
     required: bool,
 ) -> Result<PathBuf, String> {
+    match follow_links(host, mounts, initial)? {
+        Followed::Reached(path) => Ok(path),
+        // A dangling launcher elsewhere (for example an old Nix profile)
+        // cannot name a candidate below this root. Every existing prefix
+        // was checked for symlinks first.
+        Followed::Dangling { path, missing } if !required && !missing.starts_with(root) => Ok(path),
+        Followed::Dangling { missing, .. } => Err(format!(
+            "stat {}: no such file or directory",
+            missing.display()
+        )),
+    }
+}
+
+/// Where [`follow_links`] ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Followed {
+    /// The object every symlink on the way leads to, reached again without
+    /// a symlink.
+    Reached(PathBuf),
+    /// A name on the way does not exist (`ENOENT`, `ENOTDIR`): `path` is
+    /// the target as far as it was followed, `missing` the first prefix of
+    /// it that is not there.
+    Dangling { path: PathBuf, missing: PathBuf },
+}
+
+/// Follow a bounded chain one component at a time, as the kernel would
+/// resolve `initial`: every symlink is read below a safely reached parent
+/// (mount-screened, no crossing), its text normalised without folding a
+/// `..` after a named component, and the final object reached again
+/// without symlinks. `Err` for anything unsafe or unreadable on the way.
+pub(super) fn follow_links<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    initial: &Path,
+) -> Result<Followed, String> {
     let mut path = initial.to_owned();
     for _ in 0..40 {
         let mut prefix = PathBuf::from("/");
@@ -1396,15 +1522,11 @@ fn resolve_link_chain<H: Host>(
                 .map_err(|error| format!("reach {}: {error}", parent_path.display()))?;
             let before = match host.statx(Base::Dir(&parent.fd), Path::new(name)) {
                 Ok(stat) => stat,
-                Err(error)
-                    if !required
-                        && !prefix.starts_with(root)
-                        && (error.is(Errno::ENOENT) || error.is(Errno::ENOTDIR)) =>
-                {
-                    // A dangling launcher elsewhere (for example an old
-                    // Nix profile) cannot name a candidate below this root.
-                    // Every existing prefix was checked for symlinks first.
-                    return Ok(path);
+                Err(error) if error.is(Errno::ENOENT) || error.is(Errno::ENOTDIR) => {
+                    return Ok(Followed::Dangling {
+                        path,
+                        missing: prefix,
+                    });
                 }
                 Err(error) => return Err(format!("stat {}: {error}", prefix.display())),
             };
@@ -1432,7 +1554,7 @@ fn resolve_link_chain<H: Host>(
         }
         resolve_in(host, mounts, &path, Want::Any)
             .map_err(|error| format!("reach {}: {error}", path.display()))?;
-        return Ok(path);
+        return Ok(Followed::Reached(path));
     }
     Err(format!(
         "target {} has more than 40 symlink steps",
@@ -1440,7 +1562,7 @@ fn resolve_link_chain<H: Host>(
     ))
 }
 
-fn normalize_link_target(parent: &Path, text: &Path) -> Option<PathBuf> {
+pub(super) fn normalize_link_target(parent: &Path, text: &Path) -> Option<PathBuf> {
     let mut path = if text.is_absolute() {
         PathBuf::from("/")
     } else {

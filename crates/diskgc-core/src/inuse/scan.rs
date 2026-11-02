@@ -197,7 +197,22 @@ pub struct Seen {
     pub cwds: Vec<PathBuf>,
     /// Link texts of `exe` (may end in ` (deleted)`).
     pub exes: Vec<PathBuf>,
+    /// (device, inode) of each executable.
+    pub exe_ids: Vec<DevIno>,
+    /// (device, inode) of each root directory: whether its link texts are
+    /// paths of diskgc's view (the toolchain guard's working-directory
+    /// lookup, docs/safety.md, Toolchain pins).
+    pub roots: Vec<DevIno>,
+    /// Some read gave its initial environment.
+    pub environ_read: bool,
+    /// The toolchain managers' selection variables in its initial
+    /// environment ([`TOOLCHAIN_VARS`]), from the latest read that gave it.
+    pub toolchain_env: Vec<(OsString, OsString)>,
 }
+
+/// The variables that select a toolchain for every rustup or elan command
+/// a process runs (docs/safety.md, Toolchain pins).
+pub const TOOLCHAIN_VARS: [&str; 2] = ["RUSTUP_TOOLCHAIN", "ELAN_TOOLCHAIN"];
 
 /// What a readable process uses.
 #[derive(Debug, Clone, Default)]
@@ -232,7 +247,8 @@ pub(crate) struct Read {
 /// One process's read.
 #[derive(Debug, Clone)]
 pub(crate) enum Outcome {
-    Read(Read),
+    /// Boxed: a read is far larger than the other variants.
+    Read(Box<Read>),
     Gone,
     Unreadable(ProcError),
 }
@@ -292,7 +308,7 @@ impl Entry {
                 if read.environ_failed.is_none() && !read.facts_failed {
                     self.environ_read = true;
                 }
-                self.found.add(read);
+                self.found.add(*read);
                 Latest::Read
             }
             Outcome::Gone => Latest::Gone,
@@ -317,6 +333,20 @@ impl Read {
                     mine.push(text);
                 }
             }
+        }
+        for (mine, theirs) in [
+            (&mut self.seen.exe_ids, other.seen.exe_ids),
+            (&mut self.seen.roots, other.seen.roots),
+        ] {
+            for id in theirs {
+                if !mine.contains(&id) {
+                    mine.push(id);
+                }
+            }
+        }
+        if other.seen.environ_read {
+            self.seen.environ_read = true;
+            self.seen.toolchain_env = other.seen.toolchain_env;
         }
         self.uses.extend(other.uses);
         self.uses.sort_unstable();
@@ -1103,7 +1133,7 @@ fn is_initial_namespace(uid_map: Option<&str>) -> bool {
 /// What one process's read means for the scan.
 pub(crate) fn outcome(pid: Pid, view: Result<ProcView, ProcError>) -> Outcome {
     match view.and_then(|view| uses_of(pid, view)) {
-        Ok(read) => Outcome::Read(read),
+        Ok(read) => Outcome::Read(Box::new(read)),
         Err(ProcError::Gone) => Outcome::Gone,
         Err(e) => Outcome::Unreadable(e),
     }
@@ -1151,8 +1181,12 @@ fn uses_of(pid: Pid, view: ProcView) -> Result<Read, ProcError> {
                     if !read.seen.exes.contains(&text) {
                         read.seen.exes.push(text);
                     }
+                    if !read.seen.exe_ids.contains(&id) {
+                        read.seen.exe_ids.push(id);
+                    }
                 }
                 How::Cwd if !read.seen.cwds.contains(&text) => read.seen.cwds.push(text),
+                How::Root if !read.seen.roots.contains(&id) => read.seen.roots.push(id),
                 _ => {}
             }
         }
@@ -1166,6 +1200,12 @@ fn uses_of(pid: Pid, view: ProcView) -> Result<Read, ProcError> {
     match view.environ {
         Ok(env) => {
             read.environ = environ::paths(&env);
+            read.seen.environ_read = true;
+            read.seen.toolchain_env = env
+                .vars()
+                .filter(|(name, _)| TOOLCHAIN_VARS.iter().any(|v| *name == OsStr::new(v)))
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect();
             read.environ_raw = Some(env);
         }
         Err(ProcError::Failed(e)) => read.environ_failed = Some(e),

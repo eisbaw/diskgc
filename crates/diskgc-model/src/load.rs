@@ -846,6 +846,7 @@ fn create_node(
             inode.mtime = mtime;
             inode.ctime = mtime;
             inode.btime = mtime;
+            inode.atime = spec.atime.map_or(mtime, |t| timestamp(t.0));
             if let Some(uid) = spec.uid {
                 inode.uid = uid;
             }
@@ -866,6 +867,7 @@ fn set_dir_attrs(state: &mut State, loc: Loc, attrs: &DirAttrs, model: &HostMode
     inode.mtime = mtime;
     inode.ctime = mtime;
     inode.btime = mtime;
+    inode.atime = mtime;
     if let Some(uid) = attrs.uid {
         inode.uid = uid;
     }

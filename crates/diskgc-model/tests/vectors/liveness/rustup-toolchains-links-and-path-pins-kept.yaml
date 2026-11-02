@@ -1,0 +1,59 @@
+# rustup-toolchains (TASK-94): what a path or a link leads to is kept.
+# `rustup toolchain link custom <dir>` with `default custom`, where the
+# link's target is an installed toolchain (1.84.0: linked_current, the
+# link guard on toolchains/); a legacy one-line rust-toolchain holding an
+# absolute path (1.85.0); a rust-toolchain.toml `path` relative to its
+# file, through a symlink alias (1.86.0); a symlinked pin file whose
+# target lies outside the root (1.87.0). A dangling symlinked pin file
+# pins nothing, so 1.88.0 goes.
+profile_vector: 1
+select: profile:rustup-toolchains
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/.rustup/settings.toml: {content: "version = \"12\"\ndefault_toolchain = \"custom\"\n"}
+    /home/tester/.rustup/toolchains:
+      custom: {symlink: /home/tester/.rustup/toolchains/1.84.0-x86_64-unknown-linux-gnu}
+      1.84.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      1.85.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      1.86.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      1.87.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      1.88.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+    /home/tester/src/legacy/rust-toolchain: {content: "/home/tester/.rustup/toolchains/1.85.0-x86_64-unknown-linux-gnu\n"}
+    /home/tester/src/pathpin/rust-toolchain.toml: {content: "[toolchain]\npath = \"../alias\"\n"}
+    /home/tester/src/alias: {symlink: /home/tester/.rustup/toolchains/1.86.0-x86_64-unknown-linux-gnu}
+    /home/tester/src/linked/rust-toolchain.toml: {symlink: /srv/shared/rust-toolchain.toml}
+    /srv/shared/rust-toolchain.toml: {content: "[toolchain]\nchannel = \"1.87.0\"\n"}
+    /home/tester/src/dangling/rust-toolchain.toml: {symlink: /srv/gone/rust-toolchain.toml}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.rustup/toolchains/1.84.0-x86_64-unknown-linux-gnu, reason: linked_current}
+    - {candidate: /home/tester/.rustup/toolchains/1.85.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+    - {candidate: /home/tester/.rustup/toolchains/1.86.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+    - {candidate: /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+    - {candidate: /home/tester/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu}
+  reclaim_exit: 1
+  actions: [/home/tester/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu]
+  removed: [/home/tester/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu]
+  skipped:
+    - {candidate: /home/tester/.rustup/toolchains/1.84.0-x86_64-unknown-linux-gnu, reason: linked_current}
+    - {candidate: /home/tester/.rustup/toolchains/1.85.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+    - {candidate: /home/tester/.rustup/toolchains/1.86.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+    - {candidate: /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+  preserved:
+    - /home/tester/.rustup/toolchains/custom
+    - /home/tester/.rustup/toolchains/1.84.0-x86_64-unknown-linux-gnu/bin/rustc
+    - /home/tester/.rustup/toolchains/1.85.0-x86_64-unknown-linux-gnu/bin/rustc
+    - /home/tester/.rustup/toolchains/1.86.0-x86_64-unknown-linux-gnu/bin/rustc
+    - /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu/bin/rustc

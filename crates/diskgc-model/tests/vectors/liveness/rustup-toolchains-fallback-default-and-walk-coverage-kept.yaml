@@ -1,0 +1,52 @@
+# rustup-toolchains (TASK-94): rustup's system fallback default
+# (/etc/rustup/settings.toml, read when the user's settings name no
+# default) keeps 1.85.0. The pin walk covers every bound root of the
+# source (1.86.0 is pinned below /work, the second root) and crosses a
+# local mount below a root (1.87.0 is pinned in /home/tester/disk, an ext4
+# mount). 1.88.0 is pinned by nothing. (/work itself is on another
+# filesystem than PATH's, so nothing there is a candidate: other_fs.)
+profile_vector: 1
+select: profile:rustup-toolchains
+roots: [/home/tester, /work]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /home/tester/disk, fs: ext4, dev: "254:3", size: 10G, parent: 2}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /etc/rustup/settings.toml: {content: "default_toolchain = \"1.85.0\"\n", uid: 0, gid: 0}
+    /home/tester/.rustup/settings.toml: {content: "version = \"12\"\n"}
+    /home/tester/.rustup/toolchains:
+      1.85.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      1.86.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      1.87.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      1.88.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+    /work/proj/rust-toolchain.toml: {content: "[toolchain]\nchannel = \"1.86.0\"\n"}
+    /home/tester/disk/proj/rust-toolchain.toml: {content: "[toolchain]\nchannel = \"1.87.0\"\n"}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /work, reason: other_fs}
+    - {candidate: /home/tester/.rustup/toolchains/1.85.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+    - {candidate: /home/tester/.rustup/toolchains/1.86.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+    - {candidate: /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+    - {candidate: /home/tester/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu}
+  reclaim_exit: 1
+  actions: [/home/tester/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu]
+  removed: [/home/tester/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu]
+  skipped:
+    - {candidate: /work, reason: other_fs}
+    - {candidate: /home/tester/.rustup/toolchains/1.85.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+    - {candidate: /home/tester/.rustup/toolchains/1.86.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+    - {candidate: /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu, reason: pinned_toolchain}
+  preserved:
+    - /home/tester/.rustup/toolchains/1.85.0-x86_64-unknown-linux-gnu/bin/rustc
+    - /home/tester/.rustup/toolchains/1.86.0-x86_64-unknown-linux-gnu/bin/rustc
+    - /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu/bin/rustc

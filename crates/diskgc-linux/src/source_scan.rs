@@ -863,7 +863,7 @@ pub(crate) const PRODUCTION_DEPENDENCIES: &[(&str, &[&str])] = &[
             // its `debug` feature, left off. All were already in the lock
             // through proc-macro-crate.
             "toml_edit.workspace = true",
-            "workspace: toml_edit = { version = \"0.25\", default-features = false, features = [\"parse\"] }",
+            "workspace: toml_edit = { version = \"=0.25.17\", default-features = false, features = [\"parse\"] }",
         ],
     ),
     (

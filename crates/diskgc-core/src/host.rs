@@ -359,6 +359,12 @@ pub struct Stat {
     pub mtime: Option<Timestamp>,
     pub ctime: Option<Timestamp>,
     pub btime: Option<Timestamp>,
+    /// Last access. Updated by reads (and `execve`) as the mount's atime
+    /// policy allows: `relatime` (the default) at most once a day or when
+    /// older than mtime, `noatime` never. Only the toolchain guard's
+    /// recent-use floor reads it (docs/safety.md, Toolchain pins); the idle
+    /// measure never does.
+    pub atime: Option<Timestamp>,
     /// `stx_mnt_id`: the id mountinfo uses for the mount (Linux 5.8+).
     pub mnt_id: Option<u64>,
     /// `STATX_ATTR_MOUNT_ROOT`: the object is the root of its mount.

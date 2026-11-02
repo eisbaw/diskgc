@@ -591,7 +591,7 @@ impl Tier {
             }
         }
         let idle_for = library.idle_for(term)?;
-        let roots = bound
+        let roots: Vec<PathBuf> = bound
             .get(&term.source)
             .map(|roots| {
                 roots
@@ -600,6 +600,9 @@ impl Tier {
                     .collect()
             })
             .unwrap_or_default();
+        if let SourceKind::Fs(find) = &mut kind {
+            find.bound_roots = roots.clone();
+        }
         Ok(Tier {
             group: SELECT_TIER.to_owned(),
             name: SELECT_TIER.to_owned(),

@@ -396,6 +396,10 @@ pub struct FileSpec {
     /// Modification time (also ctime and birth time); default `clock`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtime: Option<WallTime>,
+    /// Last access time; default the modification time. The model's reads
+    /// never change it (as under `noatime`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atime: Option<WallTime>,
     /// Owner; default 1000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<u32>,

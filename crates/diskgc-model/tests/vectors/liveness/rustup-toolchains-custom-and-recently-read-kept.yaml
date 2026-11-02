@@ -1,0 +1,45 @@
+# rustup-toolchains (TASK-94): only a toolchain rustup can install again
+# is a candidate to delete: an official name with a full target triple.
+# espup's `esp` and a hand-made `nightly-local` are custom toolchains
+# (real directories, no manager can recreate them): kept. A toolchain
+# whose rustc was read (atime) two days ago is kept (not_idle, within the
+# two-week floor); one last read twenty days ago is not.
+profile_vector: 1
+select: profile:rustup-toolchains
+roots: [/home/tester]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/.rustup/settings.toml: {content: "version = \"12\"\n"}
+    /home/tester/.rustup/toolchains:
+      1.86.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z, atime: 2026-10-13T03:00:00Z}}}
+      1.87.0-x86_64-unknown-linux-gnu: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z, atime: 2026-09-25T03:00:00Z}}}
+      esp: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+      nightly-local: {.: {mtime: 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: 8K, mode: "0755", mtime: 2026-09-01T00:00:00Z}}}
+  processes:
+    - {pid: 901, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [HOME=/home/tester], fds: [{path: /usr/bin/tool}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.rustup/toolchains/1.86.0-x86_64-unknown-linux-gnu, reason: not_idle}
+    - {candidate: /home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu}
+    - {candidate: /home/tester/.rustup/toolchains/esp, reason: pinned_toolchain}
+    - {candidate: /home/tester/.rustup/toolchains/nightly-local, reason: pinned_toolchain}
+  reclaim_exit: 1
+  actions: [/home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu]
+  removed: [/home/tester/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu]
+  skipped:
+    - {candidate: /home/tester/.rustup/toolchains/1.86.0-x86_64-unknown-linux-gnu, reason: not_idle}
+    - {candidate: /home/tester/.rustup/toolchains/esp, reason: pinned_toolchain}
+    - {candidate: /home/tester/.rustup/toolchains/nightly-local, reason: pinned_toolchain}
+  preserved:
+    - /home/tester/.rustup/toolchains/1.86.0-x86_64-unknown-linux-gnu/bin/rustc
+    - /home/tester/.rustup/toolchains/esp/bin/rustc
+    - /home/tester/.rustup/toolchains/nightly-local/bin/rustc
