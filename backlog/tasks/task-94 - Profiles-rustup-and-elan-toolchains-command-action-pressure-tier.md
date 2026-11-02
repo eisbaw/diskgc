@@ -3,10 +3,10 @@ id: TASK-94
 title: >-
   Profiles: rustup and elan toolchains (plain delete with diskgc's pin-aware
   keep rule; dev library, pending Mark's admission)
-status: In Progress
+status: Done
 assignee: []
 created_date: 2026-10-19 11:48
-updated_date: '2026-11-02T17:12:00Z'
+updated_date: '2026-11-02T20:39:00Z'
 labels:
   - home
 dependencies:
@@ -38,4 +38,6 @@ Why: ~/.rustup/toolchains (5.2 GiB) and ~/.elan/toolchains (3.8 GiB) on the dev 
 2026-11-02: Mark steer: profiles + MockFS first. In progress in tmp/worktrees/t94 (branch t94-toolchains).
 
 2026-11-02 (review round): design changed from a command action to a plain delete with diskgc's own keep rule (the managers' uninstall protects neither defaults nor pins, and takes a toolchain name, not a path; neither tool is on PATH on Nix hosts). Mark's admission must cover this design and its residuals (safety.md 'Toolchain pins'), not only the liveness class.
+
+2026-11-02: merged (ff) into the development library after one review round. Admission to any catalog is Mark's (design + residuals in safety.md Toolchain pins). Follow-ups: per-pass pin-walk memo; container tests with real rustup/elan after admission.
 <!-- SECTION:NOTES:END -->
