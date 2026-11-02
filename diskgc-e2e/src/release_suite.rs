@@ -64,6 +64,9 @@ const EXCLUDED: &[&str] = &[
     "codex-releases",
     "claude-code-versions",
     "cursor-extensions",
+    // TASK-94, pending Mark's admission: development library only.
+    "rustup-toolchains",
+    "elan-toolchains",
 ];
 
 fn run_binary(
