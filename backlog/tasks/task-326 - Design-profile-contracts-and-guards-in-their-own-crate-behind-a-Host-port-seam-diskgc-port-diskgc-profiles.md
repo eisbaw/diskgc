@@ -3,15 +3,15 @@ id: TASK-326
 title: >-
   Design: profile contracts and guards in their own crate behind a Host-port
   seam (diskgc-port + diskgc-profiles)
-status: In Progress
+status: To Do
 assignee: []
 created_date: '2026-11-02T21:22:00Z'
-updated_date: '2026-11-02T21:22:00Z'
+updated_date: '2026-11-02T21:57:00Z'
 labels:
   - design
   - architecture
 dependencies: []
-priority: high
+priority: low
 ---
 
 ## Description
@@ -24,4 +24,6 @@ Mark 2026-11-02: 'i wonder if we cant have the profiles implemented as separate 
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-02: in progress in tmp/worktrees/t326 (branch t326-profile-crates-design).
+
+2026-11-02: Mark: 'we wont do such a refactor now.' Parked. The design (docs/design/profile-crates.md + profile-crates-seam.svg, inventory as of master 697652d) is kept on branch t326-profile-crates-design (commit 0818a49), not merged. Revisit only on Mark's request; TASK-323 (project.rs split) stays separate.
 <!-- SECTION:NOTES:END -->
