@@ -149,7 +149,7 @@
     root: /home/mark
     match: [/home/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228, /home/mark/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.150]
     no_match: [/home/mark/.cargo/registry/src, /home/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f, /home/mark/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src, /home/mark/.cargo/registry/cache/index.crates.io-1949cf8c6b5b557f/serde-1.0.228, /home/mark/.cargo/registry/index/index.crates.io-1949cf8c6b5b557f, /home/mark/.cargo/git/checkouts/repo-0123456789abcdef/abc1234, /home/mark/.cargo/bin, /home/mark/src/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228]
-  verified_with: Cargo source at master 2026-11-02 (unpack_package and .cargo-ok, CacheLockMode, global cache tracker sync of removed entries) and host registry layout under cargo 1.99.1
+  verified_with: Cargo source at commit 6238f6fd61bf, 2026-11-02 (unpack_package and .cargo-ok, CacheLockMode, global cache tracker sync of removed entries) and host registry layout
   liveness_class: verified-heuristic
 
 - name: node-gyp-headers
@@ -159,8 +159,9 @@
     roots: required
     paths: [".cache/node-gyp/*"]
     type: dir
-  # node-gyp writes installVersion with a completed install and installs a
-  # version again when it is missing.
+  # node-gyp copies installVersion in with the headers and installs a
+  # version again when its directory is missing. A delete stopped part-way
+  # leaves installVersion (docs/reference.md, Liveness contracts).
   where: {has: installVersion}
   min_idle_for: 1h
   action: delete
@@ -184,7 +185,7 @@
     root: /home/mark
     match: [/home/mark/.cache/electron/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f]
     no_match: [/home/mark/.cache/electron, /home/mark/.cache/electron/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f/electron-v33.4.5-linux-x64.zip, /home/mark/.cache/electron-builder/winCodeSign, /home/mark/.config/Electron, /home/mark/src/.cache/electron/c5bfbb83a9a00da9cf9633863c02cca5138e6c2f7c9dbd11a10a5fb33041457f]
-  verified_with: "@electron/get 5.1.0 source (env-paths cache root, SHA-256 URL directory, cache-hit path returned to the caller) and host layout (electron v33.4.5 zip), 2026-11-02"
+  verified_with: "@electron/get 5.1.0 source (env-paths cache root, SHA-256 URL directory, cache-hit path returned to the caller) and host layout (an Electron 33.4.5 zip from @electron/get 2.x), 2026-11-02"
   liveness_class: verified-heuristic
 
 # Project roots are supplied by policy. Explicit depths avoid an unbounded

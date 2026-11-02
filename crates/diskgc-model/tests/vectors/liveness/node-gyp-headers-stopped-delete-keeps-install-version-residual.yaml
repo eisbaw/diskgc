@@ -1,0 +1,37 @@
+# Residual of node-gyp-headers (TASK-40, verified heuristic, pending Mark's
+# admission; it blocks admission): the delete walk goes in byte order, so
+# include/ goes before installVersion. A delete stopped part-way (here the
+# deadline passes after the first header) leaves installVersion with
+# headers missing. node-gyp's `install --ensure` checks only the directory
+# and installVersion, so every native build for that Node version fails
+# until the leftover is deleted too or the user removes it; the leftover
+# is fresh (the unlinks change its directories), so the one-hour floor and
+# idle tiers keep it for a while. Admission needs the completion marker
+# unlinked first (a follow-up), not this residual.
+profile_vector: 1
+select: profile:node-gyp-headers
+roots: [/home/tester]
+path: /home
+min_free: 100%
+timeout: 1m
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.cache/node-gyp/22.12.0: {.: {mtime: 2026-09-01T00:00:00Z}, installVersion: {content: "11\n", mtime: 2026-09-01T00:00:00Z}, include: {.: {mtime: 2026-09-01T00:00:00Z}, node: {.: {mtime: 2026-09-01T00:00:00Z}, a.h: {size: 8K, mtime: 2026-09-01T00:00:00Z}, b.h: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}}
+  events:
+    - at: {op: unlinkat, path: /home/tester/.cache/node-gyp/22.12.0/include/node/a.h, nth: 1, when: after}
+      advance: 2m
+expect:
+  plan:
+    - {candidate: /home/tester/.cache/node-gyp/22.12.0}
+  reclaim_exit: 124
+  report: {status: deadline}
+  actions: [/home/tester/.cache/node-gyp/22.12.0]
+  removed: [/home/tester/.cache/node-gyp/22.12.0/include/node/a.h]
+  skipped: []
+  preserved: [/home/tester/.cache/node-gyp/22.12.0/installVersion, /home/tester/.cache/node-gyp/22.12.0/include/node/b.h]

@@ -1,0 +1,36 @@
+# Residual of cargo-registry-src (TASK-40, verified heuristic, pending
+# Mark's admission; it blocks admission as it stands): the delete walk goes
+# in byte order, so entries sorting before .cargo-ok (a .cargo/ directory,
+# dotfiles such as .appveyor.yml) go first. A delete stopped there (here
+# the deadline passes after .cargo/config.toml) leaves .cargo-ok, and Cargo
+# uses the incomplete source as extracted until the leftover is deleted.
+# Most entries sort after the marker, so a later stop leaves no .cargo-ok
+# and Cargo extracts again. The fix is to unlink the completion marker
+# first (a follow-up).
+profile_vector: 1
+select: profile:cargo-registry-src
+roots: [/home/tester]
+path: /home
+min_free: 100%
+timeout: 1m
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0: {.: {mtime: 2026-09-01T00:00:00Z}, .cargo: {.: {mtime: 2026-09-01T00:00:00Z}, config.toml: {size: 1K, mtime: 2026-09-01T00:00:00Z}}, .cargo-ok: {content: "{\"v\":1}", mtime: 2026-09-01T00:00:00Z}, src: {.: {mtime: 2026-09-01T00:00:00Z}, lib.rs: {size: 8K, mtime: 2026-09-01T00:00:00Z}}}
+  events:
+    - at: {op: unlinkat, path: /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/.cargo/config.toml, nth: 1, when: after}
+      advance: 2m
+expect:
+  plan:
+    - {candidate: /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0}
+  reclaim_exit: 124
+  report: {status: deadline}
+  actions: [/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0]
+  removed: [/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/.cargo/config.toml]
+  skipped: []
+  preserved: [/home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/.cargo-ok, /home/tester/.cargo/registry/src/index.crates.io-0123456789abcdef/dep-1.0.0/src/lib.rs]
