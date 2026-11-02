@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: 2026-10-16 22:41
-updated_date: '2026-11-01T06:52:00Z'
+updated_date: '2026-11-02T14:35:00Z'
 labels:
   - wave-3
   - irreversible
@@ -26,6 +26,16 @@ priority: high
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Why: the index must change speed, never safety. Integrate the index into the reclaim walk: queue per tier, cheap identity re-check, stale skips, per-tier discovery after the queue, live checks unchanged; property tests with randomly stale/partial/corrupted indexes; the stale-index model scenarios from docs/testing.md.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [x] #1 Property: with a corrupted index nothing is deleted that a correct-index run would refuse; the deleted set is within what that run's own discovery finds, with two stated exceptions (docs/testing.md, Property tests): re-matching a unit looks names up instead of listing, so a directory over the listing limit is not refused on the way down (too_many_entries; every per-candidate check still applies), and a host failure first appearing after the synchronous tally can follow deletions of queued candidates (one the tally meets keeps the run off the queue)
+- [x] #2 Stale-index scenarios (deep change, new keep file, new Cargo target inside, new protected match) are refused at deletion time
+- [x] #3 With an index present, new stale cruft created after the snapshot is deleted before any pressure tier runs
+- [x] #4 Time to first deletion on the 100k-entry fixture, cold and warm, is measured and logged (not a pass criterion: no latency target); ensure reaches --min-free and exits 0 in both
+- [x] #5 A block member opened by a process after an earlier member of the same block was deleted is skipped as in_use
+- [x] #6 A lump (block across finder sets, TASK-28) whose site lies above a tier's bound root is expanded by that tier's own discovery from the deeper of the site and the bound root, never from above the root; every member is still checked live (model test)
+<!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
@@ -58,14 +68,12 @@ Implemented on branch t31 (worktree tmp/worktrees/t31, not merged): e2bb85d e2e:
 2026-10-30: review fix round 82cb9af (host failure in the sync tally keeps every tier off the index queue; listing and sizing failure tests, each red under its own mutation; AC1 property adds keep_newest, 1000 cases). Merged to master (ff) at 82cb9af. Gate: just check exit 0 (1258 passed); e2e-clippy/e2e-tests exit 0; AC4 e2e-one PASS. Follow-up filed: TASK-251 (first deletion waits for sizing the whole first tier). Not run: full e2e (async QA), static musl measurement, mutation of the keep_newest property selection.
 
 2026-11-01 (TASK-251): AC #1's host-failure wording predates the split: a host failure in the tally before the lock (listing, best-fit sizing) keeps every tier off the queue; a failure in the deferred oldest sizing under the lock is an error of the run and can follow deletions of earlier queued candidates (architecture.md, safety.md).
-<!-- SECTION:NOTES:END -->
 
-## Acceptance Criteria
-<!-- AC:BEGIN -->
-- [ ] #1 Property: with a corrupted index nothing is deleted that a correct-index run would refuse; the deleted set is within what that run's own discovery finds, with two stated exceptions (docs/testing.md, Property tests): re-matching a unit looks names up instead of listing, so a directory over the listing limit is not refused on the way down (too_many_entries; every per-candidate check still applies), and a host failure first appearing after the synchronous tally can follow deletions of queued candidates (one the tally meets keeps the run off the queue)
-- [ ] #2 Stale-index scenarios (deep change, new keep file, new Cargo target inside, new protected match) are refused at deletion time
-- [ ] #3 With an index present, new stale cruft created after the snapshot is deleted before any pressure tier runs
-- [ ] #4 Time to first deletion on the 100k-entry fixture, cold and warm, is measured and logged (not a pass criterion: no latency target); ensure reaches --min-free and exits 0 in both
-- [ ] #5 A block member opened by a process after an earlier member of the same block was deleted is skipped as in_use
-- [ ] #6 A lump (block across finder sets, TASK-28) whose site lies above a tier's bound root is expanded by that tier's own discovery from the deeper of the site and the bound root, never from above the root; every member is still checked live (model test)
-<!-- AC:END -->
+2026-11-02 tracker hygiene (TASK-316): ACs reconciled against evidence.
+- AC1 ticked: crates/diskgc-modelgen/tests/index_authority.rs. Verification notes: 82cb9af (merge of TASK-31) 'index_authority property 1000 cases exit 0' with each tally-failure arm red under its own mutation; c0885a2 (TASK-295, order-proof property) 'index_authority 2048 cases pass; bites 1-4 red'. Caveat: the property missed three single-event holes Codex found on 82cb9af (fixed: TASK-252, and TASK-30 in 4b74b5c); its remaining generator gaps are TASK-318.
+- AC2, AC3, AC5, AC6 ticked: model tests in crates/diskgc-model/tests/index_reclaim.rs, run by every 'just check' (82cb9af's note: just check exit 0): stale_index_changes_after_the_tally_are_refused_at_deletion_time asserts all four scenarios (deep change -> not_idle, new .diskgc-keep -> keep_marker, new Cargo target -> contains_special, new protected match -> protected) plus a_seeded_index_that_missed_the_changes...; new_cruft_after_the_snapshot_is_deleted_before_the_pressure_tier; a_block_member_opened_after_an_earlier_member_was_deleted_is_in_use; a_lump_above_the_bound_root_is_expanded_from_the_root_only. Mutations that turned each red are in this task's notes (2026-10-26).
+- AC4 ticked: diskgc-e2e fs_reclaim_100k_entry_time_to_first_deletion_is_measured_cold_and_warm (Full tier; asserts --min-free reached and exit 0 cold and warm). 82cb9af's verification note records the 100k measurement (2026-10-26: cold 592 ms, warm 389 ms) and the 8k variant re-run on 82cb9af (exit 0, met). Caveat: the 100k run was on the pre-review tree, dev build under strace, not the static musl artifact, and no recorded full tier has run it since (no e2e-full note on master after 0.1).
+- DoD #1 not assessed here.
+
+2026-11-02 corrections to the hygiene note above (review): AC4's evidence is better cited as cf60cd6's verification note (TASK-251, after 82cb9af): 'e2e-one TTFD 8k cold 47 ms / warm 40 ms, 100k cold 199 ms / warm 129 ms' (dev build, e2e-one, not a full tier); 82cb9af's note lists the 100k variant under skipped:, with the 2026-10-26 figures. AC1: as the 2026-11-01 note says, AC1's host-failure wording predates TASK-251's split (a failure in the deferred oldest sizing under the lock is an error of the run and can follow deletions); the tick is for the property as it stands.
+<!-- SECTION:NOTES:END -->

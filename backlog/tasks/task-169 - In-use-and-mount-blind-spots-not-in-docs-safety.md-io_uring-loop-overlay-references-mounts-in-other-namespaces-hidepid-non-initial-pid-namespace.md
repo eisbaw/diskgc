@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: 2026-10-25 01:14
-updated_date: '2026-11-01T13:30:00Z'
+updated_date: '2026-11-02T14:35:00Z'
 labels:
   - hardening
   - safety
@@ -48,4 +48,11 @@ Periodic full review #2 on master 794e0e1 (2026-11-01; Codex tmp/reviews/codex-f
 2026-11-01 review round (Codex 2/3, mped): correction to the note above, which said 're-read once': an unresolved name is re-read up to three times (LOOP_REREADS). Design replaced: (1) LOOP_GET_STATUS64 on /dev/loopN (root, disk group) gives the exact (dev, ino), deleted or not; (2) unopenable device: name reaching a file no owner of the run holds -> no candidate can hold it (walk admits only owners' entries), noted; relative text -> noted; ' (deleted)' -> in_use_unknown for candidates on the surviving parent's filesystem, all if none; anything else (owner's file = possible decoy, or unresolved) -> every candidate in_use_unknown, unknown_cause loop_device. Premise checked: udisks 2.11.2 does not chown /dev/loopN (only a filesystem TakeOwnership), so a non-disk user's udisks image blocks fs/cargo reclaim until detached.
 
 2026-11-01: merged in the in-use visibility batch after one review round. Policy pending Mark's confirmation (PRD/safety.md marked).
+
+2026-11-02 tracker hygiene (TASK-316): neither AC ticked; the task stays Done and its remainder is carried by other tasks.
+- AC1 (each item reproduced or argued unreachable) is not met. Reproduced on a real kernel, by vm-real-kernel (verification notes 5f936c2, TASK-304, and 5e5221f, TASK-307: Linux 6.18.56): item 1's loop device (backing file in a candidate, deleted backing name, udisks), item 4 (hidepid, now refused: TASK-263), item 7 (nested btrfs subvolume; fixed by TASK-286, bcachefs by TASK-307). Item 5 (non-initial PID namespace) is refused at start by TASK-263, argued in safety.md (In use, Visibility), not reproduced as a deletion. Not reproduced and not argued: item 1's io_uring registered files and overlay upper/work directories, item 2 (mount points only in another mount namespace), item 3 (Cargo locks through an overlay), item 6 (NFS/virtiofs, one-kernel lock assumption). Carried by TASK-303 (owner of the remaining blind spots; the draft release notes now point there).
+- AC2 depends on AC1 for the unreproduced items, so it is not ticked either; for the reproduced ones the fixes above are merged.
+- The loop-device policy where diskgc cannot ask the device (udisks, not in disk) is pending Mark: TASK-296 (the PRD marker now points there, not here); the loop rules' alias limits: TASK-305.
+
+2026-11-02 correction to the note above: 5f936c2 has no verification note; the vm-real-kernel evidence for TASK-304, TASK-306 and TASK-307 is 5e5221f's note (task: TASK-304,TASK-306,TASK-307; 44/44 twice on Linux 6.18.56).
 <!-- SECTION:NOTES:END -->

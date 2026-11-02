@@ -5,7 +5,8 @@ title: >-
   remaining ~1190 mutants in shards
 status: To Do
 assignee: []
-created_date: '2026-10-25 03:24'
+created_date: 2026-10-25 03:24
+updated_date: '2026-11-02T14:15:00Z'
 labels:
   - hardening
   - mutation
@@ -31,3 +32,9 @@ The runner's partition check (verify_mutant_sweep.py) is tied to the five SOURCE
 - [ ] #1 mutation_scope/runner accept the deletion-path files in a second named scope, with the guards unchanged
 - [ ] #2 Every deletion-path file swept; each missed mutant classified (equivalent with reason / test gap filed / weakness filed)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-02 (TASK-315): the 0.2 release criteria (docs/architecture.md, '0.2 release criteria') propose this task's AC2 as the release bar for the deletion path (every source swept, no unclassified survivor), pending Mark; 0.1 ran it async, blocking only on a found hole. The inventory above predates modules such as inuse/loops.rs and engine/overlay.rs.
+<!-- SECTION:NOTES:END -->
