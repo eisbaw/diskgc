@@ -131,7 +131,7 @@ def main(argv):
     for name in created:
         # Only containers these runs created; --ignore: the passing one is
         # normally gone already.
-        removed = podman("rm", "--force", "--ignore", "--time", "0", name)
+        removed = podman("rm", "--force", "--ignore", "--volumes", "--time", "0", name)
         if removed.returncode != 0:
             print(f"e2e-one retention: could not remove {name}: {removed.stderr}", file=sys.stderr)
             verdict = 1

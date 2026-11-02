@@ -175,8 +175,9 @@ class ScopeTests(TestCase):
     def test_appended_justfile_command_is_rejected(self):
         justfile = Path("justfile").read_text()
         changed = justfile.replace(
-            "    python3 tools/mutation_scope.py run\n",
-            "    python3 tools/mutation_scope.py run\n    cargo mutants --list\n",
+            "    python3 tools/disk_stage.py mutants python3 tools/mutation_scope.py run\n",
+            "    python3 tools/disk_stage.py mutants python3 tools/mutation_scope.py run\n"
+            "    cargo mutants --list\n",
         )
         self.assertNotEqual(changed, justfile)
         with mock.patch.object(Path, "read_text", return_value=changed):

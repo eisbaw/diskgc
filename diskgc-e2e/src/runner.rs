@@ -65,7 +65,18 @@ pub struct Config {
     /// The dind image has an entrypoint and needs extra isolation for its
     /// daemon. The normal images keep the existing Podman invocation.
     pub runtime: Runtime,
+    /// The checkout (worktree) the runner was started from, its working
+    /// directory: every container it creates carries it in
+    /// [`CHECKOUT_LABEL`], so the cleanup tools find this harness's
+    /// containers per checkout (tools/e2e_kept.py; TASK-311).
+    pub checkout: PathBuf,
 }
+
+/// The Podman label every container of this runner carries, its value the
+/// checkout ([`Config::checkout`]). The cleanup tools match a container as
+/// the harness's only by its `diskgc-e2e-` name prefix and this label
+/// (tools/e2e_kept.py mirrors it).
+pub const CHECKOUT_LABEL: &str = "diskgc-e2e.checkout";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Runtime {
@@ -153,6 +164,8 @@ pub fn parse_args(args: &[String]) -> Result<(Config, Selection), String> {
         under_test: PathBuf::from(required(take("under-test"), "under-test")?),
         log_dir: PathBuf::from(take("log-dir").unwrap_or_else(|| "tmp/e2e-logs".to_owned())),
         runtime,
+        checkout: std::env::current_dir()
+            .map_err(|e| format!("the working directory (the checkout) is unreadable: {e}"))?,
     };
     let selection = match words.as_slice() {
         [cmd] if cmd == "run" => {
@@ -717,11 +730,13 @@ fn podman_run_args(config: &Config, name: &str, keep: bool, extra: &[String]) ->
         "SYS_ADMIN",
         "--cap-add",
         "SYS_PTRACE",
-        "--volume",
+        "--label",
     ]
     .iter()
     .map(|s| (*s).to_owned())
     .collect();
+    args.push(format!("{CHECKOUT_LABEL}={}", config.checkout.display()));
+    args.push("--volume".to_owned());
     args.push(format!(
         "{}:{UNDER_TEST_BIN_DIR}:ro",
         config.under_test.join("bin").display()
@@ -984,7 +999,9 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
     };
     if keep {
         if outcome == Outcome::Pass {
-            if let Err(e) = podman_cleanup(&["rm", "--force", &container]) {
+            // --volumes: an image's anonymous volumes go with it, as with
+            // the suite runs' `--rm`.
+            if let Err(e) = podman_cleanup(&["rm", "--force", "--volumes", &container]) {
                 // A passing `one` must not leave its container behind.
                 eprintln!("runner: the test passed but its container was not removed: {e}");
                 return finish(Outcome::Fail(None));
@@ -1368,6 +1385,27 @@ mod tests {
                     run[..image]
                         .windows(2)
                         .any(|w| w == ["--security-opt", "no-new-privileges"]),
+                    "{runtime}: {run:?}"
+                );
+            }
+        }
+    }
+
+    /// Every container carries the checkout label the cleanup tools match
+    /// (tools/e2e_kept.py), kept or not, on every runtime.
+    #[test]
+    fn every_container_carries_the_checkout_label() {
+        for runtime in ["standard", "dind"] {
+            let mut a = args(GLOBAL);
+            a.extend(args(&["--runtime", runtime, "one", "sandbox_trivial"]));
+            let (config, _) = parse_args(&a).unwrap();
+            assert!(config.checkout.is_absolute(), "{:?}", config.checkout);
+            let label = format!("{CHECKOUT_LABEL}={}", config.checkout.display());
+            for keep in [false, true] {
+                let run = podman_run_args(&config, "c", keep, &[]);
+                let image = run.iter().position(|a| *a == config.image_ref).unwrap();
+                assert!(
+                    run[..image].windows(2).any(|w| w == ["--label", &label]),
                     "{runtime}: {run:?}"
                 );
             }

@@ -1047,6 +1047,10 @@
               --add-flags "--image-ref ${image.imageName}:${image.imageTag}" \
               --add-flags "--runtime ${runtime}" \
               --add-flags "--under-test ${underTest}"
+            # The image this runner uses, for the last-used stamps of
+            # tools/e2e_images.py (`just _runner`; TASK-311).
+            mkdir -p $out/share/diskgc-e2e
+            printf '%s\n' "${image.imageName}:${image.imageTag}" > $out/share/diskgc-e2e/image-ref
           '';
       e2eRunner = mkE2eRunner "diskgc-e2e-runner" e2eBaseImage "standard" e2eUnderTest;
       # The same runner on the Debian image: `nix run .#e2e-runner-debian`.

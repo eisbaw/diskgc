@@ -50,7 +50,7 @@ def verify_recipe() -> None:
             recipe.append(line.strip())
     expected = [
         "git check-ignore -q tmp/system || { echo 'tmp/system must be Git-ignored before cargo-mutants copies the source tree' >&2; exit 2; }",
-        "python3 tools/mutation_scope.py run",
+        "python3 tools/disk_stage.py mutants python3 tools/mutation_scope.py run",
     ]
     if recipe != expected:
         raise ValueError("mutants recipe differs from the canonical scoped command")

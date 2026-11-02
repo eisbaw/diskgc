@@ -57,36 +57,45 @@ check:
 # and for its setup (canary, Podman checks, image load, test listing).
 # `check` runs under a one-hour hang guard (tools/deadline.py keeps Ctrl-C
 # working, which coreutils `timeout` would not); Nix builds under NIX_CONFIG's.
+# Each heavy line runs behind tools/disk_stage.py: it refuses to start below
+# its stage's free-space budget and prints free space before and after
+# (docs/testing.md, Disk budgets). `e2e` snapshots the host first and, after
+# `_e2e-cleanup`, fails if the run left anything of its own behind
+# (tools/e2e_selfcheck.py), then prints what a Nix GC would free.
 # Host requirement: rootless Podman (not provided by the dev shell).
 
 # `check`, sandboxed config, unit and release checks, and fast Nix and Docker container tests.
 e2e: _gcroot-dev
-    python3 tools/deadline.py 3600 just check
-    nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
-    nix build -L --no-link .#checks.x86_64-linux.deployment-units
-    nix build -L --no-link .#checks.x86_64-linux.nixos-module-eval
-    nix build -L --no-link .#checks.x86_64-linux.nixos-module-bad-config
-    nix build -L --no-link .#checks.x86_64-linux.diskgc-static
-    nix build -L --no-link .#checks.x86_64-linux.e2e-clippy
-    nix build -L --no-link .#checks.x86_64-linux.e2e-tests
-    nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
-    nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
-    nix build -L --no-link .#checks.x86_64-linux.release-candidate-package
-    nix build -L --no-link .#checks.x86_64-linux.version-stamp
-    nix build -L --no-link .#checks.x86_64-linux.release-gate-needs-catalog
-    just _runner e2e-runner run --suite fast --budget-secs 300
+    python3 tools/e2e_selfcheck.py snapshot
+    python3 tools/disk_stage.py check python3 tools/deadline.py 3600 just check
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.deployment-units
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.nixos-module-eval
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.nixos-module-bad-config
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.diskgc-static
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.e2e-clippy
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.e2e-tests
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.release-candidate-package
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.version-stamp
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.release-gate-needs-catalog
+    python3 tools/disk_stage.py containers just _runner e2e-runner run --suite fast --budget-secs 300
     python3 tools/e2e_one_retention.py .gcroots/e2e-runner/bin/diskgc-e2e-runner
-    just _runner e2e-runner-release --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
-    just _runner e2e-runner-release-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
-    just _e2e-docker fast 300
-    nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
-    nix build -L --no-link .#checks.x86_64-linux.vm-release-tmp-reclaim
-    nix build -L --no-link .#checks.x86_64-linux.vm-old-kernel-pidfd
-    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-1
-    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-12
-    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-15
-    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-8
-    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-8
+    python3 tools/disk_stage.py containers just _runner e2e-runner-release --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
+    python3 tools/disk_stage.py containers just _runner e2e-runner-release-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
+    python3 tools/disk_stage.py containers just _e2e-docker fast 300
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-release-tmp-reclaim
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-old-kernel-pidfd
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-1
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-12
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-15
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-8
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-8
+    just _e2e-cleanup
+    python3 tools/e2e_selfcheck.py verify
+    python3 tools/nix_dead.py
 
 # Every `e2e` stage, not stopping at a failure, for async QA (TASK-199);
 # prints and saves a per-stage exit table under tmp/e2e-all/.
@@ -95,75 +104,80 @@ e2e-all:
 
 # Background tally pressure brake in a VM with QEMU-throttled disks (~15 min); read-only.
 e2e-vm-tally-pressure: _gcroot-dev
-    nix build -L --no-link .#checks.x86_64-linux.vm-tally-pressure
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-tally-pressure
 
 # Cold guest-cache 40k dry plan on the VM's private ext4 disk; no deletion.
 e2e-vm-cold-scale: _gcroot-dev
-    nix build -L --no-link .#checks.x86_64-linux.vm-cold-scale
+    python3 tools/disk_stage.py vm-cold-scale nix build -L --no-link .#checks.x86_64-linux.vm-cold-scale
 
 # Loop devices, btrfs, idmapped, hidepid, udisks and overlay rules on a real guest kernel.
 e2e-vm-real-kernel: _gcroot-dev
-    nix build -L --no-link .#checks.x86_64-linux.vm-real-kernel
+    python3 tools/disk_stage.py vm-real-kernel nix build -L --no-link .#checks.x86_64-linux.vm-real-kernel
 
 # Every container test: Nix, Debian and native Docker; budgets guard hangs.
 e2e-full: _gcroot-dev
-    python3 tools/deadline.py 3600 just check
-    nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
-    nix build -L --no-link .#checks.x86_64-linux.deployment-units
-    nix build -L --no-link .#checks.x86_64-linux.nixos-module-eval
-    nix build -L --no-link .#checks.x86_64-linux.nixos-module-bad-config
-    nix build -L --no-link .#checks.x86_64-linux.diskgc-static
-    nix build -L --no-link .#checks.x86_64-linux.e2e-clippy
-    nix build -L --no-link .#checks.x86_64-linux.e2e-tests
-    nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
-    nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
-    nix build -L --no-link .#checks.x86_64-linux.release-candidate-package
-    nix build -L --no-link .#checks.x86_64-linux.version-stamp
-    nix build -L --no-link .#checks.x86_64-linux.release-gate-needs-catalog
-    just _runner e2e-runner run --suite full --budget-secs 3600
+    python3 tools/e2e_selfcheck.py snapshot
+    python3 tools/disk_stage.py check python3 tools/deadline.py 3600 just check
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.config-check-sandbox
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.deployment-units
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.nixos-module-eval
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.nixos-module-bad-config
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.diskgc-static
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.e2e-clippy
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.e2e-tests
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.release-excludes-e2e
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.release-excludes-clock-offset
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.release-candidate-package
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.version-stamp
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.release-gate-needs-catalog
+    python3 tools/disk_stage.py containers just _runner e2e-runner run --suite full --budget-secs 3600
     python3 tools/e2e_one_retention.py .gcroots/e2e-runner/bin/diskgc-e2e-runner
-    just _runner e2e-runner-release --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
-    just _runner e2e-runner-release-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
-    just _e2e-debian
-    just _e2e-docker full 900
-    nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
-    nix build -L --no-link .#checks.x86_64-linux.vm-release-tmp-reclaim
-    nix build -L --no-link .#checks.x86_64-linux.vm-old-kernel-pidfd
-    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-1
-    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-12
-    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-15
-    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-8
-    nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-8
-    nix build -L --no-link .#checks.x86_64-linux.vm-nixos-module
+    python3 tools/disk_stage.py containers just _runner e2e-runner-release --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
+    python3 tools/disk_stage.py containers just _runner e2e-runner-release-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
+    python3 tools/disk_stage.py containers just _e2e-debian
+    python3 tools/disk_stage.py containers just _e2e-docker full 900
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-release-tmp-reclaim
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-old-kernel-pidfd
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-1
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-12
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-15
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-8
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-8
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-nixos-module
     just e2e-vm-cold-scale
     just e2e-vm-real-kernel
+    just _e2e-cleanup
+    python3 tools/e2e_selfcheck.py verify
 
 # The static binary, no Nix inside (docs/testing.md, Images).
 # Every test but the Nix-only ones, on the Debian image.
 e2e-debian: _gcroot-dev
-    python3 tools/deadline.py 3600 just check
-    nix build -L --no-link .#checks.x86_64-linux.e2e-tests
-    just _runner e2e-runner-release-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
-    just _e2e-debian
+    python3 tools/disk_stage.py check python3 tools/deadline.py 3600 just check
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.e2e-tests
+    python3 tools/disk_stage.py containers just _runner e2e-runner-release-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
+    python3 tools/disk_stage.py containers just _e2e-debian
+    just _e2e-cleanup
 
 # Native Docker Engine tests in a digest-pinned dind image under Podman.
 e2e-docker: _gcroot-dev
-    python3 tools/deadline.py 3600 just check
-    nix build -L --no-link .#checks.x86_64-linux.e2e-tests
-    just _e2e-docker full 900
+    python3 tools/disk_stage.py check python3 tools/deadline.py 3600 just check
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.e2e-tests
+    python3 tools/disk_stage.py containers just _e2e-docker full 900
+    just _e2e-cleanup
 
 # No dev shell root here, to stay fast: the gate recipes root it.
 # One container test by NAME, keeping the container on failure.
 e2e-one NAME:
-    just _runner e2e-runner one {{NAME}}
+    python3 tools/disk_stage.py containers just _runner e2e-runner one {{NAME}}
 
 # One container test by NAME on the Debian image, kept on failure.
 e2e-debian-one NAME:
-    just _runner e2e-runner-debian --log-dir tmp/e2e-logs-debian one {{NAME}}
+    python3 tools/disk_stage.py containers just _runner e2e-runner-debian --log-dir tmp/e2e-logs-debian one {{NAME}}
 
 # One native Docker Engine test in the disposable dind image.
 e2e-docker-one NAME:
-    just _runner e2e-runner-docker --log-dir tmp/e2e-logs-docker one {{NAME}}
+    python3 tools/disk_stage.py containers just _runner e2e-runner-docker --log-dir tmp/e2e-logs-docker one {{NAME}}
 
 # The Debian image's run, shared by e2e-debian and e2e-full; its own log
 # directory, since test names repeat across images.
@@ -180,9 +194,13 @@ _e2e-docker SUITE BUDGET:
 # inputs (the toolchains, the pinned Debian and Docker images), so a Nix GC on a low
 # disk does not force them to be fetched and built again; each build
 # replaces its link, so roots do not accumulate (docs/testing.md, Images).
+# It stamps the runner's image as used (tools/e2e_images.py) and, pass or
+# fail, prunes the kept containers to the newest 5 (tools/e2e_kept.py); a
+# failed prune fails a passing run. The runner's exit status wins.
 _runner NAME *ARGS:
     nix build -L -o .gcroots/{{NAME}} .#{{NAME}}
-    .gcroots/{{NAME}}/bin/diskgc-e2e-runner {{ARGS}}
+    python3 tools/e2e_images.py stamp .gcroots/{{NAME}}
+    status=0; .gcroots/{{NAME}}/bin/diskgc-e2e-runner {{ARGS}} || status=$?; python3 tools/e2e_kept.py --prune || [ "$status" -ne 0 ] || status=1; exit "$status"
 
 # A GC root for the dev shell's inputs, the same way.
 _gcroot-dev:
@@ -193,10 +211,30 @@ _gcroot-dev:
 gcroots-drop:
     rm -rf .gcroots
 
-# Never another image, never one a container uses (tools/e2e_images.py).
+# Never another image, never one a container uses, never one any worktree
+# used in the last 24 h (--grace-hours H; tools/e2e_images.py).
 # List the e2e Podman image tags this checkout no longer uses; --apply removes them.
 e2e-images *ARGS:
     python3 tools/e2e_images.py {{ARGS}}
+
+# Only containers named diskgc-e2e-* with the runner's checkout label;
+# --legacy adds unlabelled ones older than a day (tools/e2e_kept.py).
+# List the containers failed e2e-one runs kept; --drop removes this checkout's.
+e2e-kept *ARGS:
+    python3 tools/e2e_kept.py {{ARGS}}
+
+# Only store links no recipe of CHECKOUT's justfile builds (tools/e2e_gcroots.py).
+# List a checkout's stale .gcroots links (default: this one); --apply drops them.
+e2e-gcroots *ARGS:
+    python3 tools/e2e_gcroots.py {{ARGS}}
+
+# What every gate recipe runs last: the newest 5 kept containers per
+# checkout stay, old harness images and stale GC roots go (docs/testing.md,
+# Cleanup). Nix GC stays manual.
+_e2e-cleanup:
+    python3 tools/e2e_kept.py --prune
+    python3 tools/e2e_images.py --apply
+    python3 tools/e2e_gcroots.py --apply
 
 # Safety and integrated selection properties with many cases.
 soak:
@@ -206,13 +244,13 @@ soak:
 
 # Fuzz one parser or all five for DURATION seconds each in the pinned nightly shell.
 fuzz TARGET="all" DURATION="1800":
-    nix develop .#fuzz -c bash fuzz/run.sh {{TARGET}} {{DURATION}}
+    python3 tools/disk_stage.py fuzz nix develop .#fuzz -c bash fuzz/run.sh {{TARGET}} {{DURATION}}
 
 # Run the complete five-source mutation sweep in resource-capped container shards.
 # The runner stops on resource pressure or any unverified mutant outcome.
 mutants:
     git check-ignore -q tmp/system || { echo 'tmp/system must be Git-ignored before cargo-mutants copies the source tree' >&2; exit 2; }
-    python3 tools/mutation_scope.py run
+    python3 tools/disk_stage.py mutants python3 tools/mutation_scope.py run
 
 # Validate local links and anchors in the reference and safety contracts.
 docs-check:

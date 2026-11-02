@@ -2893,8 +2893,9 @@ The VM check is part of `just e2e` and `just e2e-full`.
   (`.gcroots/dev`, its `inputDerivation`). A runner's closure holds its
   image's inputs (the toolchains, the pinned Debian and Docker images, the built
   layers), so a Nix garbage collection on a low disk does not delete them
-  and force a re-download. Each build replaces its link, so roots do not
-  accumulate. What stays on disk, measured 2026-10-19: closures of 3.0 GB
+  and force a re-download. Each build replaces its link, and every gate
+  drops links no recipe builds any more (Commands, Cleanup), so roots do
+  not accumulate. What stays on disk, measured 2026-10-19: closures of 3.0 GB
   (the Nix runner), 1.2 GB (the Debian runner) and 1.5 GB (the dev shell),
   4.4 GB together before adding the Docker runner. Podman's own copies of
   the loaded Nix and Debian images (2.84 GB and 0.93 GB) come on top.
@@ -3025,7 +3026,9 @@ snapshot, not proof that a path is safe to move.
 | `e2e-debian` | `check` plus every test but the Nix-only ones on the Debian image (Container setup: Images) | with changes to the static binary's behaviour on a non-Nix machine, the image, or the descriptor; a 15-minute deadline only guards against hangs |
 | `e2e-docker` | `check` plus Docker-only tests in the pinned native dind image | with changes to Docker fixtures or Docker kinds |
 | `e2e-one NAME` | one container test, keeping the container on failure | while working on one |
-| `e2e-images [--apply]` | the e2e images' Podman tags this checkout's flake no longer uses; `--apply` removes them | when old images fill the disk; with no other e2e run starting |
+| `e2e-images [--apply] [--grace-hours H]` | the e2e images' Podman tags this checkout's flake no longer uses and no worktree used in the last 24 h; `--apply` removes them (every gate recipe does, at its end) | to see or force what the gates prune |
+| `e2e-kept [--drop] [--legacy]` | the containers failed `e2e-one` runs kept; `--drop` removes this checkout's | when done inspecting one |
+| `e2e-gcroots [--apply] [CHECKOUT]` | a checkout's `.gcroots/` links no recipe builds any more; `--apply` drops them (every gate recipe does, for its own checkout) | after renaming or retiring a runner |
 | `e2e-debian-one NAME` | the same on the Debian image | while working on one there |
 | `e2e-docker-one NAME` | one native Docker test in a disposable dind container | while working on one there |
 | `soak` | property tests with many cases | before a release, nightly CI |
@@ -3136,19 +3139,29 @@ runner's `one` twice in `just e2e` and `just e2e-full`: on
 `runner_failure_probe_fails_on_purpose` (`Tier::Probe`: in no suite, it
 fails on purpose after setup), whose container must be kept, exited, with
 the probe's message in its log; and on `sandbox_trivial`, whose container
-must be gone. It then removes only those containers.
+must be gone. It then removes only those containers. Kept containers are
+bounded: see Cleanup below.
 
 **Old images.** A runner loads its image under a tag that is the image's
 Nix hash and never removes one, so each change of an image's inputs leaves
 a multi-gigabyte image behind, and an image a kept `e2e-one` container
 uses stays until that container is removed. `just e2e-images` lists the
 tags under `localhost/diskgc-e2e` and `localhost/diskgc-e2e-*` as current
-(the flake at this checkout uses them), in use (a container uses them) or
-old, and removes nothing; `just e2e-images --apply` runs `podman rmi` (never
-`--force`) on the old ones. Nothing else is listed or removed. A tag that
-is old here may be current in another worktree, which then loads it again;
-an e2e run there that is starting a container from it at that moment
-fails. The runner does not prune on its own for that reason.
+(the flake at this checkout uses them), in use (a container uses them),
+recent (used within the grace period, 24 h by default) or old, and removes
+nothing; `just e2e-images --apply` runs `podman rmi` (never `--force`) on
+the old ones. Nothing else is listed or removed. A tag old here may be
+current in another worktree on other inputs; that is what the grace
+period is for. Each tag has a last-used stamp, an empty file named after
+it in `${XDG_STATE_HOME:-~/.local/state}/diskgc-e2e/image-stamps/`
+(per user, as Podman's image store is), whose mtime is its last use:
+`just _runner` stamps its runner's image before every run (the runner
+package records it in `share/diskgc-e2e/image-ref`), `--apply` stamps this
+checkout's current tags and gives a never-stamped tag its first stamp,
+and a removed tag's stamp goes with it. A worktree idle for longer than
+the grace period therefore loses its images to another worktree's
+cleanup and loads them again on its next run (minutes, not an error).
+`--grace-hours 0` drops the grace for a one-off cleanup.
 
 `nix flake check` can report every check passed while building nothing
 (its outputs are already in the store from an earlier build of the same
@@ -3162,6 +3175,91 @@ subuid range covering uids 1000 and 1001 (the dev shell does not provide
 Podman; CI runners that are themselves containers need nested Podman).
 Each test's tier is declared in `diskgc-e2e/src/suite.rs`. Coverage of unit and model tests
 via `cargo llvm-cov`.
+
+### Cleanup
+
+Every e2e recipe leaves the host as it found it, except bounded, named
+debug artefacts (TASK-311). Only this harness's own artefacts are ever
+removed:
+
+- **Containers.** Suite runs start every container with `--rm`. A failed
+  `e2e-one` keeps its container for inspection; the runner labels every
+  container it creates `diskgc-e2e.checkout=<checkout>` (runner.rs
+  `CHECKOUT_LABEL`), and after every runner run (`just _runner`)
+  `tools/e2e_kept.py --prune` keeps the newest five exited ones per
+  checkout and removes older ones and those of checkouts that no longer
+  exist. A container counts as the harness's only with the `diskgc-e2e-`
+  name prefix and that label; walk containers (`walk-diskgc-*`) and every
+  other program's are never touched. `just e2e-kept` lists them,
+  `--drop` removes this checkout's, and `--drop --legacy` also removes
+  unlabelled `diskgc-e2e-<pid>-*` containers on harness images that are
+  over a day old (made before the label existed). Removal is
+  `podman rm --volumes`, so an image's anonymous volumes go too.
+- **Images.** Every gate recipe ends with `just _e2e-cleanup`, which runs
+  `e2e-images --apply` (Old images, above).
+- **GC roots.** `_e2e-cleanup` also runs `e2e-gcroots --apply`: a
+  `.gcroots/` link whose name no recipe of the checkout's justfile builds
+  (a retired runner such as `e2e-runner-release-01`) is dropped; only
+  links into `/nix/store` are. `git worktree remove` deletes a worktree's
+  `.gcroots/` with it (ignored files do not block it; checked
+  2026-11-02), so removing a worktree needs no recipe; its kept
+  containers become orphans the next prune anywhere removes. Nix GC stays
+  manual and host-wide: the machine owner's call. The last line of
+  `just e2e`, `tools/nix_dead.py`, prints how much `nix-store --gc` would
+  free (the NAR size of `nix-store --gc --print-dead`, an upper bound).
+  Listing dead paths makes the Nix daemon unlink dangling
+  `/nix/var/nix/gcroots/auto` registrations, so the tool skips the
+  estimate, naming them, when any dangling registration is outside this
+  repository.
+- **VM checks.** The NixOS test drivers run inside the Nix build sandbox
+  (`/nix/var/nix/builds`), and their VM disks are removed with the build
+  directory. Checked 2026-11-02 around a cold `just e2e-vm-real-kernel`:
+  no new entry in `/tmp` or `$XDG_RUNTIME_DIR` from the driver, none in
+  the worktree. Every `nix develop` itself leaves two empty directories
+  in `/tmp`, `nix-develop-PID-*` and `nix-shell.*` (Nix 2.34.8; seen
+  with `-c true`, with a shell fed `exit 0`, and with a bare
+  `mkShellNoCC`, so not this flake's shell hook). That is Nix's, not the
+  harness's: once per gate invocation (`nix develop -c just e2e`) and per
+  `just fuzz`.
+- **Self-check.** `just e2e` and `just e2e-full` start with
+  `tools/e2e_selfcheck.py snapshot` and end, after `_e2e-cleanup`, with
+  `verify`, which fails
+  listing anything new beyond the retained set: a container labelled with
+  this checkout, a Podman volume, a harness image that is neither one of
+  this checkout's runners' nor stamped within the grace period, an entry
+  in the checkout's `tmp/system`, an entry named like `diskgc*`,
+  `nix-build-*`, `vm-state-*` or `*.qcow2` in `/tmp` or
+  `$XDG_RUNTIME_DIR`, or a new untracked file in the source tree. Parallel
+  runs in other worktrees are not attributed to this one.
+
+### Disk budgets
+
+Disk is the binding constraint of the e2e runs. Each heavy line of a
+gate recipe, `fuzz`, `mutants` and the VM recipes runs behind
+`tools/disk_stage.py STAGE`: before it starts, the checkout's filesystem,
+the Nix store's and (container stages) Podman's graph root must each have
+the stage's budget free, or the stage does not run and the recipe fails
+naming the stage, the filesystem and both numbers. While it runs, free
+space is sampled every second; afterwards it prints free space before and
+after, the difference and the peak use (lowest free space seen). A budget
+is the stage's measured peak use, rounded up to whole GiB, plus 4 GiB left
+for the rest of the host, so that a stage does not start when it would
+leave the disk nearly full. The peak is the drop in free space, so other
+work on the host counts too; where that inflated a number, the table says
+so. Never lower a budget to make a run start; free space instead
+(`just e2e-kept --drop`, `just e2e-images --apply`, and with the owner's
+consent `nix-store --gc`). The mutation runner keeps its own guard as well.
+
+| Stage | Budget | Measured (2026-11-02, this laptop; other work ran alongside) | Lines |
+|---|---|---|---|
+| `check` | 10 GiB | cold, in a new worktree (empty `tmp/target`): 11.29 GiB peak, -11.07 GiB after (987 s), but `tmp/target` grew by about 5 GiB (to 5.3 GiB): other builds on the host account for the rest | `just check` in the gate recipes |
+| `flake-check` | 6 GiB | `e2e-clippy` rebuilt on its cached dependency artifacts: 0.23 GiB peak (29 s); a cold Crane dependency build was not measured and is what the budget allows for | each `nix build` of a non-VM flake check |
+| `containers` | 17 GiB | a cold load of the base image (4.4 GiB kept) into a private Podman store: 12.70 GiB peak, -4.34 GiB after; `e2e-one` with the image loaded: 0.03 to 0.16 GiB peak; the first, which also built the changed runner: 1.57 GiB | each runner suite, `_e2e-debian`, `_e2e-docker`, the `e2e-one` recipes |
+| `vm` | 8 GiB | `vm-historical-ctime` after its inputs were built: 0.51 GiB peak, -0.31 GiB after (86 s); the first VM check after a harness change builds those inputs too, as `vm-real-kernel` below did | each NixOS VM check, `e2e-vm-tally-pressure` |
+| `vm-real-kernel` | 8 GiB | cold, building the changed harness binaries and VM image first: 3.05 GiB peak, -2.82 GiB after (251 s) | `e2e-vm-real-kernel` |
+| `vm-cold-scale` | 8 GiB | not measured; the same 4 GiB guest disk as `vm-real-kernel` | `e2e-vm-cold-scale` |
+| `fuzz` | 10 GiB | first build plus 30 s of `grammar`: 5.98 GiB peak, -5.97 GiB after (278 s), but the worktree grew by only 0.35 GiB (`tmp/target`, `tmp/fuzz`): other builds on the host account for the rest | `fuzz` |
+| `mutants` | 16.06 GiB | the mutation runner's own start guard (16 GiB plus 64 MiB), never lower | `mutants` |
 
 ### Walkthrough driver
 
