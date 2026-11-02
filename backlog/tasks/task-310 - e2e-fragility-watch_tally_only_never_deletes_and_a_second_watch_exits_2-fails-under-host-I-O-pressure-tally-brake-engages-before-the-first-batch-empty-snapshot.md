@@ -7,6 +7,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-02T00:42:00Z'
+updated_date: '2026-11-02T00:44:00Z'
 labels:
   - test
   - flaky
@@ -19,3 +20,9 @@ priority: medium
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Found by the TASK-304 implementer (2026-11-02): under host I/O pressure (PSI 23-44%) the background tally's pressure brake engages before the first batch, so the snapshot is empty and the test fails 245/246; master's code fails the same way at the same pressure; it passed when quiet. Log: tmp/worktrees/t304/tmp/t304-logs/e2eR-watch-tally-fail.log (copied to tmp/evidence-t304/). Fix the test, not the brake: drive the tally with an explicit low-pressure condition or assert 'snapshot written or tally paused for pressure' with the reason logged; never weaken the pressure brake.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-02: in progress in tmp/worktrees/t295 (branch t295-test-flakes).
+<!-- SECTION:NOTES:END -->
