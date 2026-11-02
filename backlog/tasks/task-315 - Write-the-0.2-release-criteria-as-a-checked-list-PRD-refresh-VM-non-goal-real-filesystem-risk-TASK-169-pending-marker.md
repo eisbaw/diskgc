@@ -3,10 +3,10 @@ id: TASK-315
 title: >-
   Write the 0.2 release criteria as a checked list; PRD refresh (VM non-goal,
   real-filesystem risk, TASK-169 pending marker)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-02T11:33:00Z'
-updated_date: '2026-11-02T14:35:00Z'
+updated_date: '2026-11-02T14:48:00Z'
 labels:
   - release
   - docs
@@ -36,4 +36,6 @@ Mark 2026-11-02: 'ensure we tackle these findings ... we need more real-world VM
 - Release notes: lack TASK-309, NFS-untested, the model-only list and the ruled limits; still carry candidate-only lines.
 - release-verify: accepts a lightweight tag and does not check the row's tag (TASK-319, filed from the reviews).
 PRD: factual refreshes (VM non-goal dropped, Build-and-test row, real-filesystem risk rewritten, pending markers repointed to TASK-296/305/308, document map); 0.2 scope stated as Mark's open decision. Reviews: mped-architect and qa-test-runner (read-only, frozen diff); their blockers fixed in the same branch.
+
+2026-11-02: merged (ff), docs and backlog only; just check exit 0 (run 1 hit the TASK-317 flake).
 <!-- SECTION:NOTES:END -->

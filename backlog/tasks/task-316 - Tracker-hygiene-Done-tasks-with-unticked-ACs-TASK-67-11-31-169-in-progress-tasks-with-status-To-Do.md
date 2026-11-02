@@ -3,10 +3,10 @@ id: TASK-316
 title: >-
   Tracker hygiene: Done tasks with unticked ACs (TASK-67, 11, 31, 169);
   in-progress tasks with status To Do
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-02T11:33:00Z'
-updated_date: '2026-11-02T14:15:00Z'
+updated_date: '2026-11-02T14:48:00Z'
 labels:
   - process
   - backlog
@@ -33,4 +33,6 @@ Mark 2026-11-02: 'ensure we tackle these findings ... we need more real-world VM
 - DoD items were not assessed (out of this task's scope).
 - In-progress tasks with status To Do: TASK-295 and TASK-310 were set In Progress in f37938a and are now Done (c0885a2, 96b4875); no other To Do task's notes say in progress except TASK-305, which is In Progress.
 - Other Done tasks with unticked ACs (backlog task list --plain -s Done: 12 of the Done tasks with ACs, these four included). The other eight, not yet reconciled: TASK-28 (0/3), TASK-29 (0/4), TASK-30 (2/3), TASK-44 (4/5), TASK-117 (0/3), TASK-257 (0/2), TASK-39 (0/2), TASK-71 (0/2). Release-relevant for 0.2 (index, snapshot, watch --tally-only, units): 28, 29, 30, 44, 117, 257. Unverified leads: TASK-30 AC1 has the e2e test watch_tally_only_never_deletes_and_a_second_watch_exits_2; TASK-29 AC2 names the report's index block, which is still null (TASK-244), so it may be unmet; TASK-71 AC1 may be met by the PRD's Key decisions (checkout guard on by default).
+
+2026-11-02: merged (ff), docs and backlog only; just check exit 0 (run 1 hit the TASK-317 flake).
 <!-- SECTION:NOTES:END -->
