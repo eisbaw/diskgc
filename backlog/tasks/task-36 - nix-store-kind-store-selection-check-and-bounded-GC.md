@@ -4,7 +4,7 @@ title: 'nix-store kind: store selection check and bounded GC'
 status: In Progress
 assignee: []
 created_date: 2026-10-16 22:41
-updated_date: '2026-11-03T22:52:00Z'
+updated_date: '2026-11-03T23:53:00Z'
 labels:
   - wave-4
   - irreversible
@@ -67,4 +67,6 @@ AC #2 is superseded by the one backend rule (reference.md): NIX_REMOTE pointing 
 Orchestrator 2026-10-24: AC #2 text ('unsupported_store reported as an error') is superseded by TASK-118: unsupported_store is removed from the JSON enum; remote stores skip with remote_backend, unsupported layouts/versions with unsupported_backend, per the backend skip-vs-error rule in docs/reference.md. Rewording AC #2 accordingly.
 
 2026-11-03: Mark: 'nix-store goes first then the visibility'. In progress in tmp/worktrees/t36 (branch t36-nix-store). Full rigour (new irreversible kind), not the one-round profile rhythm.
+
+2026-11-04 Mark: 'i dont care about lix'. Lix and other Nix variants stay refused (unsupported_backend, version allowlist); the planned pinned-Lix container scenario is dropped; the model vector nix-lix-client-refused stays as the cheap guard.
 <!-- SECTION:NOTES:END -->
