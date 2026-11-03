@@ -1,10 +1,10 @@
 ---
 id: TASK-36
 title: 'nix-store kind: store selection check and bounded GC'
-status: To Do
+status: In Progress
 assignee: []
-created_date: '2026-10-16 22:41'
-updated_date: '2026-10-24 08:45'
+created_date: 2026-10-16 22:41
+updated_date: '2026-11-03T22:52:00Z'
 labels:
   - wave-4
   - irreversible
@@ -28,6 +28,11 @@ Why: Nix stores grow without bound on development machines. Implement nix-store 
 - [ ] #2 Killing diskgc while nix-store runs leaves the host lock held until it exits
 - [ ] #3 A remote or non-default store, a single-user layout, or a non-allowlisted Nix version is skipped per docs/reference.md 'Backend skips and errors' (remote_backend / unsupported_backend), never GC'd
 <!-- AC:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Definition of Done in docs/testing.md
+<!-- DOD:END -->
 
 ## Implementation Notes
 
@@ -60,9 +65,6 @@ From TASK-118 (2026-10-24, branch task118-design; design in docs/safety.md nix-s
 AC #2 is superseded by the one backend rule (reference.md): NIX_REMOTE pointing elsewhere is a SKIP, remote_backend for remote schemes and unsupported_backend otherwise, exit decided by space; 'unsupported_store' no longer exists. Suggest rewording AC #2 accordingly (not edited here: TASK-118 may only append notes to this task).
 
 Orchestrator 2026-10-24: AC #2 text ('unsupported_store reported as an error') is superseded by TASK-118: unsupported_store is removed from the JSON enum; remote stores skip with remote_backend, unsupported layouts/versions with unsupported_backend, per the backend skip-vs-error rule in docs/reference.md. Rewording AC #2 accordingly.
-<!-- SECTION:NOTES:END -->
 
-## Definition of Done
-<!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
-<!-- DOD:END -->
+2026-11-03: Mark: 'nix-store goes first then the visibility'. In progress in tmp/worktrees/t36 (branch t36-nix-store). Full rigour (new irreversible kind), not the one-round profile rhythm.
+<!-- SECTION:NOTES:END -->
