@@ -1,10 +1,10 @@
 ---
 id: TASK-93
 title: Kind or command profile for Podman storage (images, build cache)
-status: In Progress
+status: Done
 assignee: []
 created_date: 2026-10-19 11:48
-updated_date: '2026-11-03T13:13:00Z'
+updated_date: '2026-11-03T22:42:00Z'
 labels:
   - home
 dependencies:
@@ -19,9 +19,9 @@ Why: the home survey (2026-10-18) found ~8.7 GiB of rootless Podman images in ~/
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A profile (or kind) prunes Podman images with Podman's own command, never by deleting storage files; examples and a model test
+- [x] #1 A profile (or kind) prunes Podman images with Podman's own command, never by deleting storage files; examples and a model test
 - [ ] #2 Verified in a container or read-only on a real machine (dry run lists what podman would prune)
-- [ ] #3 Docs say how it relates to the Docker kinds and to rootful /var/lib/containers
+- [x] #3 Docs say how it relates to the Docker kinds and to rootful /var/lib/containers
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -34,4 +34,6 @@ TASK37 command actions landed in adcbc3f, but a generic fs command profile roote
 Further read-only host evidence: podman image prune --dry-run --help exits 125 (unknown flag). podman system df --format json reported 6,713,465,194 RawReclaimable image bytes while dangling=true listed none. Podman docs warn shared layers can make that estimate exceed bytes actually freed. The five local Nix E2E images report CreatedAt 1970-01-01 despite recent loads, so --filter until= would use creation time rather than last use and cannot safely guard --all. The isolated probe directory is /tmp/diskgc-task93-probe.umBX6p; no host image or store was pruned.
 
 2026-11-03: faster profile rhythm; in progress in tmp/worktrees/t93.
+
+2026-11-03: merged (kind podman-images, two profiles, dev library). AC2: read-only on this host (dry runs + podman image ls); a real --all prune in a container is a follow-up.
 <!-- SECTION:NOTES:END -->
