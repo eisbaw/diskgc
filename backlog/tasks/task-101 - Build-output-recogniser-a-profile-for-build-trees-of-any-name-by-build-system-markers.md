@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: 2026-10-19 12:29
-updated_date: '2026-11-03T13:13:00Z'
+updated_date: '2026-11-03T20:16:00Z'
 labels:
   - library
 dependencies:
@@ -22,11 +22,11 @@ Why: build directories have too many naming conventions to list (OpenWrt build_d
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A build-output profile matches directories of any name holding one of the documented markers, outer match only, never one holding .git/.hg/.svn (model tests per build system)
+- [x] #1 A build-output profile matches directories of any name holding one of the documented markers, outer match only, never one holding .git/.hg/.svn (model tests per build system)
 - [ ] #2 Verified read-only on real trees: an OpenWrt tree (build_dir, staging_dir), a buildroot output/, CMake and Meson build dirs; sizes match du
 - [ ] #3 survey (task-38) scores large idle dirs as 'looks like build output' with the signals used, and suggests a profile; the scoring never selects candidates for deletion
-- [ ] #4 Rebuildability is checked: a build dir whose recorded source tree is missing (or lacks its build file) is never eligible (model test per build system)
-- [ ] #5 Each plan entry states the evidence: marker, source anchor, idle age
+- [x] #4 Rebuildability is checked: a build dir whose recorded source tree is missing (or lacks its build file) is never eligible (model test per build system)
+- [x] #5 Each plan entry states the evidence: marker, source anchor, idle age
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -61,4 +61,6 @@ Final safety-correction gate on rebased 9e2ea47 tree: nix develop -c just e2e ex
 Orchestrator 2026-10-23 (COMPASS consult): parked back to To Do to cut WIP. Library breadth waits for the producer-liveness cornerstone (D3: 'idle' = newest mtime/ctime cannot tell an active read-mostly tree from an abandoned one).
 
 2026-11-03: faster profile rhythm; in progress in tmp/worktrees/t101.
+
+2026-11-03: merged four anchored build-output profiles to the development library. AC2 partial (no Buildroot/Yocto trees here; OpenWrt size vs du blocked by not_owner); AC3 waits for survey (TASK-38). Follow-ups in the new task.
 <!-- SECTION:NOTES:END -->
