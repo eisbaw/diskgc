@@ -267,7 +267,6 @@ fn the_built_in_library_loads() {
         "node-modules",
         "python-venv",
         // TASK-101, pending Mark's admission.
-        "openwrt-build-anchored",
         "buildroot-output-anchored",
         "yocto-tmpdir-anchored",
         "bazel-output-base-anchored",

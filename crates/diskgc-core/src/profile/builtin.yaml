@@ -356,23 +356,6 @@
 # from and the trees that build also reads all survive (docs/safety.md,
 # Source-anchored build trees). Never released, so a definition may still
 # change under its name.
-- name: openwrt-build-anchored
-  category: embedded
-  description: OpenWrt build_dir and staging_dir beside a full OpenWrt tree with its toolchain/ and tools/, through depth five
-  find:
-    roots: required
-    paths: [build_dir, staging_dir, "*/build_dir", "*/staging_dir", "*/*/build_dir", "*/*/staging_dir", "*/*/*/build_dir", "*/*/*/staging_dir", "*/*/*/*/build_dir", "*/*/*/*/staging_dir"]
-    type: dir
-  where: {has_dir: host, source_anchor: openwrt}
-  min_idle_for: 3d
-  action: delete
-  examples:
-    root: /home/mark/src
-    match: [/home/mark/src/openwrt/build_dir, /home/mark/src/openwrt/staging_dir, /home/mark/src/a/b/c/openwrt/staging_dir]
-    no_match: [/home/mark/src/openwrt/bin, /home/mark/src/openwrt/dl, /home/mark/src/a/b/c/d/openwrt/build_dir, /home/mark/src/openwrt/build_dir/host]
-  verified_with: OpenWrt 25.12 source tree (r32933) and 25.12.4 SDK layouts on the development host (read-only dry run, 2026-11-03)
-  liveness_class: verified-heuristic
-
 - name: buildroot-output-anchored
   category: embedded
   description: Buildroot's in-tree output/ beside its source and .config, through depth five

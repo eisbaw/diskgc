@@ -330,7 +330,6 @@ pub enum SourceAnchor {
     Meson,
     Autotools,
     // TASK-101, pending Mark's admission: development library only.
-    Openwrt,
     Buildroot,
     Yocto,
     Bazel,
@@ -342,7 +341,6 @@ impl SourceAnchor {
             Self::Cmake => "cmake",
             Self::Meson => "meson",
             Self::Autotools => "autotools",
-            Self::Openwrt => "openwrt",
             Self::Buildroot => "buildroot",
             Self::Yocto => "yocto",
             Self::Bazel => "bazel",

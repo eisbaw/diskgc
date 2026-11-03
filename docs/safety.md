@@ -2524,11 +2524,11 @@ This verifies a surviving source file, not that every external build
 dependency is available. It also cannot prove that an uncooperative
 process starts using the output after the in-use scan; that is the general
 deletion race limit below. The profile matches at most five levels below
-each supplied root. Generic Ninja, OpenWrt, Buildroot, Yocto and Bazel
-markers alone do not establish a surviving source and are not deletion
-sources; the OpenWrt, Buildroot, Yocto and Bazel profiles add a source
-anchor of their own (Source-anchored build trees, below). Generic Ninja
-records no source and stays unselected.
+each supplied root. Generic Ninja, Buildroot, Yocto and Bazel markers
+alone do not establish a surviving source and are not deletion sources;
+the Buildroot, Yocto and Bazel profiles add a source anchor of their own
+(Source-anchored build trees, below). Generic Ninja records no source and
+stays unselected.
 
 `west-build-anchored` uses the same recorded CMake source validation and
 three-day idle floor for Zephyr `build/` directories. It also requires a
@@ -2588,31 +2588,21 @@ are recoverable.
 ### Source-anchored build trees
 
 Status: development library only, a verified heuristic pending Mark's
-admission (TASK-101). `openwrt-build-anchored`,
-`buildroot-output-anchored`, `yocto-tmpdir-anchored` and
-`bazel-output-base-anchored` take a build output only when all of these
-hold, and keep it when any is in doubt: the build system's marker inside
-the output; the tree it would be rebuilt from still holds its build
-description (the source anchor); every other tree that build reads
-survives; no checkout inside (`checkouts: refuse`); idle for three days;
-the ordinary ownership, in-use and walk checks; outer match only. Each
-anchor reads generated files as inert bytes through the reached
-candidate fd (never runs the tool), opens every source path without
-following a symlink, and is read again under the candidate lock, where a
-changed source identity or a vanished file keeps the output (`changed`).
-Missing or ambiguous evidence keeps the output and does not make it a
-candidate; an unsafe or unreadable path is a visible refusal.
+admission (TASK-101). `buildroot-output-anchored`,
+`yocto-tmpdir-anchored` and `bazel-output-base-anchored` take a build
+output only when all of these hold, and keep it when any is in doubt:
+the build system's marker inside the output; the tree it would be
+rebuilt from still holds its build description (the source anchor);
+every other tree that build reads survives; no checkout inside
+(`checkouts: refuse`); idle for three days; the ordinary ownership,
+in-use and walk checks; outer match only. Each anchor reads generated
+files as inert bytes through the reached candidate fd (never runs the
+tool), opens every source path without following a symlink, and is read
+again under the candidate lock, where a changed source identity or a
+vanished file keeps the output (`changed`). Missing or ambiguous
+evidence keeps the output and does not make it a candidate; an unsafe or
+unreadable path is a visible refusal.
 
-- **OpenWrt** (`openwrt`). Only `build_dir` and `staging_dir`, the names
-  OpenWrt's `rules.mk` fixes, with a direct `host/` directory. Their
-  parent must be a full OpenWrt source tree: regular `rules.mk` (the
-  recorded identity), `Makefile`, `.config`, `include/toplevel.mk`,
-  `toolchain/Makefile` and `tools/Makefile`, on the output's filesystem.
-  An OpenWrt SDK or ImageBuilder ships a prebuilt toolchain in
-  `staging_dir` and has no `toolchain/` or `tools/` to rebuild it from,
-  so it is never a candidate (seen on the development host, 2026-11-03).
-  `bin/` (the images) and `dl/` are not candidates. Removing both
-  outputs is what `make dirclean` removes, less `bin/` and `tmp/`.
 - **Buildroot** (`buildroot`). Only an `output` directory with no
   `.config` entry: Buildroot keeps `.config` in the source top for its
   default `O=output` and in the output for any other `O=`, where the
@@ -2649,13 +2639,13 @@ candidate; an unsafe or unreadable path is a visible refusal.
 Not covered, by decision: an in-place Linux kernel build is its source
 tree (the outer match would take the source), and an out-of-tree `O=`
 kernel build holds the only `.config`, the user's configuration; neither
-is a candidate of any built-in. Buildroot's `O=` outputs are excluded for
-the same reason. The residuals are in the liveness table: user edits
-inside a build tree (OpenWrt `QUILT=1` work not yet refreshed, edits in
-Buildroot's `output/build` or Yocto's `tmp/work`) are the user's own work,
-which the dated exception for anchored build profiles above does not yet
-cover; that is part of Mark's admission decision. These anchors verify a
-surviving build description, not that every download is still served.
+is a candidate of any built-in. Buildroot's `O=` outputs are excluded
+for the same reason. The residuals are in the liveness table: user edits
+inside a build tree (edits in Buildroot's `output/build` or Yocto's
+`tmp/work`) are the user's own work, which the dated exception for
+anchored build profiles above does not yet cover; that is part of Mark's
+admission decision. These anchors verify a surviving build description,
+not that every download is still served.
 
 ### Toolchain pins
 

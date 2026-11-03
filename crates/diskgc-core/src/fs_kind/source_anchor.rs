@@ -16,9 +16,9 @@ use crate::profile::SourceAnchor;
 use crate::resolve::{ResolveError, Resolved, Want, open_beneath, resolve_in};
 
 // TASK-101: build trees whose source is a whole tree beside or named by the
-// output (OpenWrt, Buildroot, Yocto, Bazel); pending Mark's admission.
+// output (Buildroot, Yocto, Bazel); pending Mark's admission.
 mod build_trees;
-use build_trees::{bazel, buildroot, openwrt, yocto};
+use build_trees::{bazel, buildroot, yocto};
 
 const CMAKE_CACHE: &str = "CMakeCache.txt";
 const CMAKE_SOURCE_KEY: &[u8] = b"CMAKE_HOME_DIRECTORY:INTERNAL=";
@@ -151,7 +151,6 @@ pub(super) fn check_opened<H: Host>(
         SourceAnchor::Autotools => {
             autotools(host, root, candidate, candidate_fd, mount_id, deadline)
         }
-        SourceAnchor::Openwrt => openwrt(host, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Buildroot => buildroot(host, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Yocto => yocto(host, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Bazel => bazel(host, candidate, candidate_fd, mount_id, deadline),

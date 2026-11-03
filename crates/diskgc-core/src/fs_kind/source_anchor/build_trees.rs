@@ -1,12 +1,12 @@
 //! Source anchors for build systems whose output sits in its source tree
-//! (OpenWrt `build_dir`/`staging_dir`, Buildroot `output/`, a Yocto TMPDIR)
-//! or names it (a Bazel output base). Each reads only inert generated files,
-//! through the candidate fd, and never runs the tool. The tree the output
-//! would be rebuilt from must still hold its build description on the
-//! output's filesystem; the trees it also builds from (Buildroot externals,
-//! Yocto layers) must survive outside the output. Missing or ambiguous
-//! evidence keeps the output (`Ok(None)`); an unsafe or unreadable path is a
-//! visible refusal. TASK-101, pending Mark's admission.
+//! (Buildroot `output/`, a Yocto TMPDIR) or names it (a Bazel output base).
+//! Each reads only inert generated files, through the candidate fd, and
+//! never runs the tool. The tree the output would be rebuilt from must still
+//! hold its build description on the output's filesystem; the trees it also
+//! builds from (Buildroot externals, Yocto layers) must survive outside the
+//! output. Missing or ambiguous evidence keeps the output (`Ok(None)`); an
+//! unsafe or unreadable path is a visible refusal. TASK-101, pending Mark's
+//! admission.
 
 use std::path::{Path, PathBuf};
 
@@ -16,22 +16,6 @@ use crate::fs_kind::discover::check_deadline;
 use crate::host::{Access, FileType, Host, MonoTime, Stat};
 use crate::outcome::Judged;
 use crate::resolve::{ResolveError, Resolved, Want, open_beneath, resolve_in};
-
-/// OpenWrt's rules.mk fixes both names below TOPDIR.
-const OPENWRT_OUTPUTS: &[&str] = &["build_dir", "staging_dir"];
-/// Both outputs hold a `host/` directory from the first host-tool build.
-const OPENWRT_MARKER: &str = "host";
-const OPENWRT_BUILD_FILE: &str = "rules.mk";
-/// A full source tree. The SDK and the ImageBuilder ship a prebuilt
-/// toolchain in `staging_dir` and have no `toolchain/` or `tools/` to
-/// rebuild it from; `.config` holds the configuration of the image.
-const OPENWRT_TREE: &[&str] = &[
-    "Makefile",
-    ".config",
-    "include/toplevel.mk",
-    "toolchain/Makefile",
-    "tools/Makefile",
-];
 
 /// Buildroot's default `O=$(CURDIR)/output`, whose `.config` stays in the
 /// source top (Makefile `CONFIG_DIR`). An output elsewhere holds its own
@@ -66,45 +50,6 @@ const MAX_BAZEL_MARKER_BYTES: u64 = 4096;
 /// of preference; the first present one is the recorded identity.
 const BAZEL_BOUNDARY: &[&str] = &["MODULE.bazel", "REPO.bazel", "WORKSPACE.bazel", "WORKSPACE"];
 
-pub(super) fn openwrt<H: Host>(
-    host: &H,
-    candidate: &Path,
-    candidate_fd: &H::Fd,
-    mount_id: u64,
-    deadline: Option<MonoTime>,
-) -> Judged<Option<SourceEvidence>> {
-    if !named(candidate, OPENWRT_OUTPUTS) {
-        return Ok(Ok(None));
-    }
-    let Some(marker) = judged!(entry(
-        host,
-        candidate,
-        candidate_fd,
-        candidate,
-        mount_id,
-        OPENWRT_MARKER,
-        deadline
-    )) else {
-        return Ok(Ok(None));
-    };
-    if marker.1.file_type != Some(FileType::Directory) {
-        return Ok(Ok(None));
-    }
-    let Some(tree) = candidate.parent() else {
-        return Ok(Ok(None));
-    };
-    source_tree(
-        host,
-        candidate,
-        tree,
-        mount_id,
-        OPENWRT_MARKER,
-        &[OPENWRT_BUILD_FILE],
-        OPENWRT_TREE,
-        deadline,
-    )
-}
-
 pub(super) fn buildroot<H: Host>(
     host: &H,
     candidate: &Path,
@@ -112,7 +57,7 @@ pub(super) fn buildroot<H: Host>(
     mount_id: u64,
     deadline: Option<MonoTime>,
 ) -> Judged<Option<SourceEvidence>> {
-    if !named(candidate, &[BUILDROOT_OUTPUT]) {
+    if !named(candidate, BUILDROOT_OUTPUT) {
         return Ok(Ok(None));
     }
     // An output holding .config is an O= build: the configuration exists
@@ -417,10 +362,8 @@ fn names_bblayers(line: &str) -> bool {
     })
 }
 
-fn named(candidate: &Path, names: &[&str]) -> bool {
-    candidate
-        .file_name()
-        .is_some_and(|name| names.iter().any(|wanted| name == *wanted))
+fn named(candidate: &Path, wanted: &str) -> bool {
+    candidate.file_name().is_some_and(|name| name == wanted)
 }
 
 /// The tree a build output came from, on the output's filesystem: every

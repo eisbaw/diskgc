@@ -1,8 +1,8 @@
 # TASK-101. A layer bblayers.conf lists is removed after the TMPDIR is
 # locked. The layer is not part of the recorded source identity; the
 # anchor is read again under the lock, finds no evidence, and the output
-# is kept as changed. The same recheck covers OpenWrt tree files,
-# Buildroot externals and a Bazel workspace's boundary file.
+# is kept as changed. The same recheck covers Buildroot externals and a
+# Bazel workspace's boundary file.
 profile_vector: 1
 profile: yocto-tmpdir-anchored
 roots: [/home/tester/src]

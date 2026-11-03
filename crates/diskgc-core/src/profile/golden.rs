@@ -1955,11 +1955,6 @@ fn build_tree_sources_have_frozen_definitions_and_match_sets() {
             .map(|depth| format!("{}{name}", "*/".repeat(depth)))
             .collect()
     };
-    let mut openwrt = Vec::new();
-    for (build, staging) in depths("build_dir").into_iter().zip(depths("staging_dir")) {
-        openwrt.push(build);
-        openwrt.push(staging);
-    }
     /// Name, anchor, patterns, exclusions, has, has_dir, lacks_entry,
     /// root, paths matched and paths not matched (relative to the root).
     type Case<'a> = (
@@ -1967,45 +1962,20 @@ fn build_tree_sources_have_frozen_definitions_and_match_sets() {
         SourceAnchor,
         Vec<String>,
         Vec<String>,
-        Option<&'a str>,
+        &'a str,
         &'a str,
         Option<&'a str>,
         &'a str,
         Vec<&'a str>,
         Vec<&'a str>,
     );
-    let cases: [Case; 4] = [
-        (
-            "openwrt-build-anchored",
-            SourceAnchor::Openwrt,
-            openwrt,
-            Vec::new(),
-            None,
-            "host",
-            None,
-            "/home/mark/src",
-            vec![
-                "openwrt/build_dir",
-                "openwrt/staging_dir",
-                "a/b/c/openwrt/build_dir",
-                "build_dir",
-            ],
-            vec![
-                "openwrt/bin",
-                "openwrt/dl",
-                "openwrt/tmp",
-                "openwrt/build_dir/host",
-                "openwrt/staging_dir/toolchain-x",
-                "a/b/c/d/openwrt/staging_dir",
-                "openwrt/my_build_dir",
-            ],
-        ),
+    let cases: [Case; 3] = [
         (
             "buildroot-output-anchored",
             SourceAnchor::Buildroot,
             depths("output"),
             Vec::new(),
-            Some(".br2-external.mk"),
+            ".br2-external.mk",
             "build",
             Some(".config"),
             "/home/mark/src",
@@ -2022,7 +1992,7 @@ fn build_tree_sources_have_frozen_definitions_and_match_sets() {
             SourceAnchor::Yocto,
             depths("*"),
             Vec::new(),
-            Some("saved_tmpdir"),
+            "saved_tmpdir",
             "stamps",
             None,
             "/home/mark/src",
@@ -2034,7 +2004,7 @@ fn build_tree_sources_have_frozen_definitions_and_match_sets() {
             SourceAnchor::Bazel,
             vec!["_bazel_*/*".to_owned()],
             vec!["_bazel_*/cache".to_owned(), "_bazel_*/install".to_owned()],
-            Some("DO_NOT_BUILD_HERE"),
+            "DO_NOT_BUILD_HERE",
             "execroot",
             None,
             "/home/mark/.cache/bazel",
@@ -2068,7 +2038,7 @@ fn build_tree_sources_have_frozen_definitions_and_match_sets() {
             "{name}"
         );
         assert_eq!(source.where_.source_anchor, Some(anchor), "{name}");
-        assert_eq!(source.where_.has.as_deref(), has, "{name}");
+        assert_eq!(source.where_.has.as_deref(), Some(has), "{name}");
         assert_eq!(source.where_.has_dir.as_deref(), Some(has_dir), "{name}");
         assert_eq!(source.where_.lacks_entry.as_deref(), lacks, "{name}");
         assert_eq!(
