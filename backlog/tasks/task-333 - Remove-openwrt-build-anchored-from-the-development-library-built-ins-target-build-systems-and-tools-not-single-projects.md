@@ -3,10 +3,10 @@ id: TASK-333
 title: >-
   Remove openwrt-build-anchored from the development library (built-ins target
   build systems and tools, not single projects)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-03T22:52:00Z'
-updated_date: '2026-11-03T22:52:00Z'
+updated_date: '2026-11-03T23:18:00Z'
 labels:
   - profiles
   - scope

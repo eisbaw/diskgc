@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: 2026-10-19 12:29
-updated_date: '2026-11-03T20:16:00Z'
+updated_date: '2026-11-03T23:18:00Z'
 labels:
   - library
 dependencies:
@@ -63,4 +63,6 @@ Orchestrator 2026-10-23 (COMPASS consult): parked back to To Do to cut WIP. Libr
 2026-11-03: faster profile rhythm; in progress in tmp/worktrees/t101.
 
 2026-11-03: merged four anchored build-output profiles to the development library. AC2 partial (no Buildroot/Yocto trees here; OpenWrt size vs du blocked by not_owner); AC3 waits for survey (TASK-38). Follow-ups in the new task.
+
+2026-11-04: openwrt-build-anchored removed (TASK-333, Mark's scope rule); buildroot/yocto/bazel stay.
 <!-- SECTION:NOTES:END -->
