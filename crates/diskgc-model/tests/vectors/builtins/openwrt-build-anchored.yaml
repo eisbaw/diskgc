@@ -1,0 +1,145 @@
+# OpenWrt build_dir and staging_dir beside a full source tree, past the
+# 3-day floor (TASK-101). The anchor is the tree the output sits in:
+# rules.mk (identity), Makefile, .config, include/toplevel.mk and the
+# toolchain/ and tools/ build files. Layout read from a real OpenWrt
+# 25.12 tree and SDK on the development host, 2026-11-03.
+#
+# p1: both outputs reclaimed. p2: build_dir in use (a make's cwd),
+# staging_dir excluded by a negated profile. sdk: an OpenWrt SDK ships a
+# prebuilt toolchain in staging_dir and has no toolchain/ or tools/ to
+# rebuild it from, so it is never a candidate. noconfig: the tree's
+# .config is gone, so the same image cannot be rebuilt. gone: no tree at
+# all. checkout: a git clone inside build_dir. fresh: under the floor.
+profile_vector: 1
+user_profiles:
+  - name: pin
+    find: {roots: [/home/tester/src], paths: [p2/staging_dir], type: dir}
+    action: delete
+    examples: {match: [/home/tester/src/p2/staging_dir]}
+select: profile:openwrt-build-anchored && !profile:pin
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/make: {mode: "0755"}
+    /home/tester/src/p1:
+      rules.mk: {content: "TOPDIR:=${CURDIR}\n"}
+      Makefile: {content: "include $(TOPDIR)/include/toplevel.mk\n"}
+      .config: {content: "CONFIG_TARGET_x86=y\n"}
+      include: {toplevel.mk: {content: "prereq:\n"}}
+      toolchain: {Makefile: {content: "toolchain:\n"}}
+      tools: {Makefile: {content: "tools:\n"}}
+      bin: {targets: {image.bin: {size: 4K}}}
+      build_dir:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        host: {.: {mtime: 2026-10-01T00:00:00Z}, tool.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+        target-x: {.: {mtime: 2026-10-01T00:00:00Z}, .built: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+      staging_dir:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        host: {.: {mtime: 2026-10-01T00:00:00Z}, .prereq-build: {mtime: 2026-10-01T00:00:00Z}}
+        toolchain-x: {.: {mtime: 2026-10-01T00:00:00Z}, gcc: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/p2:
+      rules.mk: {content: "TOPDIR:=${CURDIR}\n"}
+      Makefile: {content: "include $(TOPDIR)/include/toplevel.mk\n"}
+      .config: {content: "CONFIG_TARGET_x86=y\n"}
+      include: {toplevel.mk: {content: "prereq:\n"}}
+      toolchain: {Makefile: {content: "toolchain:\n"}}
+      tools: {Makefile: {content: "tools:\n"}}
+      build_dir:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        host: {.: {mtime: 2026-10-01T00:00:00Z}}
+        target-x: {.: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+      staging_dir:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        host: {.: {mtime: 2026-10-01T00:00:00Z}, .prereq-build: {mtime: 2026-10-01T00:00:00Z}}
+        toolchain-x: {.: {mtime: 2026-10-01T00:00:00Z}, gcc: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/sdk:
+      rules.mk: {content: "TOPDIR:=${CURDIR}\n"}
+      Makefile: {content: "include $(TOPDIR)/include/toplevel.mk\n"}
+      .config: {content: "CONFIG_TARGET_x86=y\n"}
+      include: {toplevel.mk: {content: "prereq:\n"}}
+      staging_dir:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        host: {.: {mtime: 2026-10-01T00:00:00Z}, .prereq-build: {mtime: 2026-10-01T00:00:00Z}}
+        toolchain-x: {.: {mtime: 2026-10-01T00:00:00Z}, prebuilt-gcc: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/noconfig:
+      rules.mk: {content: "TOPDIR:=${CURDIR}\n"}
+      Makefile: {content: "include $(TOPDIR)/include/toplevel.mk\n"}
+      include: {toplevel.mk: {content: "prereq:\n"}}
+      toolchain: {Makefile: {content: "toolchain:\n"}}
+      tools: {Makefile: {content: "tools:\n"}}
+      build_dir:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        host: {.: {mtime: 2026-10-01T00:00:00Z}}
+        target-x: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/gone/build_dir:
+      .: {mtime: 2026-10-01T00:00:00Z}
+      host: {.: {mtime: 2026-10-01T00:00:00Z}}
+      target-x: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/checkout:
+      rules.mk: {content: "TOPDIR:=${CURDIR}\n"}
+      Makefile: {content: "include $(TOPDIR)/include/toplevel.mk\n"}
+      .config: {content: "CONFIG_TARGET_x86=y\n"}
+      include: {toplevel.mk: {content: "prereq:\n"}}
+      toolchain: {Makefile: {content: "toolchain:\n"}}
+      tools: {Makefile: {content: "tools:\n"}}
+      build_dir:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        host: {.: {mtime: 2026-10-01T00:00:00Z}}
+        target-x:
+          .: {mtime: 2026-10-01T00:00:00Z}
+          linux: {.: {mtime: 2026-10-01T00:00:00Z}, .git: {.: {mtime: 2026-10-01T00:00:00Z}, HEAD: {mtime: 2026-10-01T00:00:00Z}}}
+    /home/tester/src/fresh:
+      rules.mk: {content: "TOPDIR:=${CURDIR}\n"}
+      Makefile: {content: "include $(TOPDIR)/include/toplevel.mk\n"}
+      .config: {content: "CONFIG_TARGET_x86=y\n"}
+      include: {toplevel.mk: {content: "prereq:\n"}}
+      toolchain: {Makefile: {content: "toolchain:\n"}}
+      tools: {Makefile: {content: "tools:\n"}}
+      build_dir: {host: {.: {}}, target-x: {a.o: {size: 8K}}}
+  processes:
+    - {pid: 901, exe: /usr/bin/make, cwd: /home/tester/src/p2/build_dir/target-x, maps: [/usr/bin/make], environ: [HOME=/home/tester], fds: [{path: /usr/bin/make}]}
+expect:
+  plan:
+    - {candidate: /home/tester/src/checkout/build_dir, reason: contains_checkout, source: /home/tester/src/checkout}
+    - {candidate: /home/tester/src/fresh/build_dir, reason: not_idle, source: /home/tester/src/fresh}
+    - {candidate: /home/tester/src/p1/build_dir, source: /home/tester/src/p1}
+    - {candidate: /home/tester/src/p1/staging_dir, source: /home/tester/src/p1}
+    - {candidate: /home/tester/src/p2/build_dir, reason: in_use, source: /home/tester/src/p2}
+    - {candidate: /home/tester/src/p2/staging_dir, reason: excluded, source: /home/tester/src/p2}
+  # build_evidence (AC5): marker, source anchor and, for an eligible row,
+  # idle age = clock - newest mtime = 14 d 3 h = 1220400 s.
+  dry_run_report:
+    plan:
+      - {candidate: /home/tester/src/p1/build_dir, build_evidence: {marker: host, source: /home/tester/src/p1, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/src/p1/staging_dir, build_evidence: {marker: host, source: /home/tester/src/p1, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/src/checkout/build_dir, build_evidence: {marker: host, source: /home/tester/src/checkout, idle_age_seconds: null}}
+      - {candidate: /home/tester/src/fresh/build_dir, build_evidence: {marker: host, source: /home/tester/src/fresh, idle_age_seconds: null}}
+      - {candidate: /home/tester/src/p2/build_dir, build_evidence: {marker: host, source: /home/tester/src/p2, idle_age_seconds: null}}
+      - {candidate: /home/tester/src/p2/staging_dir, build_evidence: {marker: host, source: /home/tester/src/p2, idle_age_seconds: null}}
+  reclaim_exit: 1
+  actions: [/home/tester/src/p1/build_dir, /home/tester/src/p1/staging_dir]
+  removed: [/home/tester/src/p1/build_dir, /home/tester/src/p1/staging_dir]
+  skipped:
+    - {candidate: /home/tester/src/checkout/build_dir, reason: contains_checkout}
+    - {candidate: /home/tester/src/fresh/build_dir, reason: not_idle}
+    - {candidate: /home/tester/src/p2/build_dir, reason: in_use, process_blockers: [{pid: 901, evidence: cwd}]}
+    - {candidate: /home/tester/src/p2/staging_dir, reason: excluded}
+  preserved:
+    - /home/tester/src/p1/rules.mk
+    - /home/tester/src/p1/.config
+    - /home/tester/src/p1/bin/targets/image.bin
+    - /home/tester/src/p2/build_dir/target-x/a.o
+    - /home/tester/src/p2/staging_dir/toolchain-x/gcc
+    - /home/tester/src/sdk/staging_dir/toolchain-x/prebuilt-gcc
+    - /home/tester/src/noconfig/build_dir/target-x/precious
+    - /home/tester/src/gone/build_dir/target-x/precious
+    - /home/tester/src/checkout/build_dir/target-x/linux/.git/HEAD
+    - /home/tester/src/fresh/build_dir/target-x/a.o

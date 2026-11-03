@@ -1,0 +1,169 @@
+# Buildroot's in-tree output/ beside its source, past the 3-day floor
+# (TASK-101). Buildroot keeps .config in the source top for the default
+# O=output and in the output only for O= elsewhere (Makefile, CONFIG_DIR),
+# so an output holding .config is never a candidate. The generated
+# output/.br2-external.mk names the br2-external trees, which must survive
+# with their external.desc (support/scripts/br2-external, do_mk).
+#
+# b1: no external tree, reclaimed. b2: one surviving external, reclaimed.
+# b3: in use (a make's cwd). b4: excluded by a negated profile. extgone: its
+# external tree is gone. outoftree: an output holding .config. noconfig:
+# the source .config is gone. notbr: a Config.in tree that is not
+# Buildroot. checkout: a git clone inside output/build. fresh: under the
+# floor.
+profile_vector: 1
+user_profiles:
+  - name: pin
+    find: {roots: [/home/tester/src], paths: [b4/output], type: dir}
+    action: delete
+    examples: {match: [/home/tester/src/b4/output]}
+select: profile:buildroot-output-anchored && !profile:pin
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/make: {mode: "0755"}
+    /home/tester/src/ext1/external.desc: {content: "name: EXT1\n"}
+    /home/tester/src/b1:
+      Config.in: {content: "mainmenu \"Buildroot\"\n"}
+      Makefile: {content: "CONFIG_DIR := $(CURDIR)\n"}
+      .config: {content: "BR2_x86_64=y\n"}
+      package: {Config.in: {content: "menu \"Target packages\"\n"}}
+      support: {scripts: {br2-external: {content: "#!/usr/bin/env bash\n"}}}
+      output:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        .br2-external.mk: {content: "#\n# Automatically generated file; DO NOT EDIT.\n#\n\nBR2_EXTERNAL ?=\nexport BR2_EXTERNAL_NAMES = \nBR2_EXTERNAL_DIRS = \nBR2_EXTERNAL_MKS = \n\n# No br2-external tree defined.\n", mtime: 2026-10-01T00:00:00Z}
+        build: {.: {mtime: 2026-10-01T00:00:00Z}, busybox: {.: {mtime: 2026-10-01T00:00:00Z}, .stamp_built: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}}
+        images: {.: {mtime: 2026-10-01T00:00:00Z}, rootfs.ext2: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/b2:
+      Config.in: {content: "mainmenu \"Buildroot\"\n"}
+      Makefile: {content: "CONFIG_DIR := $(CURDIR)\n"}
+      .config: {content: "BR2_x86_64=y\n"}
+      package: {Config.in: {content: "menu \"Target packages\"\n"}}
+      support: {scripts: {br2-external: {content: "#!/usr/bin/env bash\n"}}}
+      output:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        .br2-external.mk: {content: "#\n# Automatically generated file; DO NOT EDIT.\n#\n\nBR2_EXTERNAL ?= /home/tester/src/ext1\nexport BR2_EXTERNAL_NAMES = \nBR2_EXTERNAL_DIRS = \nBR2_EXTERNAL_MKS = \n\nBR2_EXTERNAL_NAMES += EXT1\nBR2_EXTERNAL_DIRS += /home/tester/src/ext1\nBR2_EXTERNAL_MKS += /home/tester/src/ext1/external.mk\nexport BR2_EXTERNAL_EXT1_PATH = /home/tester/src/ext1\nexport BR2_EXTERNAL_EXT1_DESC = EXT1\nexport BR2_EXTERNAL_EXT1_VERSION = \n", mtime: 2026-10-01T00:00:00Z}
+        build: {.: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/b3:
+      Config.in: {content: "mainmenu \"Buildroot\"\n"}
+      Makefile: {content: "CONFIG_DIR := $(CURDIR)\n"}
+      .config: {content: "BR2_x86_64=y\n"}
+      package: {Config.in: {content: "menu \"Target packages\"\n"}}
+      support: {scripts: {br2-external: {content: "#!/usr/bin/env bash\n"}}}
+      output:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        .br2-external.mk: {content: "BR2_EXTERNAL ?=\n", mtime: 2026-10-01T00:00:00Z}
+        build: {.: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/b4:
+      Config.in: {content: "mainmenu \"Buildroot\"\n"}
+      Makefile: {content: "CONFIG_DIR := $(CURDIR)\n"}
+      .config: {content: "BR2_x86_64=y\n"}
+      package: {Config.in: {content: "menu \"Target packages\"\n"}}
+      support: {scripts: {br2-external: {content: "#!/usr/bin/env bash\n"}}}
+      output:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        .br2-external.mk: {content: "BR2_EXTERNAL ?=\n", mtime: 2026-10-01T00:00:00Z}
+        build: {.: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/extgone:
+      Config.in: {content: "mainmenu \"Buildroot\"\n"}
+      Makefile: {content: "CONFIG_DIR := $(CURDIR)\n"}
+      .config: {content: "BR2_x86_64=y\n"}
+      package: {Config.in: {content: "menu \"Target packages\"\n"}}
+      support: {scripts: {br2-external: {content: "#!/usr/bin/env bash\n"}}}
+      output:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        .br2-external.mk: {content: "BR2_EXTERNAL ?= /home/tester/src/ext-gone\n", mtime: 2026-10-01T00:00:00Z}
+        build: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/outoftree:
+      Config.in: {content: "mainmenu \"Buildroot\"\n"}
+      Makefile: {content: "CONFIG_DIR := $(CURDIR)\n"}
+      .config: {content: "BR2_x86_64=y\n"}
+      package: {Config.in: {content: "menu \"Target packages\"\n"}}
+      support: {scripts: {br2-external: {content: "#!/usr/bin/env bash\n"}}}
+      output:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        .config: {content: "BR2_aarch64=y\n", mtime: 2026-10-01T00:00:00Z}
+        .br2-external.mk: {content: "BR2_EXTERNAL ?=\n", mtime: 2026-10-01T00:00:00Z}
+        build: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/noconfig:
+      Config.in: {content: "mainmenu \"Buildroot\"\n"}
+      Makefile: {content: "CONFIG_DIR := $(CURDIR)\n"}
+      package: {Config.in: {content: "menu \"Target packages\"\n"}}
+      support: {scripts: {br2-external: {content: "#!/usr/bin/env bash\n"}}}
+      output:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        .br2-external.mk: {content: "BR2_EXTERNAL ?=\n", mtime: 2026-10-01T00:00:00Z}
+        build: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/notbr:
+      Config.in: {content: "mainmenu \"Other\"\n"}
+      Makefile: {content: "all:\n"}
+      .config: {content: "CONFIG_X=y\n"}
+      package: {Config.in: {content: "menu \"Target packages\"\n"}}
+      output:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        .br2-external.mk: {content: "BR2_EXTERNAL ?=\n", mtime: 2026-10-01T00:00:00Z}
+        build: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/checkout:
+      Config.in: {content: "mainmenu \"Buildroot\"\n"}
+      Makefile: {content: "CONFIG_DIR := $(CURDIR)\n"}
+      .config: {content: "BR2_x86_64=y\n"}
+      package: {Config.in: {content: "menu \"Target packages\"\n"}}
+      support: {scripts: {br2-external: {content: "#!/usr/bin/env bash\n"}}}
+      output:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        .br2-external.mk: {content: "BR2_EXTERNAL ?=\n", mtime: 2026-10-01T00:00:00Z}
+        build:
+          .: {mtime: 2026-10-01T00:00:00Z}
+          linux-custom: {.: {mtime: 2026-10-01T00:00:00Z}, .git: {.: {mtime: 2026-10-01T00:00:00Z}, HEAD: {mtime: 2026-10-01T00:00:00Z}}}
+    /home/tester/src/fresh:
+      Config.in: {content: "mainmenu \"Buildroot\"\n"}
+      Makefile: {content: "CONFIG_DIR := $(CURDIR)\n"}
+      .config: {content: "BR2_x86_64=y\n"}
+      package: {Config.in: {content: "menu \"Target packages\"\n"}}
+      support: {scripts: {br2-external: {content: "#!/usr/bin/env bash\n"}}}
+      output: {.br2-external.mk: {content: "BR2_EXTERNAL ?=\n"}, build: {a.o: {size: 8K}}}
+  processes:
+    - {pid: 901, exe: /usr/bin/make, cwd: /home/tester/src/b3/output/build, maps: [/usr/bin/make], environ: [HOME=/home/tester], fds: [{path: /usr/bin/make}]}
+expect:
+  plan:
+    - {candidate: /home/tester/src/b1/output, source: /home/tester/src/b1}
+    - {candidate: /home/tester/src/b2/output, source: /home/tester/src/b2}
+    - {candidate: /home/tester/src/b3/output, reason: in_use, source: /home/tester/src/b3}
+    - {candidate: /home/tester/src/b4/output, reason: excluded, source: /home/tester/src/b4}
+    - {candidate: /home/tester/src/checkout/output, reason: contains_checkout, source: /home/tester/src/checkout}
+    - {candidate: /home/tester/src/fresh/output, reason: not_idle, source: /home/tester/src/fresh}
+  dry_run_report:
+    plan:
+      - {candidate: /home/tester/src/b1/output, build_evidence: {marker: .br2-external.mk, source: /home/tester/src/b1, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/src/b2/output, build_evidence: {marker: .br2-external.mk, source: /home/tester/src/b2, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/src/b3/output, build_evidence: {marker: .br2-external.mk, source: /home/tester/src/b3, idle_age_seconds: null}}
+      - {candidate: /home/tester/src/b4/output, build_evidence: {marker: .br2-external.mk, source: /home/tester/src/b4, idle_age_seconds: null}}
+      - {candidate: /home/tester/src/checkout/output, build_evidence: {marker: .br2-external.mk, source: /home/tester/src/checkout, idle_age_seconds: null}}
+      - {candidate: /home/tester/src/fresh/output, build_evidence: {marker: .br2-external.mk, source: /home/tester/src/fresh, idle_age_seconds: null}}
+  reclaim_exit: 1
+  actions: [/home/tester/src/b1/output, /home/tester/src/b2/output]
+  removed: [/home/tester/src/b1/output, /home/tester/src/b2/output]
+  skipped:
+    - {candidate: /home/tester/src/b3/output, reason: in_use, process_blockers: [{pid: 901, evidence: cwd}]}
+    - {candidate: /home/tester/src/b4/output, reason: excluded}
+    - {candidate: /home/tester/src/checkout/output, reason: contains_checkout}
+    - {candidate: /home/tester/src/fresh/output, reason: not_idle}
+  preserved:
+    - /home/tester/src/b1/.config
+    - /home/tester/src/ext1/external.desc
+    - /home/tester/src/b3/output/build/a.o
+    - /home/tester/src/b4/output/build/a.o
+    - /home/tester/src/extgone/output/build/precious
+    - /home/tester/src/outoftree/output/build/precious
+    - /home/tester/src/noconfig/output/build/precious
+    - /home/tester/src/notbr/output/build/precious
+    - /home/tester/src/checkout/output/build/linux-custom/.git/HEAD
+    - /home/tester/src/fresh/output/build/a.o

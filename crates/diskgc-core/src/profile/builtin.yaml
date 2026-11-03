@@ -325,6 +325,83 @@
   verified_with: GNU Autoconf 2.73 generated config.status and Makefile in a disposable Nix test container, 2026-10-20
   liveness_class: verified-heuristic
 
+# ---- TASK-101: build trees anchored to a whole source tree (pending
+# Mark's admission; development library only, in no release catalog).
+# Each output is taken only when its marker, the tree it would be rebuilt
+# from and the trees that build also reads all survive (docs/safety.md,
+# Source-anchored build trees). Never released, so a definition may still
+# change under its name.
+- name: openwrt-build-anchored
+  category: embedded
+  description: OpenWrt build_dir and staging_dir beside a full OpenWrt tree with its toolchain/ and tools/, through depth five
+  find:
+    roots: required
+    paths: [build_dir, staging_dir, "*/build_dir", "*/staging_dir", "*/*/build_dir", "*/*/staging_dir", "*/*/*/build_dir", "*/*/*/staging_dir", "*/*/*/*/build_dir", "*/*/*/*/staging_dir"]
+    type: dir
+  where: {has_dir: host, source_anchor: openwrt}
+  min_idle_for: 3d
+  action: delete
+  examples:
+    root: /home/mark/src
+    match: [/home/mark/src/openwrt/build_dir, /home/mark/src/openwrt/staging_dir, /home/mark/src/a/b/c/openwrt/staging_dir]
+    no_match: [/home/mark/src/openwrt/bin, /home/mark/src/openwrt/dl, /home/mark/src/a/b/c/d/openwrt/build_dir, /home/mark/src/openwrt/build_dir/host]
+  verified_with: OpenWrt 25.12 source tree (r32933) and 25.12.4 SDK layouts on the development host (read-only dry run, 2026-11-03)
+  liveness_class: verified-heuristic
+
+- name: buildroot-output-anchored
+  category: embedded
+  description: Buildroot's in-tree output/ beside its source and .config, through depth five
+  find:
+    roots: required
+    paths: [output, "*/output", "*/*/output", "*/*/*/output", "*/*/*/*/output"]
+    type: dir
+  where: {has: .br2-external.mk, has_dir: build, lacks_entry: .config, source_anchor: buildroot}
+  min_idle_for: 3d
+  action: delete
+  examples:
+    root: /home/mark/src
+    match: [/home/mark/src/buildroot/output, /home/mark/src/a/b/c/buildroot/output]
+    no_match: [/home/mark/src/buildroot/output/images, /home/mark/src/a/b/c/d/buildroot/output, /home/mark/src/buildroot/dl]
+  verified_with: Buildroot master Makefile (CONFIG_DIR for O=output) and support/scripts/br2-external (generated .br2-external.mk), sources read 2026-11-03
+  liveness_class: verified-heuristic
+
+- name: yocto-tmpdir-anchored
+  category: embedded
+  description: Yocto TMPDIR of any name whose saved_tmpdir names it, beside a build directory with conf/ and surviving layers, through depth five
+  find:
+    roots: required
+    paths: ["*", "*/*", "*/*/*", "*/*/*/*", "*/*/*/*/*"]
+    type: dir
+  where: {has: saved_tmpdir, has_dir: stamps, source_anchor: yocto}
+  min_idle_for: 3d
+  action: delete
+  examples:
+    root: /home/mark/src
+    match: [/home/mark/src/poky/build/tmp, /home/mark/src/a/b/c/build/tmp-glibc]
+    no_match: [/home/mark/src/a/b/c/d/build/tmp]
+  verified_with: OpenEmbedded-Core master meta/lib/oe/sanity.py (saved_tmpdir, abi_version) and bblayers.conf.sample, sources read 2026-11-03
+  liveness_class: verified-heuristic
+
+- name: bazel-output-base-anchored
+  category: build
+  description: Bazel output bases below a supplied output user root whose recorded workspace survives
+  find:
+    roots: required
+    paths: ["_bazel_*/*"]
+    # The repository cache and the install base are never output bases.
+    exclude: ["_bazel_*/cache", "_bazel_*/install"]
+    type: dir
+  where: {has: DO_NOT_BUILD_HERE, has_dir: execroot, source_anchor: bazel}
+  min_idle_for: 3d
+  action: delete
+  examples:
+    root: /home/mark/.cache/bazel
+    match: [/home/mark/.cache/bazel/_bazel_mark/8f14e45fceea167a5a36dedd4bea2543]
+    no_match: [/home/mark/.cache/bazel/_bazel_mark, /home/mark/.cache/bazel/_bazel_mark/cache, /home/mark/.cache/bazel/_bazel_mark/install, /home/mark/.cache/bazel/_bazel_mark/8f14e45fceea167a5a36dedd4bea2543/execroot, /home/mark/.cache/bazel/other/8f14e45fceea167a5a36dedd4bea2543]
+  verified_with: Bazel master BlazeWorkspace.java (DO_NOT_BUILD_HERE holds the workspace path), source read 2026-11-03
+  liveness_class: verified-heuristic
+# ---- end TASK-101
+
 # Each command receives the exact candidate diskgc measured. Keep each
 # program's own cache protocol: deleting a whole store can destroy metadata
 # or package state that its cleaner intentionally preserves.

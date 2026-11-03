@@ -1,0 +1,42 @@
+# TASK-101. A layer bblayers.conf lists is removed after the TMPDIR is
+# locked. The layer is not part of the recorded source identity; the
+# anchor is read again under the lock, finds no evidence, and the output
+# is kept as changed. The same recheck covers OpenWrt tree files,
+# Buildroot externals and a Bazel workspace's boundary file.
+profile_vector: 1
+profile: yocto-tmpdir-anchored
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/poky/meta/conf/layer.conf: {content: "BBFILE_COLLECTIONS += \"core\"\n"}
+    /home/tester/src/meta-bsp/conf/layer.conf: {content: "BBFILE_COLLECTIONS += \"bsp\"\n"}
+    /home/tester/src/build:
+      conf:
+        local.conf: {content: "MACHINE ??= \"board\"\n"}
+        bblayers.conf: {content: "BBLAYERS ?= \"/home/tester/src/poky/meta /home/tester/src/meta-bsp\"\n"}
+      tmp:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        saved_tmpdir: {content: /home/tester/src/build/tmp, mtime: 2026-10-01T00:00:00Z}
+        abi_version: {content: "15\n", mtime: 2026-10-01T00:00:00Z}
+        stamps: {.: {mtime: 2026-10-01T00:00:00Z}}
+        deploy: {.: {mtime: 2026-10-01T00:00:00Z}, image.wic: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+  events:
+    - at: {op: flock, path: /home/tester/src/build/tmp, nth: 1, when: after}
+      remove: /home/tester/src/meta-bsp/conf/layer.conf
+expect:
+  plan:
+    - {candidate: /home/tester/src/build/tmp, source: /home/tester/src/build}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/src/build/tmp, reason: changed}
+  preserved: [/home/tester/src/build/tmp/deploy/image.wic]

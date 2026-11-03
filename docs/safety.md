@@ -2525,8 +2525,10 @@ dependency is available. It also cannot prove that an uncooperative
 process starts using the output after the in-use scan; that is the general
 deletion race limit below. The profile matches at most five levels below
 each supplied root. Generic Ninja, OpenWrt, Buildroot, Yocto and Bazel
-markers alone do not establish a surviving source and are not shipped as
-deletion sources.
+markers alone do not establish a surviving source and are not deletion
+sources; the OpenWrt, Buildroot, Yocto and Bazel profiles add a source
+anchor of their own (Source-anchored build trees, below). Generic Ninja
+records no source and stays unselected.
 
 `west-build-anchored` uses the same recorded CMake source validation and
 three-day idle floor for Zephyr `build/` directories. It also requires a
@@ -2582,6 +2584,78 @@ GNU Autoconf 2.73 and only builds with a generated `Makefile` and a source
 `configure.ac` establishes a rebuild description, but cannot prove that
 external dependencies, local build-only edits or generated deliverables
 are recoverable.
+
+### Source-anchored build trees
+
+Status: development library only, a verified heuristic pending Mark's
+admission (TASK-101). `openwrt-build-anchored`,
+`buildroot-output-anchored`, `yocto-tmpdir-anchored` and
+`bazel-output-base-anchored` take a build output only when all of these
+hold, and keep it when any is in doubt: the build system's marker inside
+the output; the tree it would be rebuilt from still holds its build
+description (the source anchor); every other tree that build reads
+survives; no checkout inside (`checkouts: refuse`); idle for three days;
+the ordinary ownership, in-use and walk checks; outer match only. Each
+anchor reads generated files as inert bytes through the reached
+candidate fd (never runs the tool), opens every source path without
+following a symlink, and is read again under the candidate lock, where a
+changed source identity or a vanished file keeps the output (`changed`).
+Missing or ambiguous evidence keeps the output and does not make it a
+candidate; an unsafe or unreadable path is a visible refusal.
+
+- **OpenWrt** (`openwrt`). Only `build_dir` and `staging_dir`, the names
+  OpenWrt's `rules.mk` fixes, with a direct `host/` directory. Their
+  parent must be a full OpenWrt source tree: regular `rules.mk` (the
+  recorded identity), `Makefile`, `.config`, `include/toplevel.mk`,
+  `toolchain/Makefile` and `tools/Makefile`, on the output's filesystem.
+  An OpenWrt SDK or ImageBuilder ships a prebuilt toolchain in
+  `staging_dir` and has no `toolchain/` or `tools/` to rebuild it from,
+  so it is never a candidate (seen on the development host, 2026-11-03).
+  `bin/` (the images) and `dl/` are not candidates. Removing both
+  outputs is what `make dirclean` removes, less `bin/` and `tmp/`.
+- **Buildroot** (`buildroot`). Only an `output` directory with no
+  `.config` entry: Buildroot keeps `.config` in the source top for its
+  default `O=output` and in the output for any other `O=`, where the
+  configuration exists nowhere else. Its generated `.br2-external.mk`
+  must hold exactly one `BR2_EXTERNAL ?=` line; each tree it lists
+  (normalized, absolute, outside the output) must keep `external.desc`.
+  The parent must keep regular `Config.in` (identity), `Makefile`,
+  `.config`, `package/Config.in` and `support/scripts/br2-external`.
+- **Yocto** (`yocto`). A TMPDIR of any name whose `saved_tmpdir` holds
+  exactly its own path (OE-core writes it and refuses a moved TMPDIR) and
+  which has `abi_version`. Its parent, the build directory by the default
+  `TMPDIR = "${TOPDIR}/tmp"`, must keep `conf/local.conf` and
+  `conf/bblayers.conf` (identity); the latter's one `BBLAYERS ?=` or `=`
+  assignment must list only literal normalized absolute paths, each
+  keeping `conf/layer.conf`. Anything BitBake would expand or append
+  (`${TOPDIR}`, `+=`, `:append`), any other line naming `BBLAYERS`, and
+  any `include`, `include_all`, `require`, `inherit`, `addfragments`,
+  `export` or `unset` line (which can change the layers from a file the
+  anchor never reads) keeps the output. A TMPDIR configured away from its
+  build directory is kept, and so is one whose build files would lie
+  inside it (`TMPDIR = "${TOPDIR}/conf"`); no anchor accepts a source file
+  inside the candidate.
+- **Bazel** (`bazel`). An output base `_bazel_*/*` below the supplied
+  output user root, never its repository cache or install base. Bazel
+  writes the workspace path to `DO_NOT_BUILD_HERE`; it must be one
+  normalized absolute path (no control byte) outside the output base,
+  and that workspace must keep `MODULE.bazel`, `REPO.bazel`,
+  `WORKSPACE.bazel` or `WORKSPACE` (the first present is the identity)
+  on the output base's filesystem. The workspace's `bazel-*` convenience
+  links are symlinks and are never followed or deleted; the output base
+  they point into is the candidate. A running server holds its log open,
+  so the in-use check keeps its output base.
+
+Not covered, by decision: an in-place Linux kernel build is its source
+tree (the outer match would take the source), and an out-of-tree `O=`
+kernel build holds the only `.config`, the user's configuration; neither
+is a candidate of any built-in. Buildroot's `O=` outputs are excluded for
+the same reason. The residuals are in the liveness table: user edits
+inside a build tree (OpenWrt `QUILT=1` work not yet refreshed, edits in
+Buildroot's `output/build` or Yocto's `tmp/work`) are the user's own work,
+which the dated exception for anchored build profiles above does not yet
+cover; that is part of Mark's admission decision. These anchors verify a
+surviving build description, not that every download is still served.
 
 ### Toolchain pins
 

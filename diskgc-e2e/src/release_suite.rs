@@ -78,6 +78,11 @@ const EXCLUDED: &[&str] = &[
     "cargo-registry-src",
     "node-gyp-headers",
     "electron-download-cache",
+    // TASK-101, pending Mark's admission: development library only.
+    "openwrt-build-anchored",
+    "buildroot-output-anchored",
+    "yocto-tmpdir-anchored",
+    "bazel-output-base-anchored",
 ];
 
 fn run_binary(

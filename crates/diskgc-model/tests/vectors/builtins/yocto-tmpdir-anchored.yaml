@@ -1,0 +1,194 @@
+# Yocto/OpenEmbedded TMPDIR of any name beside its build directory's
+# conf/, past the 3-day floor (TASK-101). OE-core's sanity check writes
+# TMPDIR's own path to TMPDIR/saved_tmpdir (no newline) and refuses a
+# moved TMPDIR; it writes OELAYOUT_ABI to TMPDIR/abi_version
+# (meta/lib/oe/sanity.py). The build directory (TOPDIR, TMPDIR's parent by
+# default) must keep conf/local.conf and conf/bblayers.conf, and every
+# layer bblayers.conf lists must keep conf/layer.conf.
+#
+# y1: tmp, reclaimed. y2: tmp-glibc (TCLIBCAPPEND), reclaimed. y3: in use
+# (a task's cwd). y4: excluded by a negated profile. moved: saved_tmpdir
+# names another path. layergone: a listed layer is gone. varlayer: a layer
+# path bitbake would expand. noconf: local.conf is gone. checkout: a git
+# clone the fetcher left in tmp/work. fresh: under the floor. inconf: a
+# TMPDIR set to ${TOPDIR}/conf, which holds the build's own conf files.
+# required: bblayers.conf requires another file that adds a layer that is
+# gone; the parser never reads it, so no evidence.
+profile_vector: 1
+user_profiles:
+  - name: pin
+    find: {roots: [/home/tester/src], paths: [y4/tmp], type: dir}
+    action: delete
+    examples: {match: [/home/tester/src/y4/tmp]}
+select: profile:yocto-tmpdir-anchored && !profile:pin
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/python3: {mode: "0755"}
+    /home/tester/src/poky/meta/conf/layer.conf: {content: "BBFILE_COLLECTIONS += \"core\"\n"}
+    /home/tester/src/poky/meta-poky/conf/layer.conf: {content: "BBFILE_COLLECTIONS += \"yocto\"\n"}
+    /home/tester/src/y1:
+      conf:
+        local.conf: {content: "MACHINE ??= \"qemux86-64\"\n"}
+        bblayers.conf: {content: "# POKY_BBLAYERS_CONF_VERSION is increased each time build/conf/bblayers.conf\n# changes incompatibly\nPOKY_BBLAYERS_CONF_VERSION = \"2\"\n\nBBPATH = \"${TOPDIR}\"\nBBFILES ?= \"\"\n\nBBLAYERS ?= \" \\\n  /home/tester/src/poky/meta \\\n  /home/tester/src/poky/meta-poky \\\n  \"\n"}
+      tmp:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        saved_tmpdir: {content: /home/tester/src/y1/tmp, mtime: 2026-10-01T00:00:00Z}
+        abi_version: {content: "15\n", mtime: 2026-10-01T00:00:00Z}
+        stamps: {.: {mtime: 2026-10-01T00:00:00Z}}
+        work: {.: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+        deploy: {.: {mtime: 2026-10-01T00:00:00Z}, core-image.wic: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/y2:
+      conf:
+        local.conf: {content: "MACHINE ??= \"qemux86-64\"\n"}
+        bblayers.conf: {content: "BBLAYERS = \"/home/tester/src/poky/meta\"\n"}
+      tmp-glibc:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        saved_tmpdir: {content: /home/tester/src/y2/tmp-glibc, mtime: 2026-10-01T00:00:00Z}
+        abi_version: {content: "15\n", mtime: 2026-10-01T00:00:00Z}
+        stamps: {.: {mtime: 2026-10-01T00:00:00Z}}
+        work: {.: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/y3:
+      conf:
+        local.conf: {content: "MACHINE ??= \"qemux86-64\"\n"}
+        bblayers.conf: {content: "BBLAYERS ?= \"/home/tester/src/poky/meta\"\n"}
+      tmp:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        saved_tmpdir: {content: /home/tester/src/y3/tmp, mtime: 2026-10-01T00:00:00Z}
+        abi_version: {content: "15\n", mtime: 2026-10-01T00:00:00Z}
+        stamps: {.: {mtime: 2026-10-01T00:00:00Z}}
+        work: {.: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/y4:
+      conf:
+        local.conf: {content: "MACHINE ??= \"qemux86-64\"\n"}
+        bblayers.conf: {content: "BBLAYERS ?= \"/home/tester/src/poky/meta\"\n"}
+      tmp:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        saved_tmpdir: {content: /home/tester/src/y4/tmp, mtime: 2026-10-01T00:00:00Z}
+        abi_version: {content: "15\n", mtime: 2026-10-01T00:00:00Z}
+        stamps: {.: {mtime: 2026-10-01T00:00:00Z}}
+        work: {.: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/moved:
+      conf:
+        local.conf: {content: "MACHINE ??= \"qemux86-64\"\n"}
+        bblayers.conf: {content: "BBLAYERS ?= \"/home/tester/src/poky/meta\"\n"}
+      tmp:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        saved_tmpdir: {content: /home/tester/old/build/tmp, mtime: 2026-10-01T00:00:00Z}
+        abi_version: {content: "15\n", mtime: 2026-10-01T00:00:00Z}
+        stamps: {.: {mtime: 2026-10-01T00:00:00Z}}
+        work: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/layergone:
+      conf:
+        local.conf: {content: "MACHINE ??= \"qemux86-64\"\n"}
+        bblayers.conf: {content: "BBLAYERS ?= \" \\\n  /home/tester/src/poky/meta \\\n  /home/tester/src/meta-gone \\\n  \"\n"}
+      tmp:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        saved_tmpdir: {content: /home/tester/src/layergone/tmp, mtime: 2026-10-01T00:00:00Z}
+        abi_version: {content: "15\n", mtime: 2026-10-01T00:00:00Z}
+        stamps: {.: {mtime: 2026-10-01T00:00:00Z}}
+        work: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/varlayer:
+      conf:
+        local.conf: {content: "MACHINE ??= \"qemux86-64\"\n"}
+        bblayers.conf: {content: "BBLAYERS ?= \"${TOPDIR}/../poky/meta\"\n"}
+      tmp:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        saved_tmpdir: {content: /home/tester/src/varlayer/tmp, mtime: 2026-10-01T00:00:00Z}
+        abi_version: {content: "15\n", mtime: 2026-10-01T00:00:00Z}
+        stamps: {.: {mtime: 2026-10-01T00:00:00Z}}
+        work: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/noconf:
+      conf:
+        bblayers.conf: {content: "BBLAYERS ?= \"/home/tester/src/poky/meta\"\n"}
+      tmp:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        saved_tmpdir: {content: /home/tester/src/noconf/tmp, mtime: 2026-10-01T00:00:00Z}
+        abi_version: {content: "15\n", mtime: 2026-10-01T00:00:00Z}
+        stamps: {.: {mtime: 2026-10-01T00:00:00Z}}
+        work: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/checkout:
+      conf:
+        local.conf: {content: "MACHINE ??= \"qemux86-64\"\n"}
+        bblayers.conf: {content: "BBLAYERS ?= \"/home/tester/src/poky/meta\"\n"}
+      tmp:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        saved_tmpdir: {content: /home/tester/src/checkout/tmp, mtime: 2026-10-01T00:00:00Z}
+        abi_version: {content: "15\n", mtime: 2026-10-01T00:00:00Z}
+        stamps: {.: {mtime: 2026-10-01T00:00:00Z}}
+        work:
+          .: {mtime: 2026-10-01T00:00:00Z}
+          git: {.: {mtime: 2026-10-01T00:00:00Z}, .git: {.: {mtime: 2026-10-01T00:00:00Z}, HEAD: {mtime: 2026-10-01T00:00:00Z}}}
+    /home/tester/src/inconf:
+      conf:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        local.conf: {content: "MACHINE ??= \"qemux86-64\"\n", mtime: 2026-10-01T00:00:00Z}
+        bblayers.conf: {content: "BBLAYERS ?= \"/home/tester/src/poky/meta\"\n", mtime: 2026-10-01T00:00:00Z}
+        saved_tmpdir: {content: /home/tester/src/inconf/conf, mtime: 2026-10-01T00:00:00Z}
+        abi_version: {content: "15\n", mtime: 2026-10-01T00:00:00Z}
+        stamps: {.: {mtime: 2026-10-01T00:00:00Z}}
+        work: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/required:
+      conf:
+        local.conf: {content: "MACHINE ??= \"qemux86-64\"\n"}
+        bblayers.conf: {content: "BBLAYERS ?= \"/home/tester/src/poky/meta\"\nrequire conf/bsp-layers.conf\n"}
+        bsp-layers.conf: {content: "BBLAYERS += \"/home/tester/src/meta-private-gone\"\n"}
+      tmp:
+        .: {mtime: 2026-10-01T00:00:00Z}
+        saved_tmpdir: {content: /home/tester/src/required/tmp, mtime: 2026-10-01T00:00:00Z}
+        abi_version: {content: "15\n", mtime: 2026-10-01T00:00:00Z}
+        stamps: {.: {mtime: 2026-10-01T00:00:00Z}}
+        work: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/fresh:
+      conf:
+        local.conf: {content: "MACHINE ??= \"qemux86-64\"\n"}
+        bblayers.conf: {content: "BBLAYERS ?= \"/home/tester/src/poky/meta\"\n"}
+      tmp: {saved_tmpdir: {content: /home/tester/src/fresh/tmp}, abi_version: {content: "15\n"}, stamps: {.: {}}, work: {a.o: {size: 8K}}}
+  processes:
+    - {pid: 901, exe: /usr/bin/python3, cwd: /home/tester/src/y3/tmp/work, maps: [/usr/bin/python3], environ: [HOME=/home/tester], fds: [{path: /usr/bin/python3}]}
+expect:
+  plan:
+    - {candidate: /home/tester/src/checkout/tmp, reason: contains_checkout, source: /home/tester/src/checkout}
+    - {candidate: /home/tester/src/fresh/tmp, reason: not_idle, source: /home/tester/src/fresh}
+    - {candidate: /home/tester/src/y1/tmp, source: /home/tester/src/y1}
+    - {candidate: /home/tester/src/y2/tmp-glibc, source: /home/tester/src/y2}
+    - {candidate: /home/tester/src/y3/tmp, reason: in_use, source: /home/tester/src/y3}
+    - {candidate: /home/tester/src/y4/tmp, reason: excluded, source: /home/tester/src/y4}
+  dry_run_report:
+    plan:
+      - {candidate: /home/tester/src/y1/tmp, build_evidence: {marker: saved_tmpdir, source: /home/tester/src/y1, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/src/y2/tmp-glibc, build_evidence: {marker: saved_tmpdir, source: /home/tester/src/y2, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/src/checkout/tmp, build_evidence: {marker: saved_tmpdir, source: /home/tester/src/checkout, idle_age_seconds: null}}
+      - {candidate: /home/tester/src/fresh/tmp, build_evidence: {marker: saved_tmpdir, source: /home/tester/src/fresh, idle_age_seconds: null}}
+      - {candidate: /home/tester/src/y3/tmp, build_evidence: {marker: saved_tmpdir, source: /home/tester/src/y3, idle_age_seconds: null}}
+      - {candidate: /home/tester/src/y4/tmp, build_evidence: {marker: saved_tmpdir, source: /home/tester/src/y4, idle_age_seconds: null}}
+  reclaim_exit: 1
+  actions: [/home/tester/src/y1/tmp, /home/tester/src/y2/tmp-glibc]
+  removed: [/home/tester/src/y1/tmp, /home/tester/src/y2/tmp-glibc]
+  skipped:
+    - {candidate: /home/tester/src/checkout/tmp, reason: contains_checkout}
+    - {candidate: /home/tester/src/fresh/tmp, reason: not_idle}
+    - {candidate: /home/tester/src/y3/tmp, reason: in_use, process_blockers: [{pid: 901, evidence: cwd}]}
+    - {candidate: /home/tester/src/y4/tmp, reason: excluded}
+  preserved:
+    - /home/tester/src/y1/conf/local.conf
+    - /home/tester/src/poky/meta/conf/layer.conf
+    - /home/tester/src/y3/tmp/work/a.o
+    - /home/tester/src/y4/tmp/work/a.o
+    - /home/tester/src/moved/tmp/work/precious
+    - /home/tester/src/layergone/tmp/work/precious
+    - /home/tester/src/varlayer/tmp/work/precious
+    - /home/tester/src/noconf/tmp/work/precious
+    - /home/tester/src/checkout/tmp/work/git/.git/HEAD
+    - /home/tester/src/fresh/tmp/work/a.o
+    - /home/tester/src/inconf/conf/local.conf
+    - /home/tester/src/inconf/conf/work/precious
+    - /home/tester/src/required/tmp/work/precious

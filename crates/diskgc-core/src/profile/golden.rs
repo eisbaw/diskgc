@@ -1938,3 +1938,172 @@ fn language_cache_sources_have_frozen_definitions_and_match_sets() {
         }
     }
 }
+
+// ---- TASK-101: source-anchored build trees (pending Mark's admission)
+
+/// The build-tree sources' frozen definitions and match sets: their
+/// output-side markers, the tree anchor, a three-day floor, a plain delete,
+/// checkouts refused, a verified heuristic and no release catalog. The
+/// anchor itself (rebuildability) is pinned by the ModelHost vectors
+/// `vectors/builtins/<name>.yaml`.
+#[test]
+fn build_tree_sources_have_frozen_definitions_and_match_sets() {
+    use crate::fs_kind::path_matches_except;
+    let library = Library::builtin().expect("built-ins");
+    let depths = |name: &str| -> Vec<String> {
+        (0..5)
+            .map(|depth| format!("{}{name}", "*/".repeat(depth)))
+            .collect()
+    };
+    let mut openwrt = Vec::new();
+    for (build, staging) in depths("build_dir").into_iter().zip(depths("staging_dir")) {
+        openwrt.push(build);
+        openwrt.push(staging);
+    }
+    /// Name, anchor, patterns, exclusions, has, has_dir, lacks_entry,
+    /// root, paths matched and paths not matched (relative to the root).
+    type Case<'a> = (
+        &'a str,
+        SourceAnchor,
+        Vec<String>,
+        Vec<String>,
+        Option<&'a str>,
+        &'a str,
+        Option<&'a str>,
+        &'a str,
+        Vec<&'a str>,
+        Vec<&'a str>,
+    );
+    let cases: [Case; 4] = [
+        (
+            "openwrt-build-anchored",
+            SourceAnchor::Openwrt,
+            openwrt,
+            Vec::new(),
+            None,
+            "host",
+            None,
+            "/home/mark/src",
+            vec![
+                "openwrt/build_dir",
+                "openwrt/staging_dir",
+                "a/b/c/openwrt/build_dir",
+                "build_dir",
+            ],
+            vec![
+                "openwrt/bin",
+                "openwrt/dl",
+                "openwrt/tmp",
+                "openwrt/build_dir/host",
+                "openwrt/staging_dir/toolchain-x",
+                "a/b/c/d/openwrt/staging_dir",
+                "openwrt/my_build_dir",
+            ],
+        ),
+        (
+            "buildroot-output-anchored",
+            SourceAnchor::Buildroot,
+            depths("output"),
+            Vec::new(),
+            Some(".br2-external.mk"),
+            "build",
+            Some(".config"),
+            "/home/mark/src",
+            vec!["buildroot/output", "a/b/c/buildroot/output", "output"],
+            vec![
+                "buildroot/output/images",
+                "buildroot/output/build",
+                "buildroot/dl",
+                "a/b/c/d/buildroot/output",
+            ],
+        ),
+        (
+            "yocto-tmpdir-anchored",
+            SourceAnchor::Yocto,
+            depths("*"),
+            Vec::new(),
+            Some("saved_tmpdir"),
+            "stamps",
+            None,
+            "/home/mark/src",
+            vec!["poky/build/tmp", "a/b/c/build/tmp-glibc", "tmp"],
+            vec!["a/b/c/d/build/tmp"],
+        ),
+        (
+            "bazel-output-base-anchored",
+            SourceAnchor::Bazel,
+            vec!["_bazel_*/*".to_owned()],
+            vec!["_bazel_*/cache".to_owned(), "_bazel_*/install".to_owned()],
+            Some("DO_NOT_BUILD_HERE"),
+            "execroot",
+            None,
+            "/home/mark/.cache/bazel",
+            vec![
+                "_bazel_mark/8f14e45fceea167a5a36dedd4bea2543",
+                "_bazel_ci/0123456789abcdef0123456789abcdef",
+            ],
+            vec![
+                "_bazel_mark",
+                "_bazel_mark/cache",
+                "_bazel_mark/install",
+                "_bazel_mark/8f14e45fceea167a5a36dedd4bea2543/execroot",
+                "other/8f14e45fceea167a5a36dedd4bea2543",
+            ],
+        ),
+    ];
+    for (name, anchor, patterns, exclude, has, has_dir, lacks, root, matched, unmatched) in cases {
+        let profile = library.get(name).expect("build-tree source");
+        assert!(profile.releases.is_empty(), "{name} is in no catalog");
+        let Body::Source(source) = &profile.body else {
+            panic!("{name} is a source")
+        };
+        assert_eq!(source.roots, Roots::Required, "{name}");
+        assert_eq!(
+            source.finds,
+            Finds::Paths {
+                patterns,
+                exclude,
+                entry_type: EntryType::Dir,
+            },
+            "{name}"
+        );
+        assert_eq!(source.where_.source_anchor, Some(anchor), "{name}");
+        assert_eq!(source.where_.has.as_deref(), has, "{name}");
+        assert_eq!(source.where_.has_dir.as_deref(), Some(has_dir), "{name}");
+        assert_eq!(source.where_.lacks_entry.as_deref(), lacks, "{name}");
+        assert_eq!(
+            source.min_idle_for,
+            Some(IdleFor(Duration::from_secs(3 * 24 * 3600))),
+            "{name}"
+        );
+        assert_eq!(source.checkouts, Checkouts::Refuse, "{name}");
+        assert_eq!(
+            source.liveness_class,
+            Some(LivenessClass::VerifiedHeuristic),
+            "{name}"
+        );
+        assert_eq!(
+            source.action,
+            Action::Delete {
+                make_writable: false
+            },
+            "{name}"
+        );
+        let find = Find::of(source, 1000).expect("filesystem source");
+        let root = Path::new(root);
+        let matches = |relative: &str| {
+            path_matches_except(
+                Some(&[root]),
+                &find.patterns,
+                &find.exclude,
+                &root.join(relative),
+            )
+        };
+        for relative in matched {
+            assert!(matches(relative), "{name} should match {relative}");
+        }
+        for relative in unmatched {
+            assert!(!matches(relative), "{name} should not match {relative}");
+        }
+    }
+}

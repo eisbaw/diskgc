@@ -1,0 +1,125 @@
+# Bazel output bases below a supplied output user root (by default
+# ~/.cache/bazel), past the 3-day floor (TASK-101). The workspace's
+# bazel-* convenience links are symlinks diskgc never follows; the
+# candidate is the output base they point into. Bazel writes the
+# workspace path, without a newline, to OUTPUT_BASE/DO_NOT_BUILD_HERE
+# (BlazeWorkspace.writeDoNotBuildHereFile); that workspace must survive
+# with a boundary file (MODULE.bazel, REPO.bazel, WORKSPACE.bazel or
+# WORKSPACE).
+#
+# ob1 (MODULE.bazel) and ob2 (legacy WORKSPACE): reclaimed. ob3: the
+# server holds java.log open. ob4: excluded by a negated profile. gone: the
+# workspace is gone. nobuild: the workspace lost its boundary file.
+# relative: an unusable recorded path. checkout: a git_repository clone in
+# external/. fresh: under the floor. cache and install hold no marker.
+profile_vector: 1
+user_profiles:
+  - name: pin
+    find: {roots: [/home/tester/.cache/bazel], paths: [_bazel_tester/44444444444444444444444444444444], type: dir}
+    action: delete
+    examples: {match: [/home/tester/.cache/bazel/_bazel_tester/44444444444444444444444444444444]}
+select: profile:bazel-output-base-anchored && !profile:pin
+roots: [/home/tester/.cache/bazel]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/java: {mode: "0755"}
+    /home/tester/src/w1/MODULE.bazel: {content: "module(name = \"w1\")\n"}
+    /home/tester/src/w2/WORKSPACE: {content: "workspace(name = \"w2\")\n"}
+    /home/tester/src/w3/MODULE.bazel: {content: "module(name = \"w3\")\n"}
+    /home/tester/src/w4/MODULE.bazel: {content: "module(name = \"w4\")\n"}
+    /home/tester/src/nobuild/BUILD.bazel: {content: "cc_binary(name = \"x\")\n"}
+    /home/tester/src/wc/MODULE.bazel: {content: "module(name = \"wc\")\n"}
+    /home/tester/src/wf/MODULE.bazel: {content: "module(name = \"wf\")\n"}
+    /home/tester/.cache/bazel/_bazel_tester:
+      cache: {repos: {v1: {content_addressable: {blob: {size: 8K}}}}}
+      install: {0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a: {A-server.jar: {size: 8K}}}
+      "11111111111111111111111111111111":
+        .: {mtime: 2026-10-01T00:00:00Z}
+        DO_NOT_BUILD_HERE: {content: /home/tester/src/w1, mtime: 2026-10-01T00:00:00Z}
+        README: {content: "WORKSPACE: /home/tester/src/w1\n", mtime: 2026-10-01T00:00:00Z}
+        execroot: {.: {mtime: 2026-10-01T00:00:00Z}, DO_NOT_BUILD_HERE: {content: /home/tester/src/w1, mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+        java.log: {mtime: 2026-10-01T00:00:00Z}
+      "22222222222222222222222222222222":
+        .: {mtime: 2026-10-01T00:00:00Z}
+        DO_NOT_BUILD_HERE: {content: /home/tester/src/w2, mtime: 2026-10-01T00:00:00Z}
+        execroot: {.: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+      "33333333333333333333333333333333":
+        .: {mtime: 2026-10-01T00:00:00Z}
+        DO_NOT_BUILD_HERE: {content: /home/tester/src/w3, mtime: 2026-10-01T00:00:00Z}
+        execroot: {.: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+        java.log: {mtime: 2026-10-01T00:00:00Z}
+      "44444444444444444444444444444444":
+        .: {mtime: 2026-10-01T00:00:00Z}
+        DO_NOT_BUILD_HERE: {content: /home/tester/src/w4, mtime: 2026-10-01T00:00:00Z}
+        execroot: {.: {mtime: 2026-10-01T00:00:00Z}, a.o: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+      "55555555555555555555555555555555":
+        .: {mtime: 2026-10-01T00:00:00Z}
+        DO_NOT_BUILD_HERE: {content: /home/tester/src/gone, mtime: 2026-10-01T00:00:00Z}
+        execroot: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+      "66666666666666666666666666666666":
+        .: {mtime: 2026-10-01T00:00:00Z}
+        DO_NOT_BUILD_HERE: {content: /home/tester/src/nobuild, mtime: 2026-10-01T00:00:00Z}
+        execroot: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+      "77777777777777777777777777777777":
+        .: {mtime: 2026-10-01T00:00:00Z}
+        DO_NOT_BUILD_HERE: {content: src/w1, mtime: 2026-10-01T00:00:00Z}
+        execroot: {.: {mtime: 2026-10-01T00:00:00Z}, precious: {size: 8K, mtime: 2026-10-01T00:00:00Z}}
+      "88888888888888888888888888888888":
+        .: {mtime: 2026-10-01T00:00:00Z}
+        DO_NOT_BUILD_HERE: {content: /home/tester/src/wc, mtime: 2026-10-01T00:00:00Z}
+        execroot: {.: {mtime: 2026-10-01T00:00:00Z}}
+        external:
+          .: {mtime: 2026-10-01T00:00:00Z}
+          dep: {.: {mtime: 2026-10-01T00:00:00Z}, .git: {.: {mtime: 2026-10-01T00:00:00Z}, HEAD: {mtime: 2026-10-01T00:00:00Z}}}
+      "99999999999999999999999999999999":
+        DO_NOT_BUILD_HERE: {content: /home/tester/src/wf}
+        execroot: {a.o: {size: 8K}}
+  processes:
+    - {pid: 901, exe: /usr/bin/java, cwd: /, maps: [/usr/bin/java], environ: [HOME=/home/tester], fds: [{path: /usr/bin/java}, {path: /home/tester/.cache/bazel/_bazel_tester/33333333333333333333333333333333/java.log}]}
+expect:
+  plan:
+    - {candidate: /home/tester/.cache/bazel/_bazel_tester/11111111111111111111111111111111, source: /home/tester/src/w1}
+    - {candidate: /home/tester/.cache/bazel/_bazel_tester/22222222222222222222222222222222, source: /home/tester/src/w2}
+    - {candidate: /home/tester/.cache/bazel/_bazel_tester/33333333333333333333333333333333, reason: in_use, source: /home/tester/src/w3}
+    - {candidate: /home/tester/.cache/bazel/_bazel_tester/44444444444444444444444444444444, reason: excluded, source: /home/tester/src/w4}
+    - {candidate: /home/tester/.cache/bazel/_bazel_tester/88888888888888888888888888888888, reason: contains_checkout, source: /home/tester/src/wc}
+    - {candidate: /home/tester/.cache/bazel/_bazel_tester/99999999999999999999999999999999, reason: not_idle, source: /home/tester/src/wf}
+  dry_run_report:
+    plan:
+      - {candidate: /home/tester/.cache/bazel/_bazel_tester/11111111111111111111111111111111, build_evidence: {marker: DO_NOT_BUILD_HERE, source: /home/tester/src/w1, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/.cache/bazel/_bazel_tester/22222222222222222222222222222222, build_evidence: {marker: DO_NOT_BUILD_HERE, source: /home/tester/src/w2, idle_age_seconds: 1220400}}
+      - {candidate: /home/tester/.cache/bazel/_bazel_tester/33333333333333333333333333333333, build_evidence: {marker: DO_NOT_BUILD_HERE, source: /home/tester/src/w3, idle_age_seconds: null}}
+      - {candidate: /home/tester/.cache/bazel/_bazel_tester/44444444444444444444444444444444, build_evidence: {marker: DO_NOT_BUILD_HERE, source: /home/tester/src/w4, idle_age_seconds: null}}
+      - {candidate: /home/tester/.cache/bazel/_bazel_tester/88888888888888888888888888888888, build_evidence: {marker: DO_NOT_BUILD_HERE, source: /home/tester/src/wc, idle_age_seconds: null}}
+      - {candidate: /home/tester/.cache/bazel/_bazel_tester/99999999999999999999999999999999, build_evidence: {marker: DO_NOT_BUILD_HERE, source: /home/tester/src/wf, idle_age_seconds: null}}
+  reclaim_exit: 1
+  actions:
+    - /home/tester/.cache/bazel/_bazel_tester/11111111111111111111111111111111
+    - /home/tester/.cache/bazel/_bazel_tester/22222222222222222222222222222222
+  removed:
+    - /home/tester/.cache/bazel/_bazel_tester/11111111111111111111111111111111
+    - /home/tester/.cache/bazel/_bazel_tester/22222222222222222222222222222222
+  skipped:
+    - {candidate: /home/tester/.cache/bazel/_bazel_tester/33333333333333333333333333333333, reason: in_use, process_blockers: [{pid: 901, evidence: fd}]}
+    - {candidate: /home/tester/.cache/bazel/_bazel_tester/44444444444444444444444444444444, reason: excluded}
+    - {candidate: /home/tester/.cache/bazel/_bazel_tester/88888888888888888888888888888888, reason: contains_checkout}
+    - {candidate: /home/tester/.cache/bazel/_bazel_tester/99999999999999999999999999999999, reason: not_idle}
+  preserved:
+    - /home/tester/src/w1/MODULE.bazel
+    - /home/tester/.cache/bazel/_bazel_tester/cache/repos/v1/content_addressable/blob
+    - /home/tester/.cache/bazel/_bazel_tester/install/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a/A-server.jar
+    - /home/tester/.cache/bazel/_bazel_tester/33333333333333333333333333333333/execroot/a.o
+    - /home/tester/.cache/bazel/_bazel_tester/44444444444444444444444444444444/execroot/a.o
+    - /home/tester/.cache/bazel/_bazel_tester/55555555555555555555555555555555/execroot/precious
+    - /home/tester/.cache/bazel/_bazel_tester/66666666666666666666666666666666/execroot/precious
+    - /home/tester/.cache/bazel/_bazel_tester/77777777777777777777777777777777/execroot/precious
+    - /home/tester/.cache/bazel/_bazel_tester/88888888888888888888888888888888/external/dep/.git/HEAD
+    - /home/tester/.cache/bazel/_bazel_tester/99999999999999999999999999999999/execroot/a.o
