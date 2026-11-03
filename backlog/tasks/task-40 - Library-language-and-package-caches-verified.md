@@ -1,10 +1,10 @@
 ---
 id: TASK-40
 title: 'Library: language and package caches, verified'
-status: In Progress
+status: Done
 assignee: []
 created_date: 2026-10-16 22:41
-updated_date: '2026-11-02T20:42:00Z'
+updated_date: '2026-11-03T13:12:00Z'
 labels:
   - wave-4
   - config
@@ -56,4 +56,6 @@ Orchestrator 2026-10-23 (COMPASS consult): parked back to To Do to cut WIP. Libr
 Orchestrator 2026-10-24 (COMPASS round 2): only Gradle and Maven remain; split them into a low-priority task when this is next touched and close the rest.
 
 2026-11-02: Mark: 'yes faster' (one review round, model-level blockers only, merge to dev library). In progress in tmp/worktrees/t40.
+
+2026-11-03: merged four more caches to the development library (huggingface-hub-repos, cargo-registry-src, node-gyp-headers, electron-download-cache). Existing nine command caches are all covered by cache_suite (AC1 has no gap for them).
 <!-- SECTION:NOTES:END -->
