@@ -3,10 +3,10 @@ id: TASK-78
 title: >-
   Profiles: chromium-family-cache and electron-app-cache (gated on app not
   running)
-status: In Progress
+status: Done
 assignee: []
 created_date: 2026-10-18 20:54
-updated_date: '2026-11-02T20:42:00Z'
+updated_date: '2026-11-03T00:01:00Z'
 labels:
   - safety
   - wave-4
@@ -47,4 +47,6 @@ Profile DoD mutation trial: `browser_cache_builtins_have_golden_sets_and_refuse_
 2026-10-20 Firefox ESR investigation: Disposable Debian ESR 153.5.0esr used ~/.mozilla/firefox/<name>/.parentlock; pinned Nix ESR 153.5.0esr used ~/.config/mozilla/firefox/<name>/.parentlock. Both used same-named ~/.cache/mozilla/firefox/<name>/cache2. A held Linux OFD write lock conflicts with the live POSIX .parentlock lock. Focused pinned ESR container E2E passed live-cache retention, fallback-lock retention, stopped-cache deletion, and site-data preservation. ModelHost also verified exact-one legacy/XDG binding and ambiguity refusal. BLOCKER: Firefox can switch to fallback lock symlink when .parentlock becomes unreadable. The ModelHost event at unlinkat(before), after the final fallback-entry check, created lock while reclaim still completed and deleted cache2. Same-user permission change can trigger this real Firefox branch; repeated checks cannot atomically exclude it. A sound protocol needs a durable guard that excludes BOTH .parentlock locking and fallback lock creation throughout every unlink, or a supported Firefox cache-clearing API that runs in the browser. Do not ship firefox-cache2 or the custom firefox_profile_lock predicate until this race is closed. Electron remains blocked on app-specific reliable lock evidence.
 
 2026-11-02: Mark: 'yes faster' (one review round, model-level blockers only, merge to dev library). In progress in tmp/worktrees/t78.
+
+2026-11-03: merged teams-for-linux-electron-cache and figma-linux-electron-cache to the development library. Follow-ups: container tests with the real apps (lock exists while running; deletion once stopped); the shutdown-order gap (Electron drops SingletonLock before sessions close) for the browser profiles too; Firefox cache2 lock race; Claude desktop when installed.
 <!-- SECTION:NOTES:END -->
