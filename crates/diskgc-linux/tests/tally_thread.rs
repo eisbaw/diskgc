@@ -42,6 +42,30 @@ fn nice_of_named(name: &str) -> Vec<i64> {
         .collect()
 }
 
+/// Waits up to `bound` for this process to list no task named `name`;
+/// otherwise their `stat` lines. A joined thread can still be listed for a
+/// moment: `pthread_join` returns when the kernel clears the exiting
+/// thread's tid (at `exit_mm`), and the task leaves `/proc/self/task` only
+/// when it is released later in `do_exit` (TASK-40: 70 of 150 runs of the
+/// panic test failed an immediate check under CPU load, 3 of 100 idle).
+fn tasks_named_gone_within(name: &str, bound: Duration) -> Result<(), Vec<String>> {
+    let deadline = std::time::Instant::now() + bound;
+    loop {
+        let left: Vec<String> = std::fs::read_dir("/proc/self/task")
+            .expect("tasks")
+            .filter_map(|t| std::fs::read_to_string(t.ok()?.path().join("stat")).ok())
+            .filter(|stat| stat.contains(&format!("({name})")))
+            .collect();
+        if left.is_empty() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(left);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn nice_of_task(task: &Path) -> i64 {
     nice_of(
         &std::fs::read_to_string(PathBuf::from("/proc").join(task).join("stat"))
@@ -80,7 +104,10 @@ fn the_background_tally_runs_at_idle_priority_and_the_caller_does_not() {
     });
     assert_eq!(tally, [19], "one tally thread, at nice 19");
     assert_eq!(during, before, "the reclaim's thread keeps its priority");
-    assert!(nice_of_named("diskgc-tally").is_empty(), "joined on return");
+    // Joined on return: gone once the kernel has released it.
+    if let Err(left) = tasks_named_gone_within("diskgc-tally", Duration::from_secs(1)) {
+        panic!("joined on return, yet still listed: {left:?}");
+    }
     let lines = LINES.lock().unwrap();
     assert!(
         !lines.iter().any(|l| l.contains("could not lower")),
@@ -111,10 +138,11 @@ fn a_panic_in_the_watchers_loop_stops_the_tally_thread() {
         1,
         "the tally thread let go of the state"
     );
-    assert!(
-        nice_of_named("diskgc-tally").is_empty(),
-        "the tally thread is gone"
-    );
+    // Joined (the elapsed bound above is below JOIN_WAIT, after which it
+    // would be detached), so it is gone once the kernel has released it.
+    if let Err(left) = tasks_named_gone_within("diskgc-tally", Duration::from_secs(1)) {
+        panic!("the tally thread is gone, yet still listed: {left:?}");
+    }
 }
 
 /// Codex 5 (TASK-32 review): a tally turn that does not end (blocked in the
