@@ -1,0 +1,33 @@
+# TASK-93 review: no per-user storage.conf at the binding (the system
+# files apply); one appears before the recheck right before the prune (a
+# newly selected configuration, which could move images elsewhere while
+# podman info still reports the same store): `changed`, podman never run.
+profile_vector: 1
+profile: podman-dangling
+path: /home/tester
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /usr/bin/podman: {mode: "0755"}
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.config/containers: {.: {}}
+    /home/tester/.local/share/containers/storage: {storage.lock: {}, overlay-layers: {.: {}}}
+  podman:
+    info: '{"host":{"serviceIsRemote":false,"security":{"rootless":true}},"store":{"graphRoot":"/home/tester/.local/share/containers/storage","runRoot":"/run/user/1000/containers","graphDriverName":"overlay","configFile":"/home/tester/.config/containers/storage.conf","graphOptions":{}},"version":{"Version":"5.8.7"}}'
+  events:
+    - {at: {op: podman_query, nth: 2, when: before}, create: /home/tester/.config/containers/storage.conf}
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/containers/storage}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/.local/share/containers/storage, reason: changed}
+  preserved: [/home/tester/.local/share/containers/storage/storage.lock]
+  commands: []

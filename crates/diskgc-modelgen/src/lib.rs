@@ -303,6 +303,7 @@ pub fn host_model(
                 command_exit: 0,
                 command_error_after_start: false,
                 docker: Default::default(),
+                podman: Default::default(),
                 pressure: None,
                 call_cost: None,
                 state_dir: None,

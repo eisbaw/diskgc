@@ -118,17 +118,10 @@ pub struct Bound {
     pub endpoint: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Skipped {
-    pub reason: Reason,
-    pub detail: String,
-}
+pub use crate::backend::Skipped;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Binding {
-    Bound(Bound),
-    Skipped(Skipped),
-}
+/// A Docker binding: bound, or a skip of the backend.
+pub type Binding = crate::backend::Binding<Bound>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Storage {
@@ -136,12 +129,7 @@ pub enum Storage {
     BuildCache,
 }
 
-fn skip(reason: Reason, detail: impl Into<String>) -> Binding {
-    Binding::Skipped(Skipped {
-        reason,
-        detail: detail.into(),
-    })
-}
+use crate::backend::skip;
 
 fn query<H: Host>(host: &H, what: DockerQuery) -> Result<Result<String, Binding>, HostError> {
     match host.docker_query(what) {

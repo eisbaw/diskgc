@@ -148,7 +148,7 @@ impl IdleMeasure {
             Kind::Fs => Some(Self::NewestChange),
             Kind::CargoTarget => Some(Self::LastBuild),
             Kind::DockerBuildCache => Some(Self::DockerLastUse),
-            Kind::DockerImages | Kind::NixStore => None,
+            Kind::DockerImages | Kind::PodmanImages | Kind::NixStore => None,
         }
     }
 

@@ -113,6 +113,10 @@ pub struct HostModel {
     /// tests. No real daemon or filesystem is contacted by ModelHost.
     #[serde(default, skip_serializing_if = "DockerSpec::is_empty")]
     pub docker: DockerSpec,
+    /// The closed Podman query response (`podman --remote=false info
+    /// --format json`) for backend model tests. No real Podman is run.
+    #[serde(default, skip_serializing_if = "PodmanSpec::is_empty")]
+    pub podman: PodmanSpec,
     /// The system-wide pressure stall information (`Host::pressure`) over
     /// the run: each step holds from its `after` (time since the start of
     /// the run) until the next step's. Absent: the kernel has no PSI
@@ -177,6 +181,25 @@ pub struct DockerSpec {
 }
 
 impl DockerSpec {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PodmanSpec {
+    /// The answer to the first query (the binding).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<String>,
+    /// The answer to every later query (the recheck right before the
+    /// prune); absent: `info` again. Models a Podman upgraded, or a
+    /// configuration changed, between the binding and the prune.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info_later: Option<String>,
+}
+
+impl PodmanSpec {
     fn is_empty(&self) -> bool {
         *self == Self::default()
     }
@@ -773,7 +796,7 @@ pub struct EventSpec {
     /// readers (`proc_identity`, `proc_identity_released`, `proc_fds`,
     /// `proc_links`, `proc_maps`, `proc_environ`, `proc_status`,
     /// `proc_uids`, `proc_cmdline`, `proc_root_lookup`, `pid_namespace`,
-    /// `proc_nspid`, `pid_alive`), `docker_query` (e.g.
+    /// `proc_nspid`, `pid_alive`), `docker_query` or `podman_query` (e.g.
     /// `ENOENT`: no Docker client installed) or `run_command` (the child
     /// does not start).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -979,6 +1002,8 @@ pub enum Op {
     Fchmod,
     RunCommand,
     DockerQuery,
+    PodmanQuery,
+    ReadBackendConfig,
     Pressure,
     LowerPriority,
     FsUuid,
@@ -1040,6 +1065,8 @@ impl Op {
             Self::Fchmod => "fchmod",
             Self::RunCommand => "run_command",
             Self::DockerQuery => "docker_query",
+            Self::PodmanQuery => "podman_query",
+            Self::ReadBackendConfig => "read_backend_config",
             Self::Pressure => "pressure",
             Self::LowerPriority => "lower_priority",
             Self::FsUuid => "fs_uuid",

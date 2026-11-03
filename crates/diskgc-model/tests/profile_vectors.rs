@@ -171,13 +171,13 @@ const CATEGORIES: [(&str, &[&str]); 4] = [
 /// Categories that cannot apply to a source, by its action, and why.
 fn not_applicable(action: &Action) -> &'static [&'static str] {
     match action {
-        // Docker prunes act on a daemon's own store, whose protections are
-        // Docker's (running containers); protect and !profile take only fs
-        // and cargo-target sources, and no walk runs (docs/safety.md,
-        // Docker kinds).
-        Action::DockerBuilderPrune | Action::DockerImagePrune { .. } => {
-            &["in_use", "protected_or_negated", "nested_guard"]
-        }
+        // Docker and Podman prunes act on a backend's own store, whose
+        // protections are the backend's (containers using an image);
+        // protect and !profile take only fs and cargo-target sources, and no
+        // walk runs (docs/safety.md, Docker kinds, Podman images).
+        Action::DockerBuilderPrune
+        | Action::DockerImagePrune { .. }
+        | Action::PodmanImagePrune { .. } => &["in_use", "protected_or_negated", "nested_guard"],
         Action::Delete { .. } | Action::CargoLockProtocol | Action::Command { .. } => &[],
     }
 }

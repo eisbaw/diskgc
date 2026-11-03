@@ -28,6 +28,18 @@ fn root_mode_checks_the_final_cli_selection() {
             .unwrap_err()
             .contains("owners: cannot bound")
     );
+    // TASK-93: root's Podman store is the rootful one, never pruned.
+    for name in ["podman-dangling", "podman-unreferenced"] {
+        let podman =
+            Tier::select(&format!("profile:{name}"), &library, None, 1000).expect("Podman source");
+        assert!(validate_selected_root_action(false, &podman).is_ok());
+        assert!(
+            validate_selected_root_action(true, &podman)
+                .unwrap_err()
+                .contains("Podman prune actions are refused under --allow-root"),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -211,8 +223,13 @@ fn under_both_catalogs(source: &[u8], expectation: &str) -> Result<Config, Strin
 
 #[test]
 fn proposed_catalog_refuses_excluded_config_tiers_even_when_later() {
-    for excluded in ["docker-build-cache", "pip-cache", "pytest-cache"] {
-        let roots = if excluded == "docker-build-cache" {
+    for excluded in [
+        "docker-build-cache",
+        "podman-unreferenced",
+        "pip-cache",
+        "pytest-cache",
+    ] {
+        let roots = if excluded.starts_with("docker-") || excluded.starts_with("podman-") {
             ""
         } else {
             "        roots: [/tmp]\n"

@@ -90,7 +90,7 @@ const NON_PROFILE_MODELS: &[(&str, &str, &str, Option<&str>)] = &[
     (
         "docker-bundled.yaml",
         include_str!("../../crates/diskgc-model/tests/models/docker-bundled.yaml"),
-        "command/docker is model-only",
+        "command/docker/podman is model-only",
         None,
     ),
     // The real-kernel counterpart is host_flock_release_only_by_close
@@ -764,14 +764,19 @@ fn model_only_field_cases() -> Result<Vec<(&'static str, HostModel, &'static str
         ("sandbox-gate", "sandbox_gate is model-only", |m| {
             m.sandbox_gate = GateSpec::Closed
         }),
-        ("command-exit", "command/docker is model-only", |m| {
+        ("command-exit", "command/docker/podman is model-only", |m| {
             m.command_exit = 1
         }),
-        ("command-error", "command/docker is model-only", |m| {
-            m.command_error_after_start = true
-        }),
-        ("docker", "command/docker is model-only", |m| {
+        (
+            "command-error",
+            "command/docker/podman is model-only",
+            |m| m.command_error_after_start = true,
+        ),
+        ("docker", "command/docker/podman is model-only", |m| {
             m.docker.host = Some("unix:///tmp/docker.sock".into())
+        }),
+        ("podman", "command/docker/podman is model-only", |m| {
+            m.podman.info = Some("{}".into())
         }),
         ("events", "events is model-only", |m| {
             m.events.push(Default::default())

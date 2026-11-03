@@ -48,9 +48,9 @@ use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DevIno,
     DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, HeldDir, Host,
     HostError, Ids, LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MakeUserLock,
-    MapEntry, MonoTime, MountEntry, OpenHow, Pid, PidNamespace, Pressure, ProcError, ProcFd,
-    ProcLink, ProcStatus, Space, Stat, StateFile, StateLock, StateWritten, Timestamp, TryLock,
-    Unlink, UserLock, UserLockError, WaitLock, is_single_name,
+    MapEntry, MonoTime, MountEntry, OpenHow, Pid, PidNamespace, PodmanQuery, Pressure, ProcError,
+    ProcFd, ProcLink, ProcStatus, Space, Stat, StateFile, StateLock, StateWritten, Timestamp,
+    TryLock, Unlink, UserLock, UserLockError, WaitLock, is_single_name,
 };
 use diskgc_core::hostlock::USER_LOCK_NAME;
 
@@ -77,6 +77,18 @@ pub const UPTIME_AT_START: Duration = Duration::from_secs(3600);
 /// The modelled `PATH` of commands (diskgc's own, as `command_path`):
 /// where a command action's program and the Docker client are found.
 const COMMAND_DIRS: [&str; 2] = ["/usr/bin", "/bin"];
+
+/// Whether a backend client `name` is an executable regular file in one of
+/// [`COMMAND_DIRS`], as LinuxHost's query finds it on `PATH`.
+fn command_installed(state: &crate::state::State, name: &str) -> bool {
+    COMMAND_DIRS.iter().any(|dir| {
+        state.lookup(&Path::new(dir).join(name)).is_ok_and(|loc| {
+            let stat = state.stat(loc);
+            stat.file_type == Some(FileType::Regular)
+                && stat.perm.is_some_and(|perm| perm & 0o111 != 0)
+        })
+    })
+}
 
 /// One port call on the trace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1355,17 +1367,7 @@ impl Host for ModelHost {
             }
             // As on LinuxHost, the query runs `docker` from the command
             // path: no executable there is ENOENT (no client installed).
-            let installed = COMMAND_DIRS.iter().any(|dir| {
-                inner
-                    .state
-                    .lookup(&Path::new(dir).join("docker"))
-                    .is_ok_and(|loc| {
-                        let stat = inner.state.stat(loc);
-                        stat.file_type == Some(FileType::Regular)
-                            && stat.perm.is_some_and(|perm| perm & 0o111 != 0)
-                    })
-            });
-            if !installed {
+            if !command_installed(&inner.state, "docker") {
                 return (
                     Err(HostError::errno("query Docker", name, Errno::ENOENT)),
                     None,
@@ -1393,6 +1395,90 @@ impl Host for ModelHost {
                 ),
             }
         })
+    }
+
+    fn podman_query(&self, query: PodmanQuery) -> Result<String, HostError> {
+        let name = match query {
+            PodmanQuery::Info => "info",
+        };
+        let path = PathBuf::from(format!("/podman/{name}"));
+        self.call(Op::PodmanQuery, Some(path), None, |inner| {
+            if let Some(errno) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("query Podman", name, errno)),
+                    None,
+                    errno.to_string(),
+                );
+            }
+            // As on LinuxHost, the query runs `podman` from the command
+            // path: no executable there is ENOENT (no client installed).
+            if !command_installed(&inner.state, "podman") {
+                return (
+                    Err(HostError::errno("query Podman", name, Errno::ENOENT)),
+                    None,
+                    errno_text(Errno::ENOENT),
+                );
+            }
+            inner.state.podman_queries += 1;
+            let podman = &inner.state.podman;
+            let response = match query {
+                PodmanQuery::Info if inner.state.podman_queries > 1 => {
+                    podman.info_later.as_ref().or(podman.info.as_ref())
+                }
+                PodmanQuery::Info => podman.info.as_ref(),
+            };
+            match response {
+                Some(text) => (Ok(text.clone()), None, "ok".to_owned()),
+                None => (
+                    Err(HostError::invalid(
+                        "query Podman",
+                        name,
+                        "no response in host model",
+                    )),
+                    None,
+                    "unmodelled".to_owned(),
+                ),
+            }
+        })
+    }
+
+    fn read_backend_config(&self, path: &Path, limit: usize) -> Result<Option<Vec<u8>>, HostError> {
+        let shown = path.display().to_string();
+        self.call(
+            Op::ReadBackendConfig,
+            Some(path.to_owned()),
+            None,
+            |inner| {
+                if let Some(errno) = inner.injected.take() {
+                    return (
+                        Err(HostError::errno("read config", &shown, errno)),
+                        None,
+                        errno_text(errno),
+                    );
+                }
+                // The model has no symlinks to follow in a configuration path.
+                let Ok(loc) = inner.state.lookup(path) else {
+                    return (Ok(None), None, "absent".to_owned());
+                };
+                let object = Some(inner.state.dev_ino(loc));
+                match &inner.state.inode(loc).kind {
+                    Kind::File { content, .. } => {
+                        let mut head = content.clone();
+                        head.truncate(limit);
+                        (Ok(Some(head)), object, "ok".to_owned())
+                    }
+                    _ => (
+                        Err(HostError::invalid(
+                            "read config",
+                            &shown,
+                            "not a regular file",
+                        )),
+                        object,
+                        "not a file".to_owned(),
+                    ),
+                }
+            },
+        )
     }
 
     fn command_origin(&self) -> Result<PathBuf, HostError> {

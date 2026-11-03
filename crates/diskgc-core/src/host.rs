@@ -1224,6 +1224,35 @@ pub trait Host {
         ))
     }
 
+    /// Run one constant-argv query of the local Podman store (`podman
+    /// --remote=false ...`) and return bounded UTF-8 output. A query cannot
+    /// prune and does not ask the pre-release deletion gate; like any
+    /// rootless podman command it may initialise Podman's own state.
+    fn podman_query(&self, _query: PodmanQuery) -> Result<String, HostError> {
+        Err(HostError::invalid(
+            "query Podman",
+            "backend",
+            "this host does not provide Podman queries",
+        ))
+    }
+
+    /// The first `limit` bytes of a backend's configuration file at `path`
+    /// (a `storage.conf`), symlinks followed as the backend itself follows
+    /// them; `Ok(None)` when no such file exists. Read-only, non-blocking,
+    /// regular files only: never a candidate, never user data, only what a
+    /// backend binding compares again before its prune.
+    fn read_backend_config(
+        &self,
+        path: &Path,
+        _limit: usize,
+    ) -> Result<Option<Vec<u8>>, HostError> {
+        Err(HostError::invalid(
+            "read config",
+            path.display(),
+            "this host does not read backend configuration",
+        ))
+    }
+
     /// The directory relative PATH entries and relative program paths refer
     /// to before the command child switches to its checked working directory.
     fn command_origin(&self) -> Result<PathBuf, HostError> {
@@ -1929,6 +1958,15 @@ pub enum DockerQuery {
     ClientVersion,
     ContextShow,
     ContextEndpoint,
+    Info,
+}
+
+/// Closed set of read-only Podman queries. LinuxHost alone maps each variant
+/// to constant argv, always with `--remote=false` (the local store, whatever
+/// `CONTAINER_HOST` or a default connection says).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PodmanQuery {
+    /// `podman --remote=false info --format json`.
     Info,
 }
 

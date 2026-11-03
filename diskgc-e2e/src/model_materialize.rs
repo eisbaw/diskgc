@@ -377,9 +377,10 @@ pub fn validate(model: &HostModel) -> Result<(), String> {
     if model.command_exit != 0
         || model.command_error_after_start
         || model.docker != Default::default()
+        || model.podman != Default::default()
     {
         return unsupported(
-            "command/docker",
+            "command/docker/podman",
             "scripted command responses have no kernel equivalent",
         );
     }

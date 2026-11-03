@@ -1,0 +1,46 @@
+# TASK-93: podman-unreferenced prunes every image no container uses
+# (`image prune --force --all`; Podman keeps an image any container,
+# running or stopped, was created from). What the prune freed is measured
+# on the requested filesystem: here the modelled prune removes a 3G layer
+# (an event after the command), the goal of 9G free is then met, and the
+# run exits 0. The plan cannot estimate a prune's size (no tally).
+profile_vector: 1
+profile: podman-unreferenced
+path: /home/tester
+min_free: 9G
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /usr/bin/podman: {mode: "0755"}
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.local/share/containers/storage:
+      storage.lock: {}
+      overlay-layers: {layers.json: {}}
+      overlay-images: {images.json: {}}
+      overlay:
+        0a1b2c: {diff: {big: {size: 3G, uid: 101000, gid: 101000}}}
+        3d4e5f: {diff: {kept: {size: 1M}}}
+  podman:
+    info: '{"host":{"serviceIsRemote":false,"security":{"rootless":true}},"store":{"graphRoot":"/home/tester/.local/share/containers/storage","runRoot":"/run/user/1000/containers","graphDriverName":"overlay","configFile":"/home/tester/.config/containers/storage.conf","graphOptions":{}},"version":{"Version":"5.8.7"}}'
+  events:
+    - {at: {op: run_command, when: after}, remove: /home/tester/.local/share/containers/storage/overlay/0a1b2c}
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/containers/storage}
+  dry_run_report:
+    plan:
+      - {estimated_bytes: null}
+  reclaim_exit: 0
+  report: {status: met}
+  actions: [/home/tester/.local/share/containers/storage]
+  removed: [/home/tester/.local/share/containers/storage/overlay/0a1b2c]
+  skipped: []
+  preserved:
+    - /home/tester/.local/share/containers/storage/storage.lock
+    - /home/tester/.local/share/containers/storage/overlay/3d4e5f/diff/kept
+  commands:
+    - {cwd: /, argv: [/usr/bin/podman, --remote=false, image, prune, --force, --all]}

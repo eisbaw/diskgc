@@ -383,6 +383,7 @@ pub enum ActionSpec {
     Command { argv: Vec<String>, cwd: Option<Cwd> },
     DockerBuilderPrune,
     DockerImagePrune { all: bool },
+    PodmanImagePrune { all: bool },
 }
 
 /// Where a command action runs (docs/reference.md, Actions).
@@ -675,6 +676,8 @@ impl<'de> Deserialize<'de> for ActionSpec {
                     "docker-builder-prune" => Ok(ActionSpec::DockerBuilderPrune),
                     "docker-image-prune" => Ok(ActionSpec::DockerImagePrune { all: false }),
                     "docker-image-prune-all" => Ok(ActionSpec::DockerImagePrune { all: true }),
+                    "podman-image-prune" => Ok(ActionSpec::PodmanImagePrune { all: false }),
+                    "podman-image-prune-all" => Ok(ActionSpec::PodmanImagePrune { all: true }),
                     "command" => Err(E::custom(
                         "a command action is a mapping: `{command: [argv...]}`",
                     )),

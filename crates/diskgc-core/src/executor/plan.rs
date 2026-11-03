@@ -1,11 +1,11 @@
 //! `--dry-run`: what [`super::ensure`] would do, deleting nothing and
 //! taking no lock (docs/reference.md, `--dry-run`), per kind: Cargo
-//! targets, `fs` candidates, a union of `fs` profiles, Docker.
+//! targets, `fs` candidates, a union of `fs` profiles, Docker and Podman.
 
+use crate::backend::Binding;
 use crate::cargo_target::{self, Stop};
 use crate::command_action::{self, Preflight};
 use crate::config::Order;
-use crate::docker_backend::{self, Binding, Storage};
 use crate::engine::{Checkouts, Identity, Reason, Rules, Skip, checkout_metadata_below};
 use crate::fs_kind::{self, Find};
 use crate::host::{DevIno, Host, MonoTime, Timestamp};
@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use super::prune_backend::{self, Which};
 use super::{
     CandidateQueue, FsUnionSourceRef, Measured, NegatedKind, NegatedSource, NotesOncePerRun,
     Protection, Refresh, Request, SourceKind, Tier, bounded_tier_timeout, deadline_of,
@@ -144,12 +145,9 @@ fn dry_run_inner<H: Host>(
             return report;
         }
     };
-    if matches!(
-        tier.source,
-        SourceKind::DockerBuildCache | SourceKind::DockerImages
-    ) {
+    if let Some(which) = Which::of(tier) {
         let started = host.now();
-        let inspected = docker_backend::inspect_backend(host, measured.space, docker_storage(tier));
+        let inspected = prune_backend::inspect(host, measured.space, which);
         record_deadline_overrun(
             host,
             &mut report,
@@ -163,10 +161,11 @@ fn dry_run_inner<H: Host>(
         }
         match inspected {
             Ok(Binding::Bound(bound)) => {
-                let candidate = docker_candidate(tier, &bound);
+                let candidate = bound.candidate(tier);
                 log(&format!(
-                    "{}: Docker backend bound to {}",
+                    "{}: {} backend bound to {}",
                     tier.name,
+                    which.name(),
                     candidate.display()
                 ));
                 let protected = match judge_protect(
@@ -193,8 +192,11 @@ fn dry_run_inner<H: Host>(
             }
             Ok(Binding::Skipped(skip)) => {
                 log(&format!(
-                    "{}: skip Docker backend: {}: {}",
-                    tier.name, skip.reason, skip.detail
+                    "{}: skip {} backend: {}: {}",
+                    tier.name,
+                    which.name(),
+                    skip.reason,
+                    skip.detail
                 ));
                 report.plan.push(plan_tier_row(tier, Some(skip.reason)));
             }
@@ -287,7 +289,9 @@ fn dry_run_inner<H: Host>(
                 )
             }
         }
-        SourceKind::DockerBuildCache | SourceKind::DockerImages => unreachable!("handled above"),
+        SourceKind::DockerBuildCache | SourceKind::DockerImages | SourceKind::PodmanImages => {
+            unreachable!("handled above")
+        }
     };
     record_deadline_overrun(host, &mut report, deadline, started, "plan", &request.path);
     // A deadline here keeps what was judged (TASK-227): each planner stops
@@ -610,22 +614,6 @@ pub(super) fn plan_skip(tier: &Tier, candidate: &Path, skip: &Skip) -> PlanEntry
         process_blockers: skip.process_blockers.clone(),
         unknown_cause: skip.unknown_cause,
         ..plan_entry(tier, candidate, Some(skip.reason), None)
-    }
-}
-
-pub(super) fn docker_candidate(tier: &Tier, bound: &docker_backend::Bound) -> PathBuf {
-    match &tier.source {
-        SourceKind::DockerBuildCache => bound.info.docker_root.join("buildkit"),
-        SourceKind::DockerImages => bound.info.image_store.root().to_owned(),
-        _ => unreachable!("Docker candidate for a non-Docker tier"),
-    }
-}
-
-pub(super) fn docker_storage(tier: &Tier) -> Storage {
-    match tier.source {
-        SourceKind::DockerBuildCache => Storage::BuildCache,
-        SourceKind::DockerImages => Storage::Images,
-        _ => unreachable!("Docker storage for a non-Docker tier"),
     }
 }
 

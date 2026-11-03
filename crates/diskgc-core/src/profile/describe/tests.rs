@@ -194,6 +194,8 @@ fn schema_form(json: &Value) -> Value {
                 Some("docker_builder_prune") => Value::from("docker-builder-prune"),
                 Some("docker_image_prune") => Value::from("docker-image-prune"),
                 Some("docker_image_prune_all") => Value::from("docker-image-prune-all"),
+                Some("podman_image_prune") => Value::from("podman-image-prune"),
+                Some("podman_image_prune_all") => Value::from("podman-image-prune-all"),
                 other => panic!("action type {other:?}"),
             },
             _ => value.clone(),

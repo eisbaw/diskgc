@@ -1,0 +1,32 @@
+# TASK-93 review: a storage.conf that sets a separate image store
+# (`imagestore`; likewise `additionalimagestores`) is refused
+# `unsupported_backend`: podman info does not report it, so where the
+# prune frees space cannot be bound. Here it is the system file, which
+# applies when the user has none.
+profile_vector: 1
+profile: podman-unreferenced
+path: /home/tester
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /usr/bin/podman: {mode: "0755"}
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /etc/containers/storage.conf: {content: "[storage]\ndriver = \"overlay\"\nimagestore = \"/mnt/images\"\n"}
+    /home/tester/.local/share/containers/storage: {storage.lock: {}, overlay-layers: {.: {}}}
+  podman:
+    info: '{"host":{"serviceIsRemote":false,"security":{"rootless":true}},"store":{"graphRoot":"/home/tester/.local/share/containers/storage","runRoot":"/run/user/1000/containers","graphDriverName":"overlay","configFile":"/home/tester/.config/containers/storage.conf","graphOptions":{}},"version":{"Version":"5.8.7"}}'
+expect:
+  plan:
+    - {candidate: null, reason: unsupported_backend}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: null, reason: unsupported_backend}
+  preserved: [/home/tester/.local/share/containers/storage/storage.lock]
+  commands: []

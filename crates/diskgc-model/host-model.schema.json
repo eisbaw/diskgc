@@ -156,6 +156,10 @@
       "description": "The PID namespace diskgc runs in, as its held `/proc` answers\n(docs/safety.md, Producer liveness; In use: Visibility): `initial`\n(the default), `nested`, or `test_container` (nested, the e2e\nharness's build in a marked test container:\n`Host::test_container_pid_namespace`).",
       "$ref": "#/$defs/PidNamespaceSpec"
     },
+    "podman": {
+      "description": "The closed Podman query response (`podman --remote=false info\n--format json`) for backend model tests. No real Podman is run.",
+      "$ref": "#/$defs/PodmanSpec"
+    },
     "pressure": {
       "description": "The system-wide pressure stall information (`Host::pressure`) over\nthe run: each step holds from its `after` (time since the start of\nthe run) until the next step's. Absent: the kernel has no PSI\n(every read fails with `ENOENT`, as without `CONFIG_PSI`). Steps in\nincreasing `after`, the first at `0s`.",
       "type": [
@@ -633,7 +637,7 @@
           "minimum": 0
         },
         "fail": {
-          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_link`, `read_dir`, `read_head`,\n`unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`, the `/proc`\nreaders (`proc_identity`, `proc_identity_released`, `proc_fds`,\n`proc_links`, `proc_maps`, `proc_environ`, `proc_status`,\n`proc_uids`, `proc_cmdline`, `proc_root_lookup`, `pid_namespace`,\n`proc_nspid`, `pid_alive`), `docker_query` (e.g.\n`ENOENT`: no Docker client installed) or `run_command` (the child\ndoes not start).",
+          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_link`, `read_dir`, `read_head`,\n`unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`, the `/proc`\nreaders (`proc_identity`, `proc_identity_released`, `proc_fds`,\n`proc_links`, `proc_maps`, `proc_environ`, `proc_status`,\n`proc_uids`, `proc_cmdline`, `proc_root_lookup`, `pid_namespace`,\n`proc_nspid`, `pid_alive`), `docker_query` or `podman_query` (e.g.\n`ENOENT`: no Docker client installed) or `run_command` (the child\ndoes not start).",
           "anyOf": [
             {
               "$ref": "#/$defs/ErrnoName"
@@ -1328,6 +1332,8 @@
         "fchmod",
         "run_command",
         "docker_query",
+        "podman_query",
+        "read_backend_config",
         "pressure",
         "lower_priority",
         "fs_uuid",
@@ -1379,6 +1385,26 @@
           "const": "test_container"
         }
       ]
+    },
+    "PodmanSpec": {
+      "type": "object",
+      "properties": {
+        "info": {
+          "description": "The answer to the first query (the binding).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "info_later": {
+          "description": "The answer to every later query (the recheck right before the\nprune); absent: `info` again. Models a Podman upgraded, or a\nconfiguration changed, between the binding and the prune.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "PressureStep": {
       "description": "The pressure readings from `after` on: the `some avg10` of `io`,\n`memory` and `cpu`, in hundredths of a percent (`1000` is 10.00 %).",

@@ -42,6 +42,31 @@
   verified_with: Docker Engine 29.8.2 in digest-pinned dind, 2026-10-20
   liveness_class: delegated
 
+# TASK-93, development library only, pending Mark's admission: the caller's
+# rootless Podman store, pruned by Podman itself (docs/safety.md, Podman
+# images). Never by deleting storage files: they belong to subuids, and
+# container storage is refused as a delete target (TASK-242).
+- name: podman-dangling
+  category: containers
+  description: Dangling images in the caller's local rootless Podman store
+  kind: podman-images
+  find: {roots: daemon}
+  action: podman-image-prune
+  verified_with: Podman 5.8.7 (prune in an isolated store, 2026-10-20; read-only on the development machine, 2026-11-03)
+  liveness_class: delegated
+
+- name: podman-unreferenced
+  category: containers
+  description: >-
+    Images no container (running or stopped) uses in the caller's local
+    rootless Podman store, tagged ones included, and (as Podman's --all
+    does) its persistent RUN --mount=type=cache build caches
+  kind: podman-images
+  find: {roots: daemon}
+  action: podman-image-prune-all
+  verified_with: Podman 5.8.7 read-only on the development machine (what --all would prune), 2026-11-03; the --all prune itself not yet run in a container
+  liveness_class: delegated
+
 - name: cargo-target
   category: rust
   description: >-

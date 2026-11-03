@@ -3741,6 +3741,139 @@ Operations:
 - One action prunes everything matching; there is no per-candidate stop.
   Volumes and containers are never touched.
 
+## Podman images
+
+Kind `podman-images` (TASK-93; `podman-dangling` and
+`podman-unreferenced`, development library only, pending Mark's
+admission) has Podman prune the caller's local rootless store. diskgc
+never opens, walks or deletes anything below that store: it is container
+storage (refused for every other kind, [No container
+storage](#the-eligibility-walk-mandatory-per-candidate)), its rootless
+layer files belong to subuids (`not_owner`), and deleting any part of it
+corrupts Podman's bookkeeping.
+
+- **Binding.** One read-only query through the Host port, `podman
+  --remote=false info --format json` (constant argv, no sandbox gate), run
+  in `/` as the prune is, so a relative configuration path in the
+  environment names the same file for both.
+  `--remote=false` pins the local store whatever `CONTAINER_HOST`,
+  `CONTAINER_CONNECTION` or `containers.conf` select (checked on 5.8.7:
+  with `CONTAINER_HOST` naming an unreachable endpoint, the query still
+  reported the local store). Skips ([reference.md](reference.md#backend-skips-and-errors)):
+  no `podman` on `PATH`, `missing`; a version other than
+  [admitted](reference.md#backend-version-allowlist) 5.8.7,
+  `unsupported_backend`; `host.serviceIsRemote` true (podman-remote
+  installed as `podman`), `remote_backend`; `host.security.rootless`
+  false, `unsupported_backend`; a `store.graphRoot` not on the requested
+  filesystem, `other_fs`; one that cannot be resolved without a symlink or
+  is absent, the resolver's reason; a separate image store configured,
+  `unsupported_backend` (below). Any other output an admitted version
+  must not give is an error.
+- **Bound facts:** the version, `store.graphRoot`, `store.runRoot`,
+  `store.graphDriverName`, `store.graphOptions`, `store.configFile`, the
+  graph root directory's device and inode, and the contents (or absence)
+  of every `storage.conf` containers/storage 5.8.7 may read for the
+  caller: `store.configFile`, `/etc/containers/storage.conf` and
+  `/usr/share/containers/storage.conf` (read-only, symlinks followed as
+  Podman follows them, at most 64 KiB each; a larger one is
+  `unsupported_backend`). Rebound under the host lock right before the
+  prune; any difference, an edited or newly created `storage.conf`
+  included, is `changed` and nothing runs.
+- **No separate image store.** `podman info` reports no `imagestore` or
+  additional image store, so where their layers live, and which filesystem
+  a prune frees, cannot be bound. A graph option naming one, or any bound
+  `storage.conf` with an uncommented non-empty `imagestore` or
+  `additionalimagestores` (in any table, even one that does not apply), is
+  `unsupported_backend`.
+- **Operation:** `podman --remote=false image prune --force`
+  (`podman-dangling`), with `--all` (`podman-unreferenced`); in `/`, in
+  its own process group, within the tier's timeout, behind the sandbox
+  gate, never as root (both actions are refused under `--allow-root`).
+  The plan and the action name the graph root as the candidate, judged by
+  `protect` only; the size is not estimated, and what was freed is the
+  final sample's.
+- **What Podman keeps** (its rule, `podman-image-prune(1)` of 5.8.7):
+  every image a container uses, running or stopped, and, since diskgc
+  never passes `--external`, every image a Buildah working container
+  uses. `image prune` removes no container and no volume, and diskgc
+  never runs `podman system prune`.
+- **`--all` also removes the persistent build caches.** Podman 5.8.7's
+  `ImageEngine.Prune` calls Buildah's `CleanCacheMount()` when
+  `--build-cache` *or* `--all` is set (`pkg/domain/infra/abi/images.go`,
+  read in the pinned source), so `podman-unreferenced`, not
+  `podman-dangling`, also deletes every `RUN --mount=type=cache` cache:
+  `os.RemoveAll` of `<tmp>/buildah-cache-<uid>`, where `<tmp>` is the
+  prune's `TMPDIR`, else `containers.conf`'s `image_copy_tmp_dir`, else
+  `/var/tmp` (`internal/tmpdir`). It takes no lock and checks for no
+  user: a build running a step with a cache mount (whose `sharing=locked`
+  lock files live inside the removed tree) has that cache emptied under
+  it and can fail or cache a partial result; the next build fills it
+  again from the network. That directory can be on another filesystem
+  than the graph root and is not measured; with a `TMPDIR` other than the
+  builds', the prune removes another directory or none. A residual for
+  Mark's admission (TASK-93), in the liveness row. No age
+  option: the image `until` filter counts from creation, not last use
+  (the Nix-built e2e images report 1970), so `podman-unreferenced`
+  removes an image loaded a minute ago if no container uses it yet.
+- **Liveness is delegated.** Podman's own store locks serialise the
+  prune with other Podman and Buildah store operations, and what it keeps
+  is its rule above; diskgc does not refuse while a `podman` process runs,
+  and, like the Docker kinds, a Podman tier is not refused where diskgc
+  cannot see every process. Not verified: whether an unnamed intermediate
+  image of a multi-stage build in progress can be dangling between its
+  stages, and so pruned by `podman-dangling` (a follow-up).
+
+**diskgc's own e2e images** (`localhost/diskgc-e2e-*`) live in the same
+rootless store. `podman-dangling` leaves them (they are tagged).
+`podman-unreferenced` removes each one no container uses, which is all of
+them between runs (the harness starts its containers with `--rm`; only a
+kept failed container keeps its image). On the development machine on
+2026-11-03 it would have removed `diskgc-e2e-debian` and
+`diskgc-e2e-dind` (and `docker.io/library/debian:trixie-slim`) and kept
+`diskgc-e2e-base`, which 16 stopped containers from earlier runs use.
+The next gate reloads a removed image from the Nix store (`podman load`):
+minutes, not data; a gate whose image check passed before the prune and
+whose `podman run` comes after it fails. Podman 5.8.7's `image prune`
+accepts `--filter label!=KEY`, which would keep labelled images; the
+harness images carry no label (the flake's image `config` has none) and
+the kind's argv takes no filter, so neither can exclude them yet
+(follow-ups). Select `podman-unreferenced` only where that cost is
+acceptable.
+
+**Relation to the Docker kinds.** The same shape: one bound backend, one
+prune of the whole store, a rebind before the prune, the dangling and
+unreferenced split, no age filter for images, delegated liveness. The
+binding differs: Docker is a daemon reached through a pinned socket fd;
+Podman has no daemon, so its binding is the store that `podman info`
+names, and the prune child opens it again by path. Podman's
+Docker-compatible socket is not a Docker backend (refused by the Docker
+kinds, [Docker kinds](#docker-kinds)). Podman's build caches go only as `--all` takes them (above); `--build-cache` alone is not offered.
+
+**Rootful `/var/lib/containers/storage`** is out of scope: diskgc runs as
+its caller, whose Podman store is rootless (`~/.local/share/containers/storage`
+unless `storage.conf` moves it). A store reported rootful is skipped,
+and root runs refuse the Podman actions at load. A rootful store stays
+container storage for every other kind under `--allow-root`.
+
+Limits:
+
+- The prune child opens the store by its configured path again: a store
+  replaced, or a `storage.conf` changed, between the recheck and the
+  child's start is not caught. An fd cannot be handed over: Podman 5.8.7
+  refuses `--root /proc/self/fd/N` (exit 125, the overlay driver cannot
+  make the mount private; TASK-93 notes). The same holds for the
+  configuration files read after the recheck. As with the deletion races,
+  only a change by one of the user's own processes in that window can
+  redirect it (PRD, Limits: no defence against a hostile local user).
+- The configuration binding covers the `storage.conf` files, not
+  `containers.conf` or drop-ins of later versions; it reads them again
+  only at the recheck, and the prune child reads them once more itself.
+- The query is a Podman command: on a host whose user never ran Podman,
+  it can create the store's directories and the rootless pause process,
+  as any `podman` command does, also in a dry run.
+- A query waiting on Podman's store lock (a long pull) fails after 10 s:
+  an error of the run (exit 3 below `--min-free`), not a skip.
+
 ## `nix-store`
 
 Status: designed (TASK-118), unshipped. The profile loader refuses kind

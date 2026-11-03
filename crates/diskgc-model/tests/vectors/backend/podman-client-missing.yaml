@@ -1,0 +1,26 @@
+# TASK-93: no podman client on the command path (its query fails ENOENT):
+# the Podman tier is skipped `missing`, nothing is pruned, and the exit
+# code follows space. Backend skips name no candidate path.
+profile_vector: 1
+profile: podman-dangling
+path: /home/tester
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.local/share/containers/storage: {storage.lock: {}, overlay-layers: {.: {}}}
+expect:
+  plan:
+    - {candidate: null, reason: missing}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: null, reason: missing}
+  preserved: [/home/tester/.local/share/containers/storage/storage.lock]
+  commands: []

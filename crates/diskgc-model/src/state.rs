@@ -508,6 +508,9 @@ pub struct State {
     pub command_exit: u8,
     pub command_error_after_start: bool,
     pub docker: crate::spec::DockerSpec,
+    pub podman: crate::spec::PodmanSpec,
+    /// Podman queries answered so far ([`crate::spec::PodmanSpec::info_later`]).
+    pub podman_queries: u32,
     /// The socket files a socket is bound to (in diskgc's network
     /// namespace).
     pub bound_sockets: BTreeSet<DevIno>,
@@ -568,6 +571,8 @@ impl State {
             command_exit: 0,
             command_error_after_start: false,
             docker: crate::spec::DockerSpec::default(),
+            podman: crate::spec::PodmanSpec::default(),
+            podman_queries: 0,
             bound_sockets: BTreeSet::new(),
             kernel,
             hostname: "model-host".to_owned(),

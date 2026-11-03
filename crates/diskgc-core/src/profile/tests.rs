@@ -246,6 +246,9 @@ fn the_built_in_library_loads() {
         "docker-build-cache",
         "docker-dangling",
         "docker-unreferenced",
+        // TASK-93, pending Mark's admission.
+        "podman-dangling",
+        "podman-unreferenced",
         "jest-cache",
         "npm-cache",
         "pip-cache",
@@ -1777,9 +1780,11 @@ fn the_documented_action_forms_load() {
         .expect("one YAML block in Actions");
     let mut seen = Vec::new();
     for (i, line) in block.lines().enumerate() {
-        let yaml = if line.contains("docker-") {
+        let yaml = if line.contains("docker-") || line.contains("podman-") {
             let kind = if line.contains("builder") {
                 "docker-build-cache"
+            } else if line.contains("podman-") {
+                "podman-images"
             } else {
                 "docker-images"
             };
@@ -1794,7 +1799,7 @@ fn the_documented_action_forms_load() {
         assert!(!seen.contains(&action), "{line} repeats an action");
         seen.push(action);
     }
-    assert_eq!(seen.len(), 6);
+    assert_eq!(seen.len(), 8);
 }
 
 /// A `nix-shell` source as docs/reference.md (Liveness contract

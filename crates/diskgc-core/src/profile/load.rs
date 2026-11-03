@@ -403,7 +403,7 @@ fn source(
                 Examples::default(),
             )
         }
-        Kind::DockerBuildCache | Kind::DockerImages => {
+        Kind::DockerBuildCache | Kind::DockerImages | Kind::PodmanImages => {
             for (field, present) in [
                 ("find.paths", find.paths.is_some()),
                 ("find.exclude", find.exclude.is_some()),
@@ -434,6 +434,16 @@ fn source(
                 (Kind::DockerImages, Some(ActionSpec::DockerImagePrune { all })) => {
                     Some(Action::DockerImagePrune { all: *all })
                 }
+                (Kind::PodmanImages, Some(ActionSpec::PodmanImagePrune { all })) => {
+                    Some(Action::PodmanImagePrune { all: *all })
+                }
+                (Kind::PodmanImages, _) => {
+                    problems.push(format!(
+                        "kind {kind} needs its matching Podman prune action \
+                         (`podman-image-prune` or `podman-image-prune-all`)"
+                    ));
+                    None
+                }
                 _ => {
                     problems.push(format!(
                         "kind {kind} needs its matching Docker prune action"
@@ -442,10 +452,10 @@ fn source(
                 }
             };
             (
-                if kind == Kind::DockerBuildCache {
-                    Finds::DockerBuildCache
-                } else {
-                    Finds::DockerImages
+                match kind {
+                    Kind::DockerBuildCache => Finds::DockerBuildCache,
+                    Kind::DockerImages => Finds::DockerImages,
+                    _ => Finds::PodmanImages,
                 },
                 action?,
                 Examples::default(),
@@ -590,6 +600,10 @@ fn fs(
         Some(ActionSpec::Command { argv, cwd }) => command(argv, *cwd, entry_type, problems),
         Some(ActionSpec::DockerBuilderPrune | ActionSpec::DockerImagePrune { .. }) => {
             problems.push("kind fs cannot use a Docker prune action".to_owned());
+            None
+        }
+        Some(ActionSpec::PodmanImagePrune { .. }) => {
+            problems.push("kind fs cannot use a Podman prune action".to_owned());
             None
         }
     };

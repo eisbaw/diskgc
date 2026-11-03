@@ -1,0 +1,38 @@
+# TASK-93: podman-dangling prunes the dangling images of the bound
+# rootless store with Podman's own command, pinned to the local store
+# (`--remote=false`), never by deleting storage files. The candidate is
+# the store's graph root, shown and judged by `protect` only: nothing below
+# it is walked or deleted (a subuid-owned layer file stays). The model's
+# command frees nothing, so 100% stays unmet.
+profile_vector: 1
+profile: podman-dangling
+path: /home/tester
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /usr/bin/podman: {mode: "0755"}
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/.local/share/containers/storage:
+      storage.lock: {}
+      overlay-layers: {layers.json: {}}
+      overlay-images: {images.json: {}}
+      overlay: {0a1b2c: {diff: {etc: {passwd: {uid: 101000, gid: 101000}}}}}
+  podman:
+    info: '{"host":{"serviceIsRemote":false,"security":{"rootless":true}},"store":{"graphRoot":"/home/tester/.local/share/containers/storage","runRoot":"/run/user/1000/containers","graphDriverName":"overlay","configFile":"/home/tester/.config/containers/storage.conf","graphOptions":{}},"version":{"Version":"5.8.7"}}'
+expect:
+  plan:
+    - {candidate: /home/tester/.local/share/containers/storage}
+  reclaim_exit: 1
+  actions: [/home/tester/.local/share/containers/storage]
+  removed: []
+  skipped: []
+  preserved:
+    - /home/tester/.local/share/containers/storage/storage.lock
+    - /home/tester/.local/share/containers/storage/overlay/0a1b2c/diff/etc/passwd
+  commands:
+    - {cwd: /, argv: [/usr/bin/podman, --remote=false, image, prune, --force]}

@@ -378,13 +378,14 @@ fn rules<C: Catalog>(expr: &Expr, catalog: &C) -> (Option<Kind>, Vec<CheckError>
 
 /// Whether a term of kind `kind` may have `factor` (docs/reference.md,
 /// "Non-`fs` kinds"): any for `fs` and `cargo-target`, plain filters for
-/// `docker-build-cache`, none for `docker-images` and `nix-store`. Which
+/// `docker-build-cache`, none for `docker-images`, `podman-images` and
+/// `nix-store`. Which
 /// predicates a filter may use is [`PredicateName::kinds`].
 fn takes(kind: Kind, factor: &Factor) -> bool {
     match kind {
         Kind::Fs | Kind::CargoTarget => true,
         Kind::DockerBuildCache => matches!(factor, Factor::Filter(_)),
-        Kind::DockerImages | Kind::NixStore => false,
+        Kind::DockerImages | Kind::PodmanImages | Kind::NixStore => false,
     }
 }
 

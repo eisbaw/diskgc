@@ -212,6 +212,7 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
     state.command_exit = model.command_exit;
     state.command_error_after_start = model.command_error_after_start;
     state.docker = model.docker.clone();
+    state.podman = model.podman.clone();
     match model.own_uid_map.as_deref() {
         None => {}
         Some("none") => state.own_uid_map = None,
@@ -1264,6 +1265,8 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
             Op::ProcEnviron,
             Op::ProcStatus,
             Op::DockerQuery,
+            Op::PodmanQuery,
+            Op::ReadBackendConfig,
             Op::RunCommand,
             Op::ProcUids,
             Op::ProcCmdline,

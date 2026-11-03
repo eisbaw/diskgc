@@ -28,8 +28,8 @@
 
 use std::time::Duration;
 
+use crate::backend::Binding;
 use crate::command_action::{self, Preflight, Ready};
-use crate::docker_backend::{self, Binding, Bound};
 use crate::engine::Reason;
 use crate::host::{Delete, Host, MonoTime, SecondSignal};
 use crate::hostlock::{self, LockError};
@@ -43,12 +43,12 @@ use super::preflight::{
     Measured, deadline_before_first_sample, measure_failure, measure_until, preflight_roots,
     process_visibility, warn_if_host_lock_unready_timed,
 };
+use super::prune_backend::{self, Bound, Which};
 use super::tier_policy::Protection;
 use super::{
     NotesOncePerRun, Reclaim, Request, SourceKind, Tier, attempted_lock, deadline_of,
-    deadline_passed, docker_candidate, docker_storage, final_sample, host_error, indexed,
-    lock_refusal, record_deadline_overrun, record_error, run_error, sample, skip_entry, taken,
-    timed_report_from, usage,
+    deadline_passed, final_sample, host_error, indexed, lock_refusal, record_deadline_overrun,
+    record_error, run_error, sample, skip_entry, taken, timed_report_from, usage,
 };
 
 /// Brings `PATH`'s filesystem to the goal with the request's tier (see the
@@ -156,8 +156,8 @@ fn timed<H: Delete>(
 
 /// Only a source whose removal this build implements is reclaimed. An
 /// allowlist: kind cargo-target through its lock protocol, kind fs through
-/// its own deletion or checked command protocol, the Docker kinds through
-/// their prune of the bound backend. Anything else is refused before the
+/// its own deletion or checked command protocol, the Docker and Podman
+/// kinds through their prune of the bound backend. Anything else is refused before the
 /// gate, the first sample or the host lock (by a reclaiming `ensure` here,
 /// by a reclaiming `watch` at its start: [`crate::watch::start`]), never
 /// approximated by a different kind's protocol. The error names the tier
@@ -167,7 +167,8 @@ pub fn reclaimable(tier: &Tier) -> Result<(), String> {
         (SourceKind::CargoTarget, Action::CargoLockProtocol)
         | (SourceKind::Fs(_), Action::Delete { .. } | Action::Command { .. })
         | (SourceKind::DockerBuildCache, Action::DockerBuilderPrune)
-        | (SourceKind::DockerImages, Action::DockerImagePrune { .. }) => Ok(()),
+        | (SourceKind::DockerImages, Action::DockerImagePrune { .. })
+        | (SourceKind::PodmanImages, Action::PodmanImagePrune { .. }) => Ok(()),
         (_, action) => Err(format!(
             "tier `{}` (`{}`): profile `{}` removes with `{action}`, which this build does not \
              run",
@@ -443,9 +444,13 @@ pub(super) enum Backend {
     Files,
     /// A command action's resolved executables.
     Command(Ready),
-    /// A Docker prune: the resolved client and the backend bound under the
-    /// host lock (rebound right before the prune).
-    Docker { client: Ready, bound: Bound },
+    /// A Docker or Podman prune: the resolved client and the backend bound
+    /// under the host lock (rebound right before the prune).
+    Prune {
+        which: Which,
+        client: Ready,
+        bound: Bound,
+    },
 }
 
 impl Backend {
@@ -455,7 +460,7 @@ impl Backend {
     pub(super) fn command(&self) -> &Ready {
         match self {
             Self::Command(ready) => ready,
-            Self::Files | Self::Docker { .. } => {
+            Self::Files | Self::Prune { .. } => {
                 unreachable!("a command action runs only with its command resolved")
             }
         }
@@ -720,7 +725,7 @@ impl<H: Delete> Tallied<'_, H> {
     /// delete: its roots ([`preflight_roots`]: one on another filesystem
     /// is skipped, an unsafe one excludes the tier) and its [`Backend`]:
     /// command executables (a tool not installed is a `missing` skip of the
-    /// tier, docs/safety.md, Command actions) and the Docker backend
+    /// tier, docs/safety.md, Command actions) and the Docker or Podman backend
     /// (docs/reference.md, Backend skips and errors). `Ok(None)`: the tier
     /// is excluded, reported, and the other tiers still run.
     fn prepare_tier(
@@ -757,14 +762,23 @@ impl<H: Delete> Tallied<'_, H> {
                 Some(ready) => Backend::Command(ready),
                 None => return Ok(None),
             },
-            Action::DockerBuilderPrune | Action::DockerImagePrune { .. } => {
-                let Some(client) = self.command(&tier, &["docker".to_owned()], report, log)? else {
+            Action::DockerBuilderPrune
+            | Action::DockerImagePrune { .. }
+            | Action::PodmanImagePrune { .. } => {
+                let which = Which::of(&tier).expect("a prune action belongs to a backend tier");
+                let Some(client) =
+                    self.command(&tier, &[which.client().to_owned()], report, log)?
+                else {
                     return Ok(None);
                 };
-                let Some(bound) = self.bind_docker(&tier, report, log)? else {
+                let Some(bound) = self.bind_backend(&tier, which, report, log)? else {
                     return Ok(None);
                 };
-                Backend::Docker { client, bound }
+                Backend::Prune {
+                    which,
+                    client,
+                    bound,
+                }
             }
         };
         Ok(Some(PreparedTier { tier, backend }))
@@ -825,19 +839,19 @@ impl<H: Delete> Tallied<'_, H> {
         }
     }
 
-    /// The Docker backend of `tier` bound (docs/reference.md, Backend skips
-    /// and errors). `Ok(None)`: the tier is excluded, as a skip of the
-    /// backend or an error of the tier.
-    fn bind_docker(
+    /// The backend of `tier` bound (docs/reference.md, Backend skips and
+    /// errors). `Ok(None)`: the tier is excluded, as a skip of the backend
+    /// or an error of the tier.
+    fn bind_backend(
         &self,
         tier: &Tier,
+        which: Which,
         report: &mut Report,
         log: &mut dyn FnMut(&str),
     ) -> Result<Option<Bound>, PastDeadline> {
         let (host, deadline) = (self.host, self.deadline);
         let started = host.now();
-        let inspected =
-            docker_backend::inspect_backend(host, self.measured.space, docker_storage(tier));
+        let inspected = prune_backend::inspect(host, self.measured.space, which);
         record_deadline_overrun(
             host,
             report,
@@ -852,16 +866,20 @@ impl<H: Delete> Tallied<'_, H> {
         match inspected {
             Ok(Binding::Bound(bound)) => {
                 log(&format!(
-                    "{}: Docker backend bound to {}",
+                    "{}: {} backend bound to {}",
                     tier.name,
-                    docker_candidate(tier, &bound).display()
+                    which.name(),
+                    bound.candidate(tier).display()
                 ));
                 Ok(Some(bound))
             }
             Ok(Binding::Skipped(skip)) => {
                 log(&format!(
-                    "{}: skip Docker backend: {}: {}",
-                    tier.name, skip.reason, skip.detail
+                    "{}: skip {} backend: {}: {}",
+                    tier.name,
+                    which.name(),
+                    skip.reason,
+                    skip.detail
                 ));
                 report
                     .skipped
@@ -872,7 +890,7 @@ impl<H: Delete> Tallied<'_, H> {
                 record_error(
                     report,
                     log,
-                    run_error(tier, format!("bind Docker backend: {error}")),
+                    run_error(tier, format!("bind {} backend: {error}", which.name())),
                 );
                 Ok(None)
             }

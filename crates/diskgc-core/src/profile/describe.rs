@@ -136,6 +136,8 @@ fn action_type(action: &Action) -> &'static str {
         Action::DockerBuilderPrune => "docker_builder_prune",
         Action::DockerImagePrune { all: false } => "docker_image_prune",
         Action::DockerImagePrune { all: true } => "docker_image_prune_all",
+        Action::PodmanImagePrune { all: false } => "podman_image_prune",
+        Action::PodmanImagePrune { all: true } => "podman_image_prune_all",
     }
 }
 
@@ -288,7 +290,9 @@ fn action_json(action: &Action) -> Json {
         Action::Delete { make_writable } => (Json::Bool(*make_writable), None, None),
         Action::Command { argv, cwd } => (Json::Null, Some(argv), *cwd),
         Action::CargoLockProtocol => (Json::Null, None, None),
-        Action::DockerBuilderPrune | Action::DockerImagePrune { .. } => (Json::Null, None, None),
+        Action::DockerBuilderPrune
+        | Action::DockerImagePrune { .. }
+        | Action::PodmanImagePrune { .. } => (Json::Null, None, None),
     };
     Json::Obj(vec![
         ("type", Json::str(action_type(action))),
@@ -310,7 +314,9 @@ fn find_json(source: &Source) -> Json {
             Json::str(entry_type.name()),
         ),
         Finds::CargoTargets => (Json::Null, Json::Null, Json::Null),
-        Finds::DockerBuildCache | Finds::DockerImages => (Json::Null, Json::Null, Json::Null),
+        Finds::DockerBuildCache | Finds::DockerImages | Finds::PodmanImages => {
+            (Json::Null, Json::Null, Json::Null)
+        }
     };
     // `roots` is always a list (TASK-192): one type for a script to read;
     // where the roots come from otherwise is its own field, spelled as in
@@ -530,6 +536,8 @@ fn yaml_action(action: &Action) -> String {
         Action::DockerBuilderPrune => "  action: docker-builder-prune\n".to_owned(),
         Action::DockerImagePrune { all: false } => "  action: docker-image-prune\n".to_owned(),
         Action::DockerImagePrune { all: true } => "  action: docker-image-prune-all\n".to_owned(),
+        Action::PodmanImagePrune { all: false } => "  action: podman-image-prune\n".to_owned(),
+        Action::PodmanImagePrune { all: true } => "  action: podman-image-prune-all\n".to_owned(),
     }
 }
 

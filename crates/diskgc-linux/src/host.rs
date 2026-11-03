@@ -43,8 +43,8 @@ use diskgc_core::host::{
     DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, HeldDir, Host,
     HostError, LinkTarget, LockMode, Locked, LoopIdentity, MAX_COMMAND_OUTPUT_PREFIX_BYTES,
     MakeUserLock, MapEntry, MonoTime, MountEntry, OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace,
-    Pressure, ProcError, ProcFd, ProcLink, ProcStatus, ProcView, SecondSignal, Space, Stat,
-    StateFile, StateLock, StateWritten, Timestamp, TryLock, UidMap, Unlink, UserLock,
+    PodmanQuery, Pressure, ProcError, ProcFd, ProcLink, ProcStatus, ProcView, SecondSignal, Space,
+    Stat, StateFile, StateLock, StateWritten, Timestamp, TryLock, UidMap, Unlink, UserLock,
     UserLockError, WaitLock, is_single_name, read_proc_view,
 };
 use diskgc_core::report::Signal;
@@ -1889,7 +1889,42 @@ impl Host for LinuxHost {
     }
 
     fn docker_query(&self, query: DockerQuery) -> Result<String, HostError> {
-        run_docker_query_ungated(query, None, DOCKER_QUERY_TIMEOUT)
+        run_backend_query_ungated(BackendQuery::Docker(query), None, DOCKER_QUERY_TIMEOUT)
+    }
+
+    fn podman_query(&self, query: PodmanQuery) -> Result<String, HostError> {
+        run_backend_query_ungated(BackendQuery::Podman(query), None, DOCKER_QUERY_TIMEOUT)
+    }
+
+    fn read_backend_config(&self, path: &Path, limit: usize) -> Result<Option<Vec<u8>>, HostError> {
+        use std::io::Read as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // O_NONBLOCK: a FIFO at the path must not block the open; anything
+        // but a regular file is refused before a byte is read.
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_error("read config", path.display(), &e)),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|e| io_error("read config", path.display(), &e))?;
+        if !metadata.is_file() {
+            return Err(HostError::invalid(
+                "read config",
+                path.display(),
+                "not a regular file",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(u64::try_from(limit).unwrap_or(u64::MAX))
+            .read_to_end(&mut bytes)
+            .map_err(|e| io_error("read config", path.display(), &e))?;
+        Ok(Some(bytes))
     }
 
     fn command_origin(&self) -> Result<std::path::PathBuf, HostError> {
@@ -3455,30 +3490,130 @@ fn pin_docker_socket() -> Result<DockerSocketPin, HostError> {
     Ok(DockerSocketPin { fd, host })
 }
 
-/// The sole ungated child-starting site: fixed, read-only Docker queries.
-/// The caller supplies an enum, never argv. Both pipes are drained within a
-/// byte bound, and the whole process group is killed if the query hangs.
-fn run_docker_query_ungated(
-    query: DockerQuery,
-    pinned: Option<(&Path, &DockerSocketPin)>,
-    timeout: Duration,
-) -> Result<String, HostError> {
-    let args: &[&str] = match query {
-        DockerQuery::Version => &["version", "--format", "{{json .Server}}"],
-        DockerQuery::ClientVersion => &["version", "--format", "{{json .Client}}"],
-        DockerQuery::ContextShow => &["context", "show"],
-        DockerQuery::ContextEndpoint => &[
+/// A read-only backend query: one of the closed Docker or Podman sets.
+#[derive(Debug, Clone, Copy)]
+enum BackendQuery {
+    Docker(DockerQuery),
+    Podman(PodmanQuery),
+}
+
+/// The operation names a backend query's errors carry (stderr and the JSON
+/// `errors[].message`). Docker's are the texts it always had.
+#[derive(Debug, PartialEq, Eq)]
+struct QueryLabels {
+    start: &'static str,
+    fcntl: &'static str,
+    query: &'static str,
+    observe: &'static str,
+    wait: &'static str,
+    read: &'static str,
+}
+
+const DOCKER_QUERY_LABELS: QueryLabels = QueryLabels {
+    start: "start Docker query",
+    fcntl: "fcntl Docker output",
+    query: "query Docker",
+    observe: "observe Docker query exit",
+    wait: "wait Docker query",
+    read: "read Docker output",
+};
+
+const PODMAN_QUERY_LABELS: QueryLabels = QueryLabels {
+    start: "start Podman query",
+    fcntl: "fcntl Podman output",
+    query: "query Podman",
+    observe: "observe Podman query exit",
+    wait: "wait Podman query",
+    read: "read Podman output",
+};
+
+/// What one query runs: its client, constant arguments, working directory
+/// (`None`: diskgc's own, inherited) and error labels.
+struct QuerySpec {
+    client: &'static str,
+    args: &'static [&'static str],
+    cwd: Option<&'static str>,
+    labels: &'static QueryLabels,
+}
+
+fn query_spec(query: BackendQuery) -> QuerySpec {
+    let docker = |args: &'static [&'static str]| QuerySpec {
+        client: "docker",
+        args,
+        // Inherited, as it always was: a relative `DOCKER_CONFIG` (a
+        // project's `.docker` selecting a named context) must keep naming
+        // the configuration the binder refuses.
+        cwd: None,
+        labels: &DOCKER_QUERY_LABELS,
+    };
+    match query {
+        BackendQuery::Docker(DockerQuery::Version) => {
+            docker(&["version", "--format", "{{json .Server}}"])
+        }
+        BackendQuery::Docker(DockerQuery::ClientVersion) => {
+            docker(&["version", "--format", "{{json .Client}}"])
+        }
+        BackendQuery::Docker(DockerQuery::ContextShow) => docker(&["context", "show"]),
+        BackendQuery::Docker(DockerQuery::ContextEndpoint) => docker(&[
             "context",
             "inspect",
             "default",
             "--format",
             "{{json .Endpoints.docker.Host}}",
-        ],
-        DockerQuery::Info => &["info", "--format", "{{json .}}"],
-    };
-    let subject = format!("docker {args:?}");
-    let mut command =
-        process::Command::new(pinned.map_or(Path::new("docker"), |(program, _)| program));
+        ]),
+        BackendQuery::Docker(DockerQuery::Info) => docker(&["info", "--format", "{{json .}}"]),
+        // `--remote=false`: the local store, whatever CONTAINER_HOST,
+        // CONTAINER_CONNECTION or containers.conf select. In `/`, as the
+        // prune child runs: a relative `CONTAINERS_STORAGE_CONF` then names
+        // the same file for the query, the recheck and the prune.
+        BackendQuery::Podman(PodmanQuery::Info) => QuerySpec {
+            client: "podman",
+            args: &["--remote=false", "info", "--format", "json"],
+            cwd: Some("/"),
+            labels: &PODMAN_QUERY_LABELS,
+        },
+    }
+}
+
+/// The query's command, not yet started: `program` in the spec's working
+/// directory, in its own process group, with piped output. The caller adds
+/// the arguments: a pinned Docker query's `--host` first, then the spec's.
+fn query_command(program: &Path, spec: &QuerySpec) -> process::Command {
+    let mut command = process::Command::new(program);
+    if let Some(cwd) = spec.cwd {
+        command.current_dir(cwd);
+    }
+    command
+        .process_group(0)
+        .stdin(process::Stdio::null())
+        .stdout(process::Stdio::piped())
+        .stderr(process::Stdio::piped());
+    command
+}
+
+/// The sole ungated child-starting site: fixed, read-only Docker and Podman
+/// queries. The caller supplies an enum, never argv. Both pipes are drained
+/// within a byte bound, and the whole process group is killed if the query
+/// hangs. Only a Docker query is ever pinned to a socket.
+fn run_backend_query_ungated(
+    query: BackendQuery,
+    pinned: Option<(&Path, &DockerSocketPin)>,
+    timeout: Duration,
+) -> Result<String, HostError> {
+    let spec = query_spec(query);
+    let (client, args, labels) = (spec.client, spec.args, spec.labels);
+    if pinned.is_some() && client != "docker" {
+        return Err(HostError::invalid(
+            labels.start,
+            client,
+            "only a Docker query is pinned to a socket",
+        ));
+    }
+    let subject = format!("{client} {args:?}");
+    let mut command = query_command(
+        pinned.map_or(Path::new(client), |(program, _)| program),
+        &spec,
+    );
     if let Some((_, pin)) = pinned {
         command
             .arg(format!("--host={}", pin.host))
@@ -3502,22 +3637,19 @@ fn run_docker_query_ungated(
     }
     let mut child = command
         .args(args)
-        .process_group(0)
-        .stdin(process::Stdio::null())
-        .stdout(process::Stdio::piped())
-        .stderr(process::Stdio::piped())
         .spawn()
-        .map_err(|error| io_error("start Docker query", &subject, &error))?;
-    collect_docker_query_output(&mut child, &subject, timeout)
+        .map_err(|error| io_error(labels.start, &subject, &error))?;
+    collect_query_output(&mut child, &subject, timeout, labels)
 }
 
 /// Keep the group leader waitable until its entire group has been dealt
 /// with. A descendant may inherit a pipe after the leader exits, and
 /// reaping the leader early would free the process-group ID before KILL.
-fn collect_docker_query_output(
+fn collect_query_output(
     child: &mut process::Child,
     subject: &str,
     timeout: Duration,
+    labels: &QueryLabels,
 ) -> Result<String, HostError> {
     let pid = match rustix::process::Pid::from_raw(child.id().cast_signed()) {
         Some(pid) => pid,
@@ -3525,7 +3657,7 @@ fn collect_docker_query_output(
             let _ = child.kill();
             let _ = child.wait();
             return Err(HostError::invalid(
-                "start Docker query",
+                labels.start,
                 subject,
                 "child has invalid pid",
             ));
@@ -3535,12 +3667,10 @@ fn collect_docker_query_output(
     let mut stderr = child.stderr.take().expect("piped stderr");
     let setup = (|| -> Result<(), HostError> {
         for fd in [stdout.as_fd(), stderr.as_fd()] {
-            let flags = rustix::fs::fcntl_getfl(fd).map_err(|error| {
-                HostError::errno("fcntl Docker output", subject, errno_of(error))
-            })?;
-            rustix::fs::fcntl_setfl(fd, flags | OFlags::NONBLOCK).map_err(|error| {
-                HostError::errno("fcntl Docker output", subject, errno_of(error))
-            })?;
+            let flags = rustix::fs::fcntl_getfl(fd)
+                .map_err(|error| HostError::errno(labels.fcntl, subject, errno_of(error)))?;
+            rustix::fs::fcntl_setfl(fd, flags | OFlags::NONBLOCK)
+                .map_err(|error| HostError::errno(labels.fcntl, subject, errno_of(error)))?;
         }
         Ok(())
     })();
@@ -3557,19 +3687,19 @@ fn collect_docker_query_output(
     let observed = loop {
         if Instant::now() >= deadline {
             break Err(HostError::invalid(
-                "query Docker",
+                labels.query,
                 subject,
                 format!("read-only query exceeded {timeout:?}"),
             ));
         }
         if !stdout_eof {
-            match read_docker_query_pipe(&mut stdout, &mut stdout_bytes, subject) {
+            match read_query_pipe(&mut stdout, &mut stdout_bytes, subject, labels) {
                 Ok(eof) => stdout_eof = eof,
                 Err(error) => break Err(error),
             }
         }
         if !stderr_eof {
-            match read_docker_query_pipe(&mut stderr, &mut stderr_bytes, subject) {
+            match read_query_pipe(&mut stderr, &mut stderr_bytes, subject, labels) {
                 Ok(eof) => stderr_eof = eof,
                 Err(error) => break Err(error),
             }
@@ -3582,11 +3712,7 @@ fn collect_docker_query_output(
         ) {
             Ok(exited) => exited.is_some(),
             Err(error) => {
-                break Err(HostError::errno(
-                    "observe Docker query exit",
-                    subject,
-                    errno_of(error),
-                ));
+                break Err(HostError::errno(labels.observe, subject, errno_of(error)));
             }
         };
         if exited && stdout_eof && stderr_eof {
@@ -3599,20 +3725,20 @@ fn collect_docker_query_output(
     let signaled = signal_command_group(pid, rustix::process::Signal::KILL, subject);
     let status = child
         .wait()
-        .map_err(|error| io_error("wait Docker query", subject, &error))?;
+        .map_err(|error| io_error(labels.wait, subject, &error))?;
     observed?;
     signaled?;
     let stderr = String::from_utf8_lossy(&stderr_bytes);
     if !status.success() {
         return Err(HostError::invalid(
-            "query Docker",
+            labels.query,
             subject,
             format!("exited {status}: {stderr}"),
         ));
     }
     String::from_utf8(stdout_bytes).map_err(|error| {
         HostError::invalid(
-            "query Docker",
+            labels.query,
             subject,
             format!("stdout is not UTF-8: {error}"),
         )
@@ -3621,10 +3747,11 @@ fn collect_docker_query_output(
 
 /// Pump only a bounded number of nonblocking reads before checking the
 /// deadline and the other pipe. The output cap is per pipe.
-fn read_docker_query_pipe(
+fn read_query_pipe(
     pipe: &mut impl Read,
     bytes: &mut Vec<u8>,
     subject: &str,
+    labels: &QueryLabels,
 ) -> Result<bool, HostError> {
     let mut chunk = [0u8; 4096];
     for _ in 0..COMMAND_READS_PER_PUMP {
@@ -3634,7 +3761,7 @@ fn read_docker_query_pipe(
                 let remaining = DOCKER_QUERY_MAX_OUTPUT.saturating_sub(bytes.len());
                 if n > remaining {
                     return Err(HostError::invalid(
-                        "query Docker",
+                        labels.query,
                         subject,
                         "output exceeded 1 MiB",
                     ));
@@ -3643,7 +3770,7 @@ fn read_docker_query_pipe(
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
-            Err(error) => return Err(io_error("read Docker output", subject, &error)),
+            Err(error) => return Err(io_error(labels.read, subject, &error)),
         }
     }
     Ok(false)
@@ -3704,8 +3831,8 @@ fn run_command_permitted(
         if remaining.is_zero() {
             return CommandInvocation::DeadlineBeforeStart;
         }
-        let info = match run_docker_query_ungated(
-            DockerQuery::Info,
+        let info = match run_backend_query_ungated(
+            BackendQuery::Docker(DockerQuery::Info),
             Some((&run.executable, &pin)),
             remaining,
         ) {
@@ -4362,6 +4489,86 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// TASK-93 review: every Docker query keeps diskgc's own working
+    /// directory (a relative `DOCKER_CONFIG` must name what it always
+    /// named) and the error texts it always had; a Podman query runs in
+    /// `/`, as its prune does. Run through the same command builder.
+    #[test]
+    fn docker_queries_keep_their_cwd_and_labels_and_podman_runs_in_root() {
+        let _fd_table = fd_table_guard();
+        let pwd_through = |query: BackendQuery| {
+            let spec = query_spec(query);
+            let probe = QuerySpec {
+                client: "sh",
+                args: &["-c", "pwd -P"],
+                cwd: spec.cwd,
+                labels: spec.labels,
+            };
+            let mut child = query_command(Path::new("sh"), &probe)
+                .args(probe.args)
+                .spawn()
+                .expect("spawn pwd");
+            collect_query_output(&mut child, "pwd", Duration::from_secs(5), spec.labels)
+                .expect("pwd output")
+                .trim_end()
+                .to_owned()
+        };
+        let own = std::env::current_dir()
+            .and_then(std::fs::canonicalize)
+            .expect("cwd");
+        for query in [
+            DockerQuery::Version,
+            DockerQuery::ClientVersion,
+            DockerQuery::ContextShow,
+            DockerQuery::ContextEndpoint,
+            DockerQuery::Info,
+        ] {
+            let spec = query_spec(BackendQuery::Docker(query));
+            assert_eq!(spec.client, "docker");
+            assert_eq!(spec.cwd, None, "{query:?}");
+            assert_eq!(
+                spec.labels,
+                &QueryLabels {
+                    start: "start Docker query",
+                    fcntl: "fcntl Docker output",
+                    query: "query Docker",
+                    observe: "observe Docker query exit",
+                    wait: "wait Docker query",
+                    read: "read Docker output",
+                }
+            );
+            assert_eq!(Path::new(&pwd_through(BackendQuery::Docker(query))), own);
+        }
+        assert_eq!(pwd_through(BackendQuery::Podman(PodmanQuery::Info)), "/");
+        assert_eq!(
+            query_spec(BackendQuery::Podman(PodmanQuery::Info))
+                .labels
+                .query,
+            "query Podman"
+        );
+        // A failing Docker query reports the Docker label.
+        let mut child = query_command(
+            Path::new("sh"),
+            &QuerySpec {
+                client: "sh",
+                args: &["-c", "exit 3"],
+                cwd: None,
+                labels: &DOCKER_QUERY_LABELS,
+            },
+        )
+        .args(["-c", "exit 3"])
+        .spawn()
+        .expect("spawn failing query");
+        let error = collect_query_output(
+            &mut child,
+            "failing",
+            Duration::from_secs(5),
+            &DOCKER_QUERY_LABELS,
+        )
+        .expect_err("exit 3 fails");
+        assert_eq!(error.op, "query Docker");
+    }
+
     #[test]
     fn docker_query_collects_both_pipes_and_successful_exit() {
         let _fd_table = fd_table_guard();
@@ -4374,9 +4581,13 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn query stand-in");
-        let output =
-            collect_docker_query_output(&mut child, "query stand-in", Duration::from_secs(2))
-                .expect("collect output");
+        let output = collect_query_output(
+            &mut child,
+            "query stand-in",
+            Duration::from_secs(2),
+            &DOCKER_QUERY_LABELS,
+        )
+        .expect("collect output");
         assert_eq!(output, "ready");
     }
 
@@ -4417,8 +4628,12 @@ mod tests {
             .spawn()
             .expect("spawn query stand-in with descendant");
         let started = Instant::now();
-        let result =
-            collect_docker_query_output(&mut child, "query stand-in", Duration::from_millis(100));
+        let result = collect_query_output(
+            &mut child,
+            "query stand-in",
+            Duration::from_millis(100),
+            &DOCKER_QUERY_LABELS,
+        );
         assert!(result.is_err(), "inherited output must hit the deadline");
         assert!(
             started.elapsed() < Duration::from_millis(1500),

@@ -140,6 +140,7 @@ impl Source {
             Finds::CargoTargets => Kind::CargoTarget,
             Finds::DockerBuildCache => Kind::DockerBuildCache,
             Finds::DockerImages => Kind::DockerImages,
+            Finds::PodmanImages => Kind::PodmanImages,
         }
     }
 }
@@ -162,6 +163,8 @@ pub enum Finds {
     DockerBuildCache,
     /// The bound Docker daemon's image store, one whole unit.
     DockerImages,
+    /// The bound local Podman store's images, one whole unit.
+    PodmanImages,
 }
 
 /// Where a source profile looks (docs/reference.md, Profiles).
@@ -285,6 +288,10 @@ pub enum Action {
     DockerImagePrune {
         all: bool,
     },
+    /// Fixed Podman prune modes of the bound local store, not user argv.
+    PodmanImagePrune {
+        all: bool,
+    },
 }
 
 impl Action {
@@ -296,6 +303,9 @@ impl Action {
             Self::Command { .. } => Some("command actions are refused under --allow-root"),
             Self::DockerBuilderPrune | Self::DockerImagePrune { .. } => Some(
                 "Docker prune actions are refused under --allow-root: owners: cannot bound the daemon's shared cache",
+            ),
+            Self::PodmanImagePrune { .. } => Some(
+                "Podman prune actions are refused under --allow-root: owners: cannot bound a store's images, and root's store is the rootful one",
             ),
             Self::Delete { .. } | Self::CargoLockProtocol => None,
         }
@@ -332,6 +342,8 @@ impl fmt::Display for Action {
             Self::DockerBuilderPrune => f.write_str("docker builder prune --all"),
             Self::DockerImagePrune { all: false } => f.write_str("docker image prune"),
             Self::DockerImagePrune { all: true } => f.write_str("docker image prune --all"),
+            Self::PodmanImagePrune { all: false } => f.write_str("podman image prune"),
+            Self::PodmanImagePrune { all: true } => f.write_str("podman image prune --all"),
         }
     }
 }

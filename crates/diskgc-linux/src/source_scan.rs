@@ -1077,10 +1077,23 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
         gate: Gate::Permit,
         matches: 1,
     },
+    // The sole ungated child-starting command: fixed, read-only Docker and
+    // Podman queries, built from a closed QuerySpec (constant argv, fixed
+    // working directory) and started only by run_backend_query_ungated.
     Allowed {
         file: "crates/diskgc-linux/src/host.rs",
-        function: "run_docker_query_ungated",
-        gate: Gate::Ungated("closed DockerQuery enum maps only to read-only constant argv"),
+        function: "query_command",
+        gate: Gate::Ungated(
+            "closed DockerQuery and PodmanQuery enums map only to read-only constant argv",
+        ),
+        matches: 2,
+    },
+    // A backend's storage.conf, read for the Podman binding: read-only,
+    // non-blocking, never created, written or truncated.
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "read_backend_config",
+        gate: Gate::Ungated("OpenOptions with read(true) only: a storage.conf read"),
         matches: 1,
     },
     // `RecvFlags::TRUNC` (MSG_TRUNC) is a receive flag of the socket

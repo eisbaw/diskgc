@@ -172,8 +172,8 @@ impl Tier {
 
     /// Whether this tier relies on diskgc's own in-use check: the `fs`
     /// kind (its `delete` and its command actions, rechecked against a
-    /// scan before they start) and `cargo-target`. The Docker kinds leave
-    /// liveness to their daemon, and are not refused where the scan cannot
+    /// scan before they start) and `cargo-target`. The Docker and Podman
+    /// kinds leave liveness to their backend, and are not refused where the scan cannot
     /// see every process (docs/safety.md, In use: Visibility).
     pub fn relies_on_in_use_check(&self) -> bool {
         matches!(self.source, SourceKind::Fs(_) | SourceKind::CargoTarget)
@@ -249,6 +249,8 @@ pub enum SourceKind {
     Fs(Box<Find>),
     DockerBuildCache,
     DockerImages,
+    /// The bound local Podman store's images (kind `podman-images`).
+    PodmanImages,
 }
 
 /// `--select EXPR` checked against a library and its roots bound
@@ -481,6 +483,7 @@ impl Tier {
             )),
             Finds::DockerBuildCache => SourceKind::DockerBuildCache,
             Finds::DockerImages => SourceKind::DockerImages,
+            Finds::PodmanImages => SourceKind::PodmanImages,
         };
         let mut idle_before: Option<IdleFor> = None;
         let mut negated = Vec::new();

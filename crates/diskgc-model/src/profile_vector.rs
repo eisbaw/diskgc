@@ -587,9 +587,10 @@ impl ProfileVector {
         Ok(())
     }
 
-    /// Every command run belongs to a command or Docker action, a command
+    /// Every command run belongs to a command or backend action, a command
     /// action's in its checked candidate or that candidate's parent (PRD,
-    /// What bad looks like), and `expect.commands` when given.
+    /// What bad looks like), a Docker or Podman action's of its own client,
+    /// and `expect.commands` when given.
     fn check_commands(
         &self,
         host: &ModelHost,
@@ -603,15 +604,18 @@ impl ProfileVector {
             .collect();
         // Pair every run with exactly one action it may belong to: a
         // command action's run in its candidate or that candidate's
-        // parent, a Docker action's run of the docker client. An action
-        // runs at most once; a run left over is a command diskgc had no
-        // checked candidate for.
-        let mut unpaired: Vec<(&PathBuf, bool)> = Vec::new();
+        // parent, a backend action's run of its client (`None`: a command
+        // action). An action runs at most once; a run left over is a
+        // command diskgc had no checked candidate for.
+        let mut unpaired: Vec<(&PathBuf, Option<&str>)> = Vec::new();
         for entry in &reclaim.actions {
             match action_of(library, &entry.profile)? {
-                Action::Command { .. } => unpaired.push((&entry.candidate, true)),
+                Action::Command { .. } => unpaired.push((&entry.candidate, None)),
                 Action::DockerBuilderPrune | Action::DockerImagePrune { .. } => {
-                    unpaired.push((&entry.candidate, false));
+                    unpaired.push((&entry.candidate, Some("docker")));
+                }
+                Action::PodmanImagePrune { .. } => {
+                    unpaired.push((&entry.candidate, Some("podman")));
                 }
                 Action::Delete { .. } | Action::CargoLockProtocol => {}
             }
@@ -621,31 +625,30 @@ impl ProfileVector {
                 .command
                 .as_ref()
                 .ok_or_else(|| format!("run_command without its request: {call}"))?;
-            let docker = run
-                .executable
-                .file_name()
-                .is_some_and(|name| name == "docker");
+            let program = run.executable.file_name();
             let cwd = call.path.as_deref();
-            let pair = unpaired.iter().position(|(candidate, command)| {
-                if *command {
-                    cwd.is_some() && (cwd == Some(candidate.as_path()) || cwd == candidate.parent())
-                } else {
-                    docker
-                }
-            });
+            let pair = unpaired
+                .iter()
+                .position(|(candidate, client)| match client {
+                    None => {
+                        cwd.is_some()
+                            && (cwd == Some(candidate.as_path()) || cwd == candidate.parent())
+                    }
+                    Some(client) => program.is_some_and(|name| name == *client),
+                });
             match pair {
                 Some(index) => {
                     unpaired.remove(index);
                 }
                 None => {
                     return Err(format!(
-                        "command run {call} ({:?}) belongs to no command or Docker action",
+                        "command run {call} ({:?}) belongs to no command or backend action",
                         run.executable
                     ));
                 }
             }
         }
-        if let Some((candidate, _)) = unpaired.iter().find(|(_, command)| *command) {
+        if let Some((candidate, _)) = unpaired.iter().find(|(_, client)| client.is_none()) {
             return Err(format!(
                 "command action {} has no run in it or its parent",
                 candidate.display()

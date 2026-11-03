@@ -44,6 +44,7 @@ mod indexed;
 mod plan;
 mod policy;
 mod preflight;
+mod prune_backend;
 mod tier;
 mod tier_policy;
 
@@ -64,8 +65,8 @@ pub use tier::{
 // import them by name from here (no glob: the source scan's sandbox-gate
 // guard refuses glob imports).
 use plan::{
-    FsUnionCandidate, discover_fs_union, docker_candidate, docker_storage, scan_negated,
-    scan_union_negated, union_checkout_refusal, union_checkouts, union_guard_veto,
+    FsUnionCandidate, discover_fs_union, scan_negated, scan_union_negated, union_checkout_refusal,
+    union_checkouts, union_guard_veto,
 };
 // The overlap verdict alone, public so the model tests can pin what it
 // must refuse whatever discovery would hand it (a covered mount).
@@ -75,17 +76,17 @@ use preflight::{
     Measured, measure_failure, measure_until, nothing_searched, preflight_roots, roots_text,
     say_lock_readiness,
 };
+use prune_backend::{Bound, Which};
 use tier::FsUnionSourceRef;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::backend::Binding;
 use crate::cargo_target::{self, Discovery, ReclaimEnd, Stop, Tally, Target};
 use crate::command_action::Ready;
 use crate::config::Order;
-use crate::docker_backend::{self, Binding, Bound};
 use crate::engine::{Checkouts, Reason, Rules, Skip, UnknownCause};
 use crate::fs_kind::{self, Find};
 use crate::host::{
@@ -515,13 +516,13 @@ fn discover<H: Host>(
                 ),
             });
         }
-        SourceKind::DockerBuildCache | SourceKind::DockerImages => {
+        SourceKind::DockerBuildCache | SourceKind::DockerImages | SourceKind::PodmanImages => {
             return Err(Stop::Failed {
                 path: PathBuf::new(),
                 error: HostError::invalid(
                     "discover",
                     &tier.profile,
-                    "Docker tiers do not use Cargo discovery",
+                    "Docker and Podman tiers do not use Cargo discovery",
                 ),
             });
         }
@@ -856,7 +857,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             Action::Delete { .. } | Action::CargoLockProtocol => true,
             Action::Command { .. }
             | Action::DockerBuilderPrune
-            | Action::DockerImagePrune { .. } => false,
+            | Action::DockerImagePrune { .. }
+            | Action::PodmanImagePrune { .. } => false,
         }
     }
 
@@ -927,10 +929,17 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     /// `candidate` `None`: the backend as a whole was skipped.
-    fn skip_docker(&mut self, candidate: Option<&Path>, reason: Reason, detail: &str) {
+    fn skip_backend(
+        &mut self,
+        which: Which,
+        candidate: Option<&Path>,
+        reason: Reason,
+        detail: &str,
+    ) {
         (self.log)(&format!(
-            "{}: skip Docker backend: {reason}: {detail}",
-            self.tier.name
+            "{}: skip {} backend: {reason}: {detail}",
+            self.tier.name,
+            which.name()
         ));
         let entry = skip_entry(self.tier, candidate, reason, Some(detail.to_owned()));
         self.report.skipped.push(entry);
@@ -938,11 +947,11 @@ impl<H: Delete> Reclaim<'_, '_, H> {
 
     /// The prune through `client` of the backend `bound` under the host
     /// lock before any tier ran, rebound right before the prune.
-    fn walk_docker(&mut self, client: &Ready, bound: Bound) {
+    fn walk_backend(&mut self, which: Which, client: &Ready, bound: Bound) {
         if self.stop_if_interrupted() {
             return;
         }
-        let candidate = docker_candidate(self.tier, &bound);
+        let candidate = bound.candidate(self.tier);
         if self.protected(&candidate, ProtectAt::BeforeReclaim) != Protect::Clear {
             return;
         }
@@ -966,15 +975,11 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             self.deadline_hit = true;
             return;
         }
-        // The daemon and its storage can change while the host lock is held;
-        // compare the full binding, including Docker's server ID, just before
-        // the deleting child is started.
+        // The backend and its storage can change while the host lock is
+        // held; compare the full binding (Docker's server ID, Podman's
+        // version and store) just before the deleting child is started.
         let started = self.host.now();
-        let rebound = docker_backend::inspect_backend(
-            self.host,
-            self.measured.space,
-            docker_storage(self.tier),
-        );
+        let rebound = prune_backend::inspect(self.host, self.measured.space, which);
         self.record_overrun("preflight", &candidate, started, self.host.now());
         if self.past_deadline() {
             self.deadline_hit = true;
@@ -983,19 +988,15 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         match rebound {
             Ok(Binding::Bound(rebound)) if rebound == bound => {}
             Ok(Binding::Bound(_)) => {
-                self.skip_docker(
-                    Some(&candidate),
-                    Reason::Changed,
-                    "Docker daemon, context, builder or storage changed before prune",
-                );
+                self.skip_backend(which, Some(&candidate), Reason::Changed, which.changed());
                 return;
             }
             Ok(Binding::Skipped(skip)) => {
-                self.skip_docker(Some(&candidate), skip.reason, &skip.detail);
+                self.skip_backend(which, Some(&candidate), skip.reason, &skip.detail);
                 return;
             }
             Err(error) => {
-                self.tier_error(format!("recheck Docker backend: {error}"));
+                self.tier_error(format!("recheck {} backend: {error}", which.name()));
                 return;
             }
         }
@@ -1015,39 +1016,16 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let cwd = match resolved {
             Ok(cwd) => cwd,
             Err(error) => {
-                self.tier_error(format!("open Docker command cwd: {error}"));
+                self.tier_error(format!("open {} command cwd: {error}", which.name()));
                 return;
             }
         };
-        let mut arguments: Vec<OsString> = vec!["--host=unix:///var/run/docker.sock".into()];
-        match &self.tier.action {
-            Action::DockerBuilderPrune => {
-                arguments.extend(["builder", "prune", "--all", "--force"].map(OsString::from));
-                if let Some(idle) = self.tier.idle_for {
-                    arguments.push("--filter".into());
-                    arguments.push(format!("until={}s", idle.0.as_secs()).into());
-                }
-            }
-            Action::DockerImagePrune { all } => {
-                arguments.extend(["image", "prune", "--force"].map(OsString::from));
-                if *all {
-                    arguments.push("--all".into());
-                }
-            }
-            _ => unreachable!("Docker tier with non-Docker action admitted by ensure"),
-        }
+        let prune = bound.prune(self.tier);
         let run = CommandRun {
             executable: client.program.clone(),
-            arguments,
-            environment: vec![
-                ("DOCKER_HOST".into(), "unix:///var/run/docker.sock".into()),
-                ("DOCKER_CONTEXT".into(), "default".into()),
-                // Docker CLI 29 forwards `docker builder` to Buildx unless
-                // DOCKER_BUILDKIT=0 selects the Engine command. The latter
-                // calls BuildCachePrune on the pinned daemon directly.
-                ("DOCKER_BUILDKIT".into(), "0".into()),
-            ],
-            docker_info: Some(bound.info.clone()),
+            arguments: prune.arguments,
+            environment: prune.environment,
+            docker_info: prune.docker_info,
             output_prefix: format!("{}/{}", self.tier.name, self.tier.profile),
             deadline: self.deadline.unwrap_or(MonoTime(Duration::MAX)),
             second_signal: self.second_signal,
@@ -1073,17 +1051,17 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             CommandInvocation::Started(Ok(CommandExit::Exited(code))) => ReclaimEnd::Failed {
                 path: candidate.clone(),
                 error: HostError::invalid(
-                    "Docker prune",
+                    which.prune_op(),
                     candidate.display(),
-                    format!("Docker client exited {code}"),
+                    format!("{} client exited {code}", which.name()),
                 ),
             },
             CommandInvocation::Started(Ok(CommandExit::Signaled(signal))) => ReclaimEnd::Failed {
                 path: candidate.clone(),
                 error: HostError::invalid(
-                    "Docker prune",
+                    which.prune_op(),
                     candidate.display(),
-                    format!("Docker client died from signal {signal}"),
+                    format!("{} client died from signal {signal}", which.name()),
                 ),
             },
             CommandInvocation::Started(Ok(CommandExit::TimedOut)) => {
@@ -1261,15 +1239,21 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     self.walk_fs_union(&rules, &mut checker);
                 }
             }
-            SourceKind::DockerBuildCache | SourceKind::DockerImages => match &self.backend {
-                Backend::Docker { client, bound } => {
-                    let (client, bound) = (client.clone(), bound.clone());
-                    self.walk_docker(&client, bound);
+            SourceKind::DockerBuildCache | SourceKind::DockerImages | SourceKind::PodmanImages => {
+                match &self.backend {
+                    Backend::Prune {
+                        which,
+                        client,
+                        bound,
+                    } => {
+                        let (which, client, bound) = (*which, client.clone(), bound.clone());
+                        self.walk_backend(which, &client, bound);
+                    }
+                    Backend::Files | Backend::Command(_) => {
+                        unreachable!("a backend tier is prepared with its backend")
+                    }
                 }
-                Backend::Files | Backend::Command(_) => {
-                    unreachable!("a Docker tier is prepared with its Docker backend")
-                }
-            },
+            }
         }
         if !self.deadline_hit && !self.run_stopped && !self.stop_if_interrupted() {
             let started = self.host.now();
@@ -1869,7 +1853,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
             Action::CargoLockProtocol
             | Action::DockerBuilderPrune
-            | Action::DockerImagePrune { .. } => unreachable!("fs action admitted by ensure"),
+            | Action::DockerImagePrune { .. }
+            | Action::PodmanImagePrune { .. } => unreachable!("fs action admitted by ensure"),
         };
         let reclaimed = matches!(outcome.end, ReclaimEnd::Complete) && !outcome.attempted_command;
         match self.record(&found.path, outcome) {

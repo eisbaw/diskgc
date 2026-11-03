@@ -36,6 +36,9 @@ const EXCLUDED: &[&str] = &[
     "docker-build-cache",
     "docker-dangling",
     "docker-unreferenced",
+    // TASK-93, pending Mark's admission: development library only.
+    "podman-dangling",
+    "podman-unreferenced",
     "pytest-cache",
     "nix-user-cache",
     "bun-cache",

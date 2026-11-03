@@ -212,7 +212,7 @@ impl Find {
                 uid,
             )),
             Finds::CargoTargets => None,
-            Finds::DockerBuildCache | Finds::DockerImages => None,
+            Finds::DockerBuildCache | Finds::DockerImages | Finds::PodmanImages => None,
         }
     }
 

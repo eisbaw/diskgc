@@ -11,15 +11,17 @@ pub enum Kind {
     CargoTarget,
     DockerBuildCache,
     DockerImages,
+    PodmanImages,
     NixStore,
 }
 
 impl Kind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Fs,
         Self::CargoTarget,
         Self::DockerBuildCache,
         Self::DockerImages,
+        Self::PodmanImages,
         Self::NixStore,
     ];
 
@@ -30,6 +32,7 @@ impl Kind {
             Self::CargoTarget => "cargo-target",
             Self::DockerBuildCache => "docker-build-cache",
             Self::DockerImages => "docker-images",
+            Self::PodmanImages => "podman-images",
             Self::NixStore => "nix-store",
         }
     }

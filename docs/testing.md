@@ -1714,6 +1714,37 @@ that skips before step 8 also no `--query --roots`.
 Each vector names the safety step it pins and turns red when that step is
 removed (the TASK-121 discipline).
 
+### Podman backend vectors
+
+TASK-93, in `crates/diskgc-model/tests/vectors/backend/` (`podman-*.yaml`,
+path `/home/tester`, the store at its default rootless graph root). The
+host model's `podman:` block holds the query's answer (`podman
+--remote=false info --format json`), and optionally another one for every
+later query (`info_later`, the recheck); the model runs no Podman. Every
+vector pins `expect.commands`; a skip runs none. The binder alone
+(admitted version, remote, rootful, malformed output, absent graph root)
+is `crates/diskgc-model/tests/podman_binding.rs`.
+
+| Vector | Model | Expected |
+|---|---|---|
+| `podman-dangling-prunes-the-bound-store` | rootless store with a subuid-owned layer file | plan the graph root; `[podman, --remote=false, image, prune, --force]` in `/`; nothing below the store touched |
+| `podman-unreferenced-prunes-and-measures-the-freed-space` | the prune (an event after the command) removes a 3G layer | plan `estimated_bytes: null`; `... --force --all`; goal met, exit 0 |
+| `podman-client-missing` | no `podman` on `PATH` | `missing`, no command |
+| `podman-store-on-another-filesystem` | path `/`, store on `/home` | `other_fs`, no command |
+| `podman-remote-service-refused` | `host.serviceIsRemote: true` | `remote_backend`, no command |
+| `podman-store-replaced-before-prune-changed` | the graph root renamed and recreated before the recheck | `changed`, no command |
+| `podman-configuration-changed-before-prune-changed` | `info_later`: another run root at the recheck | `changed`, no command |
+| `podman-storage-conf-edited-before-prune-changed` | the user's `storage.conf` replaced before the recheck | `changed`, no command |
+| `podman-storage-conf-created-before-prune-changed` | a user `storage.conf` created before the recheck | `changed`, no command |
+| `podman-separate-image-store-refused` | `/etc/containers/storage.conf` sets `imagestore` | `unsupported_backend`, no command |
+| `podman-tier-runs-without-a-complete-process-list` | `hidepid`, nested PID namespace | prunes, as the Docker kinds |
+
+Not covered: a real `podman image prune --all` in a container (rootless
+Podman inside the rootless e2e container is not yet set up; the
+`buildah_suite` shows rootless Buildah works there), so what Podman keeps
+rests on its documentation, an isolated-store prune of dangling images
+(TASK-93 notes) and the development machine's read-only listing.
+
 ## 3. Property tests
 
 `diskgc-modelgen` generates random host models (`proptest`) and checks:

@@ -853,7 +853,7 @@ under `profile`:
     "find": {"roots": ["/tmp"], "roots_required": false, "backend": null, "paths": ["zephyr-*-run.*"], "exclude": [], "type": "dir | file | any"},
     "min_idle_for": null,
     "where": {"idle_for": null, "has": null, "has_dir": null, "has_not": null, "app_not_running": null, "lacks_entry": null, "keep_newest": null, "newest_group": null, "protect_links": [], "protect_link_dirs": [], "protect_parent_link": null, "protect_cursor_extensions": null, "protect_toolchains": null, "source_anchor": null, "liveness_contract": null},
-    "action": {"type": "delete | command | cargo_lock_protocol | docker_builder_prune | docker_image_prune | docker_image_prune_all", "make_writable": false, "command": null, "cwd": null},
+    "action": {"type": "delete | command | cargo_lock_protocol | docker_builder_prune | docker_image_prune | docker_image_prune_all | podman_image_prune | podman_image_prune_all", "make_writable": false, "command": null, "cwd": null},
     "checkouts": "refuse | allow",
     "examples": {"root": null, "match": ["/tmp/zephyr-h5e5-run.jTm9zGlH"], "no_match": ["/tmp/zephyr-hal"]},
     "verified_with": null,
@@ -877,8 +877,8 @@ under `profile`:
 - `find.roots` is always a list: the fixed roots, or empty when
   `find.roots_required` is `true` (`roots: required`: a tier or `--roots`
   supplies them) or when `find.backend` names where the kind's storage
-  comes from (`"daemon"`, YAML's `roots: daemon`, for the Docker kinds;
-  `null` for every other kind). `find.paths`,
+  comes from (`"daemon"`, YAML's `roots: daemon`, for the Docker kinds and
+  `podman-images`; `null` for every other kind). `find.paths`,
   `find.exclude` and `find.type` are `null` for `cargo-target`.
 - `where` always has its fields, `null` when unused (link lists are empty);
   `idle_for` is a duration (`3d`).
@@ -1308,8 +1308,9 @@ is `host`.
 
 ### Backend skips and errors
 
-Docker and Nix tiers act through a backend that diskgc binds first
-([safety.md](safety.md#docker-kinds), [safety.md](safety.md#nix-store)).
+Docker, Podman and Nix tiers act through a backend that diskgc binds first
+([safety.md](safety.md#docker-kinds), [safety.md](safety.md#podman-images),
+[safety.md](safety.md#nix-store)).
 One rule holds for every backend kind, at preflight and at the recheck
 right before acting:
 
@@ -1353,6 +1354,7 @@ evidence, never by an operator's config.
 | Backend | Admitted | Evidence |
 |---|---|---|
 | Docker CLI (`docker-build-cache` builder dispatch) | client 29.8.2 | native dind fixture ([safety.md](safety.md#docker-kinds)) |
+| Podman (`podman-images`: `info` output, `image prune` rules) | 5.8.7 | an isolated store's prune and the development machine's read-only queries ([safety.md](safety.md#podman-images)) |
 | Nix daemon (`nix-store`: GC and root semantics) | none yet; TASK-36 admits `2.34.8` when its container scenarios pass | [testing.md](testing.md#nix-store-backend-vectors) |
 | Nix client (`nix-store`: command line, `--query --roots` output) | none yet; TASK-36 admits `nix-store (Nix) 2.34.8` with that daemon | same |
 
@@ -1711,14 +1713,17 @@ builds accept: diskgc 0.1 runs its built-in profiles alone.
   use fixed roots (`/tmp`, `/var/tmp`) or `roots: required` (machine-specific
   locations such as `cargo-target`, `pytest-cache`). Docker profiles use
   `roots: daemon`: diskgc obtains the storage root from the bound local
-  daemon and checks its filesystem against the requested path.
+  daemon and checks its filesystem against the requested path. Podman
+  profiles (`podman-images`) use it too, for the graph root of the
+  caller's local store, which Podman reports (it has no daemon).
 - **Filter profiles** have only `where` (predicates). They narrow a source's
   candidates; they never find anything.
 - **`action`** says how a source profile's candidates are removed. Docker
-  profiles declare one of the fixed Docker prune actions. Other code-backed
-  kinds fix their action.
+  and Podman profiles declare one of their fixed prune actions. Other
+  code-backed kinds fix their action.
 - **`kind`** (default `fs`): `fs` (a file or directory), or a code-backed
-  kind: `cargo-target`, `docker-build-cache`, `docker-images`, `nix-store`.
+  kind: `cargo-target`, `docker-build-cache`, `docker-images`,
+  `podman-images` (provisional, TASK-93), `nix-store`.
 - **`examples`**: paths that must and must not match. They check that the
   patterns do what their author meant; they do not prove that the matched
   files are disposable (a human decides that, from `survey --list`).
@@ -1732,8 +1737,8 @@ builds accept: diskgc 0.1 runs its built-in profiles alone.
 
 Fields (an unknown key anywhere in a profile is a load-time error):
 
-The `command` action and Docker kind schema fields in this table
-(their `kind` names, `action` forms and kind-specific constraints) are
+The `command` action and the Docker and Podman kind schema fields in this
+table (their `kind` names, `action` forms and kind-specific constraints) are
 **provisional until the release review (task-49)**. The
 schema v1 freeze covers the other fields, the `delete` and Cargo actions,
 the `nix-store` profile shape below, and `find.roots: daemon` as the
@@ -1759,13 +1764,13 @@ part of the contract.
 | `name` | every profile | A `NAME` (see Selection grammar), unique among built-in and user profiles. |
 | `category`, `description` | every profile; required on built-ins | Free text, shown by `profiles list`. |
 | `kind` | sources | Default `fs`. |
-| `find.roots` | sources | A list of absolute directories, `required`, or `daemon` for Docker kinds and `nix-store`. |
+| `find.roots` | sources | A list of absolute directories, `required`, or `daemon` for Docker kinds, `podman-images` and `nix-store`. |
 | `find.paths` | kind `fs`, required | Patterns relative to the roots, segments separated by `/`; no segment is empty, `.` or `..`, or contains `**`. Each segment matches one name, compared as bytes: `*` matches any run of bytes (none included, and a leading `.`: `*` matches `.X11-unix`), every other byte itself; `?`, `[`, `]` and `\` are reserved (a load-time error), so a later glob syntax cannot change what an existing pattern matches. `{uid}` is replaced first. |
 | `find.exclude` | kind `fs`, optional | Paths omitted from this source, with the same syntax and root as `find.paths`. An excluded path is never a candidate or a skipped candidate. An excluded leaf is not statted; an excluded intermediate directory may be opened to reach descendants matched by a deeper positive pattern. The exclusion applies to that exact relative path, not automatically to descendants. A present `null` is invalid. |
 | `find.type` | kind `fs`, required | `dir` (a directory), `file` (a regular file) or `any` (a directory or a regular file). Symlinks, sockets, FIFOs and devices are never candidates, whatever the type: a wildcard profile over `/tmp` would otherwise report every symlink there. |
 | `where` | filters (at least one predicate); optional on sources | See Predicates. A source’s own predicates narrow action admission in every term, but its positive retention guards cover raw `find` matches even when other source predicates fail. `!profile:` and `protect` ignore source `where`. A source has no `where.idle_for`; the tier chooses its idle filter. `app_not_running` and `lacks_entry` are source-only. |
 | `min_idle_for` | sources, optional | A nonzero duration that every candidate must meet even when the source is selected alone. The tier may demand a longer idle period with filters. A source uses this when a shorter period would make its matched entries unsafe to reclaim. |
-| `action` | kinds `fs` and Docker, required | See Actions. Cargo and Nix kinds fix their action and take no `action`. |
+| `action` | kinds `fs`, Docker and Podman, required | See Actions. Cargo and Nix kinds fix their action and take no `action`. |
 | `examples` | kind `fs`, required | `{match: [...], no_match: [...]}`, absolute paths, at least one `match`; built-in and user profiles alike (User profiles). With `roots: required`, an optional `root: /absolute/sample/root` pins the supplied root used to check path depth in these examples; without it, any absolute ancestor can supply the root. Config load and `check` reject examples that contradict the path patterns. |
 | `checkouts` | sources, any kind | `refuse` (the default, also when absent) or `allow`; any other value is a load-time error. Whether a candidate may hold a version-control checkout (`.git`, `.hg`, `.svn`) or lie inside a checkout's metadata; refused ones are `contains_checkout`. `allow` can delete a repository with uncommitted work: see [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate) (No source checkout) before writing it. |
 | `verified_with` | built-in sources, required | The tool version the profile was checked against. |
@@ -2052,7 +2057,7 @@ fixture-only parser catalog; that deletion profile is not shipped:
   roots if it needs them, and does not count towards "one kind and one
   action".
 - **Non-`fs` kinds** allow only `profile:NAME` (`docker-images`,
-  `nix-store`) or `profile:NAME`, optionally followed by `&&` filters whose
+  `podman-images`, `nix-store`) or `profile:NAME`, optionally followed by `&&` filters whose
   predicates are all `idle_for` (`docker-build-cache`), as the whole expression (one term, never in a
   union): they have no per-candidate enumeration.
 - **Cargo unions** may combine terms of the same `cargo-target` source with
@@ -2113,6 +2118,8 @@ action `delete`) and `f` (`idle_for`):
 | `docker-builder-prune` (provisional) | Prune the bound Docker Engine's built-in BuildKit cache with `--all`, adding `--filter until=...` when the tier selects `idle_for`. One action covers the daemon cache. |
 | `docker-image-prune` (provisional) | Prune dangling images in the bound Docker daemon. |
 | `docker-image-prune-all` (provisional) | Prune all images unused by containers in the bound Docker daemon. |
+| `podman-image-prune` (provisional) | `podman --remote=false image prune --force`: Podman prunes the dangling images of the caller's bound local store ([safety.md](safety.md#podman-images)). |
+| `podman-image-prune-all` (provisional) | The same with `--all`: every image no container (running or stopped) uses, tagged ones included, and, as Podman does with `--all`, its persistent `RUN --mount=type=cache` build caches ([safety.md](safety.md#podman-images)). |
 | kind actions | Fixed by the kind: the Cargo lock protocol ([safety.md](safety.md#cargo-target)); for `nix-store`, one bounded GC through the bound Nix daemon ([safety.md](safety.md#nix-store)). |
 
 In YAML:
@@ -2124,6 +2131,8 @@ action: {command: [env, "GOCACHE={path}", go, clean, -cache], cwd: parent}
 action: docker-builder-prune
 action: docker-image-prune
 action: docker-image-prune-all
+action: podman-image-prune
+action: podman-image-prune-all
 ```
 
 Command action fields: `command` (argv; `{path}` is replaced by the
@@ -2147,15 +2156,13 @@ the working directory, so the command must name the location explicitly
 -cache`). A non-zero exit is an error in the report (exit 3 if the goal is
 not met).
 
-No Podman image-prune example ships yet. A command profile using
-`containers/storage` as its candidate is refused as container storage
-(`contains_special`,
-[safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)), and
-a read-only dry run on rootless Podman storage found subuid-owned overlay
-files that would fail the ownership walk (`not_owner`) too. Running
-`podman image prune` against a different checked path would not protect
-the image store it changes. Task-93 covers a Podman-specific protocol
-that uses Podman's own pruning rules.
+Podman images are pruned by kind `podman-images` and Podman's own
+command, never by a `command` or `delete` profile: one whose candidate is
+container storage is refused (`contains_special`,
+[safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate)),
+rootless overlay files belong to subuids (`not_owner`), and a command run
+against a different checked path would not bind the store it changes
+([safety.md](safety.md#podman-images)).
 
 ### Built-in profile library
 
@@ -2224,6 +2231,8 @@ remain a release decision under TASK-67.
 | containers | `docker-build-cache` | BuildKit cache of the bound Docker Engine | prune |
 | containers | `docker-dangling` | untagged images | prune |
 | containers | `docker-unreferenced` | images no container uses (removes tagged images too) | prune |
+| containers | `podman-dangling` | development library only, pending Mark's admission (TASK-93): dangling images of the caller's local rootless Podman store | `podman image prune` |
+| containers | `podman-unreferenced` | development library only, pending Mark's admission (TASK-93): images no container, running or stopped, uses in that store, tagged ones included (diskgc's own e2e images when no container uses them), and Podman's persistent build caches ([safety.md](safety.md#podman-images)) | `podman image prune --all` |
 | containers | `containers-image-tmp` | withdrawn (Mark, 2026-10-23): matched top-level `/var/tmp/buildah*` and `/var/tmp/container_images_storage*` with a mandatory `min_idle_for: 3d`, which cannot show that a producer is done with a spool it may reopen; removed from the library (TASK-112 step 0), its matching set kept as the user-probe vector `containers-image-age`; re-admission only under a new name after TASK-125 | none |
 | withdrawn | `claude-code-tmp`, `chromium-tmp`, `playwright-tmp`, `zephyr-tmp`, `renode-tmp`, `xdg-cache-entry-v2` | withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24): class *none* ([Liveness contracts](#liveness-contracts)); removed from the library, each matching set kept as a user probe profile in the vectors (`<name>-probe`); re-admission only under a new name (TASK-135, TASK-136) | none |
 | agents | `cursor-agent-versions`, `codex-releases`, `claude-code-versions` | versions under a supplied home root; keep the two newest per sibling set and the installed symlink targets. `claude-code-versions` matches native installer version files only, not `~/bin/claude-*` | `delete` |
@@ -2481,6 +2490,7 @@ its task notes.
 | `teams-for-linux-electron-cache`, `figma-linux-electron-cache` | teams-for-linux 2.23.0 and figma-linux 0.11.5 on Electron 43.6.0 (sources read, TASK-78: `app.requestSingleInstanceLock()` before `ready`, a second instance quits, no `releaseSingleInstanceLock()`), default user-data directory | `app_not_running` | sound (presence marker) | As the browsers': an app that starts between the last lock check and the unlink finds a cache missing, which Chromium treats as an empty cache. Electron removes the lock at `quit`, before its sessions close, so a cache can be deleted during an app's last moments of shutdown, with the same consequence; the in-use check narrows that window only while the closing app holds files in the cache open. Only for the versions read: a later version that stops taking the lock, or takes it after opening a session, falls outside the contract. | Shipped (TASK-78) to the development library only: in no catalog until Mark admits the app names. Container tests with the real apps: not yet written (a follow-up of TASK-78). |
 | `cargo-target` | Cargo (1.90.0, 1.99.1, nightly-2026-10-16) | the kind's lock protocol, `checkouts: allow` | delegated (producer lock) | A program built in the target and running from it is protected by process heuristics only: Cargo holds no lock while it runs (PRD, Limits). | Shipped; in the 0.1 catalog. |
 | `docker-build-cache`, `docker-dangling`, `docker-unreferenced` | Docker Engine 29.8.2 and Buildx 0.37.2 in digest-pinned dind | the bound engine's own prune (`docker builder prune --all`, `docker image prune`, `docker image prune --all`); the daemon keeps what a build or container references | delegated | `docker-unreferenced` also removes tagged images that no container references; a later `docker run` pulls them again, or they are rebuilt when they were built locally and never pushed. | Shipped; not in 0.1 (Docker actions are outside its scope). |
+| `podman-dangling`, `podman-unreferenced` | Podman 5.8.7: `image prune` in an isolated store (2026-10-20, TASK-93 notes); read-only on the development machine (2026-11-03) | the caller's local store's own prune (`podman --remote=false image prune --force`, with `--all`); Podman keeps every image a container, running or stopped, was created from, and (without `--external`) every image a Buildah working container uses | delegated | `podman-unreferenced` also removes tagged images no container uses, diskgc's own e2e images among them whenever their containers are gone; the harness reloads them from the Nix store (`podman load`), a pulled image is pulled again. A `podman run` between its image check and its container's creation can find its image gone and fail. `podman-unreferenced` also empties Podman's `RUN --mount=type=cache` caches without a lock: a build using one at that moment can fail or cache a partial result, and the next build downloads again. | Shipped in the development library only (class delegated, admissible by the rule); in no release catalog until Mark admits it (TASK-93); the `--all` prune not yet run in a container. Vectors: `podman-*` (backend). |
 | `pip-cache`, `uv-cache`, `go-build-cache`, `npm-cache`, `pnpm-store`, `yarn-cache`, `ccache`, `platformio-cache`, `jest-cache` | pip 26.1.2, uv 0.13.0, Go 1.26.8, npm 11.19.0, pnpm 12.9.0, Yarn 1.22.22, ccache 4.14.1, PlatformIO 6.1.19, Jest 30.2.0, each cleaner run in a Nix container on the exact measured directory | the tool's own cleaner (Built-in profile library); in use, `checkouts: refuse` | delegated | No worse than the user running that cleaner: what it does to a run in flight is the tool's (Jest's `--clearCache` and `ccache --clear` remove the directory's contents outright; `pnpm store prune` removes only packages no project references). A uv environment installed with the non-default `link-mode = "symlink"` points into the cache and breaks until reinstalled. Rebuilding needs the network. | Shipped; not in 0.1 (command actions are outside its scope). |
 | `pytest-cache` | pytest 9.0.3 (cacheprovider source read, TASK-122) | consumer tolerance: `Cache.get` returns the caller's default for a missing or unreadable key, `Cache.set` creates the directory and only warns when it cannot write | tolerant | The next `--lf`, `--ff` or `--sw` run has no record of earlier failures and runs every test. | Shipped. |
 | `python-pycache` | CPython 3.13.15 (importlib) | consumer tolerance: a missing or stale `.pyc` is recompiled from its source, a failed bytecode write is ignored, and a `.pyc` in `__pycache__` is never imported without its source (PEP 3147), so the directory never holds the only copy of code | tolerant | Recompilation on the next import; a read-only tree stays uncached (time only). | Shipped. |
