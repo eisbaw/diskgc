@@ -3,10 +3,10 @@ id: TASK-101
 title: >-
   Build-output recogniser: a profile for build trees of any name, by
   build-system markers
-status: To Do
+status: In Progress
 assignee: []
-created_date: '2026-10-19 12:29'
-updated_date: '2026-10-23 15:24'
+created_date: 2026-10-19 12:29
+updated_date: '2026-11-03T13:13:00Z'
 labels:
   - library
 dependencies:
@@ -59,4 +59,6 @@ Final safety-correction gate on rebased 9e2ea47 tree: nix develop -c just e2e ex
 2026-10-20 tracker resolution for b68c8b7: the final exact-tree nix develop -c just e2e rerun exited 0 after the preceding tracker note. Formatting, Clippy, workspace tests, sandboxed Nix checks, 130/130 disposable Nix-container E2Es and 5/5 native Docker dind E2Es passed. QA and MPED reviews were GO before that commit. This closes the earlier gate-pending notation; TASK101 remains In Progress for broader acceptance criteria.
 
 Orchestrator 2026-10-23 (COMPASS consult): parked back to To Do to cut WIP. Library breadth waits for the producer-liveness cornerstone (D3: 'idle' = newest mtime/ctime cannot tell an active read-mostly tree from an abandoned one).
+
+2026-11-03: faster profile rhythm; in progress in tmp/worktrees/t101.
 <!-- SECTION:NOTES:END -->
