@@ -3,10 +3,10 @@ id: TASK-325
 title: >-
   Dry run is ~0.2 s per candidate (6,429 pytest-tmp candidates hit the 10 min
   deadline): batch in-use scans like the reclaim walk (TASK-292)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-02T21:19:00Z'
-updated_date: '2026-11-04T03:35:00Z'
+updated_date: '2026-11-04T06:59:00Z'
 labels:
   - performance
   - dry-run
