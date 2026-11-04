@@ -3,10 +3,10 @@ id: TASK-324
 title: >-
   Explainable results: per-profile, per-reason summary with bytes in dry run,
   ensure and watch human output (and JSON)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-02T21:19:00Z'
-updated_date: '2026-11-04T03:35:00Z'
+updated_date: '2026-11-04T06:03:00Z'
 labels:
   - ux
   - explainability
