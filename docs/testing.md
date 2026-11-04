@@ -1095,6 +1095,11 @@ per-user lock, Nix root or GC call, no state read or written):
   not list the `/tmp` mount point.
 - `an_error_before_the_deadline_stays_the_status`: a profile's error then
   the deadline: `error` (exit 3), not `deadline`.
+- `a_profile_whose_listing_fails_is_not_reported_as_finding_nothing`: EIO
+  on the first listing of `/tmp` fails that profile: no summary block, not
+  in "found nothing", its host error present, the human text says it
+  could not be surveyed, and every other profile's block equals the
+  run without the failure.
 
 The first test also checks that no backend is queried without
 `--select` (they are listed in `not_surveyed`).

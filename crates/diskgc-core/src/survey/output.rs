@@ -85,6 +85,31 @@ impl Survey {
     }
 }
 
+/// The plan's summary terms of the profiles surveyed: a failed tier's
+/// terms are left out, since a failed listing is no empty match set (its
+/// error says why, [`failures`]).
+fn surveyed_terms(path: &PathSurvey) -> Vec<summary::Term<'_>> {
+    summary::terms_without_goal(&path.plan)
+        .into_iter()
+        .filter(|term| !path.failed.iter().any(|t| t == term.tier))
+        .collect()
+}
+
+/// Each failed tier's profiles with the first error naming them, for the
+/// human text (the JSON has the errors themselves).
+fn failures(path: &PathSurvey) -> Vec<(&str, &str)> {
+    let mut out: Vec<(&str, &str)> = Vec::new();
+    for error in &path.plan.errors {
+        let (Some(tier), Some(profile)) = (error.tier.as_deref(), error.profile.as_deref()) else {
+            continue;
+        };
+        if path.failed.iter().any(|t| t == tier) && !out.iter().any(|(p, _)| *p == profile) {
+            out.push((profile, &error.message));
+        }
+    }
+    out
+}
+
 /// A plan row's candidate, if it has one.
 fn candidate(row: &PlanEntry) -> Option<&Path> {
     row.candidate.as_deref()
@@ -127,7 +152,7 @@ fn age_range(rows: &[&PlanEntry], now: Timestamp) -> Option<(u64, u64)> {
 
 fn path_json(path: &PathSurvey) -> Json {
     let plan = &path.plan;
-    let terms = summary::terms_without_goal(plan);
+    let terms = surveyed_terms(path);
     let mut candidates = Vec::new();
     let summary: Vec<Json> = terms
         .iter()
@@ -375,7 +400,7 @@ fn path_text(path: &PathSurvey, list: bool, out: &mut String) {
     } else {
         "the plan stopped"
     };
-    let terms = summary::terms_without_goal(plan);
+    let terms = surveyed_terms(path);
     let mut quiet: Vec<&str> = Vec::new();
     for term in &terms {
         if term.found() == Some(0) {
@@ -394,6 +419,13 @@ fn path_text(path: &PathSurvey, list: bool, out: &mut String) {
         if list {
             list_rows(&rows, path.surveyed_at, out);
         }
+    }
+    for (profile, why) in failures(path) {
+        out.push_str(&format!(
+            "  profile {}: could not be surveyed: {}\n",
+            printable(profile),
+            printable(why)
+        ));
     }
     for row in plan.plan.iter().filter(|row| candidate(row).is_none()) {
         out.push_str(&format!(

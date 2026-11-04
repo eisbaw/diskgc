@@ -75,6 +75,12 @@ pub struct PathSurvey {
     /// why: what they would match is not looked for, and may be listed
     /// as unmatched.
     pub not_surveyed: Vec<NotSurveyed>,
+    /// The tiers whose plan failed (an unsafe root, a listing or scan the
+    /// host failed): their profiles were not surveyed, whatever their
+    /// summary would count, so they have no block; `plan.errors` says why
+    /// (docs/reference.md, Survey JSON). A tier the deadline cut is not
+    /// failed: its block counts what it did not judge.
+    pub failed: Vec<String>,
     /// The unmatched top-level entries; `None` when `PATH` was not listed
     /// (its plan was refused, or the listing failed: an error says why).
     pub unmatched: Option<Vec<unmatched::Entry>>,
@@ -312,6 +318,7 @@ fn survey_path<H: Host>(
         not_surveyed,
     } = below;
     let mut plan: Option<Report> = None;
+    let mut failed: Vec<String> = Vec::new();
     for (index, tier) in tiers.iter().enumerate() {
         let passed = deadline.is_some_and(|end| host.now() >= end);
         if let Some(signal) = host.interrupted() {
@@ -349,6 +356,9 @@ fn survey_path<H: Host>(
             watch: None,
         };
         let part = executor::survey_tier(host, &request, &[uid], progress);
+        if matches!(part.status, Status::Error | Status::UsageError) {
+            failed.push(tier.name.clone());
+        }
         plan = Some(match plan {
             None => part,
             Some(whole) => merged(whole, part),
@@ -403,6 +413,7 @@ fn survey_path<H: Host>(
             plan,
             surveyed_at,
             not_surveyed,
+            failed,
             unmatched,
         },
         cut,

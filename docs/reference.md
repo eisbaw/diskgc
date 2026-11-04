@@ -808,7 +808,10 @@ profiles and `protect` list apply (protected candidates are kept
 the other; a filesystem shared by two of them is reported under each.
 
 Each profile is planned on its own: one profile's error (an unsafe root,
-a failed scan) is reported with its profile and stops no other.
+a listing or scan the host failed) is reported with its profile and stops
+no other. A failed profile is never shown as finding nothing: it has no
+summary line or block, and the human result says `profile NAME: could
+not be surveyed: WHY`.
 `--timeout DUR` (default `10m`, `0`: none) bounds the whole survey, as
 `ensure`'s does: the plan stops judging at the deadline (its unjudged
 candidates are counted, `not_judged`; each profile not reached is an

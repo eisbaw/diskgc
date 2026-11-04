@@ -583,3 +583,65 @@ profiles:
     );
     assert_read_only(&host);
 }
+
+/// A profile whose discovery fails (EIO on the first listing of `/tmp`,
+/// the first profile's) was not surveyed: it has no summary block and no
+/// "found nothing" (a failed listing is never an empty match set), its
+/// error names it, the human text says it could not be surveyed and why,
+/// and every other profile is planned as without the failure.
+#[test]
+fn a_profile_whose_listing_fails_is_not_reported_as_finding_nothing() {
+    let failing = laptop_tmp("")
+        + "events:\n  - {at: {op: read_dir, path: /tmp, nth: 1, when: before}, fail: EIO}\n";
+    let survey = run(&host(&failing), &options(&["/tmp"], None), None);
+    let clean = run(&host(&laptop_tmp("")), &options(&["/tmp"], None), None);
+    assert_eq!(survey.status, Status::Error, "{survey:?}");
+    let value = json(&survey);
+    let errors = value["paths"][0]["errors"].as_array().expect("errors");
+    let failed: Vec<&str> = errors
+        .iter()
+        .filter(|e| e["cause"] == "host")
+        .filter_map(|e| e["profile"].as_str())
+        .collect();
+    let [failed] = failed[..] else {
+        panic!("one profile's host error: {errors:?}")
+    };
+    assert!(
+        errors
+            .iter()
+            .any(|e| e["profile"] == failed && e["message"].as_str().unwrap().contains("EIO")),
+        "{errors:?}"
+    );
+    let blocks = value["paths"][0]["summary"].as_array().expect("summary");
+    assert!(
+        blocks.iter().all(|b| b["profile"] != failed),
+        "{failed} has a summary block though its listing failed: {blocks:?}"
+    );
+    let text = survey.to_text(false);
+    let nothing = text
+        .lines()
+        .find(|l| l.starts_with("  found nothing:"))
+        .unwrap_or_default();
+    assert!(
+        !nothing.contains(failed),
+        "{failed} reads as found nothing:\n{text}"
+    );
+    assert!(
+        text.contains(&format!("  profile {failed}: could not be surveyed: "))
+            && text.contains("EIO"),
+        "{text}"
+    );
+    // Every other profile's block is what it is without the failure.
+    let clean = json(&clean);
+    let others = |v: &Value| -> Vec<Value> {
+        v["paths"][0]["summary"]
+            .as_array()
+            .expect("summary")
+            .iter()
+            .filter(|b| b["profile"] != failed)
+            .cloned()
+            .collect()
+    };
+    assert_eq!(others(&value), others(&clean));
+    assert_eq!(block(&value, "pytest-tmp")["found"], 2);
+}
