@@ -1326,10 +1326,18 @@ pub(super) fn plan_fs_union<H: Host>(
         .with_pid_lookup(tier.pid_lookup())
         .with_pytest_facts(tier.pytest_facts())
         .with_project_facts(tier.project_facts());
+    // The path the first admitting term walks: what the judgement reads.
+    let mut read_ahead = fs_kind::ReadAhead::new(candidates.iter().map(|candidate| {
+        candidate
+            .found_by
+            .first()
+            .map(|(_, found)| found.path.as_path())
+    }));
     for (judged, candidate) in candidates.iter().enumerate() {
         if host.interrupted().is_some() {
             return planned;
         }
+        read_ahead.judging(judged, |path| host.read_ahead(path));
         match union_guard_veto(host, candidate, &sources, rules, space, deadline) {
             Ok(Some((index, skip))) => {
                 let (source_index, found) = &candidate.guard_by[index];

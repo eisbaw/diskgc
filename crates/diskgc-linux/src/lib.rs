@@ -8,6 +8,7 @@
 //!   answer).
 //! - [`nofile`]: the open-file limit, raised at startup and restored for
 //!   children.
+//! - [`read_ahead`]: the plan's metadata read-ahead (TASK-325).
 //! - [`sandbox`]: the test-sandbox markers shared by the e2e interlock and
 //!   the pre-release sandbox gate.
 //! - `source_scan` (tests only): source scans of the production crates that
@@ -18,6 +19,7 @@ pub mod mountinfo;
 pub mod nofile;
 mod pressure;
 pub mod procfs;
+pub mod read_ahead;
 pub mod sandbox;
 mod scratch;
 pub mod sockdiag;

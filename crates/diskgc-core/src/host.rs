@@ -1352,6 +1352,18 @@ pub trait Host {
         self.read_dir(dir, 0).map(drop)
     }
 
+    /// A hint and nothing more: a read-only plan will judge the directory
+    /// candidate at `path` (absolute) a few candidates from now
+    /// (docs/architecture.md, The `Host` port: Read-ahead; TASK-325). A host
+    /// may read its metadata in the background, listing and `statx`ing
+    /// below it, so that the judgement's own walk finds it in the kernel's
+    /// caches instead of waiting on the disk for each directory. What it
+    /// reads decides nothing and is never handed back: the judgement
+    /// reaches, walks and checks the candidate itself, and reports every
+    /// failure it meets, so a read-ahead that fails costs only speed.
+    /// The default does nothing (the model, which has no caches).
+    fn read_ahead(&self, _path: &Path) {}
+
     /// At most `limit` bytes from the start of the regular file open as
     /// `file` (fewer at its end); a read that fails part-way is that error.
     /// `file` may be an `O_PATH` fd: `LinuxHost` reopens the object it

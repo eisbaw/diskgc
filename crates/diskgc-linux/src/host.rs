@@ -206,6 +206,10 @@ pub struct LinuxHost {
     /// The account database lookup ([`account_home`]; a test's own in the
     /// unit tests).
     account_lookup: fn(u32) -> Result<Option<PathBuf>, HostError>,
+    /// Whether [`Host::read_ahead`] reads ahead ([`LinuxHost::without_read_ahead`]).
+    read_ahead_on: bool,
+    /// The read-ahead's readers, started by the first hint.
+    read_ahead: OnceLock<crate::read_ahead::ReadAhead>,
 }
 
 impl LinuxHost {
@@ -279,7 +283,24 @@ impl LinuxHost {
             home_fallback: None,
             account_home: std::sync::OnceLock::new(),
             account_lookup: account_home,
+            read_ahead_on: true,
+            read_ahead: OnceLock::new(),
         })
+    }
+
+    /// The host without the plan's read-ahead: [`Host::read_ahead`] does
+    /// nothing, as in the model. For tests that compare plans with and
+    /// without it.
+    #[must_use]
+    pub fn without_read_ahead(mut self) -> Self {
+        self.read_ahead_on = false;
+        self
+    }
+
+    /// What the read-ahead has done so far; `None` before its first hint
+    /// and without it. For tests and measurements.
+    pub fn read_ahead_counts(&self) -> Option<&crate::read_ahead::Counts> {
+        self.read_ahead.get().map(|readers| &*readers.counts)
     }
 
     /// The host with diskgc's state directory at the absolute `dir`
@@ -820,7 +841,7 @@ const DIRENT_BUFFER: usize = 32 * 1024;
 /// which would read an unlistable directory as complete, so its raw form
 /// is used. The caller opens the fd for this listing alone, so no other
 /// listing shares its position.
-fn for_each_name(
+pub(crate) fn for_each_name(
     fd: &OwnedFd,
     mut each: impl FnMut(&[u8]) -> bool,
 ) -> Result<(), rustix::io::Errno> {
@@ -1999,6 +2020,47 @@ impl Host for LinuxHost {
     fn listable(&self, dir: &LinuxFd) -> Result<(), HostError> {
         // `read_dir`'s own open, closed again unread.
         reopen_readable(dir, &dir.to_string()).map(drop)
+    }
+
+    fn read_ahead(&self, path: &Path) {
+        if !self.read_ahead_on {
+            return;
+        }
+        let readers = self
+            .read_ahead
+            .get_or_init(crate::read_ahead::ReadAhead::start);
+        let hint = readers.hint();
+        // Reached here as the walk reaches it (crate::read_ahead); a
+        // candidate that cannot be is the judgement's to report.
+        let Ok(mounts) = self.mountinfo() else {
+            return readers.unreached();
+        };
+        let Ok(reached) = diskgc_core::resolve::resolve_in(
+            self,
+            &mounts,
+            path,
+            diskgc_core::resolve::Want::Directory,
+        ) else {
+            return readers.unreached();
+        };
+        let uid = self.effective_uid();
+        match (
+            reached.stat.mnt_id,
+            reached.stat.file_type,
+            reached.stat.uid,
+        ) {
+            (Some(mnt_id), Some(FileType::Directory), Some(owner)) if owner == uid => {
+                readers.offer(crate::read_ahead::Job {
+                    top: reached.fd.fd,
+                    dev: reached.stat.dev,
+                    mnt_id,
+                    uid,
+                    mounted: crate::read_ahead::Job::mounted_below(&mounts, path),
+                    hint,
+                });
+            }
+            _ => readers.unreached(),
+        }
     }
 
     fn read_head(&self, file: &LinuxFd, limit: usize) -> Result<Vec<u8>, HostError> {
@@ -3628,7 +3690,7 @@ fn reopen_readable(dir: &LinuxFd, subject: &str) -> Result<OwnedFd, HostError> {
 
 /// Retry only the documented ownership/capability refusal. Other open
 /// errors must reach the caller unchanged, especially a vanished directory.
-fn open_with_noatime<T>(
+pub(crate) fn open_with_noatime<T>(
     base: OFlags,
     mut open: impl FnMut(OFlags) -> rustix::io::Result<T>,
 ) -> rustix::io::Result<T> {

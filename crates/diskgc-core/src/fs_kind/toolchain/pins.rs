@@ -24,7 +24,7 @@ use crate::inuse::Scan;
 use crate::outcome::Stop;
 use crate::profile::ToolchainManager;
 use crate::resolve::{
-    MountScreenError, ResolveError, Want, is_mount_point, open_beneath, resolve_in,
+    MountScreenError, MountedNames, ResolveError, Want, open_beneath, resolve_in,
     screen_mount_chain,
 };
 
@@ -600,9 +600,19 @@ pub(crate) fn walk_roots<H: Host>(
                     continue;
                 }
             };
+            // One pass over the mount table per directory, not per name
+            // (TASK-325, as the reclaim walk since TASK-292).
+            let mounted = MountedNames::in_dir(mounts, &dir);
             for name in entries {
                 let child = dir.join(&name);
-                if is_mount_point(mounts, &child) {
+                let is_mount = match mounted.has(&name) {
+                    Ok(is_mount) => is_mount,
+                    Err(error) => {
+                        out.unknown(format!("{}: {error}", child.display()));
+                        continue;
+                    }
+                };
+                if is_mount {
                     if depth + 1 >= PIN_DEPTH {
                         continue;
                     }

@@ -9,8 +9,14 @@
 //!
 //! The mount table is read again for each candidate: a plan of a large
 //! `/tmp` takes minutes, and a mount made meanwhile must not be `statx`ed.
+//!
+//! Candidates are judged one at a time, in the order found; the host is
+//! told [`READ_AHEAD`] candidates ahead which one comes next
+//! ([`ReadAhead`], [`Host::read_ahead`]), so that a host whose walks wait
+//! on the disk can read their metadata meanwhile. Nothing it reads is used
+//! (TASK-325).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::discover::{Discovery, check_deadline, discover};
 use super::judge::{Judge, Tally, mountinfo};
@@ -22,6 +28,48 @@ use crate::inuse::Checker;
 use crate::outcome::{Judged, Stop};
 use crate::profile::IdleWindow;
 use crate::resolve::{Want, resolve_in};
+
+/// How many candidates ahead of its judgement a plan names a candidate to
+/// the host ([`Host::read_ahead`]). Enough to keep a host's readers busy
+/// while the judgement walks one candidate, few enough that what they read
+/// is still cached when the judgement reaches it: a whole `/tmp` read
+/// ahead was evicted again before the plan got there (TASK-325).
+pub const READ_AHEAD: usize = 32;
+
+/// The candidates a plan will judge, in its order, each named to the host
+/// [`READ_AHEAD`] places before its judgement ([`ReadAhead::judging`]).
+/// `None` is a place without a directory to read (a candidate discovery
+/// already refused): it keeps its place in the count, so the distance
+/// stays the same.
+#[derive(Debug)]
+pub struct ReadAhead<'p> {
+    paths: Vec<Option<&'p Path>>,
+    /// How many places have been named (or passed over) so far.
+    named: usize,
+}
+
+impl<'p> ReadAhead<'p> {
+    /// The plan's candidates, in the order it judges them.
+    pub fn new(paths: impl IntoIterator<Item = Option<&'p Path>>) -> Self {
+        Self {
+            paths: paths.into_iter().collect(),
+            named: 0,
+        }
+    }
+
+    /// Called before the judgement of place `index` (from 0): names to
+    /// `name` (the host's [`Host::read_ahead`]) every candidate up to
+    /// `index + READ_AHEAD` (exclusive) not named yet, in order.
+    pub fn judging(&mut self, index: usize, mut name: impl FnMut(&Path)) {
+        let until = index.saturating_add(READ_AHEAD).min(self.paths.len());
+        while self.named < until {
+            if let Some(path) = self.paths[self.named] {
+                name(path);
+            }
+            self.named += 1;
+        }
+    }
+}
 
 /// What [`plan`] found.
 #[derive(Debug, Default)]
@@ -97,18 +145,24 @@ pub fn plan<H: Host>(
                 .is_some_and(crate::profile::LivenessContract::is_project),
         );
     let total = candidates.len();
-    for (path, candidate) in candidates {
+    let mut read_ahead = ReadAhead::new(
+        candidates
+            .iter()
+            .map(|(_, candidate)| candidate.as_ref().ok().map(|found| found.path.as_path())),
+    );
+    for (index, (path, candidate)) in candidates.iter().enumerate() {
         if host.interrupted().is_some() {
             out.unjudged = total - out.judged.len();
             return (out, None);
         }
+        read_ahead.judging(index, |path| host.read_ahead(path));
         let source_evidence = candidate
             .as_ref()
             .ok()
             .and_then(|found| found.source_evidence.clone());
         let verdict = match candidate {
-            Err(skip) => Err(skip),
-            Ok(found) => match judge_one(host, &judge, &found, &mut checker, deadline) {
+            Err(skip) => Err(skip.clone()),
+            Ok(found) => match judge_one(host, &judge, found, &mut checker, deadline) {
                 Ok(verdict) => verdict,
                 Err(stop) => {
                     out.unjudged = total - out.judged.len();
@@ -116,7 +170,7 @@ pub fn plan<H: Host>(
                 }
             },
         };
-        out.judged.push((path, source_evidence, verdict));
+        out.judged.push((path.clone(), source_evidence, verdict));
         if out.judged.len().is_multiple_of(10_000) {
             log(&format!(
                 "{} of {total} candidates judged so far",
@@ -265,4 +319,44 @@ pub fn contract_veto<'a, H: Host>(
         &parent.fd,
         record,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{READ_AHEAD, ReadAhead};
+    use std::path::{Path, PathBuf};
+
+    /// TASK-325: every candidate with a directory is named exactly once, in
+    /// the plan's order, before its own judgement and never more than
+    /// [`READ_AHEAD`] places ahead of the judgement in progress; a place
+    /// without one (a refused candidate) keeps its place in the count.
+    #[test]
+    fn each_candidate_is_named_once_read_ahead_places_before_its_judgement() {
+        for total in [
+            0,
+            1,
+            READ_AHEAD - 1,
+            READ_AHEAD,
+            READ_AHEAD + 1,
+            3 * READ_AHEAD + 5,
+        ] {
+            let paths: Vec<Option<PathBuf>> = (0..total)
+                .map(|i| (i % 7 != 3).then(|| PathBuf::from(format!("/tmp/c{i}"))))
+                .collect();
+            let mut ahead = ReadAhead::new(paths.iter().map(Option::as_deref));
+            let mut named: Vec<PathBuf> = Vec::new();
+            for index in 0..total {
+                ahead.judging(index, |path: &Path| named.push(path.to_owned()));
+                let expected: Vec<PathBuf> = paths
+                    .iter()
+                    .take(index + READ_AHEAD)
+                    .flatten()
+                    .cloned()
+                    .collect();
+                assert_eq!(named, expected, "{total} candidates, judging {index}");
+            }
+            let all: Vec<PathBuf> = paths.iter().flatten().cloned().collect();
+            assert_eq!(named, all, "{total} candidates: each named once, in order");
+        }
+    }
 }

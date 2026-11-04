@@ -4444,6 +4444,21 @@ its bit is set in `stx_mask`, each attribute only when its bit is set in
 `stx_attributes_mask`. A check the kernel cannot answer skips the candidate
 (`unsupported_fs`).
 
+The plan's read-ahead ([architecture.md](architecture.md#the-host-port),
+Read-ahead; TASK-325) reads less than the walk and touches nothing the
+walk would not. It reaches a candidate through the same resolution (steps
+0 to 3) and reads ahead only a directory diskgc's user owns. Below it, a
+name that is a mount point in the mount table read for that is never
+`statx`ed (Before the walk: a dead mount must not hang it), nor is a
+`systemd-private-*` name; every other name is `statx`ed
+(`AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT`), and a directory is opened only
+when that showed a directory diskgc's user owns on the candidate's device
+and mount id, with `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV)`. It lists directories with
+`O_NOATIME` and opens no file, so no access time moves. Nothing it reads
+is used: it decides nothing, and its failures are its own (the judgement
+meets and reports whatever it would have).
+
 A readable `openat2` uses `O_NONBLOCK | O_NOCTTY`. If a FIFO appears at
 the name before the caller checks its type, opening it cannot wait for a
 writer; opening a terminal cannot acquire it as the controlling terminal.

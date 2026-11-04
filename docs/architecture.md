@@ -1212,6 +1212,35 @@ is accepted until measured otherwise.
   (`LinuxHost::read_config_file`, the same type check first, at most
   1 MiB): it may be a symlink, and only its content is validated; parsing
   it is pure.
+- **Read-ahead for the plan** (`Host::read_ahead`; TASK-325). A dry
+  run's plan judges its candidates one at a time, and where the kernel
+  has not cached their metadata each judgement's walk waits on the disk
+  for one directory or inode at a time; on a disk-backed `/tmp` of
+  pytest sessions this, not the in-use scan (a plan reuses one for a
+  minute), was nearly all of the plan's time (measurements in TASK-325's
+  commit). The plan names each directory candidate to the host
+  `fs_kind::READ_AHEAD` places before it judges it; `LinuxHost` reaches
+  the candidate on the calling thread through the resolution function and
+  queues it for a few reader threads (`diskgc_linux::read_ahead`), which
+  list and `statx` below it under Path traversal's rules
+  ([safety.md](safety.md#path-traversal)), so several reads are in flight
+  and the judgement finds them cached. Reading the whole tree ahead
+  instead does not work: it is evicted again before the plan reaches it.
+  A queued candidate the plan has already judged is dropped unread. What
+  the readers read is never used, so the read-ahead changes no verdict: a
+  test (`diskgc-linux/tests/read_ahead_plan.rs`) compares plans with and
+  without it on generated trees on the real kernel (the model's
+  read-ahead does nothing). diskgc's own in-use scan never counts its own
+  descriptors ([safety.md](safety.md#in-use)); another diskgc process
+  running meanwhile can see the directories the readers hold and skip
+  them `in_use`, which only costs it a reclaim. Only the plan reads ahead,
+  not the reclaim walk. Each reader reads at most a bounded number of
+  entries per candidate and holds a bounded number of bytes of paths
+  waiting to be listed. Limits: a plan loads the disk and CPU more while
+  it runs; it holds a few dozen more descriptors (one per queued
+  candidate, two per reader); where the metadata is cached already it
+  only costs time and system CPU (each candidate is reached and read
+  twice).
 - **Locking a file checked by identity** (Cargo's lock files):
   `reopen_regular` opens again, read-only and non-blocking, the regular
   file an `O_PATH` fd refers to, through that fd (never by name), refusing
