@@ -1,9 +1,10 @@
 ---
 id: TASK-335
 title: Admit nix-garbage into the 0.2 release catalog
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-04T15:25:00Z'
+updated_date: '2026-11-04T16:02:00Z'
 labels:
   - release
   - nix
@@ -22,3 +23,9 @@ Host evidence (tmp/walks/2026-11-04-dogfood/): dev-build dry run of --select pro
 
 Not in scope: the release decision itself (TASK-276), the dry-run size estimate (a separate follow-up if wanted).
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-04 orchestrator: implementer in tmp/worktrees/t335 (branch t335-admit-nix-garbage, from master c3760086).
+<!-- SECTION:NOTES:END -->

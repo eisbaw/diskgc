@@ -4,7 +4,7 @@ title: 'survey: per-profile summary, --list candidates, unmatched name families,
 status: In Progress
 assignee: []
 created_date: 2026-10-16 22:41
-updated_date: '2026-11-04T13:43:00Z'
+updated_date: '2026-11-04T16:02:00Z'
 labels:
   - wave-4
   - cli
@@ -45,4 +45,6 @@ Orchestrator 2026-10-24 (COMPASS round 2): dependency changed from TASK-34 to TA
 COMPASS round 4 (2026-10-25): survey depends on the tally's discovery pass (29), not the snapshot (30): one way to walk profile finds.
 
 2026-11-05: Mark chose C1 (survey). In progress in tmp/worktrees/t38 (branch t38-survey), with TASK-116's design.
+
+2026-11-04 orchestrator: implementer done, branch t38-survey 2e4f65d1 (tmp/worktrees/t38), full just e2e exit 0 on that tree; Codex review running; open: Mark's ruling on in-use scan opt-in (TASK-116 note) - survey runs it always.
 <!-- SECTION:NOTES:END -->
