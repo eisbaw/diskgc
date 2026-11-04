@@ -1,10 +1,10 @@
 ---
 id: TASK-335
 title: Admit nix-garbage into the 0.2 release catalog
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-04T15:25:00Z'
-updated_date: '2026-11-04T16:02:00Z'
+updated_date: '2026-11-04T18:59:00Z'
 labels:
   - release
   - nix
@@ -28,4 +28,6 @@ Not in scope: the release decision itself (TASK-276), the dry-run size estimate 
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-04 orchestrator: implementer in tmp/worktrees/t335 (branch t335-admit-nix-garbage, from master c3760086).
+
+Merged 827c1e19bccc063ecb3c2dfe233fd42812cf17d1 (2026-11-04). Codex P2 follow-up filed separately.
 <!-- SECTION:NOTES:END -->
