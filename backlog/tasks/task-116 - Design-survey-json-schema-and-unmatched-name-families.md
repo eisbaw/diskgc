@@ -1,10 +1,10 @@
 ---
 id: TASK-116
 title: 'Design: survey --json schema and unmatched name families'
-status: To Do
+status: Done
 assignee: []
 created_date: 2026-10-23 16:18
-updated_date: '2026-11-04T18:17:00Z'
+updated_date: '2026-11-04T22:53:00Z'
 labels:
   - design
 dependencies: []
@@ -19,9 +19,9 @@ Design before implementation (audit 2026-10-23 of docs vs PRD). Deliverable is d
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 docs/reference.md survey section has a complete JSON schema, exit codes and flags; the unmatched-families contradiction is resolved
-- [ ] #2 docs/testing.md names the survey scenarios (incl. ModelHost YAML cases)
-- [ ] #3 mped-architect design review GO recorded in notes
+- [x] #1 docs/reference.md survey section has a complete JSON schema, exit codes and flags; the unmatched-families contradiction is resolved
+- [x] #2 docs/testing.md names the survey scenarios (incl. ModelHost YAML cases)
+- [x] #3 mped-architect design review GO recorded in notes
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -32,4 +32,6 @@ Mark's design decisions (2026-10-23, binding): (1) survey --json is VERSIONED, M
 COMPASS round 4 (2026-10-25): relabelled: Mark ruled survey JSON versioned, may break.
 
 Mark 2026-11-04 (verbatim): "in-use detection runtime selectable via flag" - confirms decision (3): survey default without the /proc in-use scan, --in-use adds it. Implementing on t38-survey.
+
+Design settled and implemented (merged 01535d51679a1eb448c907133e37a961ddea4616): schema_version 2, families in JSON, in-use opt-in via --in-use (Mark 2026-11-04). mped-architect review of the implementation: no blockers (t38 round 3).
 <!-- SECTION:NOTES:END -->

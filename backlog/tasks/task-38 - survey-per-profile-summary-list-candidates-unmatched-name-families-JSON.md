@@ -1,10 +1,10 @@
 ---
 id: TASK-38
 title: 'survey: per-profile summary, --list candidates, unmatched name families, JSON'
-status: In Progress
+status: Done
 assignee: []
 created_date: 2026-10-16 22:41
-updated_date: '2026-11-04T21:32:00Z'
+updated_date: '2026-11-04T22:53:00Z'
 labels:
   - wave-4
   - cli
@@ -24,10 +24,10 @@ Why: categorising cruft and reviewing AI-drafted profiles both need it. Implemen
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 On the /tmp fixture, survey reproduces the manual categorisation (pytest-of-* inside nix-shell dirs, rc dirs, claude temp) and lists unmatched families
-- [ ] #2 --list truncates at 1,000 per profile and reports the remainder
-- [ ] #3 survey never deletes and takes no lock (oracle + lock probe)
-- [ ] #4 survey works outside a container (the sandbox gate only guards deletion)
+- [x] #1 On the /tmp fixture, survey reproduces the manual categorisation (pytest-of-* inside nix-shell dirs, rc dirs, claude temp) and lists unmatched families
+- [x] #2 --list truncates at 1,000 per profile and reports the remainder
+- [x] #3 survey never deletes and takes no lock (oracle + lock probe)
+- [x] #4 survey works outside a container (the sandbox gate only guards deletion)
 <!-- AC:END -->
 
 ## Definition of Done
@@ -51,4 +51,6 @@ COMPASS round 4 (2026-10-25): survey depends on the tally's discovery pass (29),
 2026-11-04: Codex blocker (failed discovery shown as found 0) fixed aed9fc57 with bite test; just check exit 0; full just e2e refused at containers stage by the disk guard (12.99 GiB free < 17 GiB budget) - gate owed on aed9fc57. Codex non-blockers filed: TASK-338, TASK-339. read_ahead_plan intermittent seen in this run: TASK-337.
 
 2026-11-04: --in-use opt-in implemented (5d3a02ef/1204e5dd, restacked onto t336 as e833f651..b5b39920 without c4de7f76, which goes to TASK-337). Full e2e on the stack running; Codex review of the in-use delta running.
+
+Merged 01535d51679a1eb448c907133e37a961ddea4616 (stack with TASK-336). Follow-ups: TASK-343 (Codex), TASK-338/339 (pre-existing dry-run), implementer's list in its report: greedy families (node_* ), non-UTF-8 family collisions, home-relative profiles under survey ~/.cache, per-profile progress lines, --in-use extra end scan.
 <!-- SECTION:NOTES:END -->

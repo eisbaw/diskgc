@@ -1,10 +1,10 @@
 ---
 id: TASK-336
 title: Package README audit fixes and MIT license
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-04T15:25:00Z'
-updated_date: '2026-11-04T16:32:00Z'
+updated_date: '2026-11-04T22:53:00Z'
 labels:
   - docs
   - release
@@ -30,4 +30,6 @@ Mark 2026-11-04: apply the readme-improver audit of packaging/README.md; license
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-04 orchestrator: implementer in tmp/worktrees/t336 (branch t336-readme-mit, from master c9ec2c7e). License per Mark: MIT.
+
+Merged 1e9051ef. Follow-ups from implementer: editorial pass removing TASK ids from reference.md's release-notes draft + guard in release-candidate-package; refresh release-notes timing paragraph with reclaim throughput (TASK-334); meta.license on flake packages.
 <!-- SECTION:NOTES:END -->
