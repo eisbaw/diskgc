@@ -3279,8 +3279,26 @@ production parsers directly. Seeds are versioned in `fuzz/seeds/`; evolving
 corpora and crash artifacts stay in the worktree's `tmp/fuzz/`. Run a single
 target with `just fuzz grammar 1800`, or all five with `just fuzz`. A crash is
 not done until its input is reduced, saved as a regression and fixed. The
-runner also keeps full build and run logs in `tmp/fuzz/logs/`. The
-`just mutants` inventories all five named sources, finds complete nonempty
+runner also keeps full build and run logs in `tmp/fuzz/logs/`.
+
+First full run (TASK-27), 2026-11-04 on this laptop: `nix develop -c just
+fuzz TARGET 1800` for each target in turn, all exiting 0. That is one
+libFuzzer process per target and the pinned nightly, with builds from another
+worktree running alongside (load average 1 to 16 on 14 cores). Every target
+ran its full 1,800 s from the versioned seeds with no crash, timeout, leak or
+out-of-memory artifact. The runner's `-verbosity=0` prints no coverage lines,
+so `cov` and `ft` come from replaying each final corpus afterwards with
+`nix develop .#fuzz -c cargo fuzz run TARGET tmp/fuzz/corpus/TARGET -- -runs=0`.
+
+| Target | Executions | exec/s | cov | ft | Corpus files | Peak RSS |
+|---|---|---|---|---|---|---|
+| `grammar` | 16,760,180 | 9,306 | 905 | 3,618 | 629 | 615 MiB |
+| `yaml_loader` | 2,331,968 | 1,294 | 12,340 | 37,936 | 5,069 | 492 MiB |
+| `mountinfo` | 8,202,765 | 4,554 | 442 | 2,138 | 573 | 511 MiB |
+| `maps` | 30,341,957 | 16,847 | 278 | 1,088 | 386 | 549 MiB |
+| `environ` | 155,745,566 | 86,477 | 88 | 270 | 70 | 546 MiB |
+
+The `just mutants` inventories all five named sources, finds complete nonempty
 partitions of at most 16 mutants per shard, then runs each shard through the
 resource-capped Podman runner. It verifies every report before returning
 success. Reports stay in `tmp/mutants-container-smoke/`. Host `cargo-mutants`
@@ -3493,7 +3511,7 @@ consent `nix-store --gc`). The mutation runner keeps its own guard as well.
 | `vm` | 8 GiB | `vm-historical-ctime` after its inputs were built: 0.51 GiB peak, -0.31 GiB after (86 s); the first VM check after a harness change builds those inputs too, as `vm-real-kernel` below did | each NixOS VM check, `e2e-vm-tally-pressure` |
 | `vm-real-kernel` | 8 GiB | cold, building the changed harness binaries and VM image first: 3.05 GiB peak, -2.82 GiB after (251 s) | `e2e-vm-real-kernel` |
 | `vm-cold-scale` | 8 GiB | not measured; the same 4 GiB guest disk as `vm-real-kernel` | `e2e-vm-cold-scale` |
-| `fuzz` | 10 GiB | first build plus 30 s of `grammar`: 5.98 GiB peak, -5.97 GiB after (278 s), but the worktree grew by only 0.35 GiB (`tmp/target`, `tmp/fuzz`): other builds on the host account for the rest | `fuzz` |
+| `fuzz` | 10 GiB | first build plus 30 s of `grammar`: 5.98 GiB peak, -5.97 GiB after (278 s), but the worktree grew by only 0.35 GiB (`tmp/target`, `tmp/fuzz`): other builds on the host account for the rest. The full five-target run (2026-11-04) left `tmp/target` at 0.5 GiB and `tmp/fuzz` at 28 MiB, with per-target peaks of 0.04 to 9.79 GiB: the first target also fetched the nightly shell into the Nix store, and the rest is other work on the host | `fuzz` |
 | `mutants` | 16.06 GiB | the mutation runner's own start guard (16 GiB plus 64 MiB), never lower | `mutants` |
 
 ### Walkthrough driver

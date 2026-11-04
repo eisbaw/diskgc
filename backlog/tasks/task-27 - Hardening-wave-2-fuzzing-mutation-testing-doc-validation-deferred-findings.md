@@ -4,7 +4,7 @@ title: 'Hardening wave 2: fuzzing, mutation testing, doc validation, deferred fi
 status: In Progress
 assignee: []
 created_date: 2026-10-16 22:41
-updated_date: '2026-11-04T13:43:00Z'
+updated_date: '2026-11-04T16:25:00Z'
 labels:
   - wave-2
   - hardening
@@ -24,7 +24,7 @@ Why: wave-2 surfaces are frozen; harden them once. cargo-fuzz on the grammar par
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 No surviving mutants in selection semantics, or each justified
-- [ ] #2 Each fuzzer (grammar, YAML loader, mountinfo, maps, environ parsers) runs 30 minutes without crashes; crashes found become regression tests
+- [x] #2 Each fuzzer (grammar, YAML loader, mountinfo, maps, environ parsers) runs 30 minutes without crashes; crashes found become regression tests
 - [x] #3 fuzz and mutants recipes exist in the justfile
 <!-- AC:END -->
 
@@ -49,4 +49,6 @@ Orchestrator 2026-10-24 (COMPASS round 2): moved back to To Do: stalled on RAM, 
 2026-10-31: branches task27-clean/-hardening/-integrated archived as tags archive/task27-* (75-80% of their files already identical on master; the rest older versions). The live slice is the mutation run (TASK-177).
 
 2026-11-05: Mark chose E3 (fuzz). In progress in tmp/worktrees/t27 (branch t27-fuzz).
+
+2026-11-04 TASK-27 AC2 fuzz run (branch t27-fuzz): nix develop -c just fuzz TARGET 1800 run for each of grammar, yaml_loader, mountinfo, maps, environ in turn (13:48-16:21 UTC). Every run exited 0 after its full 1800 s, with no crash, timeout, leak or OOM artifact; the tmp/fuzz/artifacts/* directories are empty. Nightly 2026-10-01 with ASan and LSan, one libFuzzer process, CARGO_BUILD_JOBS=4 for the build, and builds from another worktree running alongside (load average 0.8 to 16 at target boundaries). Executions, exec/s: grammar 16.8M at 9306; yaml_loader 2.33M at 1294; mountinfo 8.20M at 4554; maps 30.3M at 16847; environ 155.7M at 86477. Coverage (cov/ft) comes from a -runs=0 corpus replay because the runner's -verbosity=0 hides it: grammar 905/3618, yaml_loader 12340/37936, mountinfo 442/2138, maps 278/1088, environ 88/270. Corpora and logs stay in the worktree's tmp/fuzz (28 MiB) and are not committed, per docs/testing.md; that file now records the run. No crash, so no new regression tests.
 <!-- SECTION:NOTES:END -->
