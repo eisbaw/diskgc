@@ -3869,8 +3869,8 @@ Limits:
 Status: designed (TASK-118), implemented (TASK-36) with the vectors and
 container scenarios in [testing.md](testing.md#nix-store-backend-vectors),
 CppNix 2.34.8 admitted ([reference.md](reference.md#backend-version-allowlist)).
-The built-in `nix-garbage` is in the development library only, pending
-Mark's admission; in no release catalog.
+The built-in `nix-garbage` is in the 0.2 catalog, not 0.1's (Mark,
+2026-11-04, TASK-335).
 
 The kind runs one Nix garbage collection through the **system Nix daemon,
 as diskgc's own user**, bounded by the remaining need:

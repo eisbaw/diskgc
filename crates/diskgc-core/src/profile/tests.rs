@@ -249,7 +249,7 @@ fn the_built_in_library_loads() {
         // TASK-93, pending Mark's admission.
         "podman-dangling",
         "podman-unreferenced",
-        // TASK-36, pending Mark's admission.
+        // TASK-36; in the 0.2 catalog (TASK-335).
         "nix-garbage",
         "jest-cache",
         "npm-cache",

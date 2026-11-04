@@ -953,6 +953,9 @@ struct LivenessRow {
     /// (TASK-N)" (docs/safety.md: a verified heuristic needs them where the
     /// kernel's view matters).
     container_tested: bool,
+    /// The release catalogs the Verdict cell puts it in ("in the 0.1 and
+    /// 0.2 catalogs"), sorted ([`catalogs_named`]).
+    catalogs: Vec<String>,
 }
 
 /// One built-in as the library holds it.
@@ -962,7 +965,8 @@ struct Builtin {
     source: bool,
     guard: Guard,
     class: Option<LivenessClass>,
-    released: bool,
+    /// Its `releases:` labels, sorted.
+    releases: Vec<String>,
 }
 
 /// The code span after `key: ` in `cell` (`` `min_idle_for: 1h` ``).
@@ -1084,6 +1088,7 @@ fn liveness_rows(rows: &[Vec<String>]) -> (Vec<(String, LivenessRow)>, Vec<Strin
             verdict: Verdict::of(&row[5]),
             decided: admission_recorded(&row[5]).is_some(),
             container_tested: container_tests_recorded(&row[5]),
+            catalogs: catalogs_named(&row[5]),
         };
         for name in row[0].split(", ").map(crate::doc::code) {
             if out.iter().any(|(seen, _)| seen == name) {
@@ -1128,13 +1133,14 @@ fn verdict_problem(name: &str, row: &LivenessRow) -> Option<String> {
 }
 
 /// The sync rule between the liveness table, the built-in library and the
-/// 0.1 catalog (TASK-112, TASK-122): every built-in source is
+/// release catalogs (TASK-112, TASK-122, TASK-335): every built-in source is
 /// named by exactly one row whose verdict names a built-in (Shipped,
 /// Decision pending, Proposed withdrawal), with builtin.yaml's
 /// `liveness_class`, non-empty residuals, and exactly the row's guard (the
 /// floor and checkout setting where the row states them; a contract row
 /// must state its floor); a built-in with a liveness guard is Shipped; a
-/// built-in in a `release` catalog is Shipped; no row names a filter, and
+/// built-in in a release catalog is Shipped, and its verdict names exactly
+/// the catalogs builtin.yaml's `releases:` lists; no row names a filter, and
 /// no verdict that names a built-in is without one.
 fn liveness_sync_problems(
     rows: &[(String, LivenessRow)],
@@ -1170,9 +1176,15 @@ fn liveness_sync_problems(
         if row.residuals.is_empty() {
             problems.push(format!("{name}: row names no residuals"));
         }
-        if builtin.released && row.verdict != Verdict::Shipped {
+        if row.catalogs != builtin.releases {
             problems.push(format!(
-                "{name}: in the 0.1 catalog (release) but its row is {:?}",
+                "{name}: its row puts it in the catalogs {:?}, builtin.yaml's `releases:` in {:?}",
+                row.catalogs, builtin.releases
+            ));
+        }
+        if !builtin.releases.is_empty() && row.verdict != Verdict::Shipped {
+            problems.push(format!(
+                "{name}: in a release catalog but its row is {:?}",
                 row.verdict
             ));
         }
@@ -1226,6 +1238,46 @@ fn liveness_sync_problems(
     problems
 }
 
+/// Release labels as the table spells them, sorted.
+fn labels(releases: &[Release]) -> Vec<String> {
+    let mut names: Vec<String> = releases.iter().map(|r| r.name().to_owned()).collect();
+    names.sort();
+    names
+}
+
+/// The catalogs a Verdict cell puts its built-in in: each "in the LABELS
+/// catalog" or "catalogs", LABELS being `MAJOR.MINOR` joined by ", " or
+/// " and ". "not in 0.1 or 0.2", "not in the 0.2 catalog" and "in no
+/// release catalog" name none.
+fn catalogs_named(cell: &str) -> Vec<String> {
+    let cell = cell.to_lowercase();
+    let mut found = BTreeSet::new();
+    for (start, _) in cell.match_indices("in the ") {
+        if cell[..start].ends_with("not ") {
+            continue;
+        }
+        let rest = &cell[start + "in the ".len()..];
+        let Some(end) = rest.find(" catalog") else {
+            continue;
+        };
+        let labels: Vec<&str> = rest[..end]
+            .split(", ")
+            .flat_map(|part| part.split(" and "))
+            .collect();
+        let label = |text: &&str| {
+            text.split_once('.').is_some_and(|(major, minor)| {
+                [major, minor]
+                    .iter()
+                    .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            })
+        };
+        if labels.iter().all(label) {
+            found.extend(labels.into_iter().map(str::to_owned));
+        }
+    }
+    found.into_iter().collect()
+}
+
 fn builtins_as_loaded(library: &Library) -> Vec<(String, Builtin)> {
     library
         .profiles()
@@ -1240,7 +1292,7 @@ fn builtins_as_loaded(library: &Library) -> Vec<(String, Builtin)> {
                         checkouts_allow: Some(source.checkouts == Checkouts::Allow),
                     },
                     class: source.liveness_class,
-                    released: profile.releases.contains(&Release::V0_1),
+                    releases: labels(&profile.releases),
                 },
                 Body::Filter(_) => Builtin {
                     source: false,
@@ -1251,7 +1303,7 @@ fn builtins_as_loaded(library: &Library) -> Vec<(String, Builtin)> {
                         checkouts_allow: None,
                     },
                     class: None,
-                    released: profile.releases.contains(&Release::V0_1),
+                    releases: labels(&profile.releases),
                 },
             };
             (profile.name.clone(), builtin)
@@ -1276,27 +1328,70 @@ fn liveness_table_and_builtin_library_agree() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
-/// The 0.1 catalog is exactly the built-ins whose `releases:` names it
-/// (derived, not listed), and every source in it is Shipped in the
-/// liveness table (the sync rule above).
+/// Each catalog is exactly the built-ins whose `releases:` names it
+/// (derived, not listed), every source in one is Shipped in the liveness
+/// table (the sync rule above), and a built-in in some catalog is in one
+/// that builds.
 #[test]
 fn the_release_catalog_is_the_release_data() {
-    let catalog = Library::builtin()
-        .expect("built-ins")
-        .release_catalog("0.1", Release::V0_1)
-        .expect("0.1 catalog");
-    let derived: Vec<&str> = catalog.profiles().map(|p| p.name.as_str()).collect();
-    let released: Vec<String> = builtin_facts()
+    let library = Library::builtin().expect("built-ins");
+    let mut in_some: BTreeSet<String> = BTreeSet::new();
+    for label in Release::ALL {
+        let catalog = library
+            .clone()
+            .release_catalog(label.name(), label)
+            .unwrap_or_else(|e| panic!("{} catalog: {e}", label.name()));
+        let derived: Vec<&str> = catalog.profiles().map(|p| p.name.as_str()).collect();
+        let labelled: Vec<&str> = library
+            .profiles()
+            .filter(|p| p.releases.contains(&label))
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(derived, labelled, "{}", label.name());
+        assert!(
+            catalog
+                .profiles()
+                .any(|p| matches!(&p.body, Body::Source(_))),
+            "the {} catalog holds a source",
+            label.name()
+        );
+        in_some.extend(derived.into_iter().map(str::to_owned));
+    }
+    let released: BTreeSet<String> = builtin_facts()
         .into_iter()
-        .filter(|(_, b)| b.released)
+        .filter(|(_, b)| !b.releases.is_empty())
         .map(|(name, _)| name)
         .collect();
-    assert_eq!(derived, released);
+    assert_eq!(in_some, released);
+}
+
+/// 0.1's catalog admits only `fs` and `cargo-target`: a `nix-store`
+/// source labelled for it is refused, while 0.2's catalog takes it
+/// (TASK-335). A catalog's kinds are part of its release's scope.
+#[test]
+fn a_catalog_admits_only_its_own_kinds() {
+    let nix = "- name: n\n  category: nix\n  description: d\n  kind: nix-store\n  find: {roots: daemon}\n  verified_with: v\n  liveness_class: delegated\n  releases: [\"0.1\", \"0.2\"]\n";
+    let library = Library::load(nix, &[]).unwrap_or_else(|e| panic!("{e}"));
+    let error = library
+        .clone()
+        .release_catalog("0.1", Release::V0_1)
+        .expect_err("nix-store is outside 0.1's scope");
     assert!(
+        error.contains(
+            "diskgc 0.1's catalog (0.1) built-in `n` is outside the release scope: kind \
+             nix-store is not one of its kinds (fs, cargo-target)"
+        ),
+        "{error}"
+    );
+    let catalog = library
+        .release_catalog("0.2", Release::V0_2)
+        .unwrap_or_else(|e| panic!("0.2 takes nix-store: {e}"));
+    assert_eq!(
         catalog
             .profiles()
-            .any(|p| matches!(&p.body, Body::Source(_))),
-        "the catalog holds a source"
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["n"]
     );
 }
 
@@ -1310,7 +1405,10 @@ fn the_release_catalog_refuses_an_out_of_scope_source() {
         .release_catalog("0.1", Release::V0_1)
         .expect_err("a command action");
     assert!(
-        error.contains("diskgc 0.1's catalog (0.1) built-in `c` is outside the release scope"),
+        error.contains(
+            "diskgc 0.1's catalog (0.1) built-in `c` is outside the release scope: its action \
+             is not kind fs's own"
+        ),
         "{error}"
     );
     let filters_only = "- name: idle-9d\n  category: c\n  description: d\n  where: {idle_for: 9d}\n  releases: [\"0.1\"]\n";
@@ -1353,7 +1451,7 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
                 checkouts_allow: Some(false),
             },
             class: Some(LivenessClass::NoContract),
-            released: false,
+            releases: Vec::new(),
         },
     ));
     let mut unrowed = builtins.clone();
@@ -1368,7 +1466,7 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
                 checkouts_allow: Some(false),
             },
             class: Some(LivenessClass::Tolerant),
-            released: false,
+            releases: Vec::new(),
         },
     ));
     let cases: Vec<(&str, Vec<String>, &str)> = vec![
@@ -1537,14 +1635,27 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
             "a release for a row that is not Shipped",
             liveness_sync_problems(
                 &edit_row("bun-cache", &|r| r.verdict = Verdict::DecisionPending),
-                &edit_builtin("bun-cache", &|b| b.released = true),
+                &edit_builtin("bun-cache", &|b| b.releases = vec!["0.1".into()]),
             ),
-            "bun-cache: in the 0.1 catalog (release) but its row is DecisionPending",
+            "bun-cache: in a release catalog but its row is DecisionPending",
         ),
         (
             "a filter with a row",
             liveness_sync_problems(&rows, &edit_builtin("pytest-cache", &|b| b.source = false)),
             "pytest-cache: a filter has no Liveness contracts row",
+        ),
+        (
+            "a row naming a catalog the library does not (TASK-335)",
+            liveness_sync_problems(&rows, &edit_builtin("nix-garbage", &|b| b.releases.clear())),
+            "nix-garbage: its row puts it in the catalogs [\"0.2\"], builtin.yaml's `releases:` in []",
+        ),
+        (
+            "a library label the row does not name",
+            liveness_sync_problems(
+                &edit_row("cargo-target", &|r| r.catalogs = vec!["0.1".into()]),
+                &builtins,
+            ),
+            "cargo-target: its row puts it in the catalogs [\"0.1\"], builtin.yaml's `releases:` in [\"0.1\", \"0.2\"]",
         ),
     ];
     for (what, problems, expected) in cases {
@@ -1587,6 +1698,30 @@ fn liveness_sync_rule_catches_each_kind_of_drift() {
         ]
     );
     assert_eq!(class_of("soundly"), None);
+    for (cell, catalogs) in [
+        ("Shipped; in the 0.1 and 0.2 catalogs.", &["0.1", "0.2"][..]),
+        (
+            "Shipped; in the 0.2 catalog, not 0.1's (TASK-335).",
+            &["0.2"],
+        ),
+        (
+            "Small in count. In the 0.1 and 0.2 catalogs (TASK-65).",
+            &["0.1", "0.2"],
+        ),
+        ("Shipped; not in 0.1 or 0.2 (Docker actions).", &[]),
+        (
+            "Shipped in the development library only; in no release catalog.",
+            &[],
+        ),
+        ("Decision pending: in no catalog; see the catalog row.", &[]),
+        ("Shipped; not in the 0.2 catalog (Docker).", &[]),
+        (
+            "Shipped; in the 0.1 catalog, not in the 0.2 catalog.",
+            &["0.1"],
+        ),
+    ] {
+        assert_eq!(catalogs_named(cell), catalogs, "{cell}");
+    }
     for (cell, recorded) in [
         ("Shipped. Container test: pending (TASK-137).", true),
         (

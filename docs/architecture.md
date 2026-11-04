@@ -1383,7 +1383,8 @@ Decisions (Mark), before the RC commit:
 
 - [ ] **Scope** (TASK-276). Is 0.2 the descriptor's provisional `0.2`
   row (`crates/diskgc-core/src/releases.json`), with or without a
-  reclaiming `watch`, and with which catalog; does the NixOS module
+  reclaiming `watch`, and with which catalog (Mark admitted
+  `nix-garbage` to it, 2026-11-04, TASK-335); does the NixOS module
   ship? Recorded in TASK-276's notes; the row, the PRD's Scope and the
   draft notes then follow it. A `/tmp` built-in new to the catalog
   first needs its producer's lifecycle verified and a live-session
@@ -1409,7 +1410,9 @@ Decisions (Mark), before the RC commit:
   found hole (TASK-67, ruling of 2026-10-25).
 - [ ] **Contract review** (proposed, pending Mark) of what 0.2 adds to
   the CLI contract (PRD, Irreversibility map): `watch --tally-only`'s
-  flags, exit codes and lock paths, the snapshot's paths, and whether
+  flags, exit codes and lock paths, the snapshot's paths, the `nix-store`
+  kind's report (its action, its skip reasons, `changed` among them, and
+  its errors; TASK-335), and whether
   the report's `index` block (still `null`, TASK-244) is frozen as
   `null` or filled first. 0.1 shipped only with its contract review
   green.
@@ -1450,7 +1453,7 @@ Evidence on the RC commit:
   `docs-vs-binary:`, with `artifact:` (store path, the binary's
   sha256).
 - [ ] **Release notes list the limits.** The draft's Known limits say,
-  in a user's terms: overlay copy-up ending a reclaim part-way
+  in a user's terms: the Nix GC's (TASK-335); overlay copy-up ending a reclaim part-way
   (TASK-309); the per-user and index locks untested on NFS (TASK-314);
   what rests on the model only ([testing.md](testing.md), Not covered
   end-to-end); the in-use blind spots (TASK-303); and what the rulings

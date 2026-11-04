@@ -879,8 +879,8 @@ under `profile`:
   YAML (`sound`, `producer-equivalent`, `verified-heuristic`, `tolerant`,
   `delegated`, `none`; [Liveness contracts](#liveness-contracts)), `null`
   for a filter and for every user profile. `releases` lists the release
-  catalogs that include a built-in (`["0.1"]` for the 0.1 catalog), and
-  is empty otherwise.
+  catalogs that include a built-in (`["0.1", "0.2"]` for one in both,
+  `["0.2"]` for `nix-garbage`), and is empty otherwise.
 - `find.roots` is always a list: the fixed roots, or empty when
   `find.roots_required` is `true` (`roots: required`: a tier or `--roots`
   supplies them) or when `find.backend` names where the kind's storage
@@ -1500,7 +1500,8 @@ Thresholds, intervals and timeouts are command-line arguments, so the same
 file serves `watch` on a laptop and `ensure` on a runner.
 
 A configuration for diskgc 0.1 uses only the 0.1 built-ins
-(`cargo-target`, `nix-shell-rc`, `pytest-tmp` and the idle filters; see
+(`cargo-target`, `nix-shell-rc`, `pytest-tmp` and the idle filters); 0.2's
+catalog adds `nix-garbage` (see
 [Release notes](#release-notes-next-release-draft)).
 It extends `docs/example.yaml` (the example the package installs) with a
 laptop's roots, a protected project and a pressure group:
@@ -1822,7 +1823,7 @@ spelling for a root the bound backend supplies, in every backend kind
 
 A `nix-store` source profile is exactly `name`, `category`, `description`,
 `kind: nix-store`, `find: {roots: daemon}` and, on a built-in,
-`verified_with` and `liveness_class`; any other field (`action`, `find.paths`, `where`,
+`verified_with`, `liveness_class` and `releases`; any other field (`action`, `find.paths`, `where`,
 `min_idle_for`, `examples`, `checkouts`) is a load-time error. The store
 is not configurable: it is `/nix/store` of the bound system daemon
 ([safety.md](safety.md#nix-store)). Selected alone as `profile:NAME` (no
@@ -1851,7 +1852,7 @@ part of the contract.
 | `checkouts` | sources, any kind | `refuse` (the default, also when absent) or `allow`; any other value is a load-time error. Whether a candidate may hold a version-control checkout (`.git`, `.hg`, `.svn`) or lie inside a checkout's metadata; refused ones are `contains_checkout`. `allow` can delete a repository with uncommitted work: see [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate) (No source checkout) before writing it. |
 | `verified_with` | built-in sources, required | The tool version the profile was checked against. |
 | `liveness_class` | built-in sources, required | The source's liveness contract class under the admission rule ([safety.md](safety.md#producer-liveness)): `sound`, `producer-equivalent`, `verified-heuristic`, `tolerant`, `delegated` or `none`. Its evidence, residuals and verdict are its row in [Liveness contracts](#liveness-contracts). Recorded data: diskgc does not act on it at run time. |
-| `releases` | built-ins, optional | The release catalogs that include the built-in, listed explicitly: `["0.1"]` (quoted strings) puts it in the 0.1 catalog, which a release row of the release descriptor names ([Built-in profile library](#built-in-profile-library)). Membership, not "since": a later catalog lists its own members. No duplicates; refused with `liveness_class: none` unless empty. Absent, null or empty: the development library only. |
+| `releases` | built-ins, optional | The release catalogs that include the built-in, listed explicitly: `["0.1", "0.2"]` (quoted strings) puts it in the 0.1 and 0.2 catalogs, which release rows of the release descriptor name ([Built-in profile library](#built-in-profile-library)). Membership, not "since": a later catalog lists its own members. No duplicates; refused with `liveness_class: none` unless empty. Absent, null or empty: the development library only. |
 | `override` | user profiles | See User profiles. |
 
 `cargo-target` recognises Cargo target directories by their structure
@@ -2283,16 +2284,20 @@ architecture.md's NixOS module `package` row, the release suite's
 refusal test, the module checks' reclaiming case). The development build
 keeps a
 reclaiming `watch`, behind the sandbox gate. The 0.2 row's catalog is
-still 0.1's (`catalog: "0.1"`, builtin.yaml's label), so the candidate
-keeps `cargo-target`, the two `/tmp` built-ins with a liveness contract (`nix-shell-rc`, `pytest-tmp`;
-TASK-65, Mark 2026-10-24) and the seven idle filters, and rejects every
+builtin.yaml's label `0.2` (`catalog: "0.2"`): 0.1's built-ins, which
+list both labels, plus `nix-garbage` (Mark, 2026-11-04, TASK-335). So the
+candidate keeps `cargo-target`, the two `/tmp` built-ins with a liveness
+contract (`nix-shell-rc`, `pytest-tmp`; TASK-65, Mark 2026-10-24),
+`nix-garbage` and the seven idle filters, and rejects every
 operator-authored profile, including
 overrides. It also refuses configured tiers and `--select` expressions that
 refer to excluded built-ins, even during a dry run. `profiles list`,
 `profiles show`, `check` and help use the same narrowed library.
 `profile_policies` for the admitted sources works only to narrow: `checkouts:
-refuse` on any of them, `allow` only where the built-in already allows
-(`cargo-target`, `pytest-tmp`); `allow` on `nix-shell-rc` is refused, as are
+refuse` on any of them (on `nix-garbage` it changes nothing: a GC has no
+file candidates), `allow` only where the built-in already allows
+(`cargo-target`, `pytest-tmp`); `allow` on `nix-shell-rc` or `nix-garbage`
+is refused, as are
 policies for excluded sources, including `npm-cache` and `uv-cache`, at load
 time. The other `/tmp` proposals stay out: `nix-shell-tmpdir`, `mktemp-dir`
 and `tmp-entry` have no owner evidence ([Liveness
@@ -2306,7 +2311,7 @@ remain a release decision under TASK-67.
 | nix | `nix-user-cache` | `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
 | nix | `nix-shell-rc` | rc directories `nix-shell-*-*` and `nix-develop-*-*` directly in `/tmp` (not below shell temp directories); `liveness_contract: nix-shell`, `min_idle_for: 1h` ([Liveness contracts](#liveness-contracts)) | `delete` |
 | nix | `nix-shell-tmpdir` | planned: `nix-shell.*` directories under `/tmp`'s temp-prefix v1 preset, including below `/tmp/claude-{uid}`; dormant shells can use them without an observable descriptor or initial environment path | no safe action yet |
-| nix | `nix-garbage` | development library only, pending Mark's admission (TASK-36): dead store paths of the bound multi-user daemon (`{kind: nix-store, find: {roots: daemon}}`), Nix's own choice ([safety.md](safety.md#nix-store)) | one bounded `nix-store --gc` |
+| nix | `nix-garbage` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-04, TASK-335): dead store paths of the bound multi-user daemon (`{kind: nix-store, find: {roots: daemon}}`), Nix's own choice ([safety.md](safety.md#nix-store)) | one bounded `nix-store --gc` |
 | rust | `cargo-target` | Cargo `target/` dirs (roots required); `checkouts: allow`: build scripts clone sources into a target (a vendored dependency in `build/<pkg>/out/`), which is Cargo's own output, reclaimed by its lock protocol | lock protocol |
 | containers | `docker-build-cache` | BuildKit cache of the bound Docker Engine | prune |
 | containers | `docker-dangling` | untagged images | prune |
@@ -2543,8 +2548,9 @@ contract is not admissible. The rule applies to every built-in, shipped
 ones included (Mark, 2026-10-23); TASK-122 classified those that predate
 it. This table is the single home for these decisions (TASK-112). Each
 built-in's class is also data, its `liveness_class` in builtin.yaml, and
-`releases: ["0.1"]` there puts a built-in in the 0.1 catalog; a
-test keeps the table, the library and the catalog in sync (every built-in
+its `releases:` there lists the release catalogs it is in (`["0.1",
+"0.2"]`); a
+test keeps the table, the library and the catalogs in sync (every built-in
 source in exactly one row, the same class, a release only for a Shipped
 row). Rows marked *planned* name a contract that is designed but not
 implemented.
@@ -2563,14 +2569,14 @@ its task notes.
 
 | Profile | Producer (verified) | Contract (evidence) | Class | Residuals | Verdict |
 |---|---|---|---|---|---|
-| `nix-shell-rc` | legacy `nix-shell` and `nix develop` (Nix 2.34.8 on the host, 2.34.9 pinned by `nix_shell_rc_lifecycle_is_pinned`): the directory's pid is the shell's own for both, interactive and `-c`; `nix develop`'s directory is referenced by nothing after start; legacy `nix-shell`'s is the `TMPDIR` of the shell and its children and its rc trap removes it except after `SIGKILL` (safety.md) | `liveness_contract: nix-shell`, `min_idle_for: 1h` | sound, under Owner PID's preconditions | A consumer that outlives the shell and keeps only a path string (Owner PID's scope). `min_idle_for: 1h` narrows it and is not part of the contract's soundness: a detached child that wrote in the directory within the hour keeps it `not_idle`. | Shipped (TASK-112 step 4) after the lifecycle verification (both commands, interactive and `-c`, normal exit, `SIGHUP` and `SIGKILL`, a detached child outliving the shell, a shell in a private PID namespace sharing `/tmp`), with its vectors and container tests. Matching set as in the library row. Small in bytes, large in count. In the 0.1 catalog (TASK-65). |
-| `pytest-tmp` | pytest 9.1.1 (sources read; lifecycle pinned by `pytest_lifecycle_is_pinned`; the contract by `pytest_live_policy_none_session_in_shell_root_is_kept` and `pytest_live_basetemp_session_is_kept`), pytest-xdist 3.8.0 with execnet 2.1.2 (`pytest_orphan_xdist_worker_keeps_session`: a worker outlives its killed controller by about 15 s, then execnet ends it) | `liveness_contract: pytest`, `min_idle_for: 1h`, `checkouts: allow`; one candidate per session | verified heuristic: lock rows sound; the rank row producer-equivalent or stricter (it never permits a session pytest's own next cleanup, with the default retention, would keep; while a pytest of the same user runs it needs a session older than pytest's dead-lock age, Mark 2026-10-23); the unused-root row heuristic, and it does remove sessions above the rank that pytest keeps | Those of safety.md (pytest sessions), each with its vector. `min_idle_for: 1h` covers pytest's startup window between the session's `mkdir` and its `.lock` (microseconds), with a wide margin for a stalled start; it is not part of the contract's soundness. | Shipped (TASK-112 step 5), admitted by Mark, 2026-10-23. Matching set as in the library row. Every verdict of the decision table names its row in the detail; the checks before the table (safety.md) name none. Container tests: `pytest_lifecycle_is_pinned`, `pytest_live_policy_none_session_in_shell_root_is_kept`, `pytest_live_basetemp_session_is_kept`, `pytest_orphan_xdist_worker_keeps_session`. In the 0.1 catalog (TASK-65, Mark 2026-10-24). |
+| `nix-shell-rc` | legacy `nix-shell` and `nix develop` (Nix 2.34.8 on the host, 2.34.9 pinned by `nix_shell_rc_lifecycle_is_pinned`): the directory's pid is the shell's own for both, interactive and `-c`; `nix develop`'s directory is referenced by nothing after start; legacy `nix-shell`'s is the `TMPDIR` of the shell and its children and its rc trap removes it except after `SIGKILL` (safety.md) | `liveness_contract: nix-shell`, `min_idle_for: 1h` | sound, under Owner PID's preconditions | A consumer that outlives the shell and keeps only a path string (Owner PID's scope). `min_idle_for: 1h` narrows it and is not part of the contract's soundness: a detached child that wrote in the directory within the hour keeps it `not_idle`. | Shipped (TASK-112 step 4) after the lifecycle verification (both commands, interactive and `-c`, normal exit, `SIGHUP` and `SIGKILL`, a detached child outliving the shell, a shell in a private PID namespace sharing `/tmp`), with its vectors and container tests. Matching set as in the library row. Small in bytes, large in count. In the 0.1 and 0.2 catalogs (TASK-65). |
+| `pytest-tmp` | pytest 9.1.1 (sources read; lifecycle pinned by `pytest_lifecycle_is_pinned`; the contract by `pytest_live_policy_none_session_in_shell_root_is_kept` and `pytest_live_basetemp_session_is_kept`), pytest-xdist 3.8.0 with execnet 2.1.2 (`pytest_orphan_xdist_worker_keeps_session`: a worker outlives its killed controller by about 15 s, then execnet ends it) | `liveness_contract: pytest`, `min_idle_for: 1h`, `checkouts: allow`; one candidate per session | verified heuristic: lock rows sound; the rank row producer-equivalent or stricter (it never permits a session pytest's own next cleanup, with the default retention, would keep; while a pytest of the same user runs it needs a session older than pytest's dead-lock age, Mark 2026-10-23); the unused-root row heuristic, and it does remove sessions above the rank that pytest keeps | Those of safety.md (pytest sessions), each with its vector. `min_idle_for: 1h` covers pytest's startup window between the session's `mkdir` and its `.lock` (microseconds), with a wide margin for a stalled start; it is not part of the contract's soundness. | Shipped (TASK-112 step 5), admitted by Mark, 2026-10-23. Matching set as in the library row. Every verdict of the decision table names its row in the detail; the checks before the table (safety.md) name none. Container tests: `pytest_lifecycle_is_pinned`, `pytest_live_policy_none_session_in_shell_root_is_kept`, `pytest_live_basetemp_session_is_kept`, `pytest_orphan_xdist_worker_keeps_session`. In the 0.1 and 0.2 catalogs (TASK-65, Mark 2026-10-24). |
 | `brave-browser-cache`, `chrome-browser-cache`, `chromium-browser-cache`, `edge-browser-cache` | Chromium-family browsers, default user-data directory | `app_not_running` | sound (presence marker) | A browser that starts between the last lock check and the unlink finds its `Cache` or `Code Cache` missing, which Chromium treats as an empty cache. | Shipped (TASK-74). |
 | `teams-for-linux-electron-cache`, `figma-linux-electron-cache` | teams-for-linux 2.23.0 and figma-linux 0.11.5 on Electron 43.6.0 (sources read, TASK-78: `app.requestSingleInstanceLock()` before `ready`, a second instance quits, no `releaseSingleInstanceLock()`), default user-data directory | `app_not_running` | sound (presence marker) | As the browsers': an app that starts between the last lock check and the unlink finds a cache missing, which Chromium treats as an empty cache. Electron removes the lock at `quit`, before its sessions close, so a cache can be deleted during an app's last moments of shutdown, with the same consequence; the in-use check narrows that window only while the closing app holds files in the cache open. Only for the versions read: a later version that stops taking the lock, or takes it after opening a session, falls outside the contract. | Shipped (TASK-78) to the development library only: in no catalog until Mark admits the app names. Container tests with the real apps: not yet written (a follow-up of TASK-78). |
-| `cargo-target` | Cargo (1.90.0, 1.99.1, nightly-2026-10-16) | the kind's lock protocol, `checkouts: allow` | delegated (producer lock) | A program built in the target and running from it is protected by process heuristics only: Cargo holds no lock while it runs (PRD, Limits). | Shipped; in the 0.1 catalog. |
-| `docker-build-cache`, `docker-dangling`, `docker-unreferenced` | Docker Engine 29.8.2 and Buildx 0.37.2 in digest-pinned dind | the bound engine's own prune (`docker builder prune --all`, `docker image prune`, `docker image prune --all`); the daemon keeps what a build or container references | delegated | `docker-unreferenced` also removes tagged images that no container references; a later `docker run` pulls them again, or they are rebuilt when they were built locally and never pushed. | Shipped; not in 0.1 (Docker actions are outside its scope). |
+| `cargo-target` | Cargo (1.90.0, 1.99.1, nightly-2026-10-16) | the kind's lock protocol, `checkouts: allow` | delegated (producer lock) | A program built in the target and running from it is protected by process heuristics only: Cargo holds no lock while it runs (PRD, Limits). | Shipped; in the 0.1 and 0.2 catalogs. |
+| `docker-build-cache`, `docker-dangling`, `docker-unreferenced` | Docker Engine 29.8.2 and Buildx 0.37.2 in digest-pinned dind | the bound engine's own prune (`docker builder prune --all`, `docker image prune`, `docker image prune --all`); the daemon keeps what a build or container references | delegated | `docker-unreferenced` also removes tagged images that no container references; a later `docker run` pulls them again, or they are rebuilt when they were built locally and never pushed. | Shipped; not in 0.1 or 0.2 (Docker actions are outside their scope). |
 | `podman-dangling`, `podman-unreferenced` | Podman 5.8.7: `image prune` in an isolated store (2026-10-20, TASK-93 notes); read-only on the development machine (2026-11-03) | the caller's local store's own prune (`podman --remote=false image prune --force`, with `--all`); Podman keeps every image a container, running or stopped, was created from, and (without `--external`) every image a Buildah working container uses | delegated | `podman-unreferenced` also removes tagged images no container uses, diskgc's own e2e images among them whenever their containers are gone; the harness reloads them from the Nix store (`podman load`), a pulled image is pulled again. A `podman run` between its image check and its container's creation can find its image gone and fail. `podman-unreferenced` also empties Podman's `RUN --mount=type=cache` caches without a lock: a build using one at that moment can fail or cache a partial result, and the next build downloads again. | Shipped in the development library only (class delegated, admissible by the rule); in no release catalog until Mark admits it (TASK-93); the `--all` prune not yet run in a container. Vectors: `podman-*` (backend). |
-| `pip-cache`, `uv-cache`, `go-build-cache`, `npm-cache`, `pnpm-store`, `yarn-cache`, `ccache`, `platformio-cache`, `jest-cache` | pip 26.1.2, uv 0.13.0, Go 1.26.8, npm 11.19.0, pnpm 12.9.0, Yarn 1.22.22, ccache 4.14.1, PlatformIO 6.1.19, Jest 30.2.0, each cleaner run in a Nix container on the exact measured directory | the tool's own cleaner (Built-in profile library); in use, `checkouts: refuse` | delegated | No worse than the user running that cleaner: what it does to a run in flight is the tool's (Jest's `--clearCache` and `ccache --clear` remove the directory's contents outright; `pnpm store prune` removes only packages no project references). A uv environment installed with the non-default `link-mode = "symlink"` points into the cache and breaks until reinstalled. Rebuilding needs the network. | Shipped; not in 0.1 (command actions are outside its scope). |
+| `pip-cache`, `uv-cache`, `go-build-cache`, `npm-cache`, `pnpm-store`, `yarn-cache`, `ccache`, `platformio-cache`, `jest-cache` | pip 26.1.2, uv 0.13.0, Go 1.26.8, npm 11.19.0, pnpm 12.9.0, Yarn 1.22.22, ccache 4.14.1, PlatformIO 6.1.19, Jest 30.2.0, each cleaner run in a Nix container on the exact measured directory | the tool's own cleaner (Built-in profile library); in use, `checkouts: refuse` | delegated | No worse than the user running that cleaner: what it does to a run in flight is the tool's (Jest's `--clearCache` and `ccache --clear` remove the directory's contents outright; `pnpm store prune` removes only packages no project references). A uv environment installed with the non-default `link-mode = "symlink"` points into the cache and breaks until reinstalled. Rebuilding needs the network. | Shipped; not in 0.1 or 0.2 (command actions are outside their scope). |
 | `pytest-cache` | pytest 9.0.3 (cacheprovider source read, TASK-122) | consumer tolerance: `Cache.get` returns the caller's default for a missing or unreadable key, `Cache.set` creates the directory and only warns when it cannot write | tolerant | The next `--lf`, `--ff` or `--sw` run has no record of earlier failures and runs every test. | Shipped. |
 | `python-pycache` | CPython 3.13.15 (importlib) | consumer tolerance: a missing or stale `.pyc` is recompiled from its source, a failed bytecode write is ignored, and a `.pyc` in `__pycache__` is never imported without its source (PEP 3147), so the directory never holds the only copy of code | tolerant | Recompilation on the next import; a read-only tree stays uncached (time only). | Shipped. |
 | `mypy-cache` | mypy 1.11.2 (cache layout); write paths read in mypy 1.9.0's source (TASK-122), not re-read for 1.11.2 | in use; consumer tolerance between runs: a module whose cache entry is missing is checked again; `CACHEDIR.TAG` required | verified heuristic | The next run is a full check (time). A run whose cache directory disappears while it writes stops with mypy's blocking "Error writing plugins snapshot" or fine-grained dependency error: one failed, retryable run (the in-use scan sees the run only while it holds a file there). | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: tolerant between runs, not for a run in flight. Vector: `mypy-cache-run-in-flight-residual`. Container test: pending (TASK-137). |
@@ -2602,7 +2608,7 @@ its task notes.
 | `containers-image-tmp` | containers/image and Buildah spools in `/var/tmp`; the real producers' lifecycle is unverified | `min_idle_for: 3d` only | none | Not a built-in. | Withdrawn (Mark, 2026-10-23). Counterexample: `vm_containers_image_dormant_spool_exposes_liveness_gap`. Re-admitted only under a new name after TASK-125 verifies the real lifecycle in a container test. |
 | `gradle-caches` | Gradle; its daemons lock cache entries only on demand | none for diskgc: Gradle's own retention-based cleanup owns the directory, but there is no cleaner diskgc could invoke on a measured directory, so it is not *delegated* | none | Not a built-in. | Excluded; tune Gradle's cache retention instead. |
 | `maven-repo` | Maven, `mvnd`, IDEs | none: a JVM holds a jar open only while it is loaded; the repository has no lock by default | none | Not a built-in. | Excluded. |
-| `nix-garbage` | the system Nix daemon's own garbage collector, CppNix 2.34.8 (TASK-36 container scenarios) | Nix's GC roots, temporary and runtime roots, and its GC lock (kind `nix-store`), after diskgc's binding and root check ([safety.md](safety.md#nix-store)), not a `where` predicate | delegated | Nix collects what its own roots do not reach, by its own rules; a root database other than the bound daemon's, and processes outside the daemon's PID namespace, are not seen (safety.md, nix-store: What it does not prove). A GC's freed space can appear only at its end in an optimised store. | Shipped in the development library only (class delegated, admissible by the rule); in no release catalog until Mark admits it (TASK-36). Vectors: `nix-*` (backend). |
+| `nix-garbage` | the system Nix daemon's own garbage collector, CppNix 2.34.8 (TASK-36 container scenarios) | Nix's GC roots, temporary and runtime roots, and its GC lock (kind `nix-store`), after diskgc's binding and root check ([safety.md](safety.md#nix-store)), not a `where` predicate | delegated | Nix collects what its own roots do not reach, by its own rules; a root database other than the bound daemon's, and processes outside the daemon's PID namespace, are not seen (safety.md, nix-store: What it does not prove). A GC's freed space can appear only at its end in an optimised store. | Shipped; in the 0.2 catalog, not 0.1's (admitted by Mark, 2026-11-04, TASK-335). Vectors: `nix-*` (backend). Container tests: the Nix GC scenarios (testing.md), the release package's own `release_candidate_nix_garbage_dry_run_then_bounded_gc`. |
 
 ### Release notes (next release, draft)
 
@@ -2785,6 +2791,9 @@ line says it was reproduced.
   item 5) for `watch --tally-only` instances, and `--help` shows only the
   commands this package runs. 0.1.0: not affected; it ran no `watch` and
   shipped no templates.
+- TASK-335: the catalog adds `nix-garbage`, a garbage collection of the
+  system Nix store (What it does; its limits under Known limits). 0.1.0:
+  not affected; it shipped no Nix kind.
 - TASK-291: a command line that is not understood (a mistyped flag) is
   exit 2 naming it before anything on the machine is read, as TASK-272
   made a bad configuration. 0.1.0: yes; it ran the host's startup first,
@@ -2810,14 +2819,21 @@ warm, two read-only ones explain it:
   and never deletes ([Tally only](#tally-only); Install, item 5).
 - `diskgc check` validates a configuration without touching the machine;
   `diskgc profiles list|show|test` shows the built-in catalog.
-- The catalog is three sources and the seven idle filters (`idle-1h` to
+- The catalog is four sources and the seven idle filters (`idle-1h` to
   `idle-30d`): `cargo-target` (Cargo `target/` directories under supplied
   roots, reclaimed by Cargo's lock protocol), `nix-shell-rc` (rc
   directories of ended `nix-shell` and `nix develop` shells directly in
-  `/tmp`; Owner PID) and `pytest-tmp` (pytest sessions the pytest
-  contract permits). Both `/tmp` sources keep anything changed in the
-  last hour (`min_idle_for: 1h`); their limits are their rows in
-  [Liveness contracts](#liveness-contracts). A configuration may use
+  `/tmp`; Owner PID), `pytest-tmp` (pytest sessions the pytest
+  contract permits) and `nix-garbage` (new in 0.2: the dead paths of a
+  multi-user `/nix/store`, collected by one `nix-store --gc --max-freed
+  NEED` through the system Nix daemon as your user, where NEED is what
+  is still missing; Nix decides what is dead, and GC roots, profiles and
+  generations are never removed). Both `/tmp` sources keep anything
+  changed in the last hour (`min_idle_for: 1h`); the limits of each
+  source are its row in [Liveness contracts](#liveness-contracts), and
+  `nix-garbage`'s also under Known limits. Select it on its own
+  (`--select profile:nix-garbage /nix/store`, or a tier of its own): it
+  takes no filter and needs no `--roots`. A configuration may use
   `profile_policies` only to narrow a built-in's checkout guard; user
   profiles and overrides are refused.
 
@@ -2943,6 +2959,31 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   complete). Run it on the host. (In 0.1.0 it ran, and kept every
   `nix-shell-rc` and most `pytest-tmp` candidates as `producer_unknown`,
   but judged Cargo targets by the processes of its own namespace only.)
+- **Nix GC (`nix-garbage`).** Only CppNix 2.34.8, client and daemon,
+  is admitted ([Backend version allowlist](#backend-version-allowlist));
+  any other version, Lix or Determinate Nix, a single-user install, a
+  store the user's Nix points elsewhere and `--allow-root` are skipped
+  or refused before any GC ([safety.md](safety.md#nix-store), Failure
+  modes). A dry run cannot size the garbage: its plan row is `/nix/store`
+  with `estimated_bytes: null`, and it does not run the root check, so a
+  reclaim can still skip a tier the dry run showed eligible. What diskgc
+  binds is the system daemon and its root database; it cannot see a
+  second root database over the same physical store (a container's own
+  daemon sharing it, a `local?state=…` store), whose roots that GC
+  collects as `nix-collect-garbage` would, nor processes outside the
+  daemon's PID namespace using a store path without a root (Nix's own
+  limit): keep one root database per store
+  ([safety.md](safety.md#nix-store), What it does not prove). Another
+  user's profiles can stop the tier for everyone: more than 1,024
+  generation links in all is `unsupported_backend`, and a generation
+  whose store path is gone is an error, until those generations are
+  deleted (diskgc never deletes one). The GC frees at least the need by
+  Nix's own count, often more (the rest of the last path), and Nix's
+  count is not free space: the measured sample decides, and an
+  undershoot moves on to the next tier. Nix's root discovery removes
+  stale `gcroots/auto` registrations whose out-link is gone. A GC can
+  take minutes under the host lock, and with `auto-optimise-store` the
+  space appears only at its end.
 - **Deadlines are cooperative.** `--timeout` is checked between
   operations; one filesystem operation blocked in the kernel (a dead
   network mount, a slow disk) overruns it, and the overrun is reported
@@ -2975,13 +3016,14 @@ list, with `find.backend` beside it. Scripts match `status`, `cause`,
 `reason` and the exit code; message text and human output may change.
 `index` is still always `null` (0.1.0 had no index; this package has
 one, and the report's `index` block is still to come, TASK-244). The
-command-action,
-Docker and Nix parts of the profile schema stay provisional until the v1
-release review (task-49). `just docs-vs-binary BIN` runs what this
+command-action and
+Docker parts of the profile schema stay provisional until the v1
+release review (task-49); the `nix-store` profile shape is final
+([Profiles](#profiles)). `just docs-vs-binary BIN` runs what this
 reference documents against a build and reports any drift.
 
 **Not in the release catalog.** A reclaiming `watch` and `survey` (both
-exit 2; `watch --tally-only` runs), the Docker kinds, the Nix store kind, command actions,
+exit 2; `watch --tally-only` runs), the Docker kinds, command actions,
 user profiles and overrides, `ipc: live-only` in `ensure`, and every other
 built-in in the [library](#built-in-profile-library), including the other
 `/tmp` entries (`nix-shell.*` TMPDIRs themselves, `tmp.*`, anything
@@ -2994,7 +3036,8 @@ Evidence for the candidate package, and what it does not cover:
 |---|---|
 | Package contents | The actual `release-candidate` derivation passes the static ELF and installed-file check (the binary is byte-identical to its compile; the file list is exactly its release row's, each copy byte for byte; the notes' header and `--help`'s `watch` lines follow the row); its tmpfiles rule and example config are exercised in disposable Nix and Debian containers, and its `watch --tally-only` starts, writes its snapshot, stops on SIGTERM with exit 0 and deletes nothing there. Its unit templates are checked by `systemd-analyze verify` only as the development package's (byte-identical sources) and in the module's drop-in verification; no live `systemd` runs them from this package. |
 | Cargo operator journey | Those containers run the packaged, gate-lifted binary against real Cargo targets: dry run, busy-lock preservation, eligible deletion judged by the filesystem oracle, and a successful rebuild. Default and explicit `checkouts: allow`, and explicit `checkouts: refuse`, are checked on vendored checkout content. |
-| Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp` and the seven idle filters. Excluded built-ins and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
+| Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp`, `nix-garbage` and the seven idle filters. Excluded built-ins and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
+| Nix GC journey | In the Nix GC image (a container's own CppNix 2.34.8 store and daemon), the packaged binary plans `nix-garbage` in a dry run that deletes nothing, then runs one GC bounded by the asked need: a direct root, an out-link, system and per-user generations, a running build's input and a store file a process holds open all survive, and the dead paths go, judged by the deletion oracle. Every other Nix GC scenario (refusals, signals, the pinned socket) runs the e2e harness's development build, which shares the kind's code. |
 | Host and filesystem deployment | The candidate has no approval for an operator host or its filesystem, mount, permissions and running-work mix. Container results establish behavior only in those disposable fixtures. |
 | Race and temporary paths | Cargo race protocol tests use a separate development test driver, so they do not establish packaged-binary race behavior. The `/tmp` contracts' container tests run the development binary; the packaged binary's `/tmp` evidence is the release vectors (ModelHost) and a recorded walk in a disposable container (TASK-65), not a container suite, because `min_idle_for: 1h` meets the kernel's ctime and the gate-lifted binary has no test clock offset. |
 | Operator policy and rollout | Operator-authored `fs`/delete and command actions are excluded; the final policy contract, installation environment and rollout evidence are unresolved. Do not deploy the candidate built from master. |

@@ -80,6 +80,25 @@ fn the_0_1_row_is_what_v0_1_0_shipped() {
     );
 }
 
+/// 0.2's catalog is 0.1's plus `nix-garbage` (Mark, 2026-11-04, TASK-335),
+/// through the same narrowing the binary uses; 0.1's stays without it.
+#[test]
+fn the_0_2_catalog_is_0_1_plus_nix_garbage() {
+    let names = |release: &str| -> Vec<String> {
+        let library = Catalog::from(super::release(release).expect(release))
+            .library(Library::builtin().expect("built-ins"))
+            .unwrap_or_else(|e| panic!("{release} catalog: {e}"));
+        assert_eq!(library.release_name(), Some(release));
+        library.profiles().map(|p| p.name.clone()).collect()
+    };
+    let mut want = names("0.1");
+    assert!(!want.iter().any(|n| n == "nix-garbage"), "{want:?}");
+    want.push("nix-garbage".to_owned());
+    want.sort();
+    assert_eq!(names("0.2"), want);
+    assert_eq!(release("0.2").expect("0.2").catalog, Some(Release::V0_2));
+}
+
 /// Every release-catalog build has a row: the version in Cargo.toml picks
 /// it (flake.nix picks the same by `lib.versions.majorMinor`).
 #[test]

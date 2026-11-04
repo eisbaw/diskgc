@@ -11,7 +11,7 @@ import unittest
 
 from docs_vs_binary import (
     Report, Result, Runner, UnsafeProbe, code_blocks, config_examples, dev_only_refusals,
-    DESCRIPTOR, RECLAIMING_COMMANDS, build_row, documented_catalog, enum_values, host_refusal,
+    CATALOGS_IN_VERDICT, DESCRIPTOR, RECLAIMING_COMMANDS, build_row, documented_catalog, enum_values, host_refusal,
     json_schema, not_in_build, observed_values, parse_usage,
     probe_ci_examples, profiles_test_keys, schema_diff, section, size_grammar, status_exit_codes,
     table_rows, tier_names,
@@ -159,12 +159,30 @@ class ReferenceShapeTests(unittest.TestCase):
         self.doc = REFERENCE.read_text()
 
     def test_catalog_tables(self):
-        release, sources, filters, inactive = documented_catalog(self.doc)
-        self.assertIn("cargo-target", release)
-        self.assertLessEqual(release, sources)
+        catalogs, sources, filters, inactive = documented_catalog(self.doc)
+        self.assertIn("cargo-target", catalogs["0.1"])
+        self.assertNotIn("nix-garbage", catalogs["0.1"])
+        # TASK-335: 0.2's catalog is 0.1's plus nix-garbage.
+        self.assertLessEqual(catalogs["0.1"], catalogs["0.2"])
+        self.assertIn("nix-garbage", catalogs["0.2"])
+        for members in catalogs.values():
+            self.assertLessEqual(members, sources)
+        self.assertNotIn("docker-dangling", set().union(*catalogs.values()))
         self.assertIn("idle-1d", filters)
         self.assertIn("tmp-entry", inactive)
         self.assertFalse(sources & inactive)
+
+    def test_verdict_catalogs(self):
+        def labels(verdict):
+            return [m.group(1) for m in CATALOGS_IN_VERDICT.finditer(verdict.lower())]
+        self.assertEqual(labels("Shipped; in the 0.1 and 0.2 catalogs."), ["0.1 and 0.2"])
+        self.assertEqual(labels("Shipped; in the 0.2 catalog, not 0.1's (TASK-335)."), ["0.2"])
+        self.assertEqual(labels("In the 0.1 and 0.2 catalogs (TASK-65)."), ["0.1 and 0.2"])
+        for none in ("Shipped; not in 0.1 or 0.2 (Docker actions are outside their scope).",
+                     "Shipped in the development library only; in no release catalog.",
+                     "Decision pending: in no catalog",
+                     "Shipped; not in the 0.2 catalog."):
+            self.assertEqual(labels(none), [], none)
 
     def test_exit_status_mapping_covers_every_status(self):
         out = section(self.doc, "## Output")

@@ -2,8 +2,9 @@
 
 diskgc keeps enough free space on a filesystem for unattended builds by
 deleting rebuildable cache that, as far as it can tell, nothing is using:
-Cargo `target/` directories, and the leftovers of ended pytest sessions and
-nix-shell runs in `/tmp`. `ensure` brings one filesystem up to a free-space
+Cargo `target/` directories, the leftovers of ended pytest sessions and
+nix-shell runs in `/tmp`, and the dead paths of a multi-user Nix store
+(through the system Nix daemon's own garbage collector). `ensure` brings one filesystem up to a free-space
 goal once and exits with a code a CI hook or an agent script can branch on.
 
 ## This package

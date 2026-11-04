@@ -15,10 +15,13 @@ use crate::owner_pid_suite::{HIDEPID, NOT_INITIAL, Namespace, expect_refused};
 use crate::suite::{Ctx, TestResult};
 use crate::{TESTER, ensure};
 
-// The 0.1 catalog signed off by TASK-65 (Mark, 2026-10-24): Cargo, the two
-// /tmp built-ins with a liveness contract, and the idle filters.
+// The release candidate's (0.2) catalog: 0.1's, signed off by TASK-65
+// (Mark, 2026-10-24: Cargo, the two /tmp built-ins with a liveness
+// contract, and the idle filters), plus nix-garbage (Mark, 2026-11-04,
+// TASK-335).
 const ADMITTED: &[&str] = &[
     "cargo-target",
+    "nix-garbage",
     "nix-shell-rc",
     "pytest-tmp",
     "idle-1h",
@@ -39,8 +42,6 @@ const EXCLUDED: &[&str] = &[
     // TASK-93, pending Mark's admission: development library only.
     "podman-dangling",
     "podman-unreferenced",
-    // TASK-36, pending Mark's admission: development library only.
-    "nix-garbage",
     "pytest-cache",
     "nix-user-cache",
     "bun-cache",
@@ -89,7 +90,7 @@ const EXCLUDED: &[&str] = &[
     "bazel-output-base-anchored",
 ];
 
-fn run_binary(
+pub(crate) fn run_binary(
     ctx: &Ctx,
     binary: &str,
     args: &[&str],
@@ -101,7 +102,7 @@ fn run_binary(
 /// The binary named `binary` under test: `diskgc-release` is the
 /// release-candidate package's, which the release runner installs as the
 /// default `diskgc` ([`crate::RELEASE_DEFAULT_MARKER`]).
-fn binary_path(ctx: &Ctx, binary: &str) -> PathBuf {
+pub(crate) fn binary_path(ctx: &Ctx, binary: &str) -> PathBuf {
     if binary == "diskgc-release" && ctx.bin_dir.join(crate::RELEASE_DEFAULT_MARKER).exists() {
         ctx.diskgc()
     } else {
@@ -136,7 +137,7 @@ fn run(ctx: &Ctx, args: &[&str], expected: i32) -> Result<crate::under_test::Run
     run_binary(ctx, "diskgc-release", args, expected)
 }
 
-fn profile_names(output: &str) -> Result<BTreeSet<String>, String> {
+pub(crate) fn profile_names(output: &str) -> Result<BTreeSet<String>, String> {
     let listed: Value = serde_json::from_str(output)
         .map_err(|error| format!("parse profiles list: {error}: {output}"))?;
     let entries = listed["profiles"]
@@ -164,7 +165,7 @@ pub fn candidate_catalog_refuses_every_excluded_builtin(ctx: &Ctx) -> TestResult
     let admitted: BTreeSet<String> = ADMITTED.iter().map(|name| (*name).to_owned()).collect();
     ensure!(
         names == admitted,
-        "candidate catalog differs from the reviewed 0.1 catalog: {names:?}"
+        "candidate catalog differs from the reviewed catalog: {names:?}"
     );
     let development = run_binary(
         ctx,
@@ -182,7 +183,7 @@ pub fn candidate_catalog_refuses_every_excluded_builtin(ctx: &Ctx) -> TestResult
     );
 
     let help = run(ctx, &["--help"], 0)?;
-    for name in ["cargo-target", "nix-shell-rc", "pytest-tmp"] {
+    for name in ["cargo-target", "nix-garbage", "nix-shell-rc", "pytest-tmp"] {
         ensure!(help.stdout.contains(name), "help omits {name}");
         let shown = run(ctx, &["profiles", "show", name, "--json"], 0)?;
         ensure!(

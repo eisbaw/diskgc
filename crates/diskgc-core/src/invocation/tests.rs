@@ -250,6 +250,49 @@ fn proposed_catalog_refuses_excluded_config_tiers_even_when_later() {
     }
 }
 
+/// TASK-335: a configured `nix-garbage` tier, refused by the 0.1 catalog
+/// above, loads under 0.2's, beside 0.1's built-ins.
+#[test]
+fn the_0_2_catalog_takes_a_nix_garbage_tier() {
+    let source = "version: 1\ngroups:\n  - name: stale\n    tiers:\n      - name: cargo\n        select: profile:cargo-target && filter:idle-7d\n        roots: [/tmp]\n      - name: nix\n        select: profile:nix-garbage\n";
+    let path = Path::new("/tmp/policy.yaml");
+    let config = Catalog::from(crate::release::release("0.2").expect("0.2"))
+        .config(path, source.as_bytes(), ConfigUse::Run)
+        .unwrap_or_else(|e| panic!("0.2 refused a nix-garbage tier: {e}"));
+    assert_eq!(config.groups[0].tiers.len(), 2);
+    let error = release_01()
+        .config(path, source.as_bytes(), ConfigUse::Run)
+        .expect_err("0.1 does not ship nix-garbage");
+    assert!(
+        error.contains("`nix-garbage` is a built-in that diskgc 0.1 does not ship"),
+        "{error}"
+    );
+}
+
+/// docs/reference.md, Built-in profile library: under 0.2, `checkouts:
+/// refuse` on `nix-garbage` loads and changes nothing (a GC has no file
+/// candidates); `allow` is refused.
+#[test]
+fn the_0_2_catalog_takes_only_a_refusing_checkout_policy_for_nix_garbage() {
+    let path = Path::new("/tmp/policy.yaml");
+    let release_02 = Catalog::from(crate::release::release("0.2").expect("0.2"));
+    let policy = |checkouts: &str| {
+        format!(
+            "version: 1\nprofile_policies:\n  - profile: nix-garbage\n    checkouts: {checkouts}\n"
+        )
+    };
+    release_02
+        .config(path, policy("refuse").as_bytes(), ConfigUse::Run)
+        .unwrap_or_else(|e| panic!("0.2 refused `checkouts: refuse` on nix-garbage: {e}"));
+    let error = release_02
+        .config(path, policy("allow").as_bytes(), ConfigUse::Run)
+        .expect_err("allow on a GC");
+    assert!(
+        error.contains("`nix-garbage` has kind nix-store and cannot allow checkouts"),
+        "{error}"
+    );
+}
+
 #[test]
 fn proposed_catalog_refuses_operator_override_of_an_allowed_name() {
     let source = concat!(

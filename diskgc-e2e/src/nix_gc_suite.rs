@@ -348,20 +348,26 @@ fn ensure_nix_in(
     env: &[(&str, &str)],
     args: &[String],
 ) -> Result<Run, String> {
+    run_binary_in(ctx, &ctx.diskgc(), cwd, env, args)
+}
+
+/// `binary args...` as tester under strace, from `cwd`, with `env` added.
+fn run_binary_in(
+    ctx: &Ctx,
+    binary: &Path,
+    cwd: &Path,
+    env: &[(&str, &str)],
+    args: &[String],
+) -> Result<Run, String> {
     let env: Vec<(String, String)> = env
         .iter()
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
         .collect();
-    let run = under_test::run_as_tester_with_env(
-        &ctx.ledger,
-        &ctx.records,
-        cwd,
-        &env,
-        &ctx.diskgc(),
-        args,
-    )?;
+    let run =
+        under_test::run_as_tester_with_env(&ctx.ledger, &ctx.records, cwd, &env, binary, args)?;
     info!(
-        "diskgc {args:?} in {} -> {:?}\n--- stdout\n{}--- stderr\n{}",
+        "{} {args:?} in {} -> {:?}\n--- stdout\n{}--- stderr\n{}",
+        binary.display(),
         cwd.display(),
         run.code,
         run.stdout,
@@ -615,17 +621,93 @@ fn avail(path: &str) -> Result<u64, String> {
 /// runtime root (a process with a store file open) all survive the GC;
 /// the dead paths go. diskgc's user is not trusted.
 pub fn nix_gc_keeps_every_kind_of_root(ctx: &Ctx) -> TestResult {
-    keeps_every_kind_of_root(ctx, false)
+    keeps_every_kind_of_root(ctx, false, Build::Development)
 }
 
 /// docs/testing.md `nix_gc_trusted_and_untrusted_user`: the same scenario
 /// with diskgc's user in `trusted-users` (the untrusted run is
 /// [`nix_gc_keeps_every_kind_of_root`]); the same paths survive.
 pub fn nix_gc_trusted_and_untrusted_user(ctx: &Ctx) -> TestResult {
-    keeps_every_kind_of_root(ctx, true)
+    keeps_every_kind_of_root(ctx, true, Build::Development)
 }
 
-fn keeps_every_kind_of_root(ctx: &Ctx, trusted: bool) -> TestResult {
+/// docs/testing.md `release_candidate_nix_garbage_dry_run_then_bounded_gc`
+/// (TASK-335): the keep-every-root scenario through the gate-lifted
+/// `release-candidate` package, whose release row's catalog holds
+/// `nix-garbage`. A dry run first (one plan row, size unknown, no GC, no
+/// root check, nothing deleted), then a reclaim asked for about 1 MiB more
+/// than is free: one GC bounded by that need, not by the filesystem, every
+/// root kept and every dead path gone, judged by the deletion oracle.
+pub fn release_candidate_nix_garbage_dry_run_then_bounded_gc(ctx: &Ctx) -> TestResult {
+    keeps_every_kind_of_root(ctx, false, Build::ReleaseCandidate)
+}
+
+/// Which build a scenario runs, and so how much it asks to free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Build {
+    /// The e2e development build (`diskgc`), asked for `--min-free 100%`.
+    Development,
+    /// The `release-candidate` package (`diskgc-release`, the default
+    /// `diskgc` of the release runner), dry run first, then a bounded need.
+    ReleaseCandidate,
+}
+
+/// The need the release-candidate reclaim asks for beyond what is free:
+/// more than the scenario's dead paths (120 KiB), far less than the store's
+/// 1 GiB tmpfs, so a `--max-freed` near it shows the bound is the need.
+const BOUNDED_NEED_KIB: u64 = 1024;
+
+/// How far diskgc's `--max-freed` may lie from the need the test measured
+/// just before the run: one tmpfs page either way for rounding, as nothing
+/// writes the store's tmpfs in between.
+const NEED_SLACK: u64 = 4096;
+
+/// The release-candidate package with `nix-garbage` in its catalog: a
+/// narrowed catalog (every built-in it lists is in a release catalog), as
+/// only a `release-catalog` build has, that lists `nix-garbage`. Run before
+/// the store moves, under an oracle with nothing eligible.
+fn release_candidate_with_nix_garbage(ctx: &Ctx) -> Result<PathBuf, String> {
+    let binary = crate::release_suite::binary_path(ctx, "diskgc-release");
+    let list = crate::release_suite::run_binary(
+        ctx,
+        "diskgc-release",
+        &["profiles", "list", "--json"],
+        0,
+    )?;
+    let listed: Value = serde_json::from_str(&list.stdout)
+        .map_err(|e| format!("parse profiles list: {e}: {}", list.stdout))?;
+    let profiles = listed["profiles"]
+        .as_array()
+        .ok_or_else(|| format!("profiles list has no profiles: {listed}"))?;
+    let unreleased: Vec<&Value> = profiles
+        .iter()
+        .filter(|p| p["releases"].as_array().is_none_or(Vec::is_empty))
+        .map(|p| &p["name"])
+        .collect();
+    ensure!(
+        !profiles.is_empty() && unreleased.is_empty(),
+        "{} is not a release-catalog build: it lists {unreleased:?} outside every release catalog",
+        binary.display()
+    );
+    let names = crate::release_suite::profile_names(&list.stdout)?;
+    ensure!(
+        names.contains("nix-garbage"),
+        "the release candidate's catalog lacks nix-garbage: {names:?}"
+    );
+    crate::release_suite::run_binary(
+        ctx,
+        "diskgc-release",
+        &["profiles", "show", "nix-garbage", "--json"],
+        0,
+    )?;
+    Ok(binary)
+}
+
+fn keeps_every_kind_of_root(ctx: &Ctx, trusted: bool, build_kind: Build) -> TestResult {
+    let binary = match build_kind {
+        Build::Development => ctx.diskgc(),
+        Build::ReleaseCandidate => release_candidate_with_nix_garbage(ctx)?,
+    };
     own_store(1024)?;
     if trusted {
         configure(&["trusted-users = root tester"])?;
@@ -727,8 +809,19 @@ fn keeps_every_kind_of_root(ctx: &Ctx, trusted: bool) -> TestResult {
             build.try_wait().map_err(|e| e.to_string())?.is_none(),
             "the paused build ended before the GC: no temporary root to keep"
         );
+        let (min_free, goal) = match build_kind {
+            Build::Development => ("100%".to_owned(), None),
+            Build::ReleaseCandidate => {
+                dry_run_plans_one_gc(ctx, &binary, &dead, &links)?;
+                let goal_kib = avail(STORE)? / 1024 + BOUNDED_NEED_KIB;
+                (format!("{goal_kib}KiB"), Some(goal_kib * 1024))
+            }
+        };
         let oracle = Oracle::arm(fixture)?;
-        let run = ensure_nix(ctx, &[], "100%")?;
+        // The need diskgc should compute from its own fresh sample: nothing
+        // else writes the store's tmpfs between this one and its.
+        let need = goal.map(|goal| avail(STORE).map(|now| goal.saturating_sub(now)));
+        let run = run_binary_in(ctx, &binary, Path::new("/"), &[], &ensure_args(&min_free))?;
         let build_ran_through = build.try_wait().map_err(|e| e.to_string())?.is_none();
         oracle.judge(&run)?.assert_clean()?;
         assert_links_kept(&links, &protected_links(&["/home/tester/result"])?)?;
@@ -743,7 +836,7 @@ fn keeps_every_kind_of_root(ctx: &Ctx, trusted: bool) -> TestResult {
         let report = report(&run)?;
         ensure!(
             run.code == Some(1),
-            "exit {:?} (100% stays unmet): {report}",
+            "exit {:?} ({min_free} stays unmet): {report}",
             run.code
         );
         ensure!(
@@ -770,10 +863,28 @@ fn keeps_every_kind_of_root(ctx: &Ctx, trusted: bool) -> TestResult {
             "no root check line for the 4 generations:\n{}",
             run.stderr
         );
+        if let Some(need) = need {
+            let need = need?;
+            let bound = max_freed(&run.stderr)?;
+            ensure!(
+                need > 0 && bound.abs_diff(need) <= NEED_SLACK,
+                "--max-freed {bound} is not the need {need} measured before the run (within \
+                 {NEED_SLACK} bytes)"
+            );
+            let removed: BTreeSet<String> = before.difference(&after).cloned().collect();
+            let dead_names: BTreeSet<String> =
+                dead.iter().map(|p| p.display().to_string()).collect();
+            ensure!(
+                removed == dead_names,
+                "the GC removed {removed:?}, not exactly the dead paths {dead_names:?}"
+            );
+        }
         info!(
-            "trusted {trusted}: root check {:?} ms, GC action {} ms, avail delta {}",
+            "{build_kind:?}, trusted {trusted}: root check {:?} ms, GC action {} ms, \
+             --max-freed {:?}, avail delta {}",
             root_check_ms(&run.stderr),
             action["duration_ms"],
+            max_freed(&run.stderr).ok(),
             action["avail_delta_bytes"]
         );
         Ok(())
@@ -783,6 +894,47 @@ fn keeps_every_kind_of_root(ctx: &Ctx, trusted: bool) -> TestResult {
     let _ = holder.kill();
     let _ = holder.wait();
     result
+}
+
+/// The release candidate's dry run of the Nix tier (exit 0): one plan row,
+/// `/nix/store`, eligible, size unknown; no GC and no root check (which
+/// unlinks stale registrations, so a dry run must not run it); every dead
+/// path and protected link still there, and nothing deleted (the oracle,
+/// with nothing eligible).
+fn dry_run_plans_one_gc(ctx: &Ctx, binary: &Path, dead: &[PathBuf], links: &Links) -> TestResult {
+    let mut args = ensure_args("100%");
+    args.insert(1, "--dry-run".to_owned());
+    let oracle = Oracle::arm(nix_state_writers(Fixture::new()).concurrent_writer("/tmp"))?;
+    let plan = run_binary_in(ctx, binary, Path::new("/"), &[], &args)?;
+    oracle.judge(&plan)?.assert_clean()?;
+    let report = report(&plan)?;
+    ensure!(
+        plan.code == Some(0) && report["status"] == "dry_run",
+        "dry run exit {:?}: {report}",
+        plan.code
+    );
+    let rows = report["plan"].as_array().ok_or("no plan array")?;
+    ensure!(
+        rows.len() == 1
+            && rows[0]["candidate"] == STORE
+            && rows[0]["eligible"] == true
+            && rows[0]["estimated_bytes"].is_null(),
+        "expected one eligible /nix/store row of unknown size: {report}"
+    );
+    ensure!(
+        report["actions"].as_array().is_some_and(Vec::is_empty)
+            && report["errors"].as_array().is_some_and(Vec::is_empty),
+        "dry run acted or failed: {report}"
+    );
+    ensure!(
+        !plan.stderr.contains("Nix GC through") && !plan.stderr.contains("Nix root check:"),
+        "the dry run ran a GC or the root check:\n{}",
+        plan.stderr
+    );
+    for path in dead {
+        ensure!(exists(path), "the dry run removed {}", path.display());
+    }
+    assert_links_kept(links, &protected_links(&["/home/tester/result"])?)
 }
 
 /// docs/testing.md `nix_gc_refuses_a_daemon_with_another_root_database`:

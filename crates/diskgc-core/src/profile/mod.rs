@@ -396,10 +396,11 @@ impl Library {
     /// allowed name. A name-only allowlist would otherwise admit a command
     /// action or an arbitrary filesystem delete under `cargo-target`.
     ///
-    /// The release scope (PRD.md, Scope: 0.1's, which no later release has
-    /// widened yet) is checked against the data rather than trusted: a
-    /// released source is of kind `fs` with the `delete` action or
-    /// `cargo-target` with its lock protocol, and of an admissible class
+    /// The release scope (PRD.md, Scope; 0.2's `nix-store`: TASK-335) is
+    /// checked against the data rather than trusted: a released source is of a kind its catalog
+    /// admits ([`Release::kinds`]) with that kind's own action (`fs` with
+    /// `delete`, `cargo-target` with its lock protocol, `nix-store` with
+    /// its bounded GC; never a command action), and of an admissible class
     /// (the loader already refuses `releases` on class none). A violation
     /// is a bug in builtin.yaml, which the tests load.
     pub fn release_catalog(self, release: &str, catalog: Release) -> Result<Self, String> {
@@ -445,21 +446,33 @@ impl Library {
         });
         self.withheld = Some((release.to_owned(), withheld));
         for profile in self.profiles.values() {
-            let in_scope = match &profile.body {
-                Body::Filter(_) => true,
-                Body::Source(source) => {
-                    let shape = match source.kind() {
-                        Kind::Fs => matches!(source.action, Action::Delete { .. }),
-                        Kind::CargoTarget => source.action == Action::CargoLockProtocol,
-                        _ => false,
-                    };
-                    shape && source.liveness_class.is_some_and(LivenessClass::admissible)
-                }
+            let Body::Source(source) = &profile.body else {
+                continue;
             };
-            if !in_scope {
+            let kind = source.kind();
+            let own_action = match kind {
+                Kind::Fs => matches!(source.action, Action::Delete { .. }),
+                Kind::CargoTarget => source.action == Action::CargoLockProtocol,
+                Kind::NixStore => source.action == Action::NixStoreGc,
+                _ => false,
+            };
+            let why = if !catalog.kinds().contains(&kind) {
+                let kinds: Vec<&str> = catalog.kinds().iter().map(|k| k.name()).collect();
+                Some(format!(
+                    "kind {kind} is not one of its kinds ({})",
+                    kinds.join(", ")
+                ))
+            } else if !own_action {
+                Some(format!("its action is not kind {kind}'s own"))
+            } else if !source.liveness_class.is_some_and(LivenessClass::admissible) {
+                Some("its liveness class is not admissible".to_owned())
+            } else {
+                None
+            };
+            if let Some(why) = why {
                 return Err(format!(
-                    "diskgc {release}'s catalog ({}) built-in `{}` is outside the release scope \
-                     (kind, action or liveness class)",
+                    "diskgc {release}'s catalog ({}) built-in `{}` is outside the release scope: \
+                     {why}",
                     catalog.name(),
                     profile.name
                 ));

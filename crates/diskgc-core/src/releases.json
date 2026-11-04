@@ -41,7 +41,7 @@
     "0.2": {
       "tag": null,
       "commands": ["ensure", "watch --tally-only", "check", "profiles"],
-      "catalog": "0.1",
+      "catalog": "0.2",
       "ships": [
         "lib/tmpfiles.d/diskgc.conf",
         "share/doc/diskgc/examples/example.yaml",

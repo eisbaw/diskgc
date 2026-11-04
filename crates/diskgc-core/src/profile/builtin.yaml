@@ -10,10 +10,11 @@
 # `liveness_class` (every source) is the admission class of docs/safety.md,
 # Producer liveness; its evidence, residuals and verdict are the source's row
 # in docs/reference.md, Liveness contracts, which a test keeps in sync.
-# `releases: ["0.1"]` puts a built-in in the 0.1 catalog, which a release
-# row of crates/diskgc-core/src/releases.json names (Library::release_catalog):
-# explicit membership per catalog, not a
-# "since"; the loader refuses it on class none.
+# `releases: ["0.1", "0.2"]` puts a built-in in the 0.1 and 0.2 catalogs,
+# which release rows of crates/diskgc-core/src/releases.json name
+# (Library::release_catalog): explicit membership per catalog, not a
+# "since"; the loader refuses it on class none, and each catalog admits only
+# its kinds (Release::kinds).
 
 - name: docker-build-cache
   category: containers
@@ -67,7 +68,7 @@
   verified_with: Podman 5.8.7 read-only on the development machine (what --all would prune), 2026-11-03; the --all prune itself not yet run in a container
   liveness_class: delegated
 
-# TASK-36, development library only, pending Mark's admission: the dead
+# TASK-36; in the 0.2 catalog, not 0.1 (Mark, 2026-11-04, TASK-335): the dead
 # store paths of the system Nix daemon, collected by Nix's own GC through
 # the daemon socket as diskgc's user, bounded by the remaining need
 # (docs/safety.md, nix-store). Nix decides liveness; GC roots, profiles and
@@ -81,6 +82,7 @@
   find: {roots: daemon}
   verified_with: CppNix 2.34.8 client and daemon, disposable-container store and daemon (TASK-36)
   liveness_class: delegated
+  releases: ["0.2"]
 
 - name: cargo-target
   category: rust
@@ -92,7 +94,7 @@
   checkouts: allow  # why: docs/reference.md, Built-in profile library (cargo-target)
   verified_with: cargo 1.90.0, 1.99.1 and nightly-2026-10-16 (lock files, docs/safety.md)
   liveness_class: delegated
-  releases: ["0.1"]
+  releases: ["0.1", "0.2"]
 
 - name: pytest-cache
   category: test
@@ -582,7 +584,7 @@
     no_match: [/tmp/nix-shell.8raHjU, /tmp/nix-shell-1144586, /tmp/nix-shell.AB/nix-shell-1-2]
   verified_with: Nix 2.34.9 (nix_shell_rc_lifecycle_is_pinned 2026-10-24); Nix 2.34.8 (host dry run 2026-10-24)
   liveness_class: sound
-  releases: ["0.1"]
+  releases: ["0.1", "0.2"]
 
 # Admitted as a verified heuristic (Mark, 2026-10-23) under the pytest
 # contract (docs/safety.md, pytest sessions; docs/reference.md, Liveness
@@ -604,7 +606,7 @@
     no_match: [/tmp/pytest-of-mark, /tmp/pytest-of-mark/pytest-3/test_x0, /tmp/a/b/c/pytest-of-mark/pytest-1, /var/tmp/pytest-of-ci/pytest-1]
   verified_with: pytest 9.1.1 (pytest_lifecycle_is_pinned 2026-10-24; contract container tests 2026-10-24)
   liveness_class: verified-heuristic
-  releases: ["0.1"]
+  releases: ["0.1", "0.2"]
 
 # Browser cache paths are below the supplied home root. Each application
 # needs its own source because app_not_running checks one SingletonLock.
@@ -838,40 +840,40 @@
   category: filters
   description: not used or changed for an hour, as the source's kind measures it
   where: {idle_for: 1h}
-  releases: ["0.1"]
+  releases: ["0.1", "0.2"]
 
 - name: idle-1d
   category: filters
   description: not used or changed for a day, as the source's kind measures it
   where: {idle_for: 1d}
-  releases: ["0.1"]
+  releases: ["0.1", "0.2"]
 
 - name: idle-2d
   category: filters
   description: not used or changed for 2 days, as the source's kind measures it
   where: {idle_for: 2d}
-  releases: ["0.1"]
+  releases: ["0.1", "0.2"]
 
 - name: idle-3d
   category: filters
   description: not used or changed for 3 days, as the source's kind measures it
   where: {idle_for: 3d}
-  releases: ["0.1"]
+  releases: ["0.1", "0.2"]
 
 - name: idle-7d
   category: filters
   description: not used or changed for 7 days, as the source's kind measures it
   where: {idle_for: 7d}
-  releases: ["0.1"]
+  releases: ["0.1", "0.2"]
 
 - name: idle-10d
   category: filters
   description: not used or changed for 10 days, as the source's kind measures it
   where: {idle_for: 10d}
-  releases: ["0.1"]
+  releases: ["0.1", "0.2"]
 
 - name: idle-30d
   category: filters
   description: not used or changed for 30 days, as the source's kind measures it
   where: {idle_for: 30d}
-  releases: ["0.1"]
+  releases: ["0.1", "0.2"]

@@ -1,6 +1,6 @@
 { pkgs, release, versionLine }:
 
-# TASK-156: the release package (the 0.1 catalog), installed in a NixOS guest as a user
+# TASK-156: the release package (this version's release catalog), installed in a NixOS guest as a user
 # installs it (the static binary on PATH, its tmpfiles.d drop-in, its example
 # config), reclaims real pytest sessions and nix rc directories in /tmp that
 # are genuinely days old. The release binary has no test clock offset, and

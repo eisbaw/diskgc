@@ -246,19 +246,37 @@ impl LivenessClass {
     }
 }
 
-/// A release catalog a built-in can belong to (`releases:`). One value
-/// until v1 has a catalog of its own.
+/// A release catalog a built-in can belong to (`releases:`): one label
+/// per catalog, each listing its own members (membership, not "since";
+/// builtin.yaml is where members are decided).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Release {
     V0_1,
+    V0_2,
 }
 
 impl Release {
+    pub const ALL: [Self; 2] = [Self::V0_1, Self::V0_2];
+
     /// As the YAML (a quoted string in `releases:`) and the JSON of
     /// `profiles` spell it.
     pub fn name(self) -> &'static str {
         match self {
             Self::V0_1 => "0.1",
+            Self::V0_2 => "0.2",
+        }
+    }
+
+    /// The kinds a source of this catalog may have: 0.1's are `fs` and
+    /// `cargo-target` (PRD.md, Scope); 0.2 adds `nix-store`, for
+    /// `nix-garbage` (Mark, 2026-11-04, TASK-335; the rest of 0.2's scope
+    /// is TASK-276's). A tagged catalog's list never changes, like its
+    /// release row. Checked against builtin.yaml when a catalog is built
+    /// (`Library::release_built_ins`), not trusted.
+    pub fn kinds(self) -> &'static [Kind] {
+        match self {
+            Self::V0_1 => &[Kind::Fs, Kind::CargoTarget],
+            Self::V0_2 => &[Kind::Fs, Kind::CargoTarget, Kind::NixStore],
         }
     }
 }
@@ -537,7 +555,7 @@ impl<'de> Deserialize<'de> for LivenessClass {
 
 impl<'de> Deserialize<'de> for Release {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        by_name(deserializer, &[Self::V0_1], Self::name)
+        by_name(deserializer, &Self::ALL, Self::name)
     }
 }
 

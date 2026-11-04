@@ -323,6 +323,10 @@ pub static NIX_GC_ONLY_TESTS: &[(&str, &str)] = &[
         "nix_gc_never_loads_a_configured_plugin",
         "needs the Nix GC image's own store, daemon and marker plugin",
     ),
+    (
+        "release_candidate_nix_garbage_dry_run_then_bounded_gc",
+        "needs the Nix GC image's own store and daemon",
+    ),
 ];
 
 /// Every image's special lists, as [`Image::runs`] takes them.
@@ -1017,6 +1021,15 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: nix_gc_suite::nix_gc_pinned_socket_survives_replacement,
+    },
+    // TASK-335: runs `diskgc-release` (the release-candidate package) in
+    // `_e2e-nix-gc`; the `--suite release` runs (base and Debian images)
+    // leave it out as Nix-GC-only (docs/testing.md, Nix GC).
+    Test {
+        name: "release_candidate_nix_garbage_dry_run_then_bounded_gc",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::release_candidate_nix_garbage_dry_run_then_bounded_gc,
     },
     Test {
         name: "native_docker_dangling_and_build_cache_prune",

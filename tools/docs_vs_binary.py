@@ -281,9 +281,17 @@ def status_exit_codes(exit_section):
     return mapping
 
 
+# A liveness verdict's catalogs: "in the 0.1 catalog", "in the 0.1 and 0.2
+# catalogs" (never "not in 0.1", "not in the 0.2 catalog" or "in no release
+# catalog"). golden.rs's catalogs_named reads the same grammar for the sync
+# rule.
+CATALOGS_IN_VERDICT = re.compile(r"(?<!not )\bin the (\d+\.\d+(?:(?:, | and )\d+\.\d+)*) catalogs?\b")
+
+
 def documented_catalog(reference):
-    """(0.1 source names, every library source name, filter names, planned or
-    withdrawn names) from the built-in library and liveness tables."""
+    """({catalog label: its source names}, every library source name, filter
+    names, planned or withdrawn names) from the built-in library and
+    liveness tables."""
     library = section(reference, "### Built-in profile library")
     rows = table_rows(library, "| Category | Profile |")
     sources, filters, inactive = set(), set(), set()
@@ -297,12 +305,12 @@ def documented_catalog(reference):
         else:
             sources |= names
     liveness = section(reference, "### Liveness contracts")
-    release = set()
+    catalogs = {}
     for cells in table_rows(liveness, "| Profile |"):
-        verdict = cells[-1].lower()
-        if "in the 0.1 catalog" in verdict and "not in 0.1" not in verdict:
-            release |= set(backticked(cells[0]))
-    return release, sources, filters, inactive
+        for match in CATALOGS_IN_VERDICT.finditer(cells[-1].lower()):
+            for label in re.findall(r"\d+\.\d+", match.group(1)):
+                catalogs.setdefault(label, set()).update(backticked(cells[0]))
+    return catalogs, sources, filters, inactive
 
 
 def size_grammar(reference):
@@ -754,7 +762,7 @@ def probe_ci_examples(reference, run, report, help_text):
                   "--help Start here example", "exit 0 dry_run", f"exit {r.code}")
 
 
-def probe_profiles(reference, run, report, help_text):
+def probe_profiles(reference, run, report, help_text, catalog):
     profiles_doc = section(reference, "### `profiles` command")
     blocks = code_blocks(profiles_doc, "json")
     list_doc, show_doc = json.loads(blocks[0]), json.loads(blocks[1])
@@ -791,23 +799,31 @@ def probe_profiles(reference, run, report, help_text):
                          "CHECKOUTS", "DESCRIPTION"]
     report.expect(header == documented_header, "profiles list", "table columns",
                   documented_header, header)
-    probe_catalog(reference, report, lobj.get("profiles", []), help_text)
+    probe_catalog(reference, report, lobj.get("profiles", []), help_text, catalog)
 
 
-def probe_catalog(reference, report, profiles, help_text):
-    release, sources, filters, inactive = documented_catalog(reference)
+def probe_catalog(reference, report, profiles, help_text, catalog):
+    """`catalog`: the label the binary's release row narrows to, or None for
+    the development build, which lists every built-in with its labels."""
+    documented, sources, filters, inactive = documented_catalog(reference)
     names = {p["name"] for p in profiles}
     bin_sources = {p["name"] for p in profiles if p["role"] == "source"}
     bin_filters = [p["name"] for p in profiles if p["role"] == "filter"]
-    bin_release = {p["name"] for p in profiles if "0.1" in (p.get("releases") or [])}
-    is_release_build = all("0.1" in (p.get("releases") or []) for p in profiles if p["role"] == "source")
-    # The 0.1 catalog is its sources and every built-in filter.
-    report.expect(bin_release == release | filters, "catalog", "0.1 catalog (`releases`)",
-                  sorted(release | filters), sorted(bin_release))
+    # A release build lists its own catalog's members only, so only that
+    # label can be compared there; the development build shows them all.
+    labels = {catalog} if catalog else (
+        set(documented) | {label for p in profiles for label in p.get("releases") or []})
+    for label in sorted(labels):
+        # A catalog is its sources and every built-in filter.
+        bin_label = {p["name"] for p in profiles if label in (p.get("releases") or [])}
+        want = documented.get(label, set()) | filters
+        report.expect(bin_label == want, "catalog", f"{label} catalog (`releases`)",
+                      sorted(want), sorted(bin_label))
     report.expect(set(bin_filters) == filters, "catalog", "built-in filters", sorted(filters), bin_filters)
-    if is_release_build:
-        report.expect(bin_sources == release, "catalog", "release build sources",
-                      sorted(release), sorted(bin_sources))
+    if catalog:
+        want = documented.get(catalog, set())
+        report.expect(bin_sources == want, "catalog", "release build sources",
+                      sorted(want), sorted(bin_sources))
     else:
         report.expect(not bin_sources - sources, "catalog", "built-ins missing from the library table",
                       "listed", sorted(bin_sources - sources))
@@ -867,7 +883,7 @@ def probe_config(reference, run, report, example_yaml, is_release_build):
                       f"exit {expected}", f"exit {r.code}: {r.err.strip()[-300:]}")
         if expected == 2:
             unnamed = [name for name in refused if f"`{name}`" not in r.err]
-            report.expect(not unnamed, "config examples", f"0.1 refusal of {what} names",
+            report.expect(not unnamed, "config examples", f"release refusal of {what} names",
                           sorted(refused), f"misses {unnamed}")
         if r.code == 0:
             lines = r.out.splitlines()
@@ -941,7 +957,7 @@ NOT_CHECKED = [
     "human output wording (summary lines, `would reclaim`, progress logs): text is not a contract",
     "stderr warnings of `check` (checkouts: allow, wildcard paths, missing roots) beyond exit codes",
     "the profile schema and selection grammar tables (Predicates, Selection grammar, Actions): the "
-    "Rust doc tests (diskgc-core doc.rs) and the config loader cover them; user profiles are refused in 0.1",
+    "Rust doc tests (diskgc-core doc.rs) and the config loader cover them; user profiles are refused in a release build",
     "enum values the probes never produce (most skip reasons, process_blockers evidence): only "
     "observed values are checked against the documented sets",
     "`index` object fields: no build has an index yet (always null)",
@@ -988,10 +1004,11 @@ def main(argv=None):
     report.guarded(probe_report_fields, reference, run, report, version, status_codes)
     if not args.container:
         report.guarded(probe_ci_examples, reference, run, report, help_text)
-    profiles = (run.diskgc("profiles", "list", "--json").json() or {}).get("profiles", [])
-    is_release_build = bool(profiles) and all(
-        "0.1" in (p.get("releases") or []) for p in profiles if p["role"] == "source")
-    report.guarded(probe_profiles, reference, run, report, help_text)
+    listed = run.diskgc("profiles", "list", "--json").json() or {}
+    _, row = build_row(json.loads(DESCRIPTOR.read_text()), run.diskgc("--version").out, listed)
+    catalog = row.get("catalog")
+    is_release_build = catalog is not None
+    report.guarded(probe_profiles, reference, run, report, help_text, catalog)
     report.guarded(probe_config, reference, run, report, example_yaml, is_release_build)
     documented_codes = probe_exit_table(reference, report)
     provoked = {0, 2, 3}
@@ -1009,7 +1026,7 @@ def main(argv=None):
         not_checked.insert(0, f"exit codes {missing}: "
                            + ("124 needs a reclaim that outlasts --timeout" if args.container else
                               "need a reclaim; rerun with --container NAME"))
-    build = "release (0.1 catalog)" if is_release_build else "development"
+    build = f"release ({catalog} catalog)" if is_release_build else "development"
     print(f"docs-vs-binary: {binary} ({build} build, {version}), "
           f"{'container ' + args.container if args.container else 'host, read-only'}")
     for line in report.unsafe:

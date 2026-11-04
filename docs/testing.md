@@ -2402,6 +2402,29 @@ filesystem, processes and mounts from the developer's system.
     the socket pathname with a decoy listener after preflight: `changed`;
     replaced after the recheck instead: the GC still reaches the original
     daemon through the pinned fd, and the decoy receives no connection.
+  - `release_candidate_nix_garbage_dry_run_then_bounded_gc` (TASK-335):
+    the keep-every-root scenario through the gate-lifted
+    `release-candidate` package (`diskgc-release`, which every runner's
+    under-test directory carries) instead of the development build. It
+    first requires a narrowed catalog that lists `nix-garbage` (`profiles
+    list` and `profiles show`); then a dry run: exit 0, one eligible
+    `/nix/store` row with `estimated_bytes: null`, no GC and no root
+    check, nothing deleted; then a reclaim asking for 1 MiB more than is
+    free: one GC whose `--max-freed` is that need (not the store's size),
+    every root kept, every dead path gone, and the store loses exactly the
+    dead paths. The only Nix GC scenario that runs the package. It runs in
+    `_e2e-nix-gc` (`--suite fast` on the Nix GC image); its name puts it in
+    the release selection too, but the `--suite release` runs use the base
+    and Debian images, which leave Nix-GC-only tests out. No
+    release-under-test runner on the Nix GC image: it would install the
+    same binary as `diskgc`, and its host PID namespace would show the
+    daemon's runtime-root scan the host's processes, where this run shows
+    the package running its Nix tier in a PID namespace of its own (not
+    refused: the rule of TASK-263 covers `fs` and `cargo-target` tiers).
+    That the binary is the gate-lifted one, not the gated
+    `diskgc-release-catalog`, rests on the under-test path and the
+    `release-candidate-package` check; the test's own identity check sees
+    only a narrowed catalog.
 - **Signals, deadlines, the CI-hook use of `ensure`, `watch` as a plain
   process.** For `watch`, the static binary in the Nix image, a scratch
   tmpfs as the watched filesystem and the deletion oracle on every run:
@@ -3187,8 +3210,8 @@ out the offset path and reader. The `release-excludes-clock-offset` flake
 check compares the `release-candidate` binary with a positive development
 control. The default package remains gated. The separate
 `release-candidate` output combines this version's release row (its
-commands and its catalog: Cargo, `nix-shell-rc`, `pytest-tmp`, the idle
-filters) and
+commands and its catalog: Cargo, `nix-shell-rc`, `pytest-tmp`,
+`nix-garbage`, the idle filters) and
 lifted gate solely for testing in disposable containers. It is unapproved
 for deployment (docs/reference.md, Built-in profile library). The `just e2e` gate runs candidate negatives
 and the real Cargo reclaim, busy-lock, rebuild and dry-run CLI cases on Nix
@@ -3196,6 +3219,9 @@ and Debian images through their candidate under-test runners, and
 `release_candidate_runs_watch_tally_only`: the gate-lifted candidate's
 `watch --tally-only` starts, tallies a Cargo target, stops on SIGTERM with
 exit 0, writes its snapshot and no record, and deletes nothing (TASK-289).
+The Nix GC stage (`_e2e-nix-gc`) runs the candidate's `nix-garbage` dry
+run and bounded GC (`release_candidate_nix_garbage_dry_run_then_bounded_gc`,
+TASK-335) on the Nix GC image.
 
 Every check, container and VM test runs the **unstamped tested build** of
 each package (flake.nix, `mkDiskgc`): the same source, features and
