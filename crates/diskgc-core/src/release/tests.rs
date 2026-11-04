@@ -136,6 +136,34 @@ fn the_development_row_runs_every_command_and_every_built_in() {
     assert!(units.iter().all(|u| row.ships.contains(u)));
 }
 
+/// The MIT license asks that its notice go with every copy, so every
+/// package built from this tree ships the repository's LICENSE: the
+/// development row and every release row not yet tagged. A tagged row
+/// stays as it shipped (v0.1.0 predates the license; the test above pins
+/// it), so a new release row that leaves the license out fails here.
+#[test]
+fn every_untagged_row_ships_the_license() {
+    let descriptor = descriptor().expect("descriptor");
+    let license = "share/doc/diskgc/LICENSE";
+    assert_eq!(
+        descriptor.files.get(license),
+        Some(&FileSource::Copy("LICENSE".into()))
+    );
+    let rows = std::iter::once(("development", &descriptor.development)).chain(
+        descriptor
+            .releases
+            .iter()
+            .filter(|(_, b)| b.tag.is_none())
+            .map(|(n, b)| (n.as_str(), b)),
+    );
+    for (name, build) in rows {
+        assert!(
+            build.ships.iter().any(|p| p == license),
+            "{name} does not ship {license}"
+        );
+    }
+}
+
 fn embedded() -> Value {
     serde_json::from_str(EMBEDDED).expect("JSON")
 }

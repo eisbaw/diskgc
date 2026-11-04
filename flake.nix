@@ -1472,6 +1472,12 @@
                 cmp $pkg/${lib.escapeShellArg path} ${shippedSource file.copy}
               ''
             ) releaseBuild.ships}
+            # The README's local links and anchors resolve where it ships,
+            # beside the package's other documents (packaging/README.md has
+            # other neighbours in the source tree, so it is checked here).
+            ${lib.optionalString (lib.elem "share/doc/diskgc/README.md" releaseBuild.ships) ''
+              ${pkgs.python3}/bin/python3 ${./tools/check_docs.py} $pkg/share/doc/diskgc/README.md
+            ''}
             notes=$pkg/share/doc/diskgc/RELEASE-NOTES.md
             head -n 1 $notes | grep -qxF ${lib.escapeShellArg releaseNotesTitle}
             grep -qxF ${lib.escapeShellArg releaseNotesHeader} $notes

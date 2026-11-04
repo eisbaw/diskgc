@@ -2856,8 +2856,9 @@ warm, two read-only ones explain it:
    `~/.config/diskgc/config.yaml` or `/etc/diskgc/config.yaml`, replace
    its Cargo root with directories you own, and run `diskgc check`. It is
    not installed as an active default.
-4. `share/doc/diskgc/`: a README (install and first run), these release
-   notes (`RELEASE-NOTES.md`, cut from `reference.md` at build time),
+4. `share/doc/diskgc/`: a README (install and first run), the MIT
+   `LICENSE`, these release notes (`RELEASE-NOTES.md`, cut from
+   `reference.md` at build time),
    `reference.md` and [safety.md](safety.md), so that the notes' links
    resolve (links into the design documents do not).
 5. `lib/systemd/user/diskgc-watch@.service` and

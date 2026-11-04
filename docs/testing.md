@@ -3295,7 +3295,7 @@ snapshot, not proof that a path is safe to move.
 | `soak` | property tests with many cases | before a release, nightly CI |
 | `fuzz [TARGET] [DURATION]` | `cargo-fuzz` targets (grammar, YAML loader, mountinfo, `maps`, `environ` parsers), with 1,800 seconds per target by default | hardening blocks, nightly CI |
 | `mutants` | complete selection and executor mutation sweep in bounded Podman shards, with verified outcomes | hardening blocks |
-| `docs-check` | offline local links and heading fragments in `reference.md` and `safety.md`, plus the core's document contract tests | after contract edits |
+| `docs-check` | offline local links and heading fragments in the root `README.md`, `reference.md` and `safety.md`, plus the core's document contract tests | after contract edits |
 | `scan-timing [SCANS] [--pytest-facts]` | read-only: the in-use process scan's age when returned on this host (min, median, p95, max), with the host (gnu) build and the shipped static musl target | with changes to the `/proc` readers or the scan; against docs/safety.md's Freshness (TASK-115) |
 | `ci` | `nix flake check -L` plus `just e2e-full` | CI |
 

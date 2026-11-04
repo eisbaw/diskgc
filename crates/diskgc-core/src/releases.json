@@ -6,6 +6,7 @@
     "lib/systemd/user/diskgc-watch@.service": { "copy": "packaging/systemd/user/diskgc-watch@.service" },
     "lib/systemd/system/diskgc-watch@.service": { "copy": "packaging/systemd/system/diskgc-watch@.service" },
     "share/doc/diskgc/README.md": { "copy": "packaging/README.md" },
+    "share/doc/diskgc/LICENSE": { "copy": "LICENSE" },
     "share/doc/diskgc/reference.md": { "copy": "docs/reference.md" },
     "share/doc/diskgc/safety.md": { "copy": "docs/safety.md" },
     "share/doc/diskgc/RELEASE-NOTES.md": { "release-notes": "docs/reference.md" }
@@ -21,7 +22,8 @@
       "lib/tmpfiles.d/diskgc.conf",
       "share/doc/diskgc/examples/example.yaml",
       "lib/systemd/user/diskgc-watch@.service",
-      "lib/systemd/system/diskgc-watch@.service"
+      "lib/systemd/system/diskgc-watch@.service",
+      "share/doc/diskgc/LICENSE"
     ]
   },
   "releases": {
@@ -48,6 +50,7 @@
         "lib/systemd/user/diskgc-watch@.service",
         "lib/systemd/system/diskgc-watch@.service",
         "share/doc/diskgc/README.md",
+        "share/doc/diskgc/LICENSE",
         "share/doc/diskgc/reference.md",
         "share/doc/diskgc/safety.md",
         "share/doc/diskgc/RELEASE-NOTES.md"

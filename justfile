@@ -41,7 +41,7 @@ check:
     cargo fmt --manifest-path fuzz/Cargo.toml --check
     cargo fmt --manifest-path diskgc-e2e/Cargo.toml --check
     python3 -m unittest discover -s tools -p 'test_*.py'
-    python3 tools/check_docs.py docs/reference.md docs/safety.md
+    python3 tools/check_docs.py README.md docs/reference.md docs/safety.md
     cargo test --manifest-path fuzz/Cargo.toml --test seeds --locked
     cargo clippy --workspace --all-targets --locked -- --deny warnings
     cargo test --workspace --locked
@@ -270,9 +270,9 @@ mutants:
     git check-ignore -q tmp/system || { echo 'tmp/system must be Git-ignored before cargo-mutants copies the source tree' >&2; exit 2; }
     python3 tools/disk_stage.py mutants python3 tools/mutation_scope.py run
 
-# Validate local links and anchors in the reference and safety contracts.
+# Validate local links and anchors in the root README and the reference and safety contracts.
 docs-check:
-    python3 tools/check_docs.py docs/reference.md docs/safety.md
+    python3 tools/check_docs.py README.md docs/reference.md docs/safety.md
     cargo test -p diskgc-core --lib --locked
 
 # Run what docs/reference.md documents against diskgc binary BIN and report drift

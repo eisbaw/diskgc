@@ -6,6 +6,11 @@ Cargo `target/` directories, the leftovers of ended pytest sessions and
 nix-shell runs in `/tmp`, and the dead paths of a multi-user Nix store
 (through the system Nix daemon's own garbage collector). `ensure` brings one filesystem up to a free-space
 goal once and exits with a code a CI hook or an agent script can branch on.
+Unlike age-only cleanup (`find -mtime +N -delete`, systemd-tmpfiles age
+rules), diskgc deletes only when free space is short, and checks every
+candidate just before deleting it: it keeps any candidate a process it can
+see has open, mapped or as its working directory, however old (`safety.md`,
+In use).
 
 ## This package
 
@@ -13,10 +18,19 @@ goal once and exits with a code a CI hook or an agent script can branch on.
 - `lib/tmpfiles.d/diskgc.conf`: creates the host lock `/run/diskgc/lock`,
   through which the reclaims of every user take turns. Root needs it; a
   user's reclaim without it takes a per-user lock of its own instead.
+- `lib/systemd/user/diskgc-watch@.service` and
+  `lib/systemd/system/diskgc-watch@.service`: the `watch` service
+  templates, one instance per filesystem (`reference.md`, Watch as a
+  systemd service). The first lines of `RELEASE-NOTES.md` say which
+  `watch` this package runs. Where it runs none that reclaims (0.2 so far
+  runs only `watch --tally-only`, which keeps the index warm and never
+  deletes), an instance's `DISKGC_WATCH_ARGS` needs `--tally-only`, and a
+  reclaiming instance exits 2 at start.
 - `share/doc/diskgc/`: this README; `RELEASE-NOTES.md` (what this version
   does, install, known limits, the JSON contract); `reference.md` (commands,
   exit codes, JSON output, configuration, profiles); `safety.md` (every
-  check made before anything is deleted); `examples/example.yaml`.
+  check made before anything is deleted); `examples/example.yaml`;
+  `LICENSE`.
 
 ## Install
 
@@ -44,12 +58,42 @@ As the user whose files diskgc may delete (it never needs root):
     diskgc ensure --dry-run --min-free 20G ~
 
 A dry run reads only: it lists what a reclaim would take and why the rest
-is kept. `--min-free` must be below the filesystem's size. Without
-`--dry-run`, `ensure` deletes what the configuration selects and the safety
-checks allow, until the goal is met. Read "Known limits" in
-`RELEASE-NOTES.md` first: in particular, diskgc running in its own PID
-namespace (most containers) keeps nearly every `/tmp` candidate, and without root
-it sees only your own processes.
+is kept. `--min-free` must be below the filesystem's size.
+
+A real dry run of the two `/tmp` built-ins on a development laptop
+(release candidate 0.2.0-dev, 2026-11-04, about 217,000 entries directly
+in `/tmp`; `--min-free` above the free space, so that it plans everything;
+trimmed at `…`). The `diskgc:` lines are stderr; the rest is the plan:
+
+    $ diskgc ensure --dry-run --min-free 200G --select 'profile:pytest-tmp || profile:nix-shell-rc' /tmp
+    diskgc: note: the host lock /run/diskgc/lock is not provisioned: a reclaim by this user takes the per-user lock /run/user/1000/diskgc/lock instead, which does not serialise it with other users' reclaims (docs/safety.md, Host lock)
+    diskgc: select: `profile:pytest-tmp || profile:nix-shell-rc`: 146976 distinct filesystem candidate(s) from 2 source term(s)
+    diskgc: process scan: 302 processes of other users not inspected (their use of the user's files is invisible without root)
+    …
+    dry run: 30.0 GiB available on / (min-free 200.0 GiB, target-free 200.0 GiB); would reclaim 146455 of 146455 eligible, est. 974.5 MiB of 170.0 GiB needed: short of the goal by 169.1 GiB by estimate; 521 kept (took 174.349 s):
+      profile pytest-tmp: 387 found · 52 eligible est. 113.5 MiB (would reclaim 52) · kept 331 future_time est. 3.5 GiB, 3 contains_special unsized, 1 in_use est. 14.9 MiB
+      profile nix-shell-rc: 146589 found · 146403 eligible est. 861.0 MiB (would reclaim 146403) · kept 100 not_idle est. 784.0 KiB, 16 in_use est. 88.0 KiB, 69 producer_unknown est. 348.0 KiB, 1 contains_ipc unsized
+      would reclaim /tmp/nix-develop-3984307-1139244087: est. 4.0 KiB
+      …
+      146445 more would reclaim: est. 974.4 MiB (--json lists every candidate)
+      …
+      100 kept: not_idle; examples: /tmp/nix-develop-109870-3793584568, /tmp/nix-develop-113998-4201987292, /tmp/nix-develop-11572-3741847121, /tmp/nix-develop-118551-346712868, /tmp/nix-develop-119955-2853012467 (95 more); e.g. newest change 25 m ago; idle_for 1h required
+      …
+      kept /tmp/nix-shell-1648100-3410698510: contains_ipc, a Socket (any socket or FIFO keeps its candidate)
+      operations: nix-shell-rc: delete; pytest-tmp: delete
+    …
+
+Without `--dry-run`, `ensure` deletes what the configuration selects and
+the safety checks allow, until the goal is met. A reclaim on a large `/tmp`
+can outlast the default `--timeout 10m` and stop with exit 124 before the
+goal is met; give it a longer `--timeout`. Read "Known limits" in
+`RELEASE-NOTES.md` first: in particular, diskgc in its own PID namespace
+(most containers) refuses `ensure` and its dry run with exit 2 (run it on
+the host), and without root it sees only your own processes.
 
 `diskgc --help` lists the commands, sizes, durations, exit codes and the
 built-in profiles; `diskgc profiles show NAME` explains one profile.
+
+## License
+
+MIT; see `LICENSE`.
