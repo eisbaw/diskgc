@@ -1,9 +1,10 @@
 ---
 id: TASK-336
 title: Package README audit fixes and MIT license
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-04T15:25:00Z'
+updated_date: '2026-11-04T16:32:00Z'
 labels:
   - docs
   - release
@@ -24,3 +25,9 @@ Mark 2026-11-04: apply the readme-improver audit of packaging/README.md; license
 6. packaging/README.md: a trimmed REAL human-format dry-run session from the release-candidate build (run it; never invent output).
 7. The shipped RELEASE-NOTES.md carries internal TASK-n ids and the maintainer's name: decide with the release-notes cut (reference.md -> RELEASE-NOTES) whether to strip them at build time; keep reference.md as the single home.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-04 orchestrator: implementer in tmp/worktrees/t336 (branch t336-readme-mit, from master c9ec2c7e). License per Mark: MIT.
+<!-- SECTION:NOTES:END -->
