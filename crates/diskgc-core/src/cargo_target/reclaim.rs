@@ -56,7 +56,7 @@ use std::time::Duration;
 
 use super::discover::{check_deadline, failure, list, open_dir, profile_dir};
 use super::eligible::{
-    Budget, judge_checkout_paths, judge_idle, judge_in_use, judge_inspected, open_profile,
+    Budget, judge_checkout_paths, judge_idle, judge_in_use, judge_inspected, open_profile, totals,
     walk_entries,
 };
 use super::{
@@ -321,7 +321,11 @@ impl<H: Delete> Run<'_, '_, H> {
                 ),
             )));
         }
-        judge_idle(host, path, last, idle).map_err(ReclaimEnd::Skipped)?;
+        // Refused after complete walks: sized ([`Skip::measured_bytes`]),
+        // measured before the deletion plan splits their records.
+        let (_, bytes) = totals(&walks);
+        let sized = |skip: Skip| ReclaimEnd::Skipped(skip.measured(bytes));
+        judge_idle(host, path, last, idle).map_err(sized)?;
         // A scan made now, under the locks: one made before them could
         // miss a process started meanwhile.
         self.checker.forget();
@@ -329,8 +333,7 @@ impl<H: Delete> Run<'_, '_, H> {
             .checker
             .current(host, deadline)
             .map_err(|e| ReclaimEnd::Stopped(e.at(path)))?;
-        judge_in_use(scan, &walks, target, &inspected, reached.project)
-            .map_err(ReclaimEnd::Skipped)?;
+        judge_in_use(scan, &walks, target, &inspected, reached.project).map_err(sized)?;
         // The path again, right before the deletion: the guard below and
         // the checkout path rule judge the path text.
         step(still_reached(host, target, &reached.target, deadline))?;
@@ -341,7 +344,7 @@ impl<H: Delete> Run<'_, '_, H> {
             newest_change: last,
         };
         if let Some(skip) = (self.guard)(path, after_walk).map_err(ReclaimEnd::Stopped)? {
-            return Err(ReclaimEnd::Skipped(skip));
+            return Err(sized(skip));
         }
 
         // Step 3: delete, fingerprints first.

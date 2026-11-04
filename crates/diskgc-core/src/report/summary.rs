@@ -170,7 +170,7 @@ fn dry_run_terms(report: &Report) -> Vec<Term<'_>> {
     let mut terms: Vec<Term<'_>> = Vec::new();
     // The planners' terms first, in tier order: a term that found nothing
     // still has its block ("0 found" explains an empty plan).
-    for planned in &report.planned_terms {
+    for planned in &report.terms {
         let term = term(&mut terms, &planned.tier, &planned.profile, true);
         let counts = term.planned.as_mut().expect("a dry run's term");
         counts.not_judged = Some(
@@ -225,5 +225,16 @@ fn live_terms(report: &Report) -> Vec<Term<'_>> {
             skip.estimated_bytes,
         );
     }
+    // Actions and skips are separate lists: the run order of their terms
+    // is the report's `terms` (a term it does not list goes last). A term
+    // without a row has no block: a reclaim found nothing to say there.
+    let position = |term: &Term<'_>| {
+        report
+            .terms
+            .iter()
+            .position(|t| t.tier == term.tier && t.profile == term.profile)
+            .unwrap_or(usize::MAX)
+    };
+    terms.sort_by_key(position);
     terms
 }

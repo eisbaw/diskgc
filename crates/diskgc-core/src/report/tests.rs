@@ -195,7 +195,7 @@ fn the_json_fields_are_the_docs() {
     let mut dry = full();
     dry.dry_run = true;
     dry.status = Status::DryRun;
-    dry.planned_terms = vec![PlannedTerm {
+    dry.terms = vec![RunTerm {
         tier: "select".into(),
         profile: "cargo-target".into(),
         not_judged: 2,
@@ -242,23 +242,23 @@ fn the_summary_counts_and_sizes_each_term() {
             row.profile = "a".into();
         }
     }
-    dry.planned_terms = vec![
-        PlannedTerm {
+    dry.terms = vec![
+        RunTerm {
             tier: "t1".into(),
             profile: "a".into(),
             not_judged: 4,
         },
-        PlannedTerm {
+        RunTerm {
             tier: "t1".into(),
             profile: "b".into(),
             not_judged: 0,
         },
-        PlannedTerm {
+        RunTerm {
             tier: "t1".into(),
             profile: "c".into(),
             not_judged: 0,
         },
-        PlannedTerm {
+        RunTerm {
             tier: "t2".into(),
             profile: "a".into(),
             not_judged: 0,
@@ -301,7 +301,7 @@ fn the_summary_counts_and_sizes_each_term() {
         "the goal is covered by t1's estimates before /w/a3: {t2}"
     );
     // A planner that did not report: found and not_judged unknown.
-    dry.planned_terms.clear();
+    dry.terms.clear();
     let got = emitted(&dry);
     assert!(got["summary"][0]["found"].is_null(), "{got}");
     assert!(got["summary"][0]["not_judged"].is_null(), "{got}");
@@ -1640,4 +1640,36 @@ fn a_dry_run_with_nothing_to_list_ends_without_a_colon() {
         ),
         "{text}"
     );
+}
+
+/// Codex review 4 (TASK-324): a live run's blocks follow the order its
+/// tiers ran in, not the order of its two lists (actions, then skips).
+#[test]
+fn a_live_summary_keeps_the_run_order_of_its_terms() {
+    let mut live = Report::new(Status::Met, Some(Path::new("/w")), false);
+    live.terms = ["stale", "pressure"]
+        .into_iter()
+        .map(|tier| RunTerm {
+            tier: tier.into(),
+            profile: "p".into(),
+            not_judged: 0,
+        })
+        .collect();
+    live.skipped = vec![skip("/w/a", "stale", "p", Reason::NotIdle)];
+    live.actions = vec![ActionEntry {
+        tier: "pressure".into(),
+        profile: "p".into(),
+        candidate: "/w/a".into(),
+        avail_delta_bytes: Some(1),
+        duration_ms: 1,
+        idle_age_seconds: None,
+        count: 1,
+    }];
+    let tiers: Vec<String> = emitted(&live)["summary"]
+        .as_array()
+        .expect("summary")
+        .iter()
+        .map(|block| block["tier"].as_str().expect("a tier").to_owned())
+        .collect();
+    assert_eq!(tiers, ["stale", "pressure"]);
 }

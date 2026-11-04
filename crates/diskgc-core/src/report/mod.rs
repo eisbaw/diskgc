@@ -249,12 +249,13 @@ pub struct PlanEntry {
     pub unknown_cause: Option<UnknownCause>,
 }
 
-/// A source term a dry run's planner judged (the `summary`'s blocks): its
-/// tier and profile, and how many of the candidates it found the plan left
-/// unjudged because it stopped first (the deadline, a failure). Kept apart
-/// from `plan`, which holds only judged rows (TASK-227).
+/// A source term the run reached, in run order (the `summary`'s blocks
+/// and their order): its tier and profile, and for a dry run how many of
+/// the candidates it found the plan left unjudged because it stopped first
+/// (the deadline, a failure), kept apart from `plan`, which holds only
+/// judged rows (TASK-227). A reclaim's are 0: it has no such count.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedTerm {
+pub struct RunTerm {
     pub tier: String,
     pub profile: String,
     pub not_judged: u64,
@@ -521,8 +522,8 @@ pub struct Report {
     pub avail_before_bytes: Option<u64>,
     pub avail_after_bytes: Option<u64>,
     pub plan: Vec<PlanEntry>,
-    /// A dry run's planned source terms ([`PlannedTerm`]); empty otherwise.
-    pub planned_terms: Vec<PlannedTerm>,
+    /// The source terms the run reached, in run order ([`RunTerm`]).
+    pub terms: Vec<RunTerm>,
     pub actions: Vec<ActionEntry>,
     pub skipped: Vec<SkipEntry>,
     /// `None` (JSON `null`) when no complete process scan of this run
@@ -633,7 +634,7 @@ impl Report {
             avail_before_bytes: None,
             avail_after_bytes: None,
             plan: Vec::new(),
-            planned_terms: Vec::new(),
+            terms: Vec::new(),
             actions: Vec::new(),
             skipped: Vec::new(),
             held_by_deleted_files: None,

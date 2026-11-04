@@ -1234,6 +1234,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     fn run(&mut self, owners: &[u32]) {
+        // The summary's blocks follow the order the tiers run in.
+        self.report.terms.extend(plan::run_terms(self.tier, &[]));
         // An earlier tier's list is not this run's last word: unknown until
         // this tier's end-of-run scan answers (null if it stops first).
         self.report.held_by_deleted_files = None;

@@ -11,7 +11,7 @@ use crate::fs_kind::{self, Find};
 use crate::host::{DevIno, Host, MonoTime, Timestamp};
 use crate::inuse::Checker;
 use crate::profile::{Action, IdleWindow};
-use crate::report::{BuildEvidence, PlanEntry, PlannedTerm, Report, Status};
+use crate::report::{BuildEvidence, PlanEntry, Report, RunTerm, Status};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -188,7 +188,7 @@ fn dry_run_inner<H: Host>(
                     protected.then_some(Reason::Protected),
                     None,
                 ));
-                report.planned_terms = planned_terms(tier, &[]);
+                report.terms = run_terms(tier, &[]);
             }
             Ok(Binding::Skipped(skip)) => {
                 log(&format!(
@@ -409,7 +409,7 @@ fn dry_run_inner<H: Host>(
         ));
     }
     report.plan.extend(root_skips);
-    report.planned_terms = planned_terms(tier, &unjudged);
+    report.terms = run_terms(tier, &unjudged);
     match stopped {
         Some(stop) => {
             if matches!(stop, Stop::DeadlinePassed { .. }) {
@@ -534,7 +534,7 @@ pub(super) fn dry_run_grouped_inner<H: Host>(
         }
         let part_failed = !part.errors.is_empty();
         report.plan.extend(part.plan);
-        report.planned_terms.extend(part.planned_terms);
+        report.terms.extend(part.terms);
         report.errors.extend(part.errors);
         report.held_by_deleted_files = part.held_by_deleted_files;
         report.avail_after_bytes = part.avail_after_bytes;
@@ -598,10 +598,10 @@ fn add_unjudged(list: &mut Vec<(String, u64)>, profile: &str, count: usize) {
     }
 }
 
-/// The source profiles of `tier` a plan judges candidates for: one
-/// [`PlannedTerm`] each, with the candidates `unjudged` left (the summary's
-/// `not_judged`; docs/reference.md, Output).
-fn planned_terms(tier: &Tier, unjudged: &[(String, u64)]) -> Vec<PlannedTerm> {
+/// The source profiles of `tier`: one [`RunTerm`] each, with the
+/// candidates a plan found and left `unjudged` (the summary's
+/// `not_judged`; docs/reference.md, Output; none for a reclaim).
+pub(super) fn run_terms(tier: &Tier, unjudged: &[(String, u64)]) -> Vec<RunTerm> {
     let mut profiles: Vec<&str> = vec![tier.profile.as_str()];
     for source in &tier.fs_union {
         if !profiles.contains(&source.profile.as_str()) {
@@ -610,7 +610,7 @@ fn planned_terms(tier: &Tier, unjudged: &[(String, u64)]) -> Vec<PlannedTerm> {
     }
     profiles
         .into_iter()
-        .map(|profile| PlannedTerm {
+        .map(|profile| RunTerm {
             tier: tier.name.clone(),
             profile: profile.to_owned(),
             not_judged: unjudged
@@ -704,10 +704,18 @@ pub(super) fn plan_cargo<H: Host>(
             for skip in &misconfigured {
                 record_error(report, log, safety_error(tier, excluded(skip)));
             }
+            let targets = if misconfigured.is_empty() {
+                found.targets.as_slice()
+            } else {
+                // The tier is excluded: none of its targets is judged.
+                add_unjudged(&mut unjudged, &tier.profile, found.targets.len());
+                &[]
+            };
             let mut negated_matches = match scan_negated(host, &tier.negated, deadline) {
                 Ok(matches) => matches,
                 Err(error) => {
                     record_error(report, log, run_error(tier, error));
+                    add_unjudged(&mut unjudged, &tier.profile, targets.len());
                     return Planned {
                         eligible,
                         skipped,
@@ -715,11 +723,6 @@ pub(super) fn plan_cargo<H: Host>(
                         unjudged,
                     };
                 }
-            };
-            let targets = if misconfigured.is_empty() {
-                found.targets.as_slice()
-            } else {
-                &[]
             };
             for (judged, target) in targets.iter().enumerate() {
                 if host.interrupted().is_some() {
@@ -741,6 +744,7 @@ pub(super) fn plan_cargo<H: Host>(
                     }
                     Err(error) => {
                         record_error(report, log, run_error(tier, error));
+                        add_unjudged(&mut unjudged, &tier.profile, targets.len() - judged);
                         return Planned {
                             eligible,
                             skipped,
@@ -1282,7 +1286,17 @@ pub(super) fn plan_fs_union<H: Host>(
             sources.len()
         ));
     }
+    for (index, skip) in refused
+        .iter()
+        .filter(|(index, skip)| !is_misconfigured_source(&sources[*index], skip))
+    {
+        let mut entry = plan_skip(tier, &skip.path, skip);
+        entry.profile = sources[*index].profile.to_owned();
+        entry.checkouts = sources[*index].checkouts;
+        planned.skipped.push(entry);
+    }
     if planned.stopped.is_some() {
+        // What discovery refused before it stopped is kept above.
         unjudged_from(&mut planned, 0);
         return planned;
     }
@@ -1295,15 +1309,6 @@ pub(super) fn plan_fs_union<H: Host>(
         entry.profile = Some(sources[*index].profile.to_owned());
         record_error(report, log, entry);
     }
-    for (index, skip) in refused
-        .iter()
-        .filter(|(index, skip)| !is_misconfigured_source(&sources[*index], skip))
-    {
-        let mut entry = plan_skip(tier, &skip.path, skip);
-        entry.profile = sources[*index].profile.to_owned();
-        entry.checkouts = sources[*index].checkouts;
-        planned.skipped.push(entry);
-    }
     if !misconfigured.is_empty() {
         // The tier is excluded: nothing it found is judged.
         unjudged_from(&mut planned, 0);
@@ -1313,6 +1318,7 @@ pub(super) fn plan_fs_union<H: Host>(
         Ok(matches) => matches,
         Err(error) => {
             record_error(report, log, run_error(tier, error));
+            unjudged_from(&mut planned, 0);
             return planned;
         }
     };
@@ -1368,6 +1374,7 @@ pub(super) fn plan_fs_union<H: Host>(
                 }
                 Err(error) => {
                     record_error(report, log, run_error(tier, error));
+                    unjudged_from(&mut planned, judged);
                     return planned;
                 }
             };

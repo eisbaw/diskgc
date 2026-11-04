@@ -548,7 +548,7 @@ fn walk_target<H: Host>(
 /// once (docs/architecture.md, Measuring space: Cargo hard-links binaries
 /// from `deps/` into the profile directory, so per name they would count
 /// twice).
-fn totals<F>(walks: &[ProfileWalk<F>]) -> (usize, u64) {
+pub(super) fn totals<F>(walks: &[ProfileWalk<F>]) -> (usize, u64) {
     let mut seen = std::collections::HashSet::new();
     let mut entries = 0;
     let mut bytes = 0u64;

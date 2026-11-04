@@ -408,7 +408,7 @@ fn protocol<H: Delete>(
                     })
                 });
             if let Some(skip) = refusal {
-                checkout_refusal.get_or_insert((index, skip));
+                checkout_refusal.get_or_insert((index, skip.measured(walked.bytes())));
             }
         }
         if selected.is_none() {
@@ -423,6 +423,9 @@ fn protocol<H: Delete>(
         selected.ok_or_else(|| first_skip.expect("every union alternative has a verdict"))?;
     let candidate = reached.candidate(found)?;
     let judge = &alternatives[index].judge;
+    // Refused from here on, before anything is deleted: sized
+    // ([`Skip::measured_bytes`]).
+    let bytes = walked.bytes();
     let Walked { record, .. } = walked;
     done.selected = Some(index);
     let options = DeleteOptions {
@@ -523,7 +526,7 @@ fn protocol<H: Delete>(
         Ok(deletion) => deletion,
         Err(NotDeleted::Skipped(skip)) => {
             check_deadline(host, deadline, path)?;
-            return Err(skip.into());
+            return Err(skip.measured(bytes).into());
         }
         Err(NotDeleted::Stopped(stop)) => return Err(ReclaimEnd::Stopped(stop)),
     };

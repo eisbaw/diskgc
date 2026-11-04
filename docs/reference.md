@@ -1284,13 +1284,16 @@ is `host`.
   exhaustive set of processes using a candidate.
 - `skipped[].estimated_bytes` is the candidate's allocated-byte estimate
   only when a complete tally succeeded before a later refusal, or the
-  refusing check's own walk was complete (an idle requirement the walk
-  measured). Early skips, untallied paths and grouped rows use `null`. It
+  refusing reclaim's own walk was complete before it refused and before
+  anything was deleted (also after `--tally-budget` left the candidate
+  untallied). Early skips, grouped rows and refusals during or before the
+  walk use `null`. It
   is a point-in-time size, not a promise of space that could be reclaimed.
 - `summary` (added with TASK-324; a consumer that ignores unknown fields
   is unaffected) has one block per source term, a tier's source profile
   (`--select 'profile:a || profile:b'` is one tier with two), in run
-  order. It counts the rows of `plan` (a dry run) or of `actions` and
+  order; a dry run has a block for every term it planned, a live run
+  only for those with a row. It counts the rows of `plan` (a dry run) or of `actions` and
   `skipped` (a live run) of that tier and profile: per tier, not per
   candidate, so a candidate one tier keeps and a later tier reclaims is
   kept in the first block and counted in the second. A row without a
@@ -1318,8 +1321,10 @@ is `host`.
     part-way is in `reclaimed`, not here.
   - `not_judged` (dry run): candidates the term found that the plan did
     not judge, or judged and dropped, because it stopped first (the
-    deadline, a failure that stopped the run, a misconfigured root that
-    excluded the tier): they are in no `plan` row. When discovery itself
+    deadline, a failure that stopped the run, a `!profile:` whose
+    matches could not be enumerated, a misconfigured root that excluded
+    the tier): they are in no `plan` row. Discovery's refusals listed
+    before such a stop keep their rows (in `kept`). When discovery itself
     stopped, it counts what was listed by then (none for a Cargo tier).
     `null` when the term's planner did not report: the run stopped
     before it, or it failed.
