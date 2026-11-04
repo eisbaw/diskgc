@@ -23,11 +23,33 @@ use std::time::Duration;
 use crate::config::{Config, IpcPolicy};
 use crate::executor::{self, Request, SelectionFailure, Tier};
 use crate::host::{Host, MonoTime, Timestamp};
+use crate::inuse::PlanScan;
 use crate::invocation::{self, ConfigFile, ConfigUse, Platform};
 use crate::profile::{Body, Finds, Library, Roots, RootsError};
 use crate::report::{ErrorCause, ErrorEntry, Report, Status};
 use crate::select;
 use crate::units::Size;
+
+/// The permission to plan without the in-use check
+/// ([`crate::inuse::PlanScan::NotChecked`]): a default `survey`'s (without
+/// `--in-use`). Its field is private to this module, so nothing else in
+/// diskgc (`ensure`, its dry run, a reclaim, `watch`) can make one, and
+/// every other plan judges candidates on in-use and liveness evidence:
+///
+/// The type is public (this compiles), so the test below fails only
+/// because it cannot be made (stable rustdoc does not check the error
+/// code, E0423):
+///
+/// ```
+/// fn names(_: diskgc_core::survey::InUseNotChecked) {}
+/// ```
+///
+/// ```compile_fail,E0423
+/// // Outside `survey`, it cannot be made:
+/// let _ = diskgc_core::survey::InUseNotChecked(());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InUseNotChecked(());
 
 /// `survey`'s arguments, checked for syntax (docs/reference.md,
 /// `survey`), without the configuration lookup and output flags.
@@ -41,6 +63,11 @@ pub struct SurveyOptions {
     pub roots: Vec<String>,
     /// The cooperative deadline of the whole survey; `None` for none.
     pub timeout: Option<Duration>,
+    /// `--in-use`: judge candidates on in-use and liveness evidence (one
+    /// process scan, reused while young). Without it no process is
+    /// scanned and a candidate that passes every other check is "not
+    /// checked" ([`InUseNotChecked`]).
+    pub in_use: bool,
 }
 
 /// What [`load`] checked before the host starts: the configuration (if
@@ -56,6 +83,10 @@ pub struct Loaded {
 pub struct Survey {
     /// The worst of the paths' plans ([`worst`]), or the refusal's.
     pub status: Status,
+    /// Whether candidates were judged on in-use and liveness evidence
+    /// (`--in-use`). Without it, a plan row without a reason passed every
+    /// other check and is "not checked", not eligible.
+    pub in_use: bool,
     pub started_at: Option<String>,
     pub duration_ms: Option<u64>,
     /// One per `PATH` surveyed, in the order given.
@@ -122,9 +153,10 @@ struct Below {
 
 impl Survey {
     /// A survey refused before any plan: nothing was looked at.
-    pub fn refused(cause: ErrorCause, why: impl Into<String>) -> Self {
+    pub fn refused(in_use: bool, cause: ErrorCause, why: impl Into<String>) -> Self {
         Self {
             status: invocation::refusal_status(cause),
+            in_use,
             started_at: None,
             duration_ms: None,
             paths: Vec::new(),
@@ -206,7 +238,7 @@ pub fn run<H: Host>(
         Ok(survey) => survey,
         Err((cause, why)) => {
             log(&format!("error: {why}"));
-            Survey::refused(cause, why)
+            Survey::refused(options.in_use, cause, why)
         }
     };
     survey.started_at = executor::rfc3339(wall);
@@ -260,15 +292,21 @@ fn survey_paths<H: Host>(
             executor::MeasureFailure::Host(why) => (ErrorCause::Host, why),
         })?;
     }
-    // As a dry run (TASK-263): a plan whose in-use verdicts cannot see
-    // every process is refused, not reported as if it could.
-    if planned
-        .iter()
-        .flat_map(|(_, below)| &below.tiers)
-        .any(Tier::relies_on_in_use_check)
-    {
-        executor::process_visibility(host).map_err(|e| (e.cause, e.message))?;
-    }
+    // With --in-use, as a dry run (TASK-263): a plan whose in-use
+    // verdicts cannot see every process is refused, not reported as if it
+    // could. Without it no process is looked at, so it runs anywhere.
+    let scan = if options.in_use {
+        if planned
+            .iter()
+            .flat_map(|(_, below)| &below.tiers)
+            .any(Tier::relies_on_in_use_check)
+        {
+            executor::process_visibility(host).map_err(|e| (e.cause, e.message))?;
+        }
+        PlanScan::Processes
+    } else {
+        PlanScan::NotChecked(InUseNotChecked(()))
+    };
     let deadline = options
         .timeout
         .map(|t| started.checked_add(t).unwrap_or(MonoTime(Duration::MAX)));
@@ -281,9 +319,10 @@ fn survey_paths<H: Host>(
         if host.interrupted().is_some() {
             break;
         }
-        let (survey, cut_here) = survey_path(host, path, below, uid, deadline, log, &mut |line| {
-            notes.line(line);
-        });
+        let (survey, cut_here) =
+            survey_path(host, path, below, uid, scan, deadline, log, &mut |line| {
+                notes.line(line);
+            });
         cut |= cut_here;
         paths.push(survey);
     }
@@ -293,6 +332,7 @@ fn survey_paths<H: Host>(
     }
     Ok(Survey {
         status,
+        in_use: options.in_use,
         started_at: None,
         duration_ms: None,
         paths,
@@ -309,6 +349,7 @@ fn survey_path<H: Host>(
     path: &Path,
     below: Below,
     uid: u32,
+    scan: PlanScan,
     deadline: Option<MonoTime>,
     log: &mut dyn FnMut(&str),
     progress: &mut dyn FnMut(&str),
@@ -355,7 +396,7 @@ fn survey_path<H: Host>(
             tier: tier.clone(),
             watch: None,
         };
-        let part = executor::survey_tier(host, &request, &[uid], progress);
+        let part = executor::survey_tier(host, &request, &[uid], scan, progress);
         if matches!(part.status, Status::Error | Status::UsageError) {
             failed.push(tier.name.clone());
         }

@@ -856,6 +856,12 @@ pub(super) fn term_texts(report: &Report) -> Vec<String> {
 /// Parts with nothing to say are left out, except a dry run's eligible
 /// count.
 pub(super) fn term_text(term: &Term<'_>, why_stopped: &str) -> String {
+    term_text_as(term, why_stopped, "eligible")
+}
+
+/// [`term_text`] with the eligible rows called `eligible` (a survey
+/// without `--in-use` calls them what they are: not checked).
+pub(super) fn term_text_as(term: &Term<'_>, why_stopped: &str, eligible: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(found) = term.found() {
         parts.push(format!("{found} found"));
@@ -870,10 +876,10 @@ pub(super) fn term_text(term: &Term<'_>, why_stopped: &str) -> String {
             }
         });
         parts.push(if planned.eligible.count == 0 {
-            "0 eligible".to_owned()
+            format!("0 {eligible}")
         } else {
             format!(
-                "{} eligible {}{}",
+                "{} {eligible} {}{}",
                 planned.eligible.count,
                 size_text(planned.eligible),
                 would_text.unwrap_or_default()

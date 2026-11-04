@@ -24,7 +24,7 @@ use super::source_anchor::SourceEvidence;
 use super::{Find, Found};
 use crate::engine::{Reason, Rules, Skip, WalkRecord};
 use crate::host::{Host, MonoTime};
-use crate::inuse::Checker;
+use crate::inuse::{Checker, PlanScan};
 use crate::outcome::{Judged, Stop};
 use crate::profile::IdleWindow;
 use crate::resolve::{Want, resolve_in};
@@ -94,8 +94,10 @@ pub struct Planned {
 /// process scan that fails, the deadline) stop it: they are returned with
 /// what was judged until then. Anything about one root, directory or
 /// candidate is in the result. A process scan serves the candidates
-/// judged within the plan checker's scan reuse window. `log` gets a
-/// progress line every 10,000 candidates.
+/// judged within the plan checker's scan reuse window; with
+/// [`PlanScan::NotChecked`] none is made and candidates are not judged on
+/// in-use or liveness evidence. `log` gets a progress line every 10,000
+/// candidates.
 #[allow(clippy::too_many_arguments)]
 pub fn plan<H: Host>(
     host: &H,
@@ -104,6 +106,7 @@ pub fn plan<H: Host>(
     space: crate::places::Space,
     rules: &Rules<'_>,
     idle: IdleWindow,
+    scan: PlanScan,
     deadline: Option<MonoTime>,
     log: &mut dyn FnMut(&str),
 ) -> (Planned, Option<Stop>) {
@@ -137,7 +140,7 @@ pub fn plan<H: Host>(
         idle,
         space,
     };
-    let mut checker = Checker::for_plan(rules)
+    let mut checker = Checker::for_plan(rules, scan)
         .with_pid_lookup(find.liveness_contract.is_some())
         .with_pytest_facts(find.liveness_contract == Some(crate::profile::LivenessContract::Pytest))
         .with_project_facts(
@@ -218,7 +221,8 @@ pub fn judge_walked<H: Host>(
         true,
         deadline
     ));
-    // A project contract's walk and rules 1 and 2, before the scan.
+    // A project contract's walk and rules 1 and 2, before the scan: files
+    // and ages only, no process read.
     let prepared = super::liveness::prepare(
         host,
         judge,
@@ -227,6 +231,15 @@ pub fn judge_walked<H: Host>(
         &walked.record,
         deadline,
     )?;
+    // A default survey's plan (crate::inuse::PlanScan::NotChecked) stops
+    // here: a refusal of those static rules stands; otherwise no scan, no
+    // contract rule on processes, and the candidate is "not checked".
+    if !checker.checks_in_use() {
+        if let super::liveness::Prepared::Refused(skip) = &prepared {
+            return Ok(Err(skip.clone().measured(walked.bytes())));
+        }
+        return Ok(Ok((walked.tally(), walked.record)));
+    }
     let scan = checker
         .current(host, deadline)
         .map_err(|e| e.at(&found.path))?;
@@ -274,6 +287,10 @@ pub fn contract_veto<'a, H: Host>(
     else {
         return Ok(Ok(()));
     };
+    // A default survey judges no liveness contract (judge_walked).
+    if !checker.checks_in_use() {
+        return Ok(Ok(()));
+    }
     check_deadline(host, deadline, &first.path)?;
     let mounts = mountinfo(host)?;
     let Some(parent) = first.path.parent() else {

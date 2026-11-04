@@ -444,6 +444,15 @@ pub fn eligibility<H: Host>(
     if let Err(skip) = judge_idle(host, path, last, idle) {
         return Ok(Err(skip.measured(bytes)));
     }
+    // A default survey's plan (crate::inuse::PlanScan::NotChecked): no
+    // scan, no Cargo process heuristics; the target is "not checked".
+    if !checker.checks_in_use() {
+        return Ok(Ok(Eligible {
+            last_build: last,
+            entries,
+            bytes,
+        }));
+    }
     let scan = checker.current(host, deadline).map_err(|e| e.at(path))?;
     check_deadline(host, deadline, path)?;
     if let Err(skip) = judge_in_use(

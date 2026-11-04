@@ -1055,7 +1055,8 @@ Model scenarios required by [safety.md](safety.md) and
 
 **Survey** (`crates/diskgc-model/tests/survey.rs`; TASK-38): the
 composition the binary runs (`diskgc_core::survey::load` and `run`) on a
-laptop-shaped `/tmp` model, each test also holding the run to its
+laptop-shaped `/tmp` model (with `--in-use` unless a test says
+otherwise), each test also holding the run to its
 call trace (no `unlinkat`, `fchmod`, command, `flock`, lock inheritance,
 per-user lock, Nix root or GC call, no state read or written):
 
@@ -1095,6 +1096,31 @@ per-user lock, Nix root or GC call, no state read or written):
   not list the `/tmp` mount point.
 - `an_error_before_the_deadline_stays_the_status`: a profile's error then
   the deadline: `error` (exit 3), not `deadline`.
+- `a_live_session_is_in_use_with_the_flag_and_not_checked_without`: the
+  pytest session a process holds open is kept `in_use` with `--in-use`;
+  without it it is not checked (`eligible: null`, the block's
+  `not_checked`, `eligible: null`), the human text never says
+  "eligible", and no process is read (none of the `Host` calls that read
+  another process: `/proc`, sockets, loop devices).
+- `a_cargo_target_in_use_is_not_checked_without_the_flag`: the Cargo
+  process heuristics are gated the same way.
+- `static_refusals_stand_without_the_flag`: `protected` and `future_time`
+  still refuse without `--in-use`.
+- `a_project_contracts_file_rules_stand_without_the_flag`: python-venv's
+  project contract still keeps a venv whose project changed yesterday
+  `not_idle` without `--in-use` (its file-based rule), and leaves the
+  idle project's not checked.
+- `ensure_dry_run_always_checks_in_use`: on the same fixture `ensure
+  --dry-run` scans, keeps the live session `in_use`, and its JSON has no
+  survey field. That no `ensure`, dry run or reclaim can plan without the
+  check is structural: the option holds a value only `survey` can make,
+  and a `compile_fail` doc test on `diskgc_core::survey::InUseNotChecked`
+  shows nothing outside it can.
+
+The first three fail when the plan's checker scans regardless
+(`PlanScan::NotChecked` ignored), the first two also when unchecked rows
+are labelled eligible; the doc test fails when the token's field is
+public.
 - `a_profile_whose_listing_fails_is_not_reported_as_finding_nothing`: EIO
   on the first listing of `/tmp` fails that profile: no summary block, not
   in "found nothing", its host error present, the human text says it
@@ -2583,10 +2609,12 @@ filesystem, processes and mounts from the developer's system.
   minimum values without hiding their one-megabyte difference.
 - **Survey** (`survey_suite.rs`, fast tier):
   `survey_reports_tmp_by_profile_and_family_and_changes_nothing` runs the
-  real `survey --json /tmp` as the tester over a laptop-shaped fixture
+  real `survey --json /tmp`, with and without `--in-use`, as the tester
+  over a laptop-shaped fixture
   (a pytest session inside a `nix-shell.*` dir, an rc dir, three `tmp.*`
-  dirs, a Claude temp root) while root holds the host lock: it must exit 0
-  without waiting for the lock, report `pytest-tmp` and `nix-shell-rc`
+  dirs, a Claude temp root) while root holds the host lock: both must exit
+  0 without waiting for the lock, the session eligible with `--in-use` and
+  not checked without; report `pytest-tmp` and `nix-shell-rc`
   with their candidates and the `tmp.*` and `claude-#` families, make no
   traced removal or rename call, leave the oracle clean and write no
   index snapshot.

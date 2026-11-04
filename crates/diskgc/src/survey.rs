@@ -27,14 +27,15 @@ const TIMEOUT_DEFAULT: Duration = Duration::from_secs(10 * 60);
 
 /// `survey`'s synopsis as the `usage:` lines print it.
 pub(super) const SURVEY_SYNOPSIS: &str = "\
-diskgc survey [--select EXPR] [--roots DIR]... [--list] [--json] [--timeout DUR]
-                     [--config FILE] PATH...";
+diskgc survey [--select EXPR] [--roots DIR]... [--in-use] [--list] [--json]
+                     [--timeout DUR] [--config FILE] PATH...";
 
 /// The flags `survey` takes, for "did you mean" (the parser is the
 /// authority; a test holds the list to it and to the usage).
-pub(super) const SURVEY_FLAGS: [&str; 6] = [
+pub(super) const SURVEY_FLAGS: [&str; 7] = [
     "--select",
     "--roots",
+    "--in-use",
     "--list",
     "--json",
     "--timeout",
@@ -54,7 +55,7 @@ pub(super) struct SurveyArgs {
 pub(super) fn parse_survey(args: &[OsString]) -> Result<SurveyArgs, String> {
     let (mut select, mut timeout, mut config) = (None, None, None);
     let mut roots = Vec::new();
-    let (mut list, mut json) = (false, false);
+    let (mut list, mut json, mut in_use) = (false, false, false);
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -77,6 +78,7 @@ pub(super) fn parse_survey(args: &[OsString]) -> Result<SurveyArgs, String> {
         };
         match name {
             "--list" => switch(&mut list)?,
+            "--in-use" => switch(&mut in_use)?,
             // Validated only: the output is `json_requested`'s.
             "--json" => switch(&mut json)?,
             "--select" | "--roots" | "--timeout" | "--config" => {
@@ -135,6 +137,7 @@ pub(super) fn parse_survey(args: &[OsString]) -> Result<SurveyArgs, String> {
                 Some(Duration::ZERO) => None,
                 Some(t) => Some(t),
             },
+            in_use,
         },
         list,
         config,
@@ -157,7 +160,7 @@ pub(super) fn survey(args: &SurveyArgs, json: bool) -> ExitCode {
 fn survey_with(args: &SurveyArgs, start: &Start<'_>) -> Survey {
     let fail = |cause: ErrorCause, why: String| {
         log(&format!("error: {why}"));
-        Survey::refused(cause, why)
+        Survey::refused(args.options.in_use, cause, why)
     };
     if let Err(error) = LinuxHost::install_interrupt_handlers() {
         return fail(
@@ -202,7 +205,9 @@ mod tests {
             [PathBuf::from("/tmp"), PathBuf::from("/home/m")]
         );
         assert!(a.list);
+        assert!(!a.options.in_use, "the in-use check is opt-in");
         assert_eq!(a.options.timeout, None);
+        assert!(parse(&["--in-use", "/tmp"]).unwrap().options.in_use);
         let a = parse(&["/home/m/", "/tmp/./x"]).unwrap();
         assert_eq!(
             a.options.paths,
@@ -237,6 +242,7 @@ mod tests {
                 "only valid together with --select",
             ),
             (&["--list", "--list", "/tmp"][..], "given twice"),
+            (&["--in-use=yes", "/tmp"][..], "takes no value"),
             (&["--list=yes", "/tmp"][..], "takes no value"),
             (&["--timeout", "5", "/tmp"][..], "--timeout"),
             (&["--min-free", "5G", "/tmp"][..], "unknown flag --min-free"),

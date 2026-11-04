@@ -1048,6 +1048,25 @@ pub struct Checker<'a> {
     options: Options<'a>,
     reuse_limit: Duration,
     latest: Option<Scan>,
+    /// `false` only for a plan made with [`PlanScan::NotChecked`] (a
+    /// `survey` without `--in-use`): it never scans, and the judges stop
+    /// before their in-use step ([`Checker::checks_in_use`]).
+    scans: bool,
+}
+
+/// Whether a plan's checker scans processes. [`PlanScan::NotChecked`]
+/// holds a [`crate::survey::InUseNotChecked`], which only the survey can
+/// make: no `ensure`, dry run or reclaim can plan without the in-use check
+/// (docs/reference.md, `survey`: `--in-use`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanScan {
+    /// The in-use check and liveness contracts run, from one scan reused
+    /// while young: every plan's but a default survey's.
+    Processes,
+    /// No process is scanned, and no candidate is judged on in-use or
+    /// liveness evidence: a candidate that passes every other check is
+    /// "not checked", never eligible.
+    NotChecked(crate::survey::InUseNotChecked),
 }
 
 impl<'a> Checker<'a> {
@@ -1066,17 +1085,27 @@ impl<'a> Checker<'a> {
             options,
             reuse_limit: reuse_limit.min(FRESHNESS),
             latest: None,
+            scans: true,
         }
     }
 
     /// A read-only plan's checker. Its verdicts are advisory; a reclaim
     /// always uses a separate deleting checker with the freshness bound.
-    pub fn for_plan(rules: &Rules<'a>) -> Self {
+    /// `scan` says whether it scans processes at all ([`PlanScan`]).
+    pub fn for_plan(rules: &Rules<'a>, scan: PlanScan) -> Self {
         Self {
             options: Options::from_rules(rules),
             reuse_limit: PLAN_REUSE_LIMIT,
             latest: None,
+            scans: scan == PlanScan::Processes,
         }
+    }
+
+    /// Whether candidates are judged on in-use and liveness evidence:
+    /// `false` only for [`PlanScan::NotChecked`], where a judge stops
+    /// before its in-use step and must not ask for a scan.
+    pub fn checks_in_use(&self) -> bool {
+        self.scans
     }
 
     /// This checker, its scans also reading what Owner PID needs when
@@ -1261,6 +1290,12 @@ impl<'a> Checker<'a> {
     }
 
     fn rescan<H: Host>(&mut self, host: &H, deadline: Option<MonoTime>) -> Result<(), ScanError> {
+        // Every scan starts here: a checker that does not check (a
+        // default survey's) reaching it is a bug, never a silent scan.
+        assert!(
+            self.scans,
+            "a checker made with PlanScan::NotChecked was asked for a process scan"
+        );
         self.latest = None;
         let mut latest = scan(host, &self.options, deadline)?;
         if let Some(why) = latest.unsettled.take() {

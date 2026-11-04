@@ -21,8 +21,14 @@ use crate::units::{format_age, format_bytes};
 
 /// The version of `survey --json`'s schema. Unlike `ensure`'s report it
 /// is not frozen: a release may change its fields, and says so by
-/// raising this number (Mark, TASK-116). Consumers check it.
-pub const SCHEMA_VERSION: u64 = 1;
+/// raising this number (Mark, TASK-116). Consumers check it. 2: `in_use`,
+/// `summary[].not_checked`, `candidates[].eligible` may be `null`.
+pub const SCHEMA_VERSION: u64 = 2;
+
+/// What the human result calls a candidate that passed every check a
+/// survey without `--in-use` made: not eligible, since whether it is in use
+/// was not looked at.
+const NOT_CHECKED: &str = "matched (in use not checked)";
 
 /// Candidates listed per profile and `PATH` (`--list`, JSON
 /// `candidates`); the rest are counted (`left_out`).
@@ -44,6 +50,14 @@ impl Survey {
     fn json(&self) -> Json {
         Json::Obj(vec![
             ("schema_version", Json::U64(SCHEMA_VERSION)),
+            (
+                "in_use",
+                Json::str(if self.in_use {
+                    "checked"
+                } else {
+                    "not_checked"
+                }),
+            ),
             ("status", Json::str(self.status.as_str())),
             ("exit_code", Json::U64(self.exit_code().into())),
             (
@@ -54,7 +68,12 @@ impl Survey {
             ("version", Json::str(env!("CARGO_PKG_VERSION"))),
             (
                 "paths",
-                Json::Arr(self.paths.iter().map(path_json).collect()),
+                Json::Arr(
+                    self.paths
+                        .iter()
+                        .map(|path| path_json(path, self.in_use))
+                        .collect(),
+                ),
             ),
             ("errors", errors_json(&self.errors)),
         ])
@@ -69,8 +88,14 @@ impl Survey {
         let mut out = String::new();
         // A refusal before any plan prints nothing here: its error is on
         // stderr already, and stdout carries only results.
+        if !self.in_use && !self.paths.is_empty() {
+            out.push_str(
+                "in use: not checked (no process was looked at; --in-use checks \
+                 it)\n",
+            );
+        }
         for path in &self.paths {
-            path_text(path, list, &mut out);
+            path_text(path, list, self.in_use, &mut out);
         }
         match self.status {
             Status::Deadline => out
@@ -150,7 +175,32 @@ fn age_range(rows: &[&PlanEntry], now: Timestamp) -> Option<(u64, u64)> {
     })
 }
 
-fn path_json(path: &PathSurvey) -> Json {
+/// `fields` of a summary block with the eligible rows under the name
+/// they have in this survey: `eligible` (checked) or `not_checked`, the
+/// other `null`, so a consumer cannot read a candidate whose use was not
+/// checked as eligible.
+fn eligible_or_not_checked(
+    fields: Vec<(&'static str, Json)>,
+    in_use: bool,
+) -> Vec<(&'static str, Json)> {
+    let mut out = Vec::with_capacity(fields.len() + 1);
+    for (key, value) in fields {
+        if key == "eligible" {
+            if in_use {
+                out.push((key, value));
+                out.push(("not_checked", Json::Null));
+            } else {
+                out.push((key, Json::Null));
+                out.push(("not_checked", value));
+            }
+        } else {
+            out.push((key, value));
+        }
+    }
+    out
+}
+
+fn path_json(path: &PathSurvey, in_use: bool) -> Json {
     let plan = &path.plan;
     let terms = surveyed_terms(path);
     let mut candidates = Vec::new();
@@ -159,11 +209,16 @@ fn path_json(path: &PathSurvey) -> Json {
         .map(|term| {
             let rows = rows_of(path, term.profile);
             let listed = rows.len().min(LISTED_PER_PROFILE);
-            candidates.extend(rows[..listed].iter().map(|row| candidate_json(row, path)));
+            candidates.extend(
+                rows[..listed]
+                    .iter()
+                    .map(|row| candidate_json(row, path, in_use)),
+            );
             let range = age_range(&rows, path.surveyed_at);
-            let Json::Obj(mut fields) = term_to_json(term) else {
+            let Json::Obj(fields) = term_to_json(term) else {
                 unreachable!("a summary block is an object");
             };
+            let mut fields = eligible_or_not_checked(fields, in_use);
             fields.extend([
                 (
                     "oldest_idle_age_seconds",
@@ -222,11 +277,18 @@ fn path_json(path: &PathSurvey) -> Json {
     ])
 }
 
-fn candidate_json(row: &PlanEntry, path: &PathSurvey) -> Json {
+/// A candidate row. `eligible` is `null` for one whose use was not checked
+/// (no reason, a survey without `--in-use`).
+fn candidate_json(row: &PlanEntry, path: &PathSurvey, in_use: bool) -> Json {
+    let eligible = match row.reason {
+        Some(_) => Json::Bool(false),
+        None if in_use => Json::Bool(true),
+        None => Json::Null,
+    };
     Json::Obj(vec![
         ("profile", Json::str(&row.profile)),
         ("candidate", Json::opt(candidate(row), path_str)),
-        ("eligible", Json::Bool(row.reason.is_none())),
+        ("eligible", eligible),
         ("reason", Json::opt(row.reason, |r| Json::str(r.as_str()))),
         ("estimated_bytes", Json::opt(row.estimated_bytes, Json::U64)),
         (
@@ -374,7 +436,8 @@ fn ages_text(range: Option<(u64, u64)>) -> Option<String> {
     })
 }
 
-fn path_text(path: &PathSurvey, list: bool, out: &mut String) {
+fn path_text(path: &PathSurvey, list: bool, in_use: bool, out: &mut String) {
+    let eligible = if in_use { "eligible" } else { NOT_CHECKED };
     let plan = &path.plan;
     let shown = plan
         .path
@@ -414,10 +477,10 @@ fn path_text(path: &PathSurvey, list: bool, out: &mut String) {
         out.push_str(&format!(
             "  profile {}: {}{ages}\n",
             printable(term.profile),
-            term_text(term, why_stopped)
+            term_text(term, why_stopped, eligible)
         ));
         if list {
-            list_rows(&rows, path.surveyed_at, out);
+            list_rows(&rows, path.surveyed_at, in_use, out);
         }
     }
     for (profile, why) in failures(path) {
@@ -468,17 +531,44 @@ fn path_text(path: &PathSurvey, list: bool, out: &mut String) {
         Some(entries) => unmatched_text(path, entries, out),
         None => out.push_str("  unmatched entries: not listed\n"),
     }
-    for error in &plan.errors {
-        out.push_str(&format!("  error: {}\n", printable(&error.message)));
+    error_lines(&plan.errors, out);
+}
+
+/// One line per distinct error message, in order, naming the profiles it
+/// was reported for when there are several (the deadline leaves dozens of
+/// profiles unplanned with the same message).
+fn error_lines(errors: &[ErrorEntry], out: &mut String) {
+    let mut seen: Vec<(&str, Vec<&str>)> = Vec::new();
+    for error in errors {
+        let profile = error.profile.as_deref();
+        match seen.iter_mut().find(|(m, _)| *m == error.message) {
+            Some((_, profiles)) => profiles.extend(profile),
+            None => seen.push((&error.message, profile.into_iter().collect())),
+        }
+    }
+    for (message, profiles) in seen {
+        let which = match profiles.as_slice() {
+            [] | [_] => String::new(),
+            many => format!(
+                " ({} profiles: {})",
+                many.len(),
+                many.iter()
+                    .map(|p| printable(p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        out.push_str(&format!("  error: {}{which}\n", printable(message)));
     }
 }
 
-fn list_rows(rows: &[&PlanEntry], now: Timestamp, out: &mut String) {
+fn list_rows(rows: &[&PlanEntry], now: Timestamp, in_use: bool, out: &mut String) {
+    let unkept = if in_use { "eligible" } else { "not checked" };
     for row in rows.iter().take(LISTED_PER_PROFILE) {
         let size = row
             .estimated_bytes
             .map_or_else(|| "unsized".to_owned(), format_bytes);
-        let verdict = row.reason.map_or("eligible", |r| r.as_str());
+        let verdict = row.reason.map_or(unkept, |r| r.as_str());
         let age = idle_age(row, now)
             .map(|a| format!(" idle {}", format_age(a)))
             .unwrap_or_default();

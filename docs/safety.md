@@ -1305,8 +1305,10 @@ A reclaim asks the [Pre-release sandbox gate](#pre-release-sandbox-gate)
 first, so outside a test container a development build names the gate,
 in its own PID namespace too, met goal or not; and the call's own errors
 (a missing root or `PATH`) are named before this rule. `watch
---tally-only`, `check`, `survey` and `profiles` judge no candidate and
-are not refused. Every scan reads the facts again, before its first
+--tally-only`, `check`, `survey` without `--in-use` (which reads no
+process, [reference.md](reference.md#survey)) and `profiles` judge no
+candidate on in-use evidence and are not refused; `survey --in-use` is
+refused as a dry run is. Every scan reads the facts again, before its first
 listing and after its last read, and confirms them once for both this
 rule and Owner PID: a failed read, a change between the two (a `/proc`
 remounted with `hidepid` during a cycle) or a failed rule makes every

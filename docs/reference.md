@@ -16,8 +16,8 @@ diskgc watch  --min-free SIZE --target-free SIZE [--interval DUR] [--timeout DUR
 diskgc watch  --tally-only [--min-free SIZE]
               [--select EXPR] [--roots DIR]... [--json] [--config FILE] [--allow-root] PATH
 diskgc check  [--config FILE]
-diskgc survey [--select EXPR] [--roots DIR]... [--list] [--json] [--timeout DUR]
-              [--config FILE] PATH...
+diskgc survey [--select EXPR] [--roots DIR]... [--in-use] [--list] [--json]
+              [--timeout DUR] [--config FILE] PATH...
 diskgc profiles list [--json] [--config FILE]
 diskgc profiles show NAME [--json] [--config FILE]
 diskgc profiles test [--json] [--config FILE]
@@ -744,8 +744,8 @@ a switch starts).
 ### `survey`
 
 ```
-diskgc survey [--select EXPR] [--roots DIR]... [--list] [--json] [--timeout DUR]
-              [--config FILE] PATH...
+diskgc survey [--select EXPR] [--roots DIR]... [--in-use] [--list] [--json]
+              [--timeout DUR] [--config FILE] PATH...
 ```
 
 Read-only: it deletes nothing, takes no lock, runs no command action and
@@ -754,19 +754,57 @@ test containers (the sandbox gate guards deletion only). For each `PATH`
 it reports what the profiles find below it, what keeps each candidate,
 and what no profile matches yet, so the next profile worth writing is
 visible. It is `ensure --dry-run`'s plan without a goal: every candidate
-is judged by the same checks, the in-use check included (Output:
-`plan`), and nothing is reclaimed toward a size.
+is judged by the same checks (Output: `plan`), and nothing is reclaimed
+toward a size, except that the in-use check is opt-in (Mark, TASK-116,
+2026-11-04: "in-use detection runtime selectable via flag"):
+
+- **Without `--in-use` (the default)** no other process is looked at:
+  no `/proc/PID` entry, no process scan, no bound sockets or loop
+  devices, no Cargo process heuristics, and no refusal for `hidepid` or a
+  PID namespace (it runs in a container too; diskgc still reads its own
+  `/proc/self` entries and the kernel version). The rules of a
+  [liveness contract](#liveness-contracts) judged on processes are
+  skipped: pytest-tmp's "no pytest run seen", nix-shell-rc's "shell
+  ended", Owner PID, and the project contracts' visible-use rule. Every
+  other check runs as in a dry run: discovery, the source's `where` (an
+  `app_not_running` lock file included), keep markers, checkouts,
+  container storage, ownership, special files, the eligibility walk with
+  its sizes, the idle filters by age, `future_time`, version rules,
+  `protect`, and a liveness contract's file-based rules (its instance
+  recognition, `filtered`; a project's location, `producer_unknown`; and
+  a project contract's "no change or read for 30 days", `not_idle`). A candidate
+  that passes all of them is **not checked**, never eligible: the human
+  result says `N matched (in use not checked)`, `--list` says `not
+  checked`, and the JSON has `in_use: "not_checked"`, the count under
+  `summary[].not_checked` with `eligible: null`, and each such row's
+  `eligible: null`. The kept reasons are those of the checks above;
+  `in_use` then comes only from an application's lock file.
+- **`--in-use`** judges candidates on in-use and liveness evidence as
+  `ensure --dry-run` does: one process scan, reused while young
+  ([safety.md](safety.md#in-use)), and the same refusal where diskgc
+  cannot see every process. A candidate that passes is eligible, one
+  that does not is kept `in_use`, `in_use_unknown` or `producer_unknown`.
+  It costs `/proc` scans of every visible process (one per reuse window
+  and profile, and one at the end of each profile's plan for its notes on
+  what it could not see). On the development laptop the scans were a
+  small part of a survey's time: walking the trees is most of it.
+
+Only a survey can plan without the in-use check: the option is a value
+only the survey's own code can make, so `ensure`, its dry run, a reclaim
+and `watch` always check.
 
 - **Per profile:** one line (one JSON `summary` block): candidates found,
-  how many are eligible and their estimated size, the kept ones by reason
+  how many are eligible (with `--in-use`) or not checked (without) and
+  their estimated size, the kept ones by reason
   with their sizes (`in_use` among them), and the idle ages of the eligible
-  ones (`idle 2 h to 30 d`: the newest change in an `fs` candidate's tree,
+  or not checked ones (`idle 2 h to 30 d`: the newest change in an `fs` candidate's tree,
   a Cargo target's last build). Profiles that found nothing share one
   line, as do the profiles not looked for below `PATH` (below); a profile
   refused before it could look (`missing`: its command's executable is
   not installed) has its own.
 - **`--list`** (always in `--json`): the candidates themselves, one line
-  each, largest first, with size, verdict (`eligible` or the skip reason)
+  each, largest first, with size, verdict (`eligible`, `not checked` or
+  the skip reason)
   and idle age, so a human reviews concrete paths, not globs. At most
   1,000 per profile are listed; the rest are counted (`... N more not
   listed`, JSON `left_out`).
@@ -823,8 +861,8 @@ not report `held_by_deleted_files` (`ensure --dry-run` does).
 A survey is refused before it looks at anything, exit 2, for what
 refuses `ensure --dry-run`: a malformed command line or `--select`, an
 invalid configuration, a `PATH` or supplied root that does not exist,
-running as root (a survey has no root mode), and an in-use check that
-cannot see every process (`hidepid`, a PID namespace other than the
+running as root (a survey has no root mode), and, with `--in-use`, an
+in-use check that cannot see every process (`hidepid`, a PID namespace other than the
 initial one: [safety.md](safety.md#in-use)). Exit codes: 0 every `PATH`
 surveyed (status `dry_run`), 2 refused, 3 a host failure (`error`: a
 plan's error, or a `PATH` whose entries could not be listed), 124
@@ -833,28 +871,36 @@ usage error, interruption, error and deadline that any of them has
 decides.
 
 Example (the development laptop, 2026-11-04, abridged; `diskgc survey
-~ /tmp` took 6 minutes there, most of it judging 146,000 `/tmp` rc
-dirs):
+~ /tmp` took 7 minutes there, most of it walking 146,000 `/tmp` rc dirs
+and the trees below `/tmp` for each `roots: required` profile):
 
 ```
 $ diskgc survey /tmp
-survey /tmp (filesystem /, 26.4 GiB available) in 276.5 s
-  profile cargo-target: 19 found · 1 eligible est. 67.8 MiB · kept 2 contains_special unsized, 15 unreadable unsized, 1 in_use est. 159.5 MiB · idle 2 d
-  profile nix-shell-rc: 146507 found · 146324 eligible est. 857.1 MiB · kept 14 in_use est. 80.0 KiB, 67 producer_unknown est. 388.0 KiB, 100 not_idle est. 2.0 MiB, 1 contains_ipc unsized, 1 missing unsized · idle 1 h to 76 d
-  profile node-compile-cache: 838 found · 838 eligible est. 1.5 GiB · idle 2 h to 69 d
-  profile pytest-tmp: 1328 found · 976 eligible est. 702.3 MiB · kept 331 future_time est. 3.5 GiB, 17 missing unsized, 3 contains_special unsized, 1 in_use est. 14.9 MiB · idle 1 d to 6 d
+in use: not checked (no process was looked at; --in-use checks it)
+survey /tmp (filesystem /, 36.5 GiB available) in 315.6 s
+  profile cargo-target: 20 found · 3 matched (in use not checked) est. 1.3 GiB · kept 2 contains_special unsized, 15 unreadable unsized · idle 57 m to 2 d
+  profile nix-shell-rc: 146844 found · 145832 matched (in use not checked) est. 839.3 MiB · kept 1011 not_idle est. 5.9 MiB, 1 contains_ipc unsized · idle 1 h to 76 d
+  profile node-compile-cache: 842 found · 842 matched (in use not checked) est. 1.0 GiB · idle 9 m to 69 d
+  profile pytest-tmp: 387 found · 53 matched (in use not checked) est. 128.4 MiB · kept 331 future_time est. 3.5 GiB, 3 contains_special unsized · idle 19 h to 6 d
   profile jest-cache: not planned: missing
   not surveyed below a PATH (select one with --select): docker-build-cache, docker-dangling, docker-unreferenced, nix-garbage, podman-dangling, podman-unreferenced
   found nothing: bazel-output-base-anchored, brave-browser-cache, ...
-  unmatched: 68292 top-level entries, est. 1.8 GiB, in 4036 name families (20 largest):
-    nix-shell.*  58575 entries  est. 767.2 MiB  idle 42 s to 66 d  e.g. nix-shell.gbPv8R
-    mpedersen  1 entry  est. 507.1 MiB  idle 20 h  e.g. mpedersen
-    tmp.*  638 entries  est. 62.4 MiB  idle 20 h to 92 d  e.g. tmp.U9REh1N81x
-    zephyr-h#e#-run.*  2578 entries  est. 10.1 MiB  idle 3 d to 11 d  e.g. zephyr-h5e5-run.00KnhMjN
+  unmatched: 69419 top-level entries, est. 1.6 GiB, in 4031 name families (20 largest):
+    nix-shell.*  59710 entries  est. 554.1 MiB  idle 1 m to 67 d  e.g. nix-shell.G2pnAk
+    mpedersen  1 entry  est. 503.4 MiB  idle 38 m  e.g. mpedersen
+    tmp.*  638 entries  est. 62.4 MiB  idle 1 d to 92 d  e.g. tmp.U9REh1N81x
+    zephyr-h#e#-run.*  2578 entries  est. 10.1 MiB  idle 4 d to 11 d  e.g. zephyr-h5e5-run.00KnhMjN
     playwright-artifacts-*  1249 entries  est. 4.9 MiB  idle 12 d to 16 d  e.g. playwright-artifacts-04G9jL
-    ... 4016 more families, 5236 entries, est. 134.5 MiB
+    ... 4011 more families, 5228 entries, est. 128.0 MiB
 ```
 
+With `--in-use` the same lines say `eligible` and add the verdicts on
+process evidence, e.g. `profile nix-shell-rc: 146846 found · 145754
+eligible est. 838.9 MiB · kept 17 in_use est. 116.0 KiB, 1007 not_idle
+est. 5.9 MiB, 67 producer_unknown est. 340.0 KiB, 1 contains_ipc
+unsized`. Errors are listed once per message, naming the profiles
+(`error: deadline passed before this profile was planned (31 profiles:
+...)`).
 When the deadline or a signal stopped the survey, a last line says that
 what is shown is partial.
 
@@ -862,8 +908,9 @@ what is shown is partial.
 
 `--json` prints one object. Its schema is **versioned and may change**
 between releases (Mark, TASK-116), unlike `ensure`'s report: a consumer
-checks `schema_version` (now 1) and treats a different value as a format
-it does not know. Within one version fields are only added. The types
+checks `schema_version` (now 2: 1 had no `in_use` and no `not_checked`,
+and its `eligible` was never `null`) and treats a different value as a
+format it does not know. Within one version fields are only added. The types
 are `ensure`'s where they are the same thing: `status`, `exit_code`,
 `started_at`, `duration_ms`, `version` and `errors` (Output); a `summary`
 block is the dry run's (Output: `summary`), with `would_reclaim` and
@@ -874,13 +921,15 @@ error; a command line that is not understood prints only `status`,
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "in_use": "checked | not_checked",
   "status": "dry_run | error | usage_error | deadline | interrupted",
   "exit_code": 0, "started_at": "2026-11-04T12:00:00Z", "duration_ms": 0, "version": "0.2.0",
   "paths": [{
     "path": "/tmp", "mount": "/", "status": "dry_run", "avail_bytes": 0,
     "summary": [{"tier": "pytest-tmp", "profile": "pytest-tmp", "found": 0,
       "eligible": {"count": 0, "estimated_bytes": 0, "unsized": 0},
+      "not_checked": {"count": 0, "estimated_bytes": 0, "unsized": 0},
       "would_reclaim": null, "reclaimed": null,
       "kept": [{"reason": "in_use", "count": 0, "estimated_bytes": 0, "unsized": 0}],
       "not_judged": 0, "oldest_idle_age_seconds": null, "newest_idle_age_seconds": null,
@@ -906,10 +955,16 @@ error; a command line that is not understood prints only `status`,
   (`null` when not measured); `errors` its plan's errors (Output,
   `errors`), and one of cause `host` when its entries could not be
   listed.
+- `in_use` says whether candidates were judged on in-use and liveness
+  evidence (`checked`, `--in-use`) or not (`not_checked`).
 - `summary` has a block per profile the survey ran below that `PATH`, in
-  run order, also for a profile that found nothing (`found: 0`).
+  run order, also for a profile that found nothing (`found: 0`). The
+  candidates that passed every check it made are `eligible` when
+  `in_use` is `checked` (`not_checked` is then `null`), and
+  `not_checked` when it is not (`eligible` is then `null`): one of the
+  two is always `null`. `found` counts both.
   `oldest_idle_age_seconds` and `newest_idle_age_seconds` are the range
-  of its eligible candidates' idle ages (`null` without one); `listed` and
+  of those candidates' idle ages (`null` without one); `listed` and
   `left_out` say how many of its candidates `candidates` lists (at most
   1,000) and how many it leaves out.
 - `refused` lists the profiles refused before they found anything
@@ -920,10 +975,11 @@ error; a command line that is not understood prints only `status`,
   `--select`). What they would match is not looked for there, and may be
   listed as unmatched.
 - `candidates` are the plan's rows of a candidate, each profile's
-  largest first (unsized last), then by path: `eligible` with `reason`
-  `null`, or kept with its skip reason; `estimated_bytes` as `plan[]`'s
+  largest first (unsized last), then by path: `eligible: true` with
+  `reason` `null` (checked), `eligible: null` with `reason` `null` (in
+  use not checked), or `eligible: false` with its skip reason; `estimated_bytes` as `plan[]`'s
   (`null`: refused before its walk was complete); `idle_age_seconds` of
-  an eligible row (`null` for a kept one, and when unknown or in the
+  an eligible or not checked row (`null` for a kept one, and when unknown or in the
   future). A root a tier could not search (`missing`, `other_fs`) is a
   row of its own, as in the plan.
 - `unmatched` is `null` when `PATH` was not listed: its plan was refused,

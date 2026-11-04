@@ -185,7 +185,8 @@ watch --tally-only runs as a service that keeps the index snapshot warm
 const HELP_SURVEY: &str = "
 survey reads only: per PATH, what each profile finds (count, size, age,
   what keeps it), and the top-level entries no profile matches, grouped by
-  name family; --list shows the candidates, --json one object of it all.
+  name family; --in-use also checks whether candidates are in use
+  (process scans), --list shows them, --json one object of it all.
 ";
 
 /// The help after the usage lines, for `build`: what it runs, from the

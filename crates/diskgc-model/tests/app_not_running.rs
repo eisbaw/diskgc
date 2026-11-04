@@ -45,6 +45,7 @@ fn verdict(host: &ModelHost) -> Option<Reason> {
         dev,
         &Rules::new(&[1000]),
         diskgc_core::profile::IdleWindow::default(),
+        diskgc_core::inuse::PlanScan::Processes,
         None,
         &mut |_| {},
     );
@@ -86,6 +87,7 @@ fn relative_lock_path_is_bound_to_the_source_root() {
         diskgc_core::places::Space::unique_device(host.stat_path(Path::new("/tmp")).unwrap().dev),
         &Rules::new(&owners),
         diskgc_core::profile::IdleWindow::default(),
+        diskgc_core::inuse::PlanScan::Processes,
         None,
         &mut |_| {},
     );

@@ -55,6 +55,7 @@ fn options(paths: &[&str], select: Option<&str>) -> SurveyOptions {
         select: select.map(str::to_owned),
         roots: Vec::new(),
         timeout: Some(Duration::from_secs(600)),
+        in_use: true,
     }
 }
 
@@ -150,7 +151,8 @@ fn the_laptop_tmp_is_categorised_by_profile_and_name_family() {
     let survey = run(&host, &options(&["/tmp"], None), None);
     assert_eq!(survey.status, Status::DryRun, "{survey:?}");
     let value = json(&survey);
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["in_use"], "checked");
     assert_eq!(value["exit_code"], 0);
 
     let pytest = block(&value, "pytest-tmp");
@@ -335,12 +337,20 @@ fn the_json_has_exactly_the_documented_fields() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/reference.md");
     let reference = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let example = survey_json_example(&reference);
-    let host = host(&laptop_tmp(""));
-    let value = json(&run(&host, &options(&["/tmp"], None), None));
-    let mut problems = Vec::new();
-    same_keys(&example, &value, "", &mut problems);
-    assert!(problems.is_empty(), "{problems:#?}");
-    assert_read_only(&host);
+    // Both modes have the same fields (one of `eligible` and `not_checked`
+    // is null).
+    for in_use in [true, false] {
+        let host = host(&laptop_tmp(""));
+        let options = SurveyOptions {
+            in_use,
+            ..options(&["/tmp"], None)
+        };
+        let value = json(&run(&host, &options, None));
+        let mut problems = Vec::new();
+        same_keys(&example, &value, "", &mut problems);
+        assert!(problems.is_empty(), "in_use {in_use}: {problems:#?}");
+        assert_read_only(&host);
+    }
 }
 
 /// The first ```json block after the `survey` JSON heading.
@@ -470,6 +480,14 @@ fn the_deadline_stops_the_survey_with_what_it_has() {
     );
     let unmatched = &value["paths"][0]["unmatched"];
     assert_eq!(unmatched["unsized"], unmatched["count"], "{unmatched}");
+    // The human text says it once, naming the profiles.
+    let text = survey.to_text(false);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("deadline passed before this profile was planned"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert!(lines[0].contains(" profiles: "), "{text}");
     assert_read_only(&host);
 }
 
@@ -644,4 +662,283 @@ fn a_profile_whose_listing_fails_is_not_reported_as_finding_nothing() {
     };
     assert_eq!(others(&value), others(&clean));
     assert_eq!(block(&value, "pytest-tmp")["found"], 2);
+}
+
+/// Every `Host` call that reads another process (`/proc`, sockets, loop
+/// devices): the in-use scan and the liveness contracts. A survey without
+/// `--in-use` makes none.
+const PROCESS_READS: [Op; 21] = [
+    Op::Pids,
+    Op::ProcIdentity,
+    Op::ProcIdentityReleased,
+    Op::ProcFds,
+    Op::ProcLinks,
+    Op::ProcMaps,
+    Op::ProcEnviron,
+    Op::ProcStatus,
+    Op::BoundUnixSockets,
+    Op::PidNamespace,
+    Op::ProcNspid,
+    Op::PidAlive,
+    Op::ProcUids,
+    Op::ProcCmdline,
+    Op::ProcRootLookup,
+    Op::ProcClimb,
+    Op::ProcMountinfo,
+    Op::LoopBackingFile,
+    Op::LoopBackingFiles,
+    Op::LoopBackingIdentity,
+    Op::LoopDevices,
+];
+
+fn process_reads(host: &ModelHost) -> Vec<(Op, usize)> {
+    PROCESS_READS
+        .iter()
+        .map(|op| (*op, host.trace_count(*op)))
+        .filter(|(_, n)| *n > 0)
+        .collect()
+}
+
+/// The pytest session pid 42 holds open, in both modes: kept `in_use`
+/// with `--in-use`; without it, not checked (`eligible: null`), never
+/// eligible, and no process was read.
+#[test]
+fn a_live_session_is_in_use_with_the_flag_and_not_checked_without() {
+    let live = "/tmp/nix-shell.Ab12Cd/pytest-of-tester/pytest-1";
+    let row = |value: &Value| -> Value {
+        value["paths"][0]["candidates"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|r| r["candidate"] == live)
+            .unwrap_or_else(|| panic!("no row for {live}: {value}"))
+            .clone()
+    };
+
+    let checked_host = host(&laptop_tmp(""));
+    let checked = json(&run(&checked_host, &options(&["/tmp"], None), None));
+    let checked_row = row(&checked);
+    assert_eq!(checked_row["eligible"], false, "{checked_row}");
+    assert_eq!(checked_row["reason"], "in_use", "{checked_row}");
+    assert!(!process_reads(&checked_host).is_empty(), "--in-use scans");
+
+    let default_host = host(&laptop_tmp(""));
+    let options = SurveyOptions {
+        in_use: false,
+        ..options(&["/tmp"], None)
+    };
+    let survey = run(&default_host, &options, None);
+    assert_eq!(survey.status, Status::DryRun, "{survey:?}");
+    let value = json(&survey);
+    assert_eq!(value["in_use"], "not_checked");
+    let default_row = row(&value);
+    assert_eq!(default_row["eligible"], Value::Null, "{default_row}");
+    assert_eq!(default_row["reason"], Value::Null, "{default_row}");
+    let pytest = block(&value, "pytest-tmp");
+    assert_eq!(pytest["eligible"], Value::Null, "{pytest}");
+    assert_eq!(pytest["not_checked"]["count"], 2, "{pytest}");
+    assert_eq!(pytest["kept"], Value::Array(Vec::new()), "{pytest}");
+    assert_eq!(pytest["found"], 2, "{pytest}");
+    let checked_pytest = block(&checked, "pytest-tmp");
+    assert_eq!(
+        checked_pytest["not_checked"],
+        Value::Null,
+        "{checked_pytest}"
+    );
+    assert_eq!(checked_pytest["eligible"]["count"], 1, "{checked_pytest}");
+
+    // Nothing reads like a checked verdict.
+    let text = survey.to_text(true);
+    assert!(text.starts_with("in use: not checked"), "{text}");
+    assert!(
+        text.contains("  profile pytest-tmp: 2 found · 2 matched (in use not checked) est. "),
+        "{text}"
+    );
+    assert!(!text.contains("eligible"), "{text}");
+    assert!(text.contains("  not checked "), "{text}");
+
+    assert_eq!(process_reads(&default_host), [], "no process is read");
+    assert_read_only(&default_host);
+}
+
+/// A Cargo target: its process heuristics are in-use evidence too, so
+/// without `--in-use` a target a visible Cargo uses is not checked, and
+/// with it, kept.
+#[test]
+fn a_cargo_target_in_use_is_not_checked_without_the_flag() {
+    let extra = "  /home/tester/p/Cargo.toml: {}\n  /home/tester/p/target: {CACHEDIR.TAG: \
+                 {cachedir_tag: true}, debug: {.cargo-lock: {}, deps: {a: {size: 1M}}}}\n  \
+                 /usr/bin/cargo: {}\n";
+    let yaml = laptop_tmp(extra).replace(
+        "processes:\n",
+        "processes:\n  - {pid: 77, exe: /usr/bin/cargo, cwd: /home/tester/p, maps: [/usr/bin/cargo], \
+         environ: [HOME=/home/tester], fds: []}\n",
+    );
+    let target = |in_use: bool| -> (Value, Vec<(Op, usize)>) {
+        let host = host(&yaml);
+        let options = SurveyOptions {
+            in_use,
+            ..options(&["/home/tester"], Some("profile:cargo-target"))
+        };
+        let value = json(&run(&host, &options, None));
+        (
+            value["paths"][0]["candidates"][0].clone(),
+            process_reads(&host),
+        )
+    };
+    let (checked, reads) = target(true);
+    // The model's Cargo is seen (in use), or its facts cannot be read
+    // (unknown): a verdict on process evidence either way.
+    assert!(
+        matches!(
+            checked["reason"].as_str(),
+            Some("in_use" | "in_use_unknown")
+        ),
+        "{checked}"
+    );
+    assert!(!reads.is_empty());
+    let (unchecked, reads) = target(false);
+    assert_eq!(
+        (unchecked["eligible"].clone(), unchecked["reason"].clone()),
+        (Value::Null, Value::Null),
+        "{unchecked}"
+    );
+    assert_eq!(reads, []);
+}
+
+/// Static refusals stand without `--in-use`: a `protect`ed candidate is
+/// kept `protected`, a future-dated one `future_time` (under an idle
+/// filter).
+#[test]
+fn static_refusals_stand_without_the_flag() {
+    let host = host(&laptop_tmp(
+        "  /tmp/tmp.Fut123: {.: {mtime: 2026-10-14T00:00:00Z}, f: {mtime: 2026-10-20T00:00:00Z}}\n",
+    ));
+    let config = r#"version: 1
+profiles:
+  - name: shell-tmp
+    find: {roots: [/tmp], paths: ["tmp.*"], type: any}
+    action: delete
+    examples: {match: [/tmp/tmp.x]}
+  - name: guard
+    find: {roots: [/tmp], paths: [tmp.Xy12ab], type: dir}
+    action: delete
+    examples: {match: [/tmp/tmp.Xy12ab]}
+protect: [guard]
+"#;
+    let options = SurveyOptions {
+        in_use: false,
+        ..options(&["/tmp"], Some("profile:shell-tmp && filter:idle-1h"))
+    };
+    let value = json(&run(&host, &options, Some(config)));
+    let reasons: BTreeSet<(String, String)> = value["paths"][0]["candidates"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| {
+            (
+                r["candidate"].as_str().unwrap().to_owned(),
+                r["reason"].as_str().unwrap_or("-").to_owned(),
+            )
+        })
+        .collect();
+    assert!(
+        reasons.contains(&("/tmp/tmp.Xy12ab".into(), "protected".into())),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.contains(&("/tmp/tmp.Fut123".into(), "future_time".into())),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.contains(&("/tmp/tmp.Qw34er".into(), "-".into())),
+        "{reasons:?}"
+    );
+    assert_eq!(process_reads(&host), []);
+}
+
+/// `ensure --dry-run` cannot plan without the in-use check: it has no way
+/// to ask (the option is made only by the survey; a compile-fail doc test
+/// on `diskgc_core::survey::InUseNotChecked` shows nothing else can make
+/// it), and on the fixture where a survey without `--in-use` reads no
+/// process, the dry run scans and keeps the live session `in_use`.
+#[test]
+fn ensure_dry_run_always_checks_in_use() {
+    use diskgc_core::invocation::{self, EnsureOptions};
+    use diskgc_core::units::parse_size;
+    let host = host(&laptop_tmp(""));
+    let options = EnsureOptions {
+        min_free: parse_size("1K").expect("a size"),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        select: Some("profile:pytest-tmp".to_owned()),
+        roots: Vec::new(),
+        dry_run: true,
+        allow_root: false,
+        no_index: true,
+        path: PathBuf::from("/tmp"),
+        test_entry_budget: None,
+    };
+    let draw_seed = || Err("no seed".to_owned());
+    let builtins = || Library::builtin().map_err(|e| e.to_string());
+    let platform = Platform {
+        catalog: Catalog::Development,
+        draw_seed: &draw_seed,
+        builtins: &builtins,
+    };
+    let config = ConfigFile::NotFound { tried: Vec::new() };
+    let loaded = invocation::load(options.selection(), &config, &platform, &mut |_| {})
+        .unwrap_or_else(|(c, why)| panic!("{c:?}: {why}"));
+    let report = invocation::ensure(&host, &options, loaded, &platform, &mut |_| {}, &mut |_| {});
+    assert_eq!(report.status, Status::DryRun, "{report:?}");
+    let live = report
+        .plan
+        .iter()
+        .find(|r| {
+            r.candidate.as_deref()
+                == Some("/tmp/nix-shell.Ab12Cd/pytest-of-tester/pytest-1".as_ref())
+        })
+        .expect("the live session's row");
+    assert_eq!(live.reason, Some(diskgc_core::engine::Reason::InUse));
+    assert!(host.trace_count(Op::Pids) > 0, "the dry run scanned");
+    let json: Value = serde_json::from_str(&report.to_json()).expect("JSON");
+    assert!(json.get("in_use").is_none(), "ensure's report is unchanged");
+    assert!(json["summary"][0].get("not_checked").is_none());
+}
+
+/// A project contract's file-based rules stand without `--in-use`: a
+/// virtual environment 60 days old in a project whose source changed
+/// yesterday is kept `not_idle` by the contract (no process is read),
+/// and one in a project idle 60 days is not checked.
+#[test]
+fn a_project_contracts_file_rules_stand_without_the_flag() {
+    let venv = |name: &str, source: &str| {
+        format!(
+            "  /home/tester/src/{name}:\n    .: {{mtime: 2026-08-16T03:00:00Z}}\n    \
+             pyproject.toml: {{mtime: {source}}}\n    \".venv\":\n      .: {{mtime: \
+             2026-08-16T03:00:00Z}}\n      pyvenv.cfg: {{mtime: 2026-08-16T03:00:00Z}}\n      \
+             lib: {{.: {{mtime: 2026-08-16T03:00:00Z}}, x.py: {{size: 4K, mtime: \
+             2026-08-16T03:00:00Z}}}}\n"
+        )
+    };
+    let extra = venv("busy", "2026-10-14T03:00:00Z") + &venv("idle", "2026-08-16T03:00:00Z");
+    let host = host(&laptop_tmp(&extra));
+    let options = SurveyOptions {
+        in_use: false,
+        ..options(&["/home/tester/src"], Some("profile:python-venv"))
+    };
+    let value = json(&run(&host, &options, None));
+    let reason = |dir: &str| -> Value {
+        value["paths"][0]["candidates"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|r| r["candidate"] == format!("/home/tester/src/{dir}/.venv"))
+            .map(|r| r["reason"].clone())
+            .unwrap_or_else(|| panic!("no row for {dir}: {value}"))
+    };
+    assert_eq!(reason("busy"), "not_idle", "{value}");
+    assert_eq!(reason("idle"), Value::Null, "{value}");
+    assert_eq!(process_reads(&host), []);
 }

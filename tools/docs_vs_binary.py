@@ -752,7 +752,9 @@ def probe_survey(reference, run, report, runs_survey):
     schema = json_schema(documented)
     enums = enum_values(documented)
     every = run.diskgc("survey", "--json", f"{s}/targets")
-    for label, result in (("--select", r), ("every profile", every)):
+    checked = run.diskgc("survey", "--json", "--in-use", "--select", "profile:cargo-target",
+                         f"{s}/targets")
+    for label, result in (("--select", r), ("every profile", every), ("--in-use", checked)):
         obj = result.json()
         if obj is None:
             report.expect(False, "survey", f"survey JSON ({label})", "one object",
@@ -765,15 +767,26 @@ def probe_survey(reference, run, report, runs_survey):
         for path, allowed in enums.items():
             for value in observed_values(obj, path):
                 report.expect(value in allowed, "survey enums", path, sorted(allowed), value)
-        report.expect((result.code, obj.get("status"), obj.get("schema_version")) == (0, "dry_run", 1),
-                      "survey", f"exit, status, schema_version ({label})", (0, "dry_run", 1),
+        report.expect((result.code, obj.get("status"), obj.get("schema_version")) == (0, "dry_run", 2),
+                      "survey", f"exit, status, schema_version ({label})", (0, "dry_run", 2),
                       (result.code, obj.get("status"), obj.get("schema_version")))
+        in_use = "checked" if label == "--in-use" else "not_checked"
+        report.expect(obj.get("in_use") == in_use, "survey", f"in_use ({label})", in_use,
+                      obj.get("in_use"))
+        # The fresh target passes every check: eligible only when its use
+        # was checked, else not checked (eligible null), never both.
+        live = [c for p in obj.get("paths", []) for c in p.get("candidates", [])
+                if c.get("candidate", "").endswith("/live/target")]
+        want = True if label == "--in-use" else None
+        report.expect([c.get("eligible") for c in live] == [want], "survey",
+                      f"fresh target's eligible ({label})", [want], [c.get("eligible") for c in live])
         blocks = {b["profile"]: b for p in obj.get("paths", []) for b in p.get("summary", [])}
         cargo = blocks.get("cargo-target") or {}
         report.expect(cargo.get("found") == 2, "survey", f"cargo-target found ({label})", 2,
                       cargo.get("found"))
     text = run.diskgc("survey", "--list", "--select", "profile:cargo-target", f"{s}/targets")
     report.expect(text.code == 0 and "profile cargo-target: 2 found" in text.out
+                  and "matched (in use not checked)" in text.out
                   and f"{s}/targets/live/target" in text.out, "survey", "`survey --list` text",
                   "the profile line and its candidates", f"exit {text.code}: {text.out[:200]!r}")
     for argv in (["survey", "--json"], ["survey", "--json", "relative"]):

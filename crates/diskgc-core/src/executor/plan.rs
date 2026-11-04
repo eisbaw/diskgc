@@ -9,7 +9,7 @@ use crate::config::Order;
 use crate::engine::{Checkouts, Identity, Reason, Rules, Skip, checkout_metadata_below};
 use crate::fs_kind::{self, Find};
 use crate::host::{DevIno, Host, MonoTime, Timestamp};
-use crate::inuse::Checker;
+use crate::inuse::{Checker, PlanScan};
 use crate::profile::{Action, IdleWindow};
 use crate::report::{BuildEvidence, PlanEntry, Report, RunTerm, Status};
 use std::collections::HashMap;
@@ -42,13 +42,24 @@ pub fn dry_run<H: Host>(
 /// What a tier's plan is for. A dry run says what its reclaim would lock
 /// once per run (a grouped plan for its first tier only) and reports the
 /// deleted files holding space; a survey does neither (it never reclaims,
-/// and its result has no `held_by_deleted_files`: one process scan per
-/// tier saved).
+/// and its result has no `held_by_deleted_files`), but with `--in-use` it
+/// still logs the end-of-plan scan's notes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlanAs {
     FirstDryRunTier,
     LaterDryRunTier,
-    Survey,
+    /// A survey's: with [`PlanScan::NotChecked`] (only a survey can make
+    /// one) no process is scanned. A dry run always scans.
+    Survey(PlanScan),
+}
+
+impl PlanAs {
+    fn scan(self) -> PlanScan {
+        match self {
+            Self::FirstDryRunTier | Self::LaterDryRunTier => PlanScan::Processes,
+            Self::Survey(scan) => scan,
+        }
+    }
 }
 
 fn dry_run_tier<H: Host>(
@@ -253,7 +264,7 @@ fn dry_run_inner<H: Host>(
         }
     }
     let rules = rules(tier, owners);
-    let mut checker = Checker::for_plan(&rules)
+    let mut checker = Checker::for_plan(&rules, plan_as.scan())
         .with_pid_lookup(tier.pid_lookup())
         .with_pytest_facts(tier.pytest_facts())
         .with_project_facts(tier.project_facts());
@@ -277,6 +288,7 @@ fn dry_run_inner<H: Host>(
                     find,
                     measured.space,
                     &rules,
+                    plan_as.scan(),
                     deadline,
                     &mut report,
                     log,
@@ -287,6 +299,7 @@ fn dry_run_inner<H: Host>(
                     tier,
                     measured.space,
                     &rules,
+                    plan_as.scan(),
                     deadline,
                     &mut report,
                     log,
@@ -434,10 +447,16 @@ fn dry_run_inner<H: Host>(
     }
     // Unmeasured: unknown, not the earlier sample.
     report.avail_after_bytes = final_sample(host, &measured, deadline, &mut report, log, tier);
-    if plan_as != PlanAs::Survey && !deadline_passed(host, deadline) && host.interrupted().is_none()
+    // The end-of-plan scan: its notes say what the in-use verdicts could
+    // not see (other users' processes, unreadable ones). A survey with
+    // `--in-use` logs them and drops the deleted files; one without reads
+    // no process at all.
+    if plan_as.scan() == PlanScan::Processes
+        && !deadline_passed(host, deadline)
+        && host.interrupted().is_none()
     {
         let started = host.now();
-        report.held_by_deleted_files = held(
+        let held_files = held(
             host,
             &mut checker,
             measured.space,
@@ -445,6 +464,9 @@ fn dry_run_inner<H: Host>(
             deadline,
             log,
         );
+        if !matches!(plan_as, PlanAs::Survey(_)) {
+            report.held_by_deleted_files = held_files;
+        }
         record_deadline_overrun(
             host,
             &mut report,
@@ -484,9 +506,10 @@ pub fn survey_tier<H: Host>(
     host: &H,
     request: &Request,
     owners: &[u32],
+    scan: PlanScan,
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    dry_run_tier(host, request, owners, log, PlanAs::Survey)
+    dry_run_tier(host, request, owners, log, PlanAs::Survey(scan))
 }
 
 fn dry_run_grouped_inner<H: Host>(
@@ -832,6 +855,7 @@ pub(super) fn plan_fs<H: Host>(
     find: &Find,
     space: crate::places::Space,
     rules: &Rules<'_>,
+    scan: PlanScan,
     deadline: Option<MonoTime>,
     report: &mut Report,
     log: &mut dyn FnMut(&str),
@@ -847,6 +871,7 @@ pub(super) fn plan_fs<H: Host>(
             at_least: tier.idle_for,
             before: tier.idle_before,
         },
+        scan,
         deadline,
         log,
     );
@@ -1278,6 +1303,7 @@ pub(super) fn plan_fs_union<H: Host>(
     tier: &Tier,
     space: crate::places::Space,
     rules: &Rules<'_>,
+    scan: PlanScan,
     deadline: Option<MonoTime>,
     report: &mut Report,
     log: &mut dyn FnMut(&str),
@@ -1344,7 +1370,7 @@ pub(super) fn plan_fs_union<H: Host>(
             return planned;
         }
     };
-    let mut checker = Checker::for_plan(rules)
+    let mut checker = Checker::for_plan(rules, scan)
         .with_pid_lookup(tier.pid_lookup())
         .with_pytest_facts(tier.pytest_facts())
         .with_project_facts(tier.project_facts());

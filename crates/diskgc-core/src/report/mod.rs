@@ -911,10 +911,11 @@ impl Report {
 
 /// One source term in words, as the human result's `profile NAME: ...`
 /// line says it after the colon ([`summary::Term`]); `why_stopped` names
-/// what left candidates not judged. For `survey`, which renders terms
+/// what left candidates not judged, `eligible` what the eligible rows are
+/// called. For `survey`, which renders terms
 /// planned without a goal ([`summary::terms_without_goal`]).
-pub fn term_text(term: &summary::Term<'_>, why_stopped: &str) -> String {
-    human::term_text(term, why_stopped)
+pub fn term_text(term: &summary::Term<'_>, why_stopped: &str, eligible: &str) -> String {
+    human::term_text_as(term, why_stopped, eligible)
 }
 
 /// One `summary` block as the `ensure` JSON writes it, for `survey`'s

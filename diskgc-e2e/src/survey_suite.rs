@@ -1,9 +1,10 @@
 //! `survey` (TASK-38; docs/reference.md, `survey`) against the real binary
 //! in a disposable container: read-only over a laptop-shaped `/tmp`
-//! fixture while another process holds the host lock. It must report each
-//! profile's candidates and the unmatched name families, finish without
-//! waiting for the lock, delete or rename nothing (no traced removal call,
-//! oracle clean) and write no index snapshot.
+//! fixture while another process holds the host lock, once without and
+//! once with `--in-use`. It must report each profile's candidates (not
+//! checked, then eligible) and the unmatched name families, finish
+//! without waiting for the lock, delete or rename nothing (no traced
+//! removal call, oracle clean) and write no index snapshot.
 
 use std::path::Path;
 
@@ -58,26 +59,51 @@ pub fn survey_reports_tmp_by_profile_and_family_and_changes_nothing(ctx: &Ctx) -
     let oracle = Oracle::arm(Fixture::new())?;
     // A reclaim waits for this lock; a survey must not even ask for it.
     let holder = Holder::root(ctx, &["flock-hold", HOST_LOCK])?;
+    let checked = ctx.run_as_tester(
+        &ctx.diskgc(),
+        &["survey", "--json", "--in-use", "--timeout", "60s", "/tmp"],
+    )?;
     let run = ctx.run_as_tester(
         &ctx.diskgc(),
         &["survey", "--json", "--timeout", "60s", "/tmp"],
     )?;
     holder.finish()?;
     info!(
+        "diskgc survey --in-use -> {:?}\n--- stdout\n{}--- stderr\n{}",
+        checked.code, checked.stdout, checked.stderr
+    );
+    info!(
         "diskgc survey -> {:?}\n--- stdout\n{}--- stderr\n{}",
         run.code, run.stdout, run.stderr
     );
-    oracle.judge(&run)?.assert_clean()?;
+    oracle.judge_runs(&[&checked, &run])?.assert_clean()?;
+    for r in [&checked, &run] {
+        ensure!(
+            r.events.is_empty(),
+            "survey made removal or rename calls: {:?}",
+            r.events
+        );
+        r.expect_code(0)?;
+    }
+    // With --in-use: the session is checked (no process holds it).
+    let with: Value = serde_json::from_str(&checked.stdout)
+        .map_err(|e| format!("survey --in-use JSON: {e}: {}", checked.stdout))?;
+    let session = with["paths"][0]["summary"]
+        .as_array()
+        .and_then(|b| b.iter().find(|b| b["profile"] == "pytest-tmp"))
+        .ok_or_else(|| format!("no pytest-tmp block under --in-use: {with}"))?;
     ensure!(
-        run.events.is_empty(),
-        "survey made removal or rename calls: {:?}",
-        run.events
+        with["in_use"] == "checked"
+            && session["eligible"]["count"] == 1
+            && session["not_checked"].is_null(),
+        "under --in-use the idle session is eligible: {session}"
     );
-    run.expect_code(0)?;
     let survey: Value = serde_json::from_str(&run.stdout)
         .map_err(|e| format!("survey JSON: {e}: {}", run.stdout))?;
     ensure!(
-        survey["schema_version"] == 1 && survey["status"] == "dry_run",
+        survey["schema_version"] == 2
+            && survey["status"] == "dry_run"
+            && survey["in_use"] == "not_checked",
         "unexpected survey: {survey}"
     );
     let tmp = &survey["paths"][0];
@@ -90,8 +116,10 @@ pub fn survey_reports_tmp_by_profile_and_family_and_changes_nothing(ctx: &Ctx) -
             .ok_or_else(|| format!("no summary block for {profile}: {tmp}"))
     };
     ensure!(
-        block("pytest-tmp")?["found"] == 1,
-        "the nested pytest session was not found: {}",
+        block("pytest-tmp")?["found"] == 1
+            && block("pytest-tmp")?["not_checked"]["count"] == 1
+            && block("pytest-tmp")?["eligible"].is_null(),
+        "the nested pytest session was not found, or not as not checked: {}",
         block("pytest-tmp")?
     );
     ensure!(
