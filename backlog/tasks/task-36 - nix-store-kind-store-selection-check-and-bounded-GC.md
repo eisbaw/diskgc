@@ -1,10 +1,10 @@
 ---
 id: TASK-36
 title: 'nix-store kind: store selection check and bounded GC'
-status: In Progress
+status: Done
 assignee: []
 created_date: 2026-10-16 22:41
-updated_date: '2026-11-04T03:34:00Z'
+updated_date: '2026-11-04T03:35:00Z'
 labels:
   - wave-4
   - irreversible
@@ -24,9 +24,9 @@ Why: Nix stores grow without bound on development machines. Implement nix-store 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 GC removes only dead paths in the container store; roots and generations survive
-- [ ] #2 Killing diskgc while nix-store runs leaves the host lock held until it exits
-- [ ] #3 A remote or non-default store, a single-user layout, or a non-allowlisted Nix version is skipped per docs/reference.md 'Backend skips and errors' (remote_backend / unsupported_backend), never GC'd
+- [x] #1 GC removes only dead paths in the container store; roots and generations survive
+- [x] #2 Killing diskgc while nix-store runs leaves the host lock held until it exits
+- [x] #3 A remote or non-default store, a single-user layout, or a non-allowlisted Nix version is skipped per docs/reference.md 'Backend skips and errors' (remote_backend / unsupported_backend), never GC'd
 <!-- AC:END -->
 
 ## Definition of Done
@@ -71,4 +71,6 @@ Orchestrator 2026-10-24: AC #2 text ('unsupported_store reported as an error') i
 2026-11-04 Mark: 'i dont care about lix'. Lix and other Nix variants stay refused (unsupported_backend, version allowlist); the planned pinned-Lix container scenario is dropped; the model vector nix-lix-client-refused stays as the cheap guard.
 
 2026-11-04 implementer, review round 1 (Codex + mped on 09ed55e), fixed in 49e1b3d on t36-nix-store (rebased on 76571ef): client anchored to the installation (/run/current-system/sw, root's default profile; links root's), ELF nix in a root-owned read-only <hash>-nix-<admitted> store path, exec through the checked descriptor; --option plugin-files '' on every Nix argv; config show store in diskgc's cwd; no-deadline overflow fixed; profiles --json where/checkouts/backend; narrowed container oracle plus link identity checks; S1-S6 and NITs (see commit). 52 nix-* vectors, 27 bites (all red but step1-store-bin, subsumed by the name check); 14 container scenarios. Gates: nix develop -c just check exit 0; nix develop -c just e2e exit 0 on 49e1b3d (nix 246/246, release 11/11, release-debian 11/11, docker-dind 7/7, nix-gc 14/14, VM checks). Host walk read-only: dry run binds through /run/current-system (eligible, estimated_bytes null); nix_dead.py still skips (dangling gcroots/auto registration). Not merged.
+
+2026-11-04: merged (ff) after one review round; full just e2e exit 0 incl. 14 Nix GC container scenarios. nix-garbage awaits Mark's admission. Next: TASK-98 (stale Nix GC roots) pairs with it.
 <!-- SECTION:NOTES:END -->
