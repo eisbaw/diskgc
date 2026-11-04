@@ -15,6 +15,7 @@
 mod human;
 pub mod json;
 pub mod outcome;
+pub mod summary;
 
 #[cfg(test)]
 mod tests;
@@ -226,9 +227,11 @@ pub struct PlanEntry {
     pub candidate: Option<PathBuf>,
     /// The skip reason, `None` for an eligible candidate.
     pub reason: Option<Reason>,
-    /// The candidate's estimated size; `None` for every skipped candidate
-    /// (its checks stopped before its walk was complete, so a size would
-    /// be a partial count).
+    /// The candidate's estimated size: an eligible one's, or a skipped
+    /// one's whose walk was complete before the refusal
+    /// ([`crate::engine::Skip::measured_bytes`]); `None` when unknown, and
+    /// for a skip before or during the walk (a size would be a partial
+    /// count).
     pub estimated_bytes: Option<u64>,
     pub operation: String,
     /// The source profile's `checkouts` setting the candidate was judged
@@ -244,6 +247,17 @@ pub struct PlanEntry {
     pub process_blockers: Option<Vec<ProcessBlocker>>,
     /// The skip's `unknown_cause`, for the human plan only.
     pub unknown_cause: Option<UnknownCause>,
+}
+
+/// A source term a dry run's planner judged (the `summary`'s blocks): its
+/// tier and profile, and how many of the candidates it found the plan left
+/// unjudged because it stopped first (the deadline, a failure). Kept apart
+/// from `plan`, which holds only judged rows (TASK-227).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedTerm {
+    pub tier: String,
+    pub profile: String,
+    pub not_judged: u64,
 }
 
 /// Source evidence from discovery, with age only after an eligibility walk.
@@ -306,6 +320,60 @@ fn process_blocker_json(blocker: &ProcessBlocker) -> Json {
         ("pid", Json::U64(u64::from(blocker.pid))),
         ("command", Json::opt(blocker.command.as_deref(), Json::str)),
         ("evidence", Json::str(blocker.evidence.as_str())),
+    ])
+}
+
+/// One `summary` block (docs/reference.md, Output).
+fn term_json(term: &summary::Term<'_>) -> Json {
+    let sized = |sized: summary::Sized| {
+        Json::Obj(vec![
+            ("count", Json::U64(sized.count)),
+            ("estimated_bytes", Json::U64(sized.bytes)),
+            ("unsized", Json::U64(sized.unmeasured)),
+        ])
+    };
+    let planned = term.planned;
+    Json::Obj(vec![
+        ("tier", Json::str(term.tier)),
+        ("profile", Json::str(term.profile)),
+        ("found", Json::opt(term.found(), Json::U64)),
+        ("eligible", Json::opt(planned.map(|p| p.eligible), sized)),
+        (
+            "would_reclaim",
+            Json::opt(planned.map(|p| p.would_reclaim), sized),
+        ),
+        (
+            "reclaimed",
+            Json::opt(term.reclaimed, |reclaimed| {
+                Json::Obj(vec![
+                    ("count", Json::U64(reclaimed.count)),
+                    (
+                        "avail_delta_bytes",
+                        Json::opt(reclaimed.avail_delta_bytes, Json::I64),
+                    ),
+                ])
+            }),
+        ),
+        (
+            "kept",
+            Json::Arr(
+                term.kept
+                    .iter()
+                    .map(|(reason, kept)| {
+                        Json::Obj(vec![
+                            ("reason", Json::str(reason.as_str())),
+                            ("count", Json::U64(kept.count)),
+                            ("estimated_bytes", Json::U64(kept.bytes)),
+                            ("unsized", Json::U64(kept.unmeasured)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "not_judged",
+            Json::opt(planned.and_then(|p| p.not_judged), Json::U64),
+        ),
     ])
 }
 
@@ -453,6 +521,8 @@ pub struct Report {
     pub avail_before_bytes: Option<u64>,
     pub avail_after_bytes: Option<u64>,
     pub plan: Vec<PlanEntry>,
+    /// A dry run's planned source terms ([`PlannedTerm`]); empty otherwise.
+    pub planned_terms: Vec<PlannedTerm>,
     pub actions: Vec<ActionEntry>,
     pub skipped: Vec<SkipEntry>,
     /// `None` (JSON `null`) when no complete process scan of this run
@@ -563,6 +633,7 @@ impl Report {
             avail_before_bytes: None,
             avail_after_bytes: None,
             plan: Vec::new(),
+            planned_terms: Vec::new(),
             actions: Vec::new(),
             skipped: Vec::new(),
             held_by_deleted_files: None,
@@ -770,6 +841,10 @@ impl Report {
                 ),
             ),
             (
+                "summary",
+                Json::Arr(summary::terms(self).iter().map(term_json).collect()),
+            ),
+            (
                 "held_by_deleted_files",
                 Json::opt(self.held_by_deleted_files.as_deref(), |held| {
                     Json::Arr(
@@ -815,5 +890,12 @@ impl Report {
     /// summarised here and logged in full on stderr as they happen.
     pub fn summary(&self) -> Option<String> {
         human::summary(self)
+    }
+
+    /// One text per source term, `PROFILE [TIER]: ...`, as the human
+    /// result shows them ([`summary::terms`]): `watch`'s cycle line joins
+    /// them.
+    pub fn term_summaries(&self) -> Vec<String> {
+        human::term_texts(self)
     }
 }

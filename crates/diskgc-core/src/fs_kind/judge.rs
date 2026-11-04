@@ -243,14 +243,16 @@ impl Judge<'_> {
         }
         judged!(self.version_where(host, reached.parent(), found, deadline));
         let mut walked = judged!(self.walk(host, candidate_view.candidate, found, idle, deadline));
-        judged!(self.negated_mixed_filters(
+        if let Err(skip) = self.negated_mixed_filters(
             host,
             reached.parent(),
             candidate_view.locked_fd,
             found,
             walked.newest_change,
-            deadline
-        ));
+            deadline,
+        )? {
+            return Ok(Err(skip.measured(walked.bytes())));
+        }
         walked.source_evidence = source_evidence;
         Ok(Ok(walked))
     }
@@ -552,15 +554,15 @@ impl Judge<'_> {
         if let Err(skip) = same_object(found, Some(record.root().identity), "walked") {
             return Ok(Err(skip));
         }
-        let newest_change = record.newest_change();
-        if idle && let Err(skip) = judge_idle(host, &found.path, newest_change, self.idle) {
-            return Ok(Err(skip));
-        }
-        Ok(Ok(Walked {
+        let walked = Walked {
+            newest_change: record.newest_change(),
             record,
-            newest_change,
             source_evidence: None,
-        }))
+        };
+        if idle && let Err(skip) = judge_idle(host, &found.path, walked.newest_change, self.idle) {
+            return Ok(Err(skip.measured(walked.bytes())));
+        }
+        Ok(Ok(walked))
     }
 }
 

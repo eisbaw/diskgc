@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use super::outcome::{self, Live, Planned, Verdict};
+use super::summary::{self, Sized, Term};
 use super::{
     HeldEntry, OTHER_FS_ROOT_DETAIL, PlanEntry, Report, SkipEntry, Status, human_space_values,
     signed_bytes,
@@ -131,6 +132,7 @@ fn live_text(report: &Report, held: Option<String>) -> String {
                 .to_owned(),
         );
     }
+    lines.extend(term_lines(report));
     let tiers: BTreeSet<&str> = report
         .actions
         .iter()
@@ -583,6 +585,7 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
                 .to_owned(),
         );
     }
+    lines.extend(term_lines(report));
     let tiers: BTreeSet<&str> = report.plan.iter().map(|p| p.tier.as_str()).collect();
     let tier_label = |tier: &str| {
         if tiers.len() > 1 {
@@ -810,6 +813,119 @@ fn evidence_text(entry: &PlanEntry) -> String {
                 .map_or_else(|| "unknown".to_owned(), format_age)
         )
     })
+}
+
+/// One line per source term ([`summary::terms`]): `  profile NAME [TIER]:
+/// ...` ([`term_text`]), the tier named when the run had more than one.
+fn term_lines(report: &Report) -> Vec<String> {
+    term_texts(report)
+        .into_iter()
+        .map(|text| format!("  profile {text}"))
+        .collect()
+}
+
+/// [`Report::term_summaries`].
+pub(super) fn term_texts(report: &Report) -> Vec<String> {
+    let terms = summary::terms(report);
+    let tiers: BTreeSet<&str> = terms.iter().map(|term| term.tier).collect();
+    let why_stopped = if report.status == Status::Deadline {
+        "deadline"
+    } else {
+        "the plan stopped"
+    };
+    terms
+        .iter()
+        .map(|term| {
+            format!(
+                "{}{}: {}",
+                one_line(term.profile),
+                if tiers.len() > 1 {
+                    format!(" [{}]", one_line(term.tier))
+                } else {
+                    String::new()
+                },
+                term_text(term, why_stopped)
+            )
+        })
+        .collect()
+}
+
+/// What one term found and did, ` · `-separated: a dry run's `N found ·
+/// N eligible SIZE (would reclaim N) · kept N REASON SIZE, ... · N not
+/// judged (WHY)`, a live run's `reclaimed N (observed CHANGE) · kept ...`.
+/// Parts with nothing to say are left out, except a dry run's eligible
+/// count.
+fn term_text(term: &Term<'_>, why_stopped: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(found) = term.found() {
+        parts.push(format!("{found} found"));
+    }
+    if let Some(planned) = term.planned {
+        let would = planned.would_reclaim;
+        let would_text = if would.count == planned.eligible.count || would.count == 0 {
+            format!("would reclaim {}", would.count)
+        } else {
+            format!("would reclaim {} {}", would.count, size_text(would))
+        };
+        parts.push(if planned.eligible.count == 0 {
+            "0 eligible".to_owned()
+        } else {
+            format!(
+                "{} eligible {} ({would_text})",
+                planned.eligible.count,
+                size_text(planned.eligible)
+            )
+        });
+    }
+    if let Some(reclaimed) = term.reclaimed.filter(|r| r.count > 0) {
+        parts.push(format!(
+            "reclaimed {} (observed change {})",
+            reclaimed.count,
+            signed_bytes(reclaimed.avail_delta_bytes)
+        ));
+    }
+    if !term.kept.is_empty() {
+        parts.push(format!(
+            "kept {}",
+            term.kept
+                .iter()
+                .map(|(reason, kept)| format!(
+                    "{} {} {}",
+                    kept.count,
+                    reason_label(*reason),
+                    size_text(*kept)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(not_judged) = term.planned.and_then(|p| p.not_judged).filter(|n| *n > 0) {
+        parts.push(format!("{not_judged} not judged ({why_stopped})"));
+    }
+    if parts.is_empty() {
+        // A live term always has a row; a dry run's always has `eligible`.
+        parts.push("nothing".to_owned());
+    }
+    parts.join(" · ")
+}
+
+/// What is known of some candidates' size: `est. 1.2 GiB`, `est. 1.2 GiB +
+/// 3 unsized` (counted, their size not measured: refused before their
+/// walk was complete, or no estimate), or `unsized`; `0 B` for none.
+fn size_text(sized: Sized) -> String {
+    if sized.count == 0 {
+        "0 B".to_owned()
+    } else if sized.unmeasured == sized.count {
+        "unsized".to_owned()
+    } else if sized.unmeasured == 0 {
+        format!("est. {}", format_bytes(sized.bytes))
+    } else {
+        format!(
+            "est. {} + {} unsized",
+            format_bytes(sized.bytes),
+            sized.unmeasured
+        )
+    }
 }
 
 /// Holders of deleted files that pin space. A holder of 0 B (an empty

@@ -439,8 +439,10 @@ pub fn eligibility<H: Host>(
     let path = &target.path;
     let walked = judged!(walk_target(host, target, rules, deadline));
     let last = last_build(&walked.inspected, &walked.walks);
+    // Refused after complete walks: sized ([`Skip::measured_bytes`]).
+    let (entries, bytes) = totals(&walked.walks);
     if let Err(skip) = judge_idle(host, path, last, idle) {
-        return Ok(Err(skip));
+        return Ok(Err(skip.measured(bytes)));
     }
     let scan = checker.current(host, deadline).map_err(|e| e.at(path))?;
     check_deadline(host, deadline, path)?;
@@ -451,9 +453,8 @@ pub fn eligibility<H: Host>(
         &walked.inspected,
         walked.project,
     ) {
-        return Ok(Err(skip));
+        return Ok(Err(skip.measured(bytes)));
     }
-    let (entries, bytes) = totals(&walked.walks);
     Ok(Ok(Eligible {
         last_build: last,
         entries,

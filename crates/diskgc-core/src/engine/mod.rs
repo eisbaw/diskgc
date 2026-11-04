@@ -890,6 +890,12 @@ pub struct Skip {
     /// `in_use_unknown`, `None` on every other reason (docs/reference.md,
     /// Output: `unknown_cause`).
     pub unknown_cause: Option<UnknownCause>,
+    /// The candidate's allocated bytes, when its eligibility walk was
+    /// complete before this refusal (an idle requirement, the in-use check,
+    /// a liveness contract): what it would be sized at had it been
+    /// eligible. `None` for a refusal before or during the walk, where a
+    /// size would be a partial count (docs/reference.md, Output: `summary`).
+    pub measured_bytes: Option<u64>,
 }
 
 /// Why an `in_use_unknown` candidate could not be judged: a stable report
@@ -1037,7 +1043,15 @@ impl Skip {
             detail: detail.into(),
             process_blockers: None,
             unknown_cause: None,
+            measured_bytes: None,
         }
+    }
+
+    /// This refusal came after a complete walk that measured `bytes`
+    /// ([`Skip::measured_bytes`]).
+    pub(crate) fn measured(mut self, bytes: u64) -> Self {
+        self.measured_bytes = Some(bytes);
+        self
     }
 
     /// An `in_use_unknown` skip and its cause.

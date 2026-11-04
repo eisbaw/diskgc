@@ -332,6 +332,40 @@ fn watch_reclaims_below_min_free_to_target_free() {
     assert_eq!(run.count("cycle 1 ended met"), 1, "{:?}", run.lines);
 }
 
+/// TASK-324: the one line that ends a cycle explains it per source term:
+/// what was reclaimed (count, observed change) and what was kept, counted
+/// and sized by reason. Here the goal is out of reach: three old
+/// candidates are reclaimed, and a fresh one is kept `not_idle`, sized by
+/// the walk that refused it.
+#[test]
+fn a_cycle_line_explains_each_term() {
+    let tree = format!(
+        "{}  /tmp/a-fresh: {{.: {{mtime: 2026-10-15T02:59:00Z}}, f: {{size: 50M, mtime: \
+         2026-10-15T02:59:00Z}}}}\n",
+        old_candidates(3, "100M")
+    );
+    let events = "events:\n  - {at: {elapsed: 30s}, other_used: {mount: /tmp, bytes: 9G}}\n  \
+                  - {at: {elapsed: 2m}, signal: term}\n";
+    let host = host(&yaml("1G", &tree, events));
+    let run = watch(&host, &reclaim("2G", "3G", "10s"));
+    assert_eq!(run.ended, Ok(Ended::Stopped(Signal::Term)));
+    let ended: Vec<&String> = run
+        .lines
+        .iter()
+        .filter(|l| l.starts_with("cycle 1 ended"))
+        .collect();
+    assert_eq!(
+        ended,
+        [
+            "cycle 1 ended exhausted: 674.0 MiB available before, 974.0 MiB after; 3 reclaimed, \
+             1 kept; by profile: tmp-a: reclaimed 3 (observed change +300.0 MiB) · kept 1 \
+             not_idle est. 50.0 MiB"
+        ],
+        "{:?}",
+        run.lines
+    );
+}
+
 // ---- TASK-277: a user's watch without the host lock ----
 
 /// A non-root watch on a host without `/run/diskgc/lock` starts, says once

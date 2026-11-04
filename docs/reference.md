@@ -523,9 +523,13 @@ scripts use `--json`. journald or the supervisor adds timestamps.
   cycle number), then what `ensure` logs on stderr (one line per action,
   tier search lines, child output with its prefix; Output), then one line
   when it ends: status, space before and after, how many reclaimed and
-  kept, and the kept counted by reason (one line in all, not one per
-  candidate: a watcher that is `exhausted` every 15 minutes must not
-  flood the journal);
+  kept, then each source term's block as the human result shows it
+  (`by profile: NAME [TIER]: reclaimed N (observed change ...) · kept N
+  REASON SIZE, ...; NAME ...`, Output), the kept counted and sized by
+  reason, and each profile skipped without a candidate (`skipped profile
+  NAME [TIER]: REASON`) (one line in all, not one per candidate: a
+  watcher that is `exhausted` every 15 minutes must not flood the
+  journal);
 - back-off: one line when it starts, one when space recovering ends it;
 - the background tally: one line when the pressure brake engages and one
   when it releases, each with the number of batches since the previous
@@ -745,7 +749,8 @@ diskgc survey [--select EXPR] [--roots DIR]... [--list] [--json] [--config FILE]
 Read-only: takes no lock and deletes nothing. For each `PATH`:
 
 - per profile: candidate count, total estimated size, age range, how many
-  are in use;
+  are in use (as `ensure --dry-run`'s `summary` blocks count and size
+  them, Output);
 - with `--list` (and always in `--json`): the **candidates themselves**,
   one line each, with size, age and in-use state, so a human reviews
   concrete paths, not globs. Output beyond 1,000 candidates per profile is
@@ -1065,7 +1070,15 @@ development builds, the pre-release sandbox gate,
   candidate. Its per-candidate verdicts are not repeated on stderr. Human results, including dry runs, report elapsed
   time and, when present, open deleted files that hold space by process
   count, bytes, and the largest three holders (holders of 0 B are left
-  out).
+  out). A human result that prints also has one line per source
+  term (`summary` below; a dry run's include a term that found nothing),
+  after the first line: `profile NAME [TIER]: ...`, its JSON `summary`
+  block in words, e.g. `profile pytest-tmp: 6425 found · 2971
+  eligible est. 5.8 GiB (would reclaim 2971) · kept 145 future_time est.
+  1.6 GiB, 1 in_use est. 34.3 MiB · 3308 not judged (deadline)`, or for a
+  live run `profile cargo-target: reclaimed 3 (observed change +2.1 GiB)
+  · kept 2 not_idle est. 1.0 GiB, 1 keep marker unsized`. `unsized`
+  counts candidates refused before their walk measured them.
   `exhausted` is rendered
   as “nothing more could be reclaimed” in human mode; the JSON status remains
   `exhausted`. When two different byte counts would round to the same human
@@ -1100,6 +1113,7 @@ JSON result (field names are part of the contract):
   "plan":     [{"group": "", "tier": "", "profile": "", "candidate": "", "eligible": true, "reason": null, "estimated_bytes": 0, "operation": "", "checkouts": "refuse | allow", "build_evidence": {"marker": "", "source": "", "idle_age_seconds": null}}],
   "actions":  [{"tier": "", "profile": "", "candidate": "", "avail_delta_bytes": 0, "duration_ms": 0, "idle_age_seconds": null, "count": 1}],
     "skipped":  [{"tier": "", "profile": "", "candidate": "", "count": 1, "examples": [], "reason": "locked | in_use | in_use_unknown | not_idle | too_idle | changed | empty | keep_marker | other_fs | remote_backend | unsupported_fs | unsupported_layout | unsupported_backend | backend_unavailable | missing | unsafe_path | contains_ipc | contains_mount | contains_special | contains_checkout | protected | excluded | not_owner | filtered | future_time | stale | too_many_entries | unreadable | newest_version | linked_current | installed_extension | pinned_toolchain | producer_unknown", "detail": null, "process_blockers": [{"pid": 42, "command": null, "evidence": "fd | cwd | root | exe | map | inode_map | environment | unreadable | target_cwd | target_exe | project_cargo | detached_cargo | cargo_manifest_dir | owner_pid | command_line | temp_root | unresolved_path"}], "unknown_cause": null, "estimated_bytes": null}],
+  "summary":  [{"tier": "", "profile": "", "found": 0, "eligible": {"count": 0, "estimated_bytes": 0, "unsized": 0}, "would_reclaim": {"count": 0, "estimated_bytes": 0, "unsized": 0}, "reclaimed": {"count": 0, "avail_delta_bytes": 0}, "kept": [{"reason": "", "count": 0, "estimated_bytes": 0, "unsized": 0}], "not_judged": 0}],
   "held_by_deleted_files": [{"pid": 0, "command": "", "bytes": 0}],
   "overruns": [{"operation": "", "path": "", "over_ms": 0}],
   "errors":   [{"tier": "", "profile": "", "candidate": "", "cause": "parse | config | safety | host | operation | usage | provisioning", "message": ""}]
@@ -1200,7 +1214,11 @@ is `host`.
   it may hold a version-control checkout, see
   [safety.md](safety.md#the-eligibility-walk-mandatory-per-candidate));
   `operation` is human-readable text (`cargo lock protocol`, a command's
-  argv), not an enum: it is for reading, not for matching.
+  argv), not an enum: it is for reading, not for matching. A skipped row
+  has a size when its eligibility walk was complete before the refusal
+  (e.g. an idle requirement, the in-use check, a liveness contract); a
+  refusal before or during the walk (e.g. ownership, a keep marker, a
+  version rule) has `null`.
   A source-anchored build candidate whose source was established at
   discovery has `build_evidence` with `marker`, `source` and
   `idle_age_seconds`. The age is measured from the newest change in an
@@ -1265,9 +1283,50 @@ is `host`.
   process, sorted by pid. The field reports visible evidence, not an
   exhaustive set of processes using a candidate.
 - `skipped[].estimated_bytes` is the candidate's allocated-byte estimate
-  only when a complete tally succeeded before a later refusal. Early skips,
-  untallied paths and grouped rows use `null`. It is a point-in-time size,
-  not a promise of space that could be reclaimed.
+  only when a complete tally succeeded before a later refusal, or the
+  refusing check's own walk was complete (an idle requirement the walk
+  measured). Early skips, untallied paths and grouped rows use `null`. It
+  is a point-in-time size, not a promise of space that could be reclaimed.
+- `summary` (added with TASK-324; a consumer that ignores unknown fields
+  is unaffected) has one block per source term, a tier's source profile
+  (`--select 'profile:a || profile:b'` is one tier with two), in run
+  order. It counts the rows of `plan` (a dry run) or of `actions` and
+  `skipped` (a live run) of that tier and profile: per tier, not per
+  candidate, so a candidate one tier keeps and a later tier reclaims is
+  kept in the first block and counted in the second. A row without a
+  candidate (a profile refused before discovery) is not counted. A
+  size object `{count, estimated_bytes, unsized}` counts candidates:
+  `estimated_bytes` sums the sizes known (an estimate from the walk,
+  never extra I/O), `unsized` counts those without one, which are in
+  `count` but not in the sum.
+  - `found` (dry run): `eligible.count` + every `kept` count +
+    `not_judged`; `null` when `not_judged` is. Like the human
+    per-candidate lines, `kept` also counts the roots and directories
+    discovery refused (a `missing` root, an `unreadable` directory on the
+    way), which are rows of their own.
+  - `eligible` (dry run): the term's eligible rows; `would_reclaim`
+    (dry run): those of them a reclaim would take before the goal is
+    reached by estimate, each candidate once, by the first tier that
+    finds it eligible (the human `would reclaim` verdict).
+  - `reclaimed` (live run): the candidates with an action in this tier,
+    including those deleted part-way, and the sum of their observed
+    `avail_delta_bytes` (`null` when any is).
+  - `kept`: the term's refused candidates by `reason` (the skip-reason
+    enum, in the order each first appears), each counted and sized as
+    its rows are (`plan[].estimated_bytes`,
+    `skipped[].estimated_bytes`). A live run's candidate deleted
+    part-way is in `reclaimed`, not here.
+  - `not_judged` (dry run): candidates the term found that the plan did
+    not judge, or judged and dropped, because it stopped first (the
+    deadline, a failure that stopped the run, a misconfigured root that
+    excluded the tier): they are in no `plan` row. When discovery itself
+    stopped, it counts what was listed by then (none for a Cargo tier).
+    `null` when the term's planner did not report: the run stopped
+    before it, or it failed.
+  - A dry run has `reclaimed` `null`; a live run has `found`,
+    `eligible`, `would_reclaim` and `not_judged` `null` (a reclaim judges
+    a candidate only when it takes it and stops at the goal, so it has no
+    such count).
 - A Cargo target whose profile directories hold only lock files is omitted
   from a live `ensure` result's `skipped` list and human skipped count; a
   stderr line names it (`TIER: PATH: its profile directories hold nothing

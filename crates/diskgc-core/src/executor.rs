@@ -1180,7 +1180,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             detail: Some(skip.detail.clone()),
             process_blockers: skip.process_blockers.clone(),
             unknown_cause: skip.unknown_cause,
-            estimated_bytes,
+            // The tally's size, else the refusing check's own complete walk.
+            estimated_bytes: estimated_bytes.or(skip.measured_bytes),
         });
     }
 

@@ -43,3 +43,31 @@ expect:
     - /home/tester/.rustup/toolchains/1.86.0-x86_64-unknown-linux-gnu/bin/rustc
     - /home/tester/.rustup/toolchains/esp/bin/rustc
     - /home/tester/.rustup/toolchains/nightly-local/bin/rustc
+  # TASK-324: the per-term summary counts and sizes what the plan and the
+  # reclaim judged: each toolchain is 16 KiB (two directories of 4 KiB and
+  # rustc's 8 KiB). Both refusals here come before the eligibility walk
+  # (the recent read of bin/, the pin): counted, unsized.
+  dry_run_report:
+    summary:
+      - tier: select
+        profile: rustup-toolchains
+        found: 4
+        eligible: {count: 1, estimated_bytes: 16384, unsized: 0}
+        would_reclaim: {count: 1, estimated_bytes: 16384, unsized: 0}
+        reclaimed: null
+        kept:
+          - {reason: not_idle, count: 1, estimated_bytes: 0, unsized: 1}
+          - {reason: pinned_toolchain, count: 2, estimated_bytes: 0, unsized: 2}
+        not_judged: 0
+  report:
+    summary:
+      - tier: select
+        profile: rustup-toolchains
+        found: null
+        eligible: null
+        would_reclaim: null
+        reclaimed: {count: 1, avail_delta_bytes: 16384}
+        kept:
+          - {reason: not_idle, count: 1, estimated_bytes: 0, unsized: 1}
+          - {reason: pinned_toolchain, count: 2, estimated_bytes: 0, unsized: 2}
+        not_judged: null

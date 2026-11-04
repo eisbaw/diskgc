@@ -883,30 +883,36 @@ fn failed_cycle<H: Host>(
     })
 }
 
-/// The one line that ends a cycle: status, space before and after, what
-/// was reclaimed and what was kept, counted by reason.
+/// The one line that ends a cycle: status, space before and after, how
+/// many were reclaimed and kept, then each source term's block (what it
+/// reclaimed and kept, counted and sized by reason; [`Report::term_summaries`])
+/// and each profile skipped without a candidate (a backend not serving
+/// this user), which the blocks do not count.
 fn end_line(cycle: u64, report: &Report) -> String {
     let space = |v: Option<u64>| v.map_or_else(|| "unknown".to_owned(), format_bytes);
     let reclaimed: u64 = report.actions.iter().map(|a| a.count).sum();
-    let mut kept: std::collections::BTreeMap<&str, u64> = std::collections::BTreeMap::new();
-    for skip in &report.skipped {
-        *kept.entry(skip.reason.as_str()).or_default() += skip.count;
-    }
-    let kept_total: u64 = kept.values().sum();
-    let by_reason = if kept.is_empty() {
+    let kept_total: u64 = report.skipped.iter().map(|s| s.count).sum();
+    let mut terms = report.term_summaries();
+    terms.extend(
+        report
+            .skipped
+            .iter()
+            .filter(|skip| skip.candidate.is_none())
+            .map(|skip| {
+                format!(
+                    "skipped profile {} [{}]: {}",
+                    skip.profile, skip.tier, skip.reason
+                )
+            }),
+    );
+    let by_term = if terms.is_empty() {
         String::new()
     } else {
-        format!(
-            " ({})",
-            kept.iter()
-                .map(|(reason, n)| format!("{reason} {n}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        format!("; by profile: {}", terms.join("; "))
     };
     format!(
         "cycle {cycle} ended {}: {} available before, {} after; {reclaimed} reclaimed, \
-         {kept_total} kept{by_reason}",
+         {kept_total} kept{by_term}",
         report.status.as_str(),
         space(report.avail_before_bytes),
         space(report.avail_after_bytes),
@@ -929,6 +935,46 @@ mod tests {
         assert_eq!(after(at(0), ten, at(10)), at(20));
         // A cycle that took 95 s: the next sample is the tick after it.
         assert_eq!(after(at(10), ten, at(105)), at(110));
+    }
+
+    /// TASK-324: the cycle line names each term's kept reasons with sizes,
+    /// and a profile skipped without a candidate, which no block counts.
+    #[test]
+    fn the_cycle_line_names_every_kept_reason_and_skipped_profile() {
+        use crate::engine::Reason;
+        use crate::report::SkipEntry;
+        let skip = |tier: &str, profile: &str, candidate: Option<&str>, reason, bytes| SkipEntry {
+            tier: tier.into(),
+            profile: profile.into(),
+            candidate: candidate.map(PathBuf::from),
+            count: 1,
+            examples: Vec::new(),
+            reason,
+            detail: None,
+            process_blockers: None,
+            unknown_cause: None,
+            estimated_bytes: bytes,
+        };
+        let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);
+        report.avail_before_bytes = Some(1 << 30);
+        report.avail_after_bytes = Some(1 << 30);
+        report.skipped = vec![
+            skip("t1", "tmp-a", Some("/tmp/a"), Reason::NotIdle, Some(2048)),
+            skip("t1", "tmp-a", Some("/tmp/b"), Reason::InUse, None),
+            skip(
+                "t2",
+                "docker-images",
+                None,
+                Reason::BackendUnavailable,
+                None,
+            ),
+        ];
+        assert_eq!(
+            end_line(4, &report),
+            "cycle 4 ended exhausted: 1.0 GiB available before, 1.0 GiB after; 0 reclaimed, \
+             3 kept; by profile: tmp-a: kept 1 not_idle est. 2.0 KiB, 1 in_use unsized; \
+             skipped profile docker-images [t2]: backend_unavailable"
+        );
     }
 
     #[test]

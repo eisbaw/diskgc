@@ -16,6 +16,16 @@ use crate::engine::{Checkouts, RESERVED_REASONS, Reason};
 /// Documented object fields this build always emits as `null`, and why.
 const NULL_FOR_NOW: &[(&str, &str)] = &[("index", "no index before task-28/29")];
 
+/// Documented fields that are `null` in one kind of run (docs/reference.md,
+/// Output: `summary`): the shape test checks each in the run that has it.
+const NULL_BY_RUN: &[(&str, &str)] = &[
+    ("report.summary.found", "a dry run's only"),
+    ("report.summary.not_judged", "a dry run's only"),
+    ("report.summary.eligible", "a dry run's only"),
+    ("report.summary.would_reclaim", "a dry run's only"),
+    ("report.summary.reclaimed", "a live run's only"),
+];
+
 /// The JSON block of docs/reference.md, Output.
 fn documented() -> Value {
     let output = section(&reference_md(), "## Output");
@@ -145,6 +155,7 @@ fn same_shape(want: &Value, got: &Value, at: &str) {
                 (Some(_), None) => panic!("{here}: the test report must hold an entry"),
                 (None, _) => {}
             },
+            (_, Value::Null) if NULL_BY_RUN.iter().any(|(path, _)| *path == here) => {}
             (Value::Object(_), _) => same_shape(w, g, &here),
             _ => assert_eq!(kind(w), kind(g), "{here}: type"),
         }
@@ -180,6 +191,180 @@ fn the_json_fields_are_the_docs() {
         );
     }
     same_shape(&doc, &got, "report");
+    // The dry run's summary objects (null in a live run, above).
+    let mut dry = full();
+    dry.dry_run = true;
+    dry.status = Status::DryRun;
+    dry.planned_terms = vec![PlannedTerm {
+        tier: "select".into(),
+        profile: "cargo-target".into(),
+        not_judged: 2,
+    }];
+    let got = emitted(&dry);
+    for (name, _) in NULL_BY_RUN {
+        let name = name.trim_start_matches("report.summary.");
+        let want = &doc["summary"][0][name];
+        match (want, &got["summary"][0][name]) {
+            (_, Value::Null) => assert_eq!(name, "reclaimed", "a dry run has {name}"),
+            (Value::Object(_), value) => {
+                same_shape(want, value, &format!("dry run summary.{name}"));
+            }
+            (_, value) => assert_eq!(kind(want), kind(value), "dry run summary.{name}"),
+        }
+    }
+}
+
+/// The summary pins its counts (docs/reference.md, Output: `summary`): a
+/// dry run's per term, with sizes where the plan has them and `unsized`
+/// otherwise, `found` their sum, and `would_reclaim` folded over tiers; a
+/// live run's reclaimed and kept, a part-way deletion reclaimed.
+#[test]
+fn the_summary_counts_and_sizes_each_term() {
+    let mut dry = Report::new(Status::Deadline, Some(Path::new("/w")), true);
+    dry.avail_before_bytes = Some(0);
+    dry.min_free_bytes = Some(100);
+    dry.target_free_bytes = Some(100);
+    let mut union_b = plan_row("t1", "/w/b1", None, Some(70));
+    union_b.profile = "b".into();
+    dry.plan = vec![
+        plan_row("t1", "/w/a1", None, Some(60)),
+        plan_row("t1", "/w/a2", None, Some(50)),
+        union_b,
+        plan_row("t1", "/w/a3", Some(Reason::NotIdle), Some(5)),
+        plan_row("t1", "/w/a4", Some(Reason::NotIdle), None),
+        plan_row("t1", "/w/a5", Some(Reason::KeepMarker), None),
+        // A later tier takes /w/a3; /w/a1 again changes nothing.
+        plan_row("t2", "/w/a3", None, Some(5)),
+        plan_row("t2", "/w/a1", None, Some(60)),
+    ];
+    for row in &mut dry.plan {
+        if row.profile == "cargo-target" {
+            row.profile = "a".into();
+        }
+    }
+    dry.planned_terms = vec![
+        PlannedTerm {
+            tier: "t1".into(),
+            profile: "a".into(),
+            not_judged: 4,
+        },
+        PlannedTerm {
+            tier: "t1".into(),
+            profile: "b".into(),
+            not_judged: 0,
+        },
+        PlannedTerm {
+            tier: "t1".into(),
+            profile: "c".into(),
+            not_judged: 0,
+        },
+        PlannedTerm {
+            tier: "t2".into(),
+            profile: "a".into(),
+            not_judged: 0,
+        },
+    ];
+    let got = emitted(&dry);
+    let summary = got["summary"].as_array().expect("summary");
+    let blocks: Vec<(&str, &str)> = summary
+        .iter()
+        .map(|b| (b["tier"].as_str().unwrap(), b["profile"].as_str().unwrap()))
+        .collect();
+    assert_eq!(blocks, [("t1", "a"), ("t1", "b"), ("t1", "c"), ("t2", "a")]);
+    let a = &summary[0];
+    assert_eq!(a["found"], 9, "2 eligible + 3 kept + 4 not judged: {a}");
+    assert_eq!(a["not_judged"], 4);
+    assert_eq!(
+        a["eligible"],
+        serde_json::json!({"count": 2, "estimated_bytes": 110, "unsized": 0})
+    );
+    // Needed 100: a1 (60) and a2 (50) cover it; b1 is not needed.
+    assert_eq!(
+        a["would_reclaim"],
+        serde_json::json!({"count": 2, "estimated_bytes": 110, "unsized": 0})
+    );
+    assert_eq!(
+        a["kept"],
+        serde_json::json!([
+            {"reason": "not_idle", "count": 2, "estimated_bytes": 5, "unsized": 1},
+            {"reason": "keep_marker", "count": 1, "estimated_bytes": 0, "unsized": 1},
+        ])
+    );
+    assert!(a["reclaimed"].is_null());
+    assert_eq!(summary[1]["found"], 1);
+    assert_eq!(summary[1]["would_reclaim"]["count"], 0);
+    assert_eq!(summary[2]["found"], 0, "a term that found nothing: {got}");
+    let t2 = &summary[3];
+    assert_eq!(t2["eligible"]["count"], 2);
+    assert_eq!(
+        t2["would_reclaim"]["count"], 0,
+        "the goal is covered by t1's estimates before /w/a3: {t2}"
+    );
+    // A planner that did not report: found and not_judged unknown.
+    dry.planned_terms.clear();
+    let got = emitted(&dry);
+    assert!(got["summary"][0]["found"].is_null(), "{got}");
+    assert!(got["summary"][0]["not_judged"].is_null(), "{got}");
+    assert_eq!(got["summary"][0]["eligible"]["count"], 2);
+    let text = dry.summary().expect("prints");
+    assert!(
+        text.contains(
+            "\n  profile a [t1]: 2 eligible est. 110 B (would reclaim 2) · kept 2 not_idle \
+             est. 5 B + 1 unsized, 1 keep marker unsized\n"
+        ),
+        "{text}"
+    );
+
+    let mut live = Report::new(Status::Exhausted, Some(Path::new("/w")), false);
+    let action = |candidate: &str, delta| ActionEntry {
+        tier: "t".into(),
+        profile: "p".into(),
+        candidate: candidate.into(),
+        avail_delta_bytes: delta,
+        duration_ms: 1,
+        idle_age_seconds: None,
+        count: 1,
+    };
+    live.actions = vec![
+        action("/w/x", Some(1000)),
+        action("/w/y", Some(24)),
+        action("/w/y", Some(0)),
+    ];
+    let mut sized = skip("/w/z", "t", "p", Reason::NotIdle);
+    sized.estimated_bytes = Some(2048);
+    live.skipped = vec![
+        // Deleted part-way, then kept: reclaimed, not kept.
+        skip("/w/y", "t", "p", Reason::InUse),
+        sized,
+        skip("/w/u", "t", "p", Reason::NotIdle),
+        skip("/w/v", "t", "p", Reason::NotOwner),
+    ];
+    let got = emitted(&live);
+    let block = &got["summary"][0];
+    assert_eq!(
+        block["reclaimed"],
+        serde_json::json!({"count": 2, "avail_delta_bytes": 1024})
+    );
+    assert_eq!(
+        block["kept"],
+        serde_json::json!([
+            {"reason": "not_idle", "count": 2, "estimated_bytes": 2048, "unsized": 1},
+            {"reason": "not_owner", "count": 1, "estimated_bytes": 0, "unsized": 1},
+        ])
+    );
+    for field in ["found", "eligible", "would_reclaim", "not_judged"] {
+        assert!(block[field].is_null(), "{field}: {block}");
+    }
+    let text = live.summary().expect("prints");
+    assert!(
+        text.contains(
+            "\n  profile p: reclaimed 2 (observed change +1.0 KiB) · kept 2 not_idle est. 2.0 KiB \
+             + 1 unsized, 1 not_owner unsized\n"
+        ),
+        "{text}"
+    );
+    live.actions[0].avail_delta_bytes = None;
+    assert!(emitted(&live)["summary"][0]["reclaimed"]["avail_delta_bytes"].is_null());
 }
 
 #[test]
@@ -657,6 +842,8 @@ fn human_groups_other_users_entries_from_two() {
     assert_eq!(
         lines,
         [
+            "  profile p: kept 3 unreadable unsized, 2 not_owner unsized, 2 keep marker unsized"
+                .to_owned(),
             format!("  3 kept: unreadable; examples: /tmp/a, /tmp/b, /tmp/c; e.g. {denied}"),
             format!("  2 kept: not_owner; examples: /tmp/d, /tmp/e; e.g. {foreign}"),
             "  kept /tmp/f: keep marker, inside the candidate".to_owned(),
@@ -1447,5 +1634,10 @@ fn a_dry_run_with_nothing_to_list_ends_without_a_colon() {
     assert!(!text.contains('\n'), "{text}");
     dry.plan = vec![plan_row("t", "/w/a", Some(Reason::NotIdle), None)];
     let text = dry.summary().expect("a dry run prints");
-    assert!(text.contains("(took 1 ms):\n  kept /w/a"), "{text}");
+    assert!(
+        text.contains(
+            "(took 1 ms):\n  profile cargo-target: 0 eligible · kept 1 not_idle unsized\n  kept /w/a"
+        ),
+        "{text}"
+    );
 }

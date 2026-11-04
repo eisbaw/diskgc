@@ -3089,7 +3089,8 @@ fn a_dry_run_plans_every_target_and_locks_and_deletes_nothing() {
         ]
     );
     assert!(report.plan[0].estimated_bytes.expect("eligible: sized") >= 8 * GIB);
-    assert_eq!(report.plan[1].estimated_bytes, None);
+    // Refused after its walks: sized as it was measured (TASK-324).
+    assert!(report.plan[1].estimated_bytes.is_some_and(|b| b > 0));
     assert_eq!(report.plan[0].operation, "cargo lock protocol");
     for op in [
         Op::Flock,

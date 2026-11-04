@@ -985,9 +985,25 @@ fn expect_preview(run: &Run, idle: &[PathBuf], busy: &[PathBuf; 2], holder_pid: 
         "dry run did not include the persistent deleted file: {}",
         run.stdout
     );
-    // The header, one line per candidate, the operations and the held line.
+    // TASK-324: one line for the source term explains the plan in counts
+    // and sizes: everything found, the eligible ones, the kept by reason.
+    let term = format!(
+        "  profile cargo-target: {} found · {} eligible est. ",
+        idle.len() + busy.len(),
+        idle.len()
+    );
     ensure!(
-        lines.len() == 3 + idle.len() + busy.len()
+        lines
+            .iter()
+            .any(|l| l.starts_with(&term)
+                && l.contains(&format!(" · kept {} in_use est. ", busy.len()))),
+        "no term line `{term}...`:\n{}",
+        run.stdout
+    );
+    // The header, the term line, one line per candidate, the operations
+    // and the held line.
+    ensure!(
+        lines.len() == 4 + idle.len() + busy.len()
             && lines.contains(&"  operations: cargo-target: cargo lock protocol"),
         "{}",
         run.stdout

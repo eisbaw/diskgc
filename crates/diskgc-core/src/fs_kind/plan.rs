@@ -180,18 +180,21 @@ pub fn judge_walked<H: Host>(
     // one may end right at it: leave this candidate unjudged rather than
     // publishing a late verdict.
     check_deadline(host, deadline, &found.path)?;
+    // Refused after a complete walk: sized ([`Skip::measured_bytes`]).
     if let Err(skip) = scan.check(&candidate, &walked.record) {
-        return Ok(Err(skip));
+        return Ok(Err(skip.measured(walked.bytes())));
     }
-    judged!(super::liveness::check(
+    if let Err(skip) = super::liveness::check(
         host,
         scan,
         judge.find,
         found,
         candidate.parent(),
         &walked.record,
-        &prepared
-    ));
+        &prepared,
+    )? {
+        return Ok(Err(skip.measured(walked.bytes())));
+    }
     let tally = walked.tally();
     Ok(Ok((tally, walked.record)))
 }

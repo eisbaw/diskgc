@@ -11,7 +11,7 @@ use crate::fs_kind::{self, Find};
 use crate::host::{DevIno, Host, MonoTime, Timestamp};
 use crate::inuse::Checker;
 use crate::profile::{Action, IdleWindow};
-use crate::report::{BuildEvidence, PlanEntry, Report, Status};
+use crate::report::{BuildEvidence, PlanEntry, PlannedTerm, Report, Status};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -188,6 +188,7 @@ fn dry_run_inner<H: Host>(
                     protected.then_some(Reason::Protected),
                     None,
                 ));
+                report.planned_terms = planned_terms(tier, &[]);
             }
             Ok(Binding::Skipped(skip)) => {
                 log(&format!(
@@ -301,6 +302,7 @@ fn dry_run_inner<H: Host>(
         mut eligible,
         skipped,
         stopped,
+        mut unjudged,
     } = planned;
     if host.interrupted().is_some() {
         // A partial judgement is not a trustworthy plan. Keep the root
@@ -394,6 +396,9 @@ fn dry_run_inner<H: Host>(
         // A skipped row keeps its own reason, which is true either way.
         let unchecked = report.plan.split_off(index);
         let dropped = unchecked.iter().filter(|e| e.reason.is_none()).count();
+        for entry in unchecked.iter().filter(|e| e.reason.is_none()) {
+            add_unjudged(&mut unjudged, &entry.profile, 1);
+        }
         report
             .plan
             .extend(unchecked.into_iter().filter(|e| e.reason.is_some()));
@@ -404,6 +409,7 @@ fn dry_run_inner<H: Host>(
         ));
     }
     report.plan.extend(root_skips);
+    report.planned_terms = planned_terms(tier, &unjudged);
     match stopped {
         Some(stop) => {
             if matches!(stop, Stop::DeadlinePassed { .. }) {
@@ -528,6 +534,7 @@ pub(super) fn dry_run_grouped_inner<H: Host>(
         }
         let part_failed = !part.errors.is_empty();
         report.plan.extend(part.plan);
+        report.planned_terms.extend(part.planned_terms);
         report.errors.extend(part.errors);
         report.held_by_deleted_files = part.held_by_deleted_files;
         report.avail_after_bytes = part.avail_after_bytes;
@@ -561,12 +568,57 @@ pub(super) fn record_unplanned(report: &mut Report, log: &mut dyn FnMut(&str), u
 }
 
 /// A plan in the making: the eligible candidates with their order key
-/// (the kind's idle measure), the skipped ones, and why planning stopped
-/// early (an error of the run, or the deadline).
+/// (the kind's idle measure), the skipped ones, why planning stopped
+/// early (an error of the run, or the deadline), and, per source profile,
+/// how many candidates it found that the stop left unjudged.
+#[derive(Default)]
 pub(super) struct Planned {
     pub(super) eligible: Vec<(Option<Timestamp>, PlanEntry)>,
     pub(super) skipped: Vec<PlanEntry>,
     pub(super) stopped: Option<Stop>,
+    pub(super) unjudged: Vec<(String, u64)>,
+}
+
+impl Planned {
+    /// `count` more candidates of `profile` found and not judged.
+    fn unjudged(&mut self, profile: &str, count: usize) {
+        add_unjudged(&mut self.unjudged, profile, count);
+    }
+}
+
+/// [`Planned::unjudged`] on a list of its own.
+fn add_unjudged(list: &mut Vec<(String, u64)>, profile: &str, count: usize) {
+    if count == 0 {
+        return;
+    }
+    let count = count as u64;
+    match list.iter_mut().find(|(seen, _)| seen == profile) {
+        Some((_, total)) => *total = total.saturating_add(count),
+        None => list.push((profile.to_owned(), count)),
+    }
+}
+
+/// The source profiles of `tier` a plan judges candidates for: one
+/// [`PlannedTerm`] each, with the candidates `unjudged` left (the summary's
+/// `not_judged`; docs/reference.md, Output).
+fn planned_terms(tier: &Tier, unjudged: &[(String, u64)]) -> Vec<PlannedTerm> {
+    let mut profiles: Vec<&str> = vec![tier.profile.as_str()];
+    for source in &tier.fs_union {
+        if !profiles.contains(&source.profile.as_str()) {
+            profiles.push(&source.profile);
+        }
+    }
+    profiles
+        .into_iter()
+        .map(|profile| PlannedTerm {
+            tier: tier.name.clone(),
+            profile: profile.to_owned(),
+            not_judged: unjudged
+                .iter()
+                .find(|(seen, _)| seen == profile)
+                .map_or(0, |(_, count)| *count),
+        })
+        .collect()
 }
 
 /// One plan entry of `tier`.
@@ -606,14 +658,15 @@ pub(super) fn plan_tier_row(tier: &Tier, reason: Option<Reason>) -> PlanEntry {
     }
 }
 
-/// The plan row of a candidate `skip` refused. A dry run's verdicts are its
-/// plan (stdout), so they are not logged as well.
+/// The plan row of a candidate `skip` refused, sized when its walk was
+/// complete before the refusal ([`Skip::measured_bytes`]). A dry run's
+/// verdicts are its plan (stdout), so they are not logged as well.
 pub(super) fn plan_skip(tier: &Tier, candidate: &Path, skip: &Skip) -> PlanEntry {
     PlanEntry {
         detail: Some(skip.detail.clone()),
         process_blockers: skip.process_blockers.clone(),
         unknown_cause: skip.unknown_cause,
-        ..plan_entry(tier, candidate, Some(skip.reason), None)
+        ..plan_entry(tier, candidate, Some(skip.reason), skip.measured_bytes)
     }
 }
 
@@ -636,6 +689,7 @@ pub(super) fn plan_cargo<H: Host>(
     let mut eligible = Vec::new();
     let mut skipped = Vec::new();
     let mut stopped = None;
+    let mut unjudged = Vec::new();
     match discover(host, tier, deadline, log) {
         Err(stop) => stopped = Some(stop),
         Ok(found) => {
@@ -658,6 +712,7 @@ pub(super) fn plan_cargo<H: Host>(
                         eligible,
                         skipped,
                         stopped,
+                        unjudged,
                     };
                 }
             };
@@ -666,7 +721,7 @@ pub(super) fn plan_cargo<H: Host>(
             } else {
                 &[]
             };
-            for target in targets {
+            for (judged, target) in targets.iter().enumerate() {
                 if host.interrupted().is_some() {
                     break;
                 }
@@ -690,6 +745,7 @@ pub(super) fn plan_cargo<H: Host>(
                             eligible,
                             skipped,
                             stopped,
+                            unjudged,
                         };
                     }
                 };
@@ -725,6 +781,7 @@ pub(super) fn plan_cargo<H: Host>(
                     }
                     Err(stop) => {
                         stopped = Some(stop);
+                        add_unjudged(&mut unjudged, &tier.profile, targets.len() - judged);
                         break;
                     }
                 }
@@ -735,6 +792,7 @@ pub(super) fn plan_cargo<H: Host>(
         eligible,
         skipped,
         stopped,
+        unjudged,
     }
 }
 
@@ -753,11 +811,7 @@ pub(super) fn plan_fs<H: Host>(
     report: &mut Report,
     log: &mut dyn FnMut(&str),
 ) -> Planned {
-    let mut planned = Planned {
-        eligible: Vec::new(),
-        skipped: Vec::new(),
-        stopped: None,
-    };
+    let mut planned = Planned::default();
     let (found, stopped) = fs_kind::plan(
         host,
         &tier.roots,
@@ -779,6 +833,7 @@ pub(super) fn plan_fs<H: Host>(
         String::new()
     };
     planned.stopped = stopped;
+    planned.unjudged(&tier.profile, found.unjudged);
     if tier.roots.is_empty() {
         assert!(
             found.judged.is_empty(),
@@ -809,6 +864,8 @@ pub(super) fn plan_fs<H: Host>(
         planned.skipped.push(plan_skip(tier, &skip.path, skip));
     }
     if !misconfigured.is_empty() {
+        // The tier is excluded: what it judged is not its plan.
+        planned.unjudged(&tier.profile, found.judged.len());
         return planned;
     }
     for (path, source_evidence, verdict) in &found.judged {
@@ -1202,9 +1259,17 @@ pub(super) fn plan_fs_union<H: Host>(
     let sources = tier.fs_sources();
     let (candidates, refused, stopped) = discover_fs_union(host, &sources, deadline);
     let mut planned = Planned {
-        eligible: Vec::new(),
-        skipped: Vec::new(),
         stopped,
+        ..Planned::default()
+    };
+    // A stop leaves the candidates from `from` on unjudged, each counted
+    // for the first source that found it.
+    let unjudged_from = |planned: &mut Planned, from: usize| {
+        for candidate in &candidates[from..] {
+            if let Some((index, _)) = candidate.found_by.first() {
+                planned.unjudged(sources[*index].profile, 1);
+            }
+        }
     };
     if sources.iter().all(|source| source.roots.is_empty()) {
         log(&nothing_searched(tier));
@@ -1218,6 +1283,7 @@ pub(super) fn plan_fs_union<H: Host>(
         ));
     }
     if planned.stopped.is_some() {
+        unjudged_from(&mut planned, 0);
         return planned;
     }
     let misconfigured: Vec<_> = refused
@@ -1239,6 +1305,8 @@ pub(super) fn plan_fs_union<H: Host>(
         planned.skipped.push(entry);
     }
     if !misconfigured.is_empty() {
+        // The tier is excluded: nothing it found is judged.
+        unjudged_from(&mut planned, 0);
         return planned;
     }
     let mut negated_matches = match scan_union_negated(host, &sources, deadline) {
@@ -1252,7 +1320,7 @@ pub(super) fn plan_fs_union<H: Host>(
         .with_pid_lookup(tier.pid_lookup())
         .with_pytest_facts(tier.pytest_facts())
         .with_project_facts(tier.project_facts());
-    for candidate in &candidates {
+    for (judged, candidate) in candidates.iter().enumerate() {
         if host.interrupted().is_some() {
             return planned;
         }
@@ -1269,6 +1337,7 @@ pub(super) fn plan_fs_union<H: Host>(
             Ok(None) => {}
             Err(stop) => {
                 planned.stopped = Some(stop);
+                unjudged_from(&mut planned, judged);
                 return planned;
             }
         }
@@ -1336,6 +1405,7 @@ pub(super) fn plan_fs_union<H: Host>(
                 }
                 Err(stop) => {
                     planned.stopped = Some(stop);
+                    unjudged_from(&mut planned, judged);
                     return planned;
                 }
             }
@@ -1371,7 +1441,9 @@ pub(super) fn plan_fs_union<H: Host>(
                 Ok(Ok(())) => {}
                 Ok(Err((veto, skip))) => {
                     let vetoing = claimed.get(veto).map_or(*index, |(source, _)| *source);
+                    let bytes = selected.as_ref().map(|(_, _, tally)| tally.bytes);
                     let mut entry = plan_skip(tier, path, &skip);
+                    entry.estimated_bytes = bytes;
                     entry.profile = sources[vetoing].profile.to_owned();
                     entry.checkouts = sources[vetoing].checkouts;
                     entry.build_evidence = skipped_build_evidence(candidate.discovered(vetoing));
@@ -1380,6 +1452,7 @@ pub(super) fn plan_fs_union<H: Host>(
                 }
                 Err(stop) => {
                     planned.stopped = Some(stop);
+                    unjudged_from(&mut planned, judged);
                     return planned;
                 }
             }
@@ -1391,6 +1464,7 @@ pub(super) fn plan_fs_union<H: Host>(
                     union_checkout_refusal(&sources, candidate, &admitted, checkout_marker)
             {
                 let mut entry = plan_skip(tier, path, &skip);
+                entry.estimated_bytes = Some(tally.bytes);
                 entry.profile = sources[refusing_index].profile.to_owned();
                 entry.checkouts = checkouts;
                 entry.build_evidence = skipped_build_evidence(candidate.discovered(refusing_index));

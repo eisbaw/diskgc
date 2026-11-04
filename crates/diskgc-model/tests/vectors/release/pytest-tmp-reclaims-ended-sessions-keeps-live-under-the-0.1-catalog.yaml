@@ -44,3 +44,21 @@ expect:
   preserved:
     - /tmp/nix-shell.CD/pytest-of-tester/pytest-0/test_live0/ready
     - /tmp/nix-shell.CD/pytest-of-tester/pytest-0/.lock
+  # TASK-324: the summary sizes the live session too, kept by the pytest
+  # contract after its eligibility walk: 8 KiB of directories and a 4 KiB
+  # .lock block. Each ended session is 1 MiB and two 4 KiB directories.
+  dry_run_report:
+    summary:
+      - profile: pytest-tmp
+        found: 3
+        eligible: {count: 2, estimated_bytes: 2113536, unsized: 0}
+        would_reclaim: {count: 2, estimated_bytes: 2113536, unsized: 0}
+        kept:
+          - {reason: in_use, count: 1, estimated_bytes: 12288, unsized: 0}
+        not_judged: 0
+  report:
+    summary:
+      - profile: pytest-tmp
+        reclaimed: {count: 2}
+        kept:
+          - {reason: in_use, count: 1, estimated_bytes: 12288, unsized: 0}
