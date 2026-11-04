@@ -1,10 +1,10 @@
 ---
 id: TASK-38
 title: 'survey: per-profile summary, --list candidates, unmatched name families, JSON'
-status: To Do
+status: In Progress
 assignee: []
-created_date: '2026-10-16 22:41'
-updated_date: '2026-10-25 20:18'
+created_date: 2026-10-16 22:41
+updated_date: '2026-11-04T13:43:00Z'
 labels:
   - wave-4
   - cli
@@ -30,6 +30,11 @@ Why: categorising cruft and reviewing AI-drafted profiles both need it. Implemen
 - [ ] #4 survey works outside a container (the sandbox gate only guards deletion)
 <!-- AC:END -->
 
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 Definition of Done in docs/testing.md
+<!-- DOD:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -38,9 +43,6 @@ Orchestrator 2026-10-23 (design audit): now depends on TASK-116 (survey --json s
 Orchestrator 2026-10-24 (COMPASS round 2): dependency changed from TASK-34 to TASK-30 (survey needs the snapshot, not hardening wave 3).
 
 COMPASS round 4 (2026-10-25): survey depends on the tally's discovery pass (29), not the snapshot (30): one way to walk profile finds.
-<!-- SECTION:NOTES:END -->
 
-## Definition of Done
-<!-- DOD:BEGIN -->
-- [ ] #1 Definition of Done in docs/testing.md
-<!-- DOD:END -->
+2026-11-05: Mark chose C1 (survey). In progress in tmp/worktrees/t38 (branch t38-survey), with TASK-116's design.
+<!-- SECTION:NOTES:END -->

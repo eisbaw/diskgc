@@ -1,10 +1,10 @@
 ---
 id: TASK-27
 title: 'Hardening wave 2: fuzzing, mutation testing, doc validation, deferred findings'
-status: To Do
+status: In Progress
 assignee: []
 created_date: 2026-10-16 22:41
-updated_date: '2026-10-31T21:20:00Z'
+updated_date: '2026-11-04T13:43:00Z'
 labels:
   - wave-2
   - hardening
@@ -47,4 +47,6 @@ For the 0.1 ensure MVP (2026-10-18): only this task's mutation-testing slice on 
 Orchestrator 2026-10-24 (COMPASS round 2): moved back to To Do: stalled on RAM, not in progress. Mark ruled 2026-10-24: run cargo-mutants in SMALLER SHARDS that fit current free RAM with the memory guard unchanged (no dedicated window). Run the 0.1 mutation slice together with TASK-13 AC3.
 
 2026-10-31: branches task27-clean/-hardening/-integrated archived as tags archive/task27-* (75-80% of their files already identical on master; the rest older versions). The live slice is the mutation run (TASK-177).
+
+2026-11-05: Mark chose E3 (fuzz). In progress in tmp/worktrees/t27 (branch t27-fuzz).
 <!-- SECTION:NOTES:END -->
