@@ -3,10 +3,10 @@ id: TASK-305
 title: >-
   Decide: TASK-299 loop-alias limits (orchestrator convergence call) vs the PRD;
   cost the upper-layer reverse-alias fail-closed rule
-status: In Progress
+status: To Do
 assignee: []
 created_date: '2026-11-01T20:29:00Z'
-updated_date: '2026-11-02T18:06:00Z'
+updated_date: '2026-11-04T09:14:00Z'
 labels:
   - needs-mark
   - safety
@@ -27,4 +27,6 @@ COMPASS 2026-11-01: the orchestrator documented four TASK-299 aliases as limits 
 2026-11-02: item (5) in progress in tmp/worktrees/t305 (branch t305-overlay-upper-alias); items (1)-(3) await Mark.
 
 2026-11-02: item (5) fixed and merged (exact match by upper-layer name, processes included; decoy cover detected by mountinfo order). Item (4) verified harmless on a real kernel. Items (1)-(3) and (4)'s wording await Mark's ruling; the task stays open for that.
+
+2026-11-05: item (5) merged; the task now only waits for Mark's ruling on items (1)-(4) - status back to To Do so it does not look like running work.
 <!-- SECTION:NOTES:END -->

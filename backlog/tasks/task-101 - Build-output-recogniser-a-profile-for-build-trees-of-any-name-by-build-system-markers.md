@@ -3,10 +3,10 @@ id: TASK-101
 title: >-
   Build-output recogniser: a profile for build trees of any name, by
   build-system markers
-status: In Progress
+status: Done
 assignee: []
 created_date: 2026-10-19 12:29
-updated_date: '2026-11-03T23:18:00Z'
+updated_date: '2026-11-04T09:13:00Z'
 labels:
   - library
 dependencies:
@@ -65,4 +65,6 @@ Orchestrator 2026-10-23 (COMPASS consult): parked back to To Do to cut WIP. Libr
 2026-11-03: merged four anchored build-output profiles to the development library. AC2 partial (no Buildroot/Yocto trees here; OpenWrt size vs du blocked by not_owner); AC3 waits for survey (TASK-38). Follow-ups in the new task.
 
 2026-11-04: openwrt-build-anchored removed (TASK-333, Mark's scope rule); buildroot/yocto/bazel stay.
+
+2026-11-05: closed after merge (b312b4b, then OpenWrt removed by TASK-333). AC2 (real Buildroot/Yocto trees) and AC3 (survey scoring) carried by TASK-331 and TASK-38.
 <!-- SECTION:NOTES:END -->
