@@ -4,7 +4,7 @@ title: 'survey: per-profile summary, --list candidates, unmatched name families,
 status: In Progress
 assignee: []
 created_date: 2026-10-16 22:41
-updated_date: '2026-11-04T17:18:00Z'
+updated_date: '2026-11-04T21:32:00Z'
 labels:
   - wave-4
   - cli
@@ -49,4 +49,6 @@ COMPASS round 4 (2026-10-25): survey depends on the tally's discovery pass (29),
 2026-11-04 orchestrator: implementer done, branch t38-survey 2e4f65d1 (tmp/worktrees/t38), full just e2e exit 0 on that tree; Codex review running; open: Mark's ruling on in-use scan opt-in (TASK-116 note) - survey runs it always.
 
 2026-11-04: Codex blocker (failed discovery shown as found 0) fixed aed9fc57 with bite test; just check exit 0; full just e2e refused at containers stage by the disk guard (12.99 GiB free < 17 GiB budget) - gate owed on aed9fc57. Codex non-blockers filed: TASK-338, TASK-339. read_ahead_plan intermittent seen in this run: TASK-337.
+
+2026-11-04: --in-use opt-in implemented (5d3a02ef/1204e5dd, restacked onto t336 as e833f651..b5b39920 without c4de7f76, which goes to TASK-337). Full e2e on the stack running; Codex review of the in-use delta running.
 <!-- SECTION:NOTES:END -->

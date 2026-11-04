@@ -3,9 +3,10 @@ id: TASK-342
 title: >-
   Command actions fail when one forwarded stderr line takes >50 ms: the 0.2 Nix
   GC stopped after 17.2 GiB with exit 3
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-04T19:03:00Z'
+updated_date: '2026-11-04T21:32:00Z'
 labels:
   - release-blocker
   - nix
@@ -25,3 +26,9 @@ Same path serves every command action (docker/podman prune, the fs command actio
 
 Do: decide the policy so that a slow or blocked stderr never fails or hangs an action: e.g. keep draining the child's pipes always, forward lossily with a bounded buffer and a 'N lines of command output dropped' note, never fail the action for diskgc's own log stalls (the action result comes from the child's exit status and the measured change). Reproduce first (a model/Host test with a stderr writer that stalls >50 ms, and an e2e with a chatty command action and stderr to a slow pipe), prove the fix bites, re-run the Nix GC e2e. Check: does a failed forward kill or orphan the child (here it finished/was gone)?
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-04 orchestrator: implementer in tmp/worktrees/t342 (branch t342-stderr, from master 426ee8b8).
+<!-- SECTION:NOTES:END -->
