@@ -2613,8 +2613,8 @@ filesystem, processes and mounts from the developer's system.
   over a laptop-shaped fixture
   (a pytest session inside a `nix-shell.*` dir, an rc dir, three `tmp.*`
   dirs, a Claude temp root) while root holds the host lock: both must exit
-  0 without waiting for the lock, the session eligible with `--in-use` and
-  not checked without; report `pytest-tmp` and `nix-shell-rc`
+  0 without waiting for the lock, the blocks counting `eligible` with
+  `--in-use` and `not_checked` without (never both); report `pytest-tmp` and `nix-shell-rc`
   with their candidates and the `tmp.*` and `claude-#` families, make no
   traced removal or rename call, leave the oracle clean and write no
   index snapshot.

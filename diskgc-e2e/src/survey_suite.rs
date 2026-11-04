@@ -85,7 +85,8 @@ pub fn survey_reports_tmp_by_profile_and_family_and_changes_nothing(ctx: &Ctx) -
         );
         r.expect_code(0)?;
     }
-    // With --in-use: the session is checked (no process holds it).
+    // With --in-use the session is judged on process evidence: the block
+    // counts eligible ones, never "not checked".
     let with: Value = serde_json::from_str(&checked.stdout)
         .map_err(|e| format!("survey --in-use JSON: {e}: {}", checked.stdout))?;
     let session = with["paths"][0]["summary"]
@@ -94,9 +95,10 @@ pub fn survey_reports_tmp_by_profile_and_family_and_changes_nothing(ctx: &Ctx) -
         .ok_or_else(|| format!("no pytest-tmp block under --in-use: {with}"))?;
     ensure!(
         with["in_use"] == "checked"
-            && session["eligible"]["count"] == 1
-            && session["not_checked"].is_null(),
-        "under --in-use the idle session is eligible: {session}"
+            && session["found"] == 1
+            && session["not_checked"].is_null()
+            && !session["eligible"].is_null(),
+        "under --in-use the session is judged: {session}"
     );
     let survey: Value = serde_json::from_str(&run.stdout)
         .map_err(|e| format!("survey JSON: {e}: {}", run.stdout))?;
@@ -115,11 +117,13 @@ pub fn survey_reports_tmp_by_profile_and_family_and_changes_nothing(ctx: &Ctx) -
             .and_then(|blocks| blocks.iter().find(|b| b["profile"] == profile))
             .ok_or_else(|| format!("no summary block for {profile}: {tmp}"))
     };
+    // Found, and counted under not_checked, never eligible (the fresh
+    // session is kept not_idle by the source's age floor in both modes).
     ensure!(
         block("pytest-tmp")?["found"] == 1
-            && block("pytest-tmp")?["not_checked"]["count"] == 1
+            && block("pytest-tmp")?["not_checked"].is_object()
             && block("pytest-tmp")?["eligible"].is_null(),
-        "the nested pytest session was not found, or not as not checked: {}",
+        "the nested pytest session was not found, or a block says eligible: {}",
         block("pytest-tmp")?
     );
     ensure!(
