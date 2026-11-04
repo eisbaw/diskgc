@@ -53,7 +53,9 @@ pub use discover::{
 pub use judge::{Judge, Reached, Tally, Walked};
 pub(crate) use liveness::contract_scan_floor;
 pub use pattern::{Pattern, RESERVED, Segment, path_matches, path_matches_except};
-pub use plan::{Planned, READ_AHEAD, ReadAhead, contract_veto, judge_one, judge_walked, plan};
+pub use plan::{
+    Planned, READ_AHEAD, ReadAhead, TermVerdict, contract_veto, judge_one, judge_term, plan,
+};
 pub use reclaim::{
     Alternative, Reclaimed, reclaim, reclaim_alternatives, reclaim_alternatives_checked,
     retention_guard_veto, tally, tally_for_union,

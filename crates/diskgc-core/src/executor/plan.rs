@@ -7,7 +7,7 @@ use crate::cargo_target::{self, Stop};
 use crate::command_action::{self, Preflight};
 use crate::config::Order;
 use crate::engine::{Checkouts, Identity, Reason, Rules, Skip, checkout_metadata_below};
-use crate::fs_kind::{self, Find};
+use crate::fs_kind::{self, Find, TermVerdict};
 use crate::host::{DevIno, Host, MonoTime, Timestamp};
 use crate::inuse::{Checker, PlanScan};
 use crate::profile::{Action, IdleWindow};
@@ -1412,6 +1412,10 @@ pub(super) fn plan_fs_union<H: Host>(
         let mut selected_record = None;
         let mut admitted = Vec::new();
         let mut checkout_marker = None;
+        // The in-use check judges the candidate, not the term: for the
+        // first term whose own judgement admits it, as the reclaim checks
+        // it for the term it selected (TASK-337).
+        let mut in_use_cleared = false;
         for (index, found) in &candidate.found_by {
             let source = &sources[*index];
             let excluded = match judge_negated(
@@ -1452,8 +1456,15 @@ pub(super) fn plan_fs_union<H: Host>(
                 idle: source.idle,
                 space,
             };
-            match fs_kind::judge_walked(host, &judge, found, &mut checker, deadline) {
-                Ok(Ok((tally, record))) => {
+            match fs_kind::judge_term(
+                host,
+                &judge,
+                found,
+                &mut checker,
+                deadline,
+                &mut in_use_cleared,
+            ) {
+                Ok(TermVerdict::Admitted(tally, record)) => {
                     admitted.push(*index);
                     if source.checkouts == Checkouts::Refuse && tally.contains_checkout {
                         checkout_marker.get_or_insert((*index, found.path.as_path()));
@@ -1463,7 +1474,15 @@ pub(super) fn plan_fs_union<H: Host>(
                         selected_record = Some(record);
                     }
                 }
-                Ok(Err(skip)) => {
+                // Its refusal is the candidate's verdict, under this term:
+                // a later term must not scan again and plan it eligible
+                // under another profile because a fork storm ended
+                // meanwhile.
+                Ok(TermVerdict::InUse(skip)) => {
+                    first_skip = Some((*index, found.path.as_path(), skip));
+                    break;
+                }
+                Ok(TermVerdict::Refused(skip)) => {
                     first_skip.get_or_insert((*index, found.path.as_path(), skip));
                 }
                 Err(stop) => {

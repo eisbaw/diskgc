@@ -193,34 +193,75 @@ pub fn judge_one<H: Host>(
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
 ) -> Judged<Tally> {
-    Ok(judge_walked(host, judge, found, checker, deadline)?.map(|(tally, _)| tally))
+    Ok(
+        match judge_term(host, judge, found, checker, deadline, &mut false)? {
+            TermVerdict::Admitted(tally, _) => Ok(tally),
+            TermVerdict::Refused(skip) | TermVerdict::InUse(skip) => Err(skip),
+        },
+    )
 }
 
-/// [`judge_one`], also returning the walk of an admitted candidate (a
-/// union plan judges the other terms' liveness contracts on it,
-/// [`contract_veto`]).
-pub fn judge_walked<H: Host>(
+/// One source term's plan judgement of a candidate ([`judge_term`]). A
+/// union tells the two refusals apart (docs/reference.md, filesystem
+/// unions): what the term's own evidence refuses, another term may still
+/// admit; what the in-use check refuses is a fact about the candidate.
+#[derive(Debug)]
+pub enum TermVerdict {
+    /// Every check passed: the candidate's tally, and its walk (a union
+    /// plan judges the other terms' liveness contracts on it,
+    /// [`contract_veto`]; boxed, it is most of the size).
+    Admitted(Tally, Box<WalkRecord>),
+    /// Refused by the term's own judgement: its place, `where`, filters,
+    /// eligibility walk, idle requirement, liveness contract or toolchain
+    /// guard.
+    Refused(Skip),
+    /// Refused by the in-use check against the process scan
+    /// ([`crate::inuse::Scan::check`]: `in_use`, `in_use_unknown`, or a
+    /// live socket's `contains_ipc`), after the term's own place, filters
+    /// and walk admitted it (a liveness contract is not evidence for
+    /// that: its refusal, even a static one, is judged after the scan, as
+    /// the reclaim vetoes after it). It says what the host's processes do with the
+    /// candidate, whichever term found it: the reclaim checks it once, for
+    /// the term it selected ([`super::reclaim`]), so a union judges no
+    /// later term for it.
+    InUse(Skip),
+}
+
+/// [`judge_one`] for one term of a union: the same steps, the verdict
+/// told apart ([`TermVerdict`]). `in_use_cleared` is the candidate's, not
+/// the term's: once the in-use check has cleared the candidate for one
+/// term, it is not judged again for a later one (whose in-use verdict
+/// would otherwise depend on a newer scan); it is set here when the check
+/// clears it.
+pub fn judge_term<H: Host>(
     host: &H,
     judge: &Judge<'_>,
     found: &Found,
     checker: &mut Checker<'_>,
     deadline: Option<MonoTime>,
-) -> Judged<(Tally, WalkRecord)> {
+    in_use_cleared: &mut bool,
+) -> Result<TermVerdict, Stop> {
     check_deadline(host, deadline, &found.path)?;
     let mounts = mountinfo(host)?;
-    let reached = judged!(judge.approach(host, found, &mounts, deadline));
+    let reached = match judge.approach(host, found, &mounts, deadline)? {
+        Ok(reached) => reached,
+        Err(skip) => return Ok(TermVerdict::Refused(skip)),
+    };
     let candidate = reached.candidate(found)?;
-    let walked = judged!(judge.contents(
+    let walked = match judge.contents(
         host,
         &reached,
         super::judge::CandidateView {
             candidate: &candidate,
-            locked_fd: None
+            locked_fd: None,
         },
         found,
         true,
-        deadline
-    ));
+        deadline,
+    )? {
+        Ok(walked) => walked,
+        Err(skip) => return Ok(TermVerdict::Refused(skip)),
+    };
     // A project contract's walk and rules 1 and 2, before the scan: files
     // and ages only, no process read.
     let prepared = super::liveness::prepare(
@@ -234,11 +275,16 @@ pub fn judge_walked<H: Host>(
     // A default survey's plan (crate::inuse::PlanScan::NotChecked) stops
     // here: a refusal of those static rules stands; otherwise no scan, no
     // contract rule on processes, and the candidate is "not checked".
+    // In a union the candidate stays with this term, the first that admits
+    // it: with no scan there is no in-use verdict to hand on (TASK-337).
     if !checker.checks_in_use() {
         if let super::liveness::Prepared::Refused(skip) = &prepared {
-            return Ok(Err(skip.clone().measured(walked.bytes())));
+            return Ok(TermVerdict::Refused(skip.clone().measured(walked.bytes())));
         }
-        return Ok(Ok((walked.tally(), walked.record)));
+        return Ok(TermVerdict::Admitted(
+            walked.tally(),
+            Box::new(walked.record),
+        ));
     }
     let scan = checker
         .current(host, deadline)
@@ -248,8 +294,11 @@ pub fn judge_walked<H: Host>(
     // publishing a late verdict.
     check_deadline(host, deadline, &found.path)?;
     // Refused after a complete walk: sized ([`Skip::measured_bytes`]).
-    if let Err(skip) = scan.check(&candidate, &walked.record) {
-        return Ok(Err(skip.measured(walked.bytes())));
+    if !*in_use_cleared {
+        if let Err(skip) = scan.check(&candidate, &walked.record) {
+            return Ok(TermVerdict::InUse(skip.measured(walked.bytes())));
+        }
+        *in_use_cleared = true;
     }
     if let Err(skip) = super::liveness::check(
         host,
@@ -260,10 +309,10 @@ pub fn judge_walked<H: Host>(
         &walked.record,
         &prepared,
     )? {
-        return Ok(Err(skip.measured(walked.bytes())));
+        return Ok(TermVerdict::Refused(skip.measured(walked.bytes())));
     }
     let tally = walked.tally();
-    Ok(Ok((tally, walked.record)))
+    Ok(TermVerdict::Admitted(tally, Box::new(walked.record)))
 }
 
 /// The union rule of liveness contracts for the plan: every admitted
@@ -287,7 +336,7 @@ pub fn contract_veto<'a, H: Host>(
     else {
         return Ok(Ok(()));
     };
-    // A default survey judges no liveness contract (judge_walked).
+    // A default survey judges no liveness contract (judge_term).
     if !checker.checks_in_use() {
         return Ok(Ok(()));
     }

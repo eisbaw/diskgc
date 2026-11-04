@@ -1900,8 +1900,13 @@ lock if it proceeds that far, and immediately before delete or command. A
 guard refusal is attributed to the guarding source. For an admitted candidate,
 term-local evidence and admitted-term checkout policy still decide which source
 supplies the action and report identity. It rechecks each term under one
-candidate lock. A command union
-invokes its shared argv at most once per inode, with `DISKGC_PROFILE` and the
+candidate lock. The in-use check is not term-local evidence: it judges the
+candidate for the first term whose own evidence admits it. A refusal
+there (`in_use`; `in_use_unknown`, including a process scan that never
+settled; a live socket's `contains_ipc`) is never handed to a later term to
+admit, in the plan as in the reclaim, so a busy host cannot move a
+candidate to another profile (TASK-337). A command union invokes its
+shared argv at most once per inode, with `DISKGC_PROFILE` and the
 output prefix of the source selected by that locked recheck. If the final
 policy scan excludes that source before the command starts, the union judges
 every term again under the same lock, including its filters and checkout

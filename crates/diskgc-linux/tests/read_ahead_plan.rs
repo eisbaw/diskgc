@@ -8,17 +8,32 @@
 //! Read-only: nothing is deleted (a dry run), and the trees are this
 //! test's own, below the test temp dir (removed on drop). The model's
 //! read-ahead is a no-op, so this equality cannot be shown there.
+//!
+//! The in-use scan sees diskgc's own process alone ([`OwnProcessOnly`]):
+//! what other processes do is no part of the read-ahead, and two scans of
+//! a busy host differ. Under load one plan's scan stayed unsettled
+//! (`in_use_unknown`, cause `busy`) while the other's settled, so the
+//! plans differed whatever the read-ahead did (TASK-337). The kernel still
+//! answers every filesystem call and the reads of diskgc's own process:
+//! were the scan to stop passing over that process, the readers' open
+//! directories (its threads') would show as a use. A reader moved into
+//! another process would not be seen here.
+
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
+use diskgc_core::engine::Reason;
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::fs_kind::READ_AHEAD;
 use diskgc_core::profile::{Library, parse_profiles};
 use diskgc_core::report::Status;
 use diskgc_core::units::parse_size;
 use diskgc_linux::LinuxHost;
+
+use common::OwnProcessOnly;
 
 const PROFILES: &str = r#"
 - name: gen-a
@@ -114,7 +129,7 @@ fn tree(root: &Path, seed: u64) {
 
 /// The plan of `select` over `root` by `host`, as comparable rows:
 /// candidate, profile, reason, size, operation, checkouts.
-fn plan(host: &LinuxHost, select: &str, root: &Path) -> Vec<String> {
+fn plan(host: &OwnProcessOnly, select: &str, root: &Path) -> Vec<String> {
     let specs = parse_profiles(PROFILES).unwrap_or_else(|e| panic!("{e}"));
     let library = Library::with_user_profiles(&specs).unwrap_or_else(|e| panic!("{e}"));
     let uid = executor::privileges(host, false).unwrap_or_else(|e| panic!("{e:?}"));
@@ -136,6 +151,13 @@ fn plan(host: &LinuxHost, select: &str, root: &Path) -> Vec<String> {
         report.errors
     );
     assert!(report.errors.is_empty(), "{select}: {:?}", report.errors);
+    // Only diskgc's own process was scanned, and it never counts.
+    let in_use: Vec<_> = report
+        .plan
+        .iter()
+        .filter(|row| matches!(row.reason, Some(Reason::InUse | Reason::InUseUnknown)))
+        .collect();
+    assert!(in_use.is_empty(), "{select}: {in_use:#?}");
     report
         .plan
         .iter()
@@ -161,8 +183,8 @@ fn same_plans(seeds: &[u64]) -> std::collections::BTreeSet<String> {
         let dir = TempDir::new(seed);
         tree(&dir.0, seed);
         for select in ["profile:gen-a", "profile:gen-a || profile:gen-ab"] {
-            let without = LinuxHost::new().expect("host").without_read_ahead();
-            let with = LinuxHost::new().expect("host");
+            let without = OwnProcessOnly(LinuxHost::new().expect("host").without_read_ahead());
+            let with = OwnProcessOnly(LinuxHost::new().expect("host"));
             // Alternate which runs first, so a cache the first run warmed
             // favours neither.
             let (ahead, plain) = if seed % 2 == 0 {
@@ -178,7 +200,7 @@ fn same_plans(seeds: &[u64]) -> std::collections::BTreeSet<String> {
                 "seed {seed}: {} rows",
                 ahead.len()
             );
-            let counts = with.read_ahead_counts().expect("the plan read ahead");
+            let counts = with.0.read_ahead_counts().expect("the plan read ahead");
             assert_eq!(
                 counts.queued.load(Ordering::Relaxed)
                     + counts.unreached.load(Ordering::Relaxed)
@@ -187,7 +209,7 @@ fn same_plans(seeds: &[u64]) -> std::collections::BTreeSet<String> {
                 "seed {seed}, `{select}`: every candidate named once"
             );
             assert!(counts.queued.load(Ordering::Relaxed) > 0, "seed {seed}");
-            assert!(without.read_ahead_counts().is_none(), "seed {seed}");
+            assert!(without.0.read_ahead_counts().is_none(), "seed {seed}");
             for row in &ahead {
                 reasons.insert(row.split(' ').nth(2).expect("a reason").to_owned());
             }

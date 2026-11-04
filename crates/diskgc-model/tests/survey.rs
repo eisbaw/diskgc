@@ -942,3 +942,81 @@ fn a_project_contracts_file_rules_stand_without_the_flag() {
     assert_eq!(reason("idle"), Value::Null, "{value}");
     assert_eq!(process_reads(&host), []);
 }
+
+/// A union in survey's default mode (TASK-337): a candidate both terms
+/// find stays under the first term whose own judgement admits it, not
+/// checked; it is not handed on to a later term for want of a scan. A
+/// term its filter refuses hands it on, as with `--in-use`.
+#[test]
+fn a_union_candidate_stays_with_its_first_admitting_term_without_the_flag() {
+    let extra = "  /tmp/a-0: {.: {mtime: 2026-10-01T00:00:00Z}, f: {size: 8K, mtime: \
+                 2026-10-01T00:00:00Z}}\n  /tmp/b-1: {.: {mtime: 2026-10-01T00:00:00Z}, f: \
+                 {size: 4K, mtime: 2026-10-01T00:00:00Z}}\n";
+    let config = r#"version: 1
+profiles:
+  - name: gen-a
+    find: {roots: [/tmp], paths: ["a-*"], type: dir}
+    action: delete
+    examples: {match: [/tmp/a-1]}
+  - name: gen-ab
+    find: {roots: [/tmp], paths: ["a-*", "b-*"], type: dir}
+    action: delete
+    examples: {match: [/tmp/a-1, /tmp/b-1]}
+  - name: has-tag
+    where: {has: CACHEDIR.TAG}
+"#;
+    let rows = |select: &str, in_use: bool| -> Vec<(String, String, Value)> {
+        let host = host(&laptop_tmp(extra));
+        let options = SurveyOptions {
+            in_use,
+            ..options(&["/tmp"], Some(select))
+        };
+        let survey = run(&host, &options, Some(config));
+        assert_eq!(survey.status, Status::DryRun, "{survey:?}");
+        if !in_use {
+            assert_eq!(process_reads(&host), [], "no process is read");
+        }
+        assert_read_only(&host);
+        let value = json(&survey);
+        let mut rows: Vec<_> = value["paths"][0]["candidates"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|r| {
+                (
+                    r["candidate"].as_str().expect("a path").to_owned(),
+                    r["profile"].as_str().expect("a profile").to_owned(),
+                    r["eligible"].clone(),
+                )
+            })
+            .collect();
+        rows.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        rows
+    };
+    let row = |candidate: &str, profile: &str, eligible: Value| {
+        (candidate.to_owned(), profile.to_owned(), eligible)
+    };
+    let union = "profile:gen-a || profile:gen-ab";
+    assert_eq!(
+        rows(union, false),
+        [
+            row("/tmp/a-0", "gen-a", Value::Null),
+            row("/tmp/b-1", "gen-ab", Value::Null),
+        ]
+    );
+    assert_eq!(
+        rows(union, true),
+        [
+            row("/tmp/a-0", "gen-a", true.into()),
+            row("/tmp/b-1", "gen-ab", true.into()),
+        ]
+    );
+    let filtered = "(profile:gen-a && filter:has-tag) || profile:gen-ab";
+    assert_eq!(
+        rows(filtered, false),
+        [
+            row("/tmp/a-0", "gen-ab", Value::Null),
+            row("/tmp/b-1", "gen-ab", Value::Null),
+        ]
+    );
+}
