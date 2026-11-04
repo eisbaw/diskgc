@@ -131,7 +131,10 @@ fn the_development_row_runs_every_command_and_every_built_in() {
     for command in Command::ALL {
         assert!(row.allows(command), "{command:?}");
     }
-    assert_eq!(row.commands_phrase(), "ensure, watch, check and profiles");
+    assert_eq!(
+        row.commands_phrase(),
+        "ensure, watch, check, profiles and survey"
+    );
     let units = &descriptor().expect("descriptor").watch_units;
     assert!(units.iter().all(|u| row.ships.contains(u)));
 }
@@ -240,8 +243,8 @@ fn each_rule_refuses_its_edit() {
             "0.1: `check` twice",
         ),
         (
-            refused(|v| v["releases"]["0.1"]["commands"] = json!(["ensure", "survey"])),
-            "unknown command `survey`, expected one of ensure, watch, watch --tally-only",
+            refused(|v| v["releases"]["0.1"]["commands"] = json!(["ensure", "prune"])),
+            "unknown command `prune`, expected one of ensure, watch, watch --tally-only",
         ),
         (
             refused(|v| v["releases"]["0.1"]["since"] = json!("0.1")),

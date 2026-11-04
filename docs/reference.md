@@ -16,15 +16,18 @@ diskgc watch  --min-free SIZE --target-free SIZE [--interval DUR] [--timeout DUR
 diskgc watch  --tally-only [--min-free SIZE]
               [--select EXPR] [--roots DIR]... [--json] [--config FILE] [--allow-root] PATH
 diskgc check  [--config FILE]
+diskgc survey [--select EXPR] [--roots DIR]... [--list] [--json] [--timeout DUR]
+              [--config FILE] PATH...
 diskgc profiles list [--json] [--config FILE]
 diskgc profiles show NAME [--json] [--config FILE]
 diskgc profiles test [--json] [--config FILE]
 diskgc --help | --version
 ```
 
-`survey` is a planned command. This version returns exit 2 for it,
-naming the commands it has; its interface is described below for
-implementation (intended), not as available CLI behavior.
+A build runs the commands of its row of the release descriptor
+(`crates/diskgc-core/src/releases.json`); `survey` runs in the
+development build only, and a release build refuses it with exit 2,
+naming the commands it has.
 
 A usage error (an unknown command or flag, a missing or malformed
 argument) exits 2 and prints, on stderr, `diskgc: error: MESSAGE`, then
@@ -740,35 +743,197 @@ a switch starts).
 
 ### `survey`
 
-Planned; this build returns exit 2. Intended syntax:
-
 ```
-diskgc survey [--select EXPR] [--roots DIR]... [--list] [--json] [--config FILE] PATH...
+diskgc survey [--select EXPR] [--roots DIR]... [--list] [--json] [--timeout DUR]
+              [--config FILE] PATH...
 ```
 
-Read-only: takes no lock and deletes nothing. For each `PATH`:
+Read-only: it deletes nothing, takes no lock, runs no command action and
+reads or writes no index snapshot, so it runs anywhere, also outside the
+test containers (the sandbox gate guards deletion only). For each `PATH`
+it reports what the profiles find below it, what keeps each candidate,
+and what no profile matches yet, so the next profile worth writing is
+visible. It is `ensure --dry-run`'s plan without a goal: every candidate
+is judged by the same checks, the in-use check included (Output:
+`plan`), and nothing is reclaimed toward a size.
 
-- per profile: candidate count, total estimated size, age range, how many
-  are in use (as `ensure --dry-run`'s `summary` blocks count and size
-  them, Output);
-- with `--list` (and always in `--json`): the **candidates themselves**,
-  one line each, with size, age and in-use state, so a human reviews
-  concrete paths, not globs. Output beyond 1,000 candidates per profile is
-  truncated, and the report says how many were left out;
-- the *unmatched* top-level entries grouped by name family, so the next
-  profile worth writing is visible. A name family is the name with a
+- **Per profile:** one line (one JSON `summary` block): candidates found,
+  how many are eligible and their estimated size, the kept ones by reason
+  with their sizes (`in_use` among them), and the idle ages of the eligible
+  ones (`idle 2 h to 30 d`: the newest change in an `fs` candidate's tree,
+  a Cargo target's last build). Profiles that found nothing share one
+  line, as do the profiles not looked for below `PATH` (below); a profile
+  refused before it could look (`missing`: its command's executable is
+  not installed) has its own.
+- **`--list`** (always in `--json`): the candidates themselves, one line
+  each, largest first, with size, verdict (`eligible` or the skip reason)
+  and idle age, so a human reviews concrete paths, not globs. At most
+  1,000 per profile are listed; the rest are counted (`... N more not
+  listed`, JSON `left_out`).
+- **Unmatched top-level entries** of `PATH`, those that are not a
+  candidate and hold none, grouped by **name family**: the name with a
   trailing random-looking suffix after `.`, `-` or `_` (five or more
-  letters and digits, at least one a letter) replaced by `*`, then runs of
+  letters and digits, at least one a letter, after a separator that is
+  not the name's first character) replaced by `*`, then each run of
   digits replaced by `#`, e.g. `nix-shell.8raHjU` → `nix-shell.*`,
-  `nix-shell-1144586-3257819220` → `nix-shell-#-#`. The grouping is a hint
-  for humans, not part of the JSON contract.
+  `nix-shell-1144586-3257819220` → `nix-shell-#-#`, `.cache` stays
+  `.cache`. Each entry is sized as the tally sizes a unit (allocated
+  bytes, each inode once, no symlink followed, no mount crossed); a tree
+  the eligibility walk would refuse as it is (more than 2,000,000 entries,
+  an unreadable or `systemd-private-*` entry inside) is counted
+  `unsized`. The human result shows the 20 largest families with their
+  size, idle ages and an example; the JSON has every family. Mount points
+  below `PATH` (another filesystem) and `systemd-private-*` names (never
+  statted) are not entries. The grouping is a hint for people; which
+  families a name falls into may change between releases (it is the
+  index's collapse rule, [architecture.md](architecture.md#the-index)).
 
-Without `--select`, all profiles (built-in and user) are applied; each
-`PATH` also serves as the root for `roots: required` profiles, so
-`diskgc survey ~/src` finds Cargo targets there. `survey` starts from a
-valid snapshot when one exists and tallies what it lacks
-([architecture.md](architecture.md#the-tally)); it never writes the
-snapshot.
+Which profiles run below a `PATH`: without `--select`, every source
+profile of kind `fs` or `cargo-target`, built-in and user, one tier each,
+in the library's order; `PATH` is the root of each `roots: required`
+profile (so `diskgc survey ~` finds Cargo targets and caches below the
+home directory), and a profile with fixed roots runs only for its roots
+at or below `PATH` (`/tmp`'s profiles under `diskgc survey /tmp`, not
+under `diskgc survey ~`). The backend kinds (`docker-*`, `podman-*`,
+`nix-store`) keep their stores elsewhere and run only when `--select`
+names them. With `--select EXPR`, the one tier `EXPR` selects, its
+`roots: required` profiles bound to `--roots DIR` (repeatable, only with
+`--select`) or else to `PATH`; a root outside `PATH` is not searched
+there (one log line), and a selection none of whose roots is left is not
+surveyed there (`not_surveyed`, below). Each `PATH` is absolute and is
+taken without a trailing `/` or `.` parts (`diskgc survey ~/` is `~`); a
+`..` in it is a usage error. A configuration file is optional: its user
+profiles and `protect` list apply (protected candidates are kept
+`protected`), its groups do not. Several `PATH`s are surveyed one after
+the other; a filesystem shared by two of them is reported under each.
+
+Each profile is planned on its own: one profile's error (an unsafe root,
+a failed scan) is reported with its profile and stops no other.
+`--timeout DUR` (default `10m`, `0`: none) bounds the whole survey, as
+`ensure`'s does: the plan stops judging at the deadline (its unjudged
+candidates are counted, `not_judged`; each profile not reached is an
+error of its own), and unmatched entries not sized by then are
+`unsized`; the status is then `deadline`. Ctrl-C (SIGINT) or SIGTERM
+stops it with the result so far and status `interrupted`. A survey does
+not report `held_by_deleted_files` (`ensure --dry-run` does).
+
+A survey is refused before it looks at anything, exit 2, for what
+refuses `ensure --dry-run`: a malformed command line or `--select`, an
+invalid configuration, a `PATH` or supplied root that does not exist,
+running as root (a survey has no root mode), and an in-use check that
+cannot see every process (`hidepid`, a PID namespace other than the
+initial one: [safety.md](safety.md#in-use)). Exit codes: 0 every `PATH`
+surveyed (status `dry_run`), 2 refused, 3 a host failure (`error`: a
+plan's error, or a `PATH` whose entries could not be listed), 124
+`deadline`, 130 / 143 interrupted. Over several `PATH`s the first of
+usage error, interruption, error and deadline that any of them has
+decides.
+
+Example (the development laptop, 2026-11-04, abridged; `diskgc survey
+~ /tmp` took 6 minutes there, most of it judging 146,000 `/tmp` rc
+dirs):
+
+```
+$ diskgc survey /tmp
+survey /tmp (filesystem /, 26.4 GiB available) in 276.5 s
+  profile cargo-target: 19 found · 1 eligible est. 67.8 MiB · kept 2 contains_special unsized, 15 unreadable unsized, 1 in_use est. 159.5 MiB · idle 2 d
+  profile nix-shell-rc: 146507 found · 146324 eligible est. 857.1 MiB · kept 14 in_use est. 80.0 KiB, 67 producer_unknown est. 388.0 KiB, 100 not_idle est. 2.0 MiB, 1 contains_ipc unsized, 1 missing unsized · idle 1 h to 76 d
+  profile node-compile-cache: 838 found · 838 eligible est. 1.5 GiB · idle 2 h to 69 d
+  profile pytest-tmp: 1328 found · 976 eligible est. 702.3 MiB · kept 331 future_time est. 3.5 GiB, 17 missing unsized, 3 contains_special unsized, 1 in_use est. 14.9 MiB · idle 1 d to 6 d
+  profile jest-cache: not planned: missing
+  not surveyed below a PATH (select one with --select): docker-build-cache, docker-dangling, docker-unreferenced, nix-garbage, podman-dangling, podman-unreferenced
+  found nothing: bazel-output-base-anchored, brave-browser-cache, ...
+  unmatched: 68292 top-level entries, est. 1.8 GiB, in 4036 name families (20 largest):
+    nix-shell.*  58575 entries  est. 767.2 MiB  idle 42 s to 66 d  e.g. nix-shell.gbPv8R
+    mpedersen  1 entry  est. 507.1 MiB  idle 20 h  e.g. mpedersen
+    tmp.*  638 entries  est. 62.4 MiB  idle 20 h to 92 d  e.g. tmp.U9REh1N81x
+    zephyr-h#e#-run.*  2578 entries  est. 10.1 MiB  idle 3 d to 11 d  e.g. zephyr-h5e5-run.00KnhMjN
+    playwright-artifacts-*  1249 entries  est. 4.9 MiB  idle 12 d to 16 d  e.g. playwright-artifacts-04G9jL
+    ... 4016 more families, 5236 entries, est. 134.5 MiB
+```
+
+When the deadline or a signal stopped the survey, a last line says that
+what is shown is partial.
+
+#### Survey JSON
+
+`--json` prints one object. Its schema is **versioned and may change**
+between releases (Mark, TASK-116), unlike `ensure`'s report: a consumer
+checks `schema_version` (now 1) and treats a different value as a format
+it does not know. Within one version fields are only added. The types
+are `ensure`'s where they are the same thing: `status`, `exit_code`,
+`started_at`, `duration_ms`, `version` and `errors` (Output); a `summary`
+block is the dry run's (Output: `summary`), with `would_reclaim` and
+`reclaimed` always `null` (a survey has no goal); reasons are the
+skip-reason enum. A refusal before any plan has `paths: []` and the
+error; a command line that is not understood prints only `status`,
+`exit_code` and `errors`, as every command does (Output, Errors).
+
+```json
+{
+  "schema_version": 1,
+  "status": "dry_run | error | usage_error | deadline | interrupted",
+  "exit_code": 0, "started_at": "2026-11-04T12:00:00Z", "duration_ms": 0, "version": "0.2.0",
+  "paths": [{
+    "path": "/tmp", "mount": "/", "status": "dry_run", "avail_bytes": 0,
+    "summary": [{"tier": "pytest-tmp", "profile": "pytest-tmp", "found": 0,
+      "eligible": {"count": 0, "estimated_bytes": 0, "unsized": 0},
+      "would_reclaim": null, "reclaimed": null,
+      "kept": [{"reason": "in_use", "count": 0, "estimated_bytes": 0, "unsized": 0}],
+      "not_judged": 0, "oldest_idle_age_seconds": null, "newest_idle_age_seconds": null,
+      "listed": 0, "left_out": 0}],
+    "refused": [{"profile": "go-build-cache", "reason": "missing"}],
+    "not_surveyed": [{"profile": "nix-garbage", "why": "roots_elsewhere | backend"}],
+    "candidates": [{"profile": "pytest-tmp", "candidate": "/tmp/pytest-of-mark/pytest-1",
+      "eligible": true, "reason": null, "estimated_bytes": 0, "idle_age_seconds": null}],
+    "unmatched": {"count": 0, "estimated_bytes": 0, "unsized": 0,
+      "families": [{"family": "nix-shell.*", "count": 0, "estimated_bytes": 0, "unsized": 0,
+        "oldest_idle_age_seconds": null, "newest_idle_age_seconds": null,
+        "examples": ["/tmp/nix-shell.8raHjU"]}]},
+    "errors": [{"tier": null, "profile": null, "candidate": null, "cause": "host", "message": ""}]
+  }],
+  "errors": [{"tier": null, "profile": null, "candidate": null, "cause": "usage", "message": ""}]
+}
+```
+
+- `paths` has one object per `PATH` surveyed, in the order given (fewer
+  when a signal stopped the survey). Its `status` is that `PATH`'s plan's
+  (as `ensure --dry-run`'s report would say), `mount` and `avail_bytes`
+  its filesystem and the available space sampled when its plan started
+  (`null` when not measured); `errors` its plan's errors (Output,
+  `errors`), and one of cause `host` when its entries could not be
+  listed.
+- `summary` has a block per profile the survey ran below that `PATH`, in
+  run order, also for a profile that found nothing (`found: 0`).
+  `oldest_idle_age_seconds` and `newest_idle_age_seconds` are the range
+  of its eligible candidates' idle ages (`null` without one); `listed` and
+  `left_out` say how many of its candidates `candidates` lists (at most
+  1,000) and how many it leaves out.
+- `refused` lists the profiles refused before they found anything
+  (`reason`: `missing`, `backend_unavailable`, ...): they have no block.
+- `not_surveyed` lists the profiles not run below this `PATH`:
+  `roots_elsewhere` (every root outside `PATH`, also for a `--select`
+  whose roots all are) or `backend` (a Docker, Podman or Nix kind, without
+  `--select`). What they would match is not looked for there, and may be
+  listed as unmatched.
+- `candidates` are the plan's rows of a candidate, each profile's
+  largest first (unsized last), then by path: `eligible` with `reason`
+  `null`, or kept with its skip reason; `estimated_bytes` as `plan[]`'s
+  (`null`: refused before its walk was complete); `idle_age_seconds` of
+  an eligible row (`null` for a kept one, and when unknown or in the
+  future). A root a tier could not search (`missing`, `other_fs`) is a
+  row of its own, as in the plan.
+- `unmatched` is `null` when `PATH` was not listed: its plan was refused,
+  its mount chain is one diskgc does not look into (a FUSE, network or
+  automount mount, [safety.md](safety.md#before-the-walk); one log line),
+  the listing failed (an error says why), or a signal stopped the plan.
+  It is empty when `PATH` is itself a candidate. A profile whose plan
+  failed, or that the deadline left unplanned, has no `summary` block and
+  no `refused` row, only its `errors` entry (with its `profile`); what it
+  would have matched can then be listed as unmatched. `count`, `estimated_bytes`
+  and `unsized` cover every unmatched entry; `families` are largest
+  first, each with up to five `examples` (its largest members' paths).
+  The idle ages of a family are those of its sized members.
 
 ### `profiles` command
 
@@ -1127,9 +1292,10 @@ be its value.
 
 Errors: every command fails under `--json` with an object that opens
 like this report, `status`, `exit_code` and `errors` with entries of the
-shape above; `ensure` prints its whole report, every other command
-(`check`, `profiles`, and the commands this version does not have) only
-those three fields, e.g. `{"status": "usage_error", "exit_code": 2,
+shape above; `ensure` prints its whole report and `survey` its whole
+object (`paths: []`, [Survey JSON](#survey-json)) once its command line
+is understood, every other command (`check`, `profiles`, and the
+commands this version does not have) only those three fields, e.g. `{"status": "usage_error", "exit_code": 2,
 "errors": [{"tier": null, "profile": null, "candidate": null, "cause":
 "parse", "message": "..."}]}`.
 

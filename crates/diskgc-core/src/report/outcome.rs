@@ -232,6 +232,7 @@ mod tests {
             operation: String::new(),
             checkouts: Checkouts::Refuse,
             build_evidence: None,
+            idle_since: None,
             detail: None,
             process_blockers: None,
             unknown_cause: None,

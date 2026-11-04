@@ -1053,6 +1053,55 @@ Model scenarios required by [safety.md](safety.md) and
 - `command_action_closed_pipe_descendant_is_killed`: a descendant closes both
   output pipes and still gets killed before the successful leader is reaped.
 
+**Survey** (`crates/diskgc-model/tests/survey.rs`; TASK-38): the
+composition the binary runs (`diskgc_core::survey::load` and `run`) on a
+laptop-shaped `/tmp` model, each test also holding the run to its
+call trace (no `unlinkat`, `fchmod`, command, `flock`, lock inheritance,
+per-user lock, Nix root or GC call, no state read or written):
+
+- `the_laptop_tmp_is_categorised_by_profile_and_name_family`: every
+  built-in applied; the pytest sessions inside a `nix-shell.*` dir and
+  the rc dir are their profiles' candidates (one `in_use`), a profile
+  that found nothing keeps its block, the unmatched entries are exactly
+  the `tmp.*` and `claude-#` families with their sizes, ages and
+  largest-first examples, the `nix-shell.*` dir holding candidates is no
+  family, and `systemd-private-*` is never statted; the human text has no
+  `would reclaim`.
+- `the_candidates_are_listed_up_to_1000_per_profile_and_the_rest_counted`:
+  a `--select` union of two user profiles is one tier with a block each;
+  1,003 candidates list 1,000 (largest first) and count 3 as `left_out`,
+  in the JSON and in `--list`.
+- `each_path_reports_only_what_lies_below_it`: two `PATH`s; `/tmp`'s
+  fixed-root profiles do not run under `/home/tester`, a `roots:
+  required` one does, and each `PATH` has its own unmatched entries.
+- `the_json_has_exactly_the_documented_fields`: the JSON's keys equal the
+  reference's `Survey JSON` example, recursively.
+- `a_missing_supplied_root_refuses_the_survey`: exit 2 before anything is
+  planned, with `paths: []`.
+- `one_profiles_error_stops_no_other_profile`: a user profile whose root
+  is a symlink is an error of its own (exit 3); the built-ins after it
+  are still planned.
+- `a_path_that_is_a_candidate_has_no_unmatched_entries`: `survey` of a
+  Cargo target itself lists no entry below it as unmatched.
+- `the_deadline_stops_the_survey_with_what_it_has`: a clock event past
+  `--timeout` during the first listing: exit 124, each profile not
+  reached an error, every unmatched entry unsized.
+- `a_kept_candidate_has_no_idle_age`: a `protected` row has no age, and
+  the profile's age range is its eligible rows' alone.
+- `a_selected_profile_rooted_elsewhere_is_not_surveyed`: `--select` of a
+  `/tmp` profile under another `PATH` is `not_surveyed`
+  (`roots_elsewhere`), not "found nothing".
+- `a_mount_point_below_path_is_not_an_unmatched_entry`: `survey /` does
+  not list the `/tmp` mount point.
+- `an_error_before_the_deadline_stays_the_status`: a profile's error then
+  the deadline: `error` (exit 3), not `deadline`.
+
+The first test also checks that no backend is queried without
+`--select` (they are listed in `not_surveyed`).
+
+`just docs-vs-binary BIN` runs `survey` on the host over its scratch Cargo
+targets and compares the JSON with the same example.
+
 ### Producer liveness vectors
 
 Status: the Owner PID (`nix-shell`) and `pytest` vectors and container
@@ -2527,6 +2576,15 @@ filesystem, processes and mounts from the developer's system.
   when rounded sizes would misleadingly compare equal (including in a dry run). A ModelHost
   integration test makes the progress line compare near-equal available and
   minimum values without hiding their one-megabyte difference.
+- **Survey** (`survey_suite.rs`, fast tier):
+  `survey_reports_tmp_by_profile_and_family_and_changes_nothing` runs the
+  real `survey --json /tmp` as the tester over a laptop-shaped fixture
+  (a pytest session inside a `nix-shell.*` dir, an rc dir, three `tmp.*`
+  dirs, a Claude temp root) while root holds the host lock: it must exit 0
+  without waiting for the lock, report `pytest-tmp` and `nix-shell-rc`
+  with their candidates and the `tmp.*` and `claude-#` families, make no
+  traced removal or rename call, leave the oracle clean and write no
+  index snapshot.
 - **Agent pre-job journey** (`agent_journey.rs`, Nix image): the shipped
   [agent-pre-job.py](agent-pre-job.py) runs real `ensure --json` and decides
   from its exit code and parsed JSON alone. Separate traced runs exercise

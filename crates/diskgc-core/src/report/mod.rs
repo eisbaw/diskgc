@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::engine::{Checkouts, ProcessBlocker, Reason, UnknownCause};
+use crate::host::Timestamp;
 use crate::units::{Size, format_bytes};
 use json::Json;
 
@@ -240,6 +241,13 @@ pub struct PlanEntry {
     /// Only for a build output whose recorded source was verified (the
     /// JSON then has `null`).
     pub build_evidence: Option<BuildEvidence>,
+    /// When the candidate was last used, as its kind measures idleness
+    /// (the newest change in an `fs` candidate's tree, a Cargo target's
+    /// last build): an eligible row's, from its eligibility walk; `None`
+    /// for a skipped row and where the walk reported none. Not in the
+    /// `ensure` JSON; `survey` reports it as an age (docs/reference.md,
+    /// `survey`).
+    pub idle_since: Option<Timestamp>,
     /// The skip's human diagnostic and attributed processes, as in
     /// [`SkipEntry`], for the human plan only: the JSON plan has neither
     /// (programs branch on `reason`).
@@ -341,7 +349,7 @@ fn term_json(term: &summary::Term<'_>) -> Json {
         ("eligible", Json::opt(planned.map(|p| p.eligible), sized)),
         (
             "would_reclaim",
-            Json::opt(planned.map(|p| p.would_reclaim), sized),
+            Json::opt(planned.and_then(|p| p.would_reclaim), sized),
         ),
         (
             "reclaimed",
@@ -428,7 +436,7 @@ impl ErrorEntry {
         }
     }
 
-    fn to_json(&self) -> Json {
+    pub(crate) fn to_json(&self) -> Json {
         Json::Obj(vec![
             ("tier", Json::opt(self.tier.as_deref(), Json::str)),
             ("profile", Json::opt(self.profile.as_deref(), Json::str)),
@@ -899,4 +907,26 @@ impl Report {
     pub fn term_summaries(&self) -> Vec<String> {
         human::term_texts(self)
     }
+}
+
+/// One source term in words, as the human result's `profile NAME: ...`
+/// line says it after the colon ([`summary::Term`]); `why_stopped` names
+/// what left candidates not judged. For `survey`, which renders terms
+/// planned without a goal ([`summary::terms_without_goal`]).
+pub fn term_text(term: &summary::Term<'_>, why_stopped: &str) -> String {
+    human::term_text(term, why_stopped)
+}
+
+/// One `summary` block as the `ensure` JSON writes it, for `survey`'s
+/// `summary` (docs/reference.md, `survey`): the same fields, so a consumer
+/// reads both alike.
+pub fn term_to_json(term: &summary::Term<'_>) -> Json {
+    term_json(term)
+}
+
+/// `value` on one line, as the human result shows paths and names:
+/// control characters and backslashes escaped, so a name cannot forge a
+/// line.
+pub fn printable(value: &str) -> String {
+    human::one_line(value)
 }

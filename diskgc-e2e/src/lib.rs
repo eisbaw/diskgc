@@ -96,6 +96,7 @@ pub mod snapshot;
 pub mod stdout_suite;
 pub mod strace;
 pub mod suite;
+pub mod survey_suite;
 pub mod tally_probe;
 pub mod temp_safety_suite;
 pub mod under_test;

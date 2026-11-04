@@ -36,15 +36,19 @@ pub fn dry_run<H: Host>(
     owners: &[u32],
     log: &mut dyn FnMut(&str),
 ) -> Report {
-    dry_run_tier(host, request, owners, log, SayLock::Yes)
+    dry_run_tier(host, request, owners, log, PlanAs::FirstDryRunTier)
 }
 
-/// Whether a dry run says what its reclaim would lock: once per run, so a
-/// grouped plan says it for its first tier only.
+/// What a tier's plan is for. A dry run says what its reclaim would lock
+/// once per run (a grouped plan for its first tier only) and reports the
+/// deleted files holding space; a survey does neither (it never reclaims,
+/// and its result has no `held_by_deleted_files`: one process scan per
+/// tier saved).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SayLock {
-    Yes,
-    No,
+enum PlanAs {
+    FirstDryRunTier,
+    LaterDryRunTier,
+    Survey,
 }
 
 fn dry_run_tier<H: Host>(
@@ -52,10 +56,10 @@ fn dry_run_tier<H: Host>(
     request: &Request,
     owners: &[u32],
     log: &mut dyn FnMut(&str),
-    say_lock: SayLock,
+    plan_as: PlanAs,
 ) -> Report {
     timed_report(host, || {
-        let mut report = dry_run_inner(host, request, owners, log, say_lock);
+        let mut report = dry_run_inner(host, request, owners, log, plan_as);
         if report.status == Status::DryRun && !report.errors.is_empty() {
             report.status = Status::Error;
         }
@@ -68,7 +72,7 @@ fn dry_run_inner<H: Host>(
     request: &Request,
     owners: &[u32],
     log: &mut dyn FnMut(&str),
-    say_lock: SayLock,
+    plan_as: PlanAs,
 ) -> Report {
     let deadline = deadline_of(host, request.timeout);
     let mut report = request.report(Status::DryRun, true);
@@ -87,7 +91,7 @@ fn dry_run_inner<H: Host>(
         log(&note);
     }
     // Read-only, as the plan: what the reclaim would lock (TASK-277).
-    if say_lock == SayLock::Yes {
+    if plan_as == PlanAs::FirstDryRunTier {
         say_lock_readiness(host, &mut report, deadline, log);
     }
     let tier = &request.tier;
@@ -310,7 +314,7 @@ fn dry_run_inner<H: Host>(
         return report;
     }
     if tier.order == Order::Oldest {
-        oldest_first(&mut eligible, |(last, _)| *last);
+        oldest_first(&mut eligible, |entry| entry.idle_since);
     } else {
         // A dry run cannot observe what reclamation actually frees. Order
         // the complete plan with estimated bytes and the initial sample.
@@ -322,22 +326,17 @@ fn dry_run_inner<H: Host>(
             .target
             .saturating_sub(report.avail_before_bytes.expect("measured"));
         let mut ordered = Vec::with_capacity(eligible.len());
-        let mut queue =
-            CandidateQueue::new(Order::BestFit, eligible, |(_, entry): &(_, PlanEntry)| {
-                entry.estimated_bytes.map(|bytes| (bytes, 1))
-            });
+        let mut queue = CandidateQueue::new(Order::BestFit, eligible, |entry: &PlanEntry| {
+            entry.estimated_bytes.map(|bytes| (bytes, 1))
+        });
         while let Some(item) = queue.pop(remaining) {
-            remaining = remaining.saturating_sub(item.1.estimated_bytes.unwrap_or(0));
+            remaining = remaining.saturating_sub(item.estimated_bytes.unwrap_or(0));
             ordered.push(item);
         }
         eligible = ordered;
     }
     let root_skips = std::mem::take(&mut report.plan);
-    report.plan = eligible
-        .into_iter()
-        .map(|(_, e)| e)
-        .chain(skipped)
-        .collect();
+    report.plan = eligible.into_iter().chain(skipped).collect();
     // Without protect matches nothing can overlap one: no check, no I/O.
     let checks = if protection.matches.is_empty() {
         0
@@ -387,6 +386,8 @@ fn dry_run_inner<H: Host>(
             let entry = &mut report.plan[index];
             entry.reason = Some(Reason::Protected);
             entry.estimated_bytes = None;
+            // A kept row has no idle measure (PlanEntry::idle_since).
+            entry.idle_since = None;
             entry.detail = Some("overlaps a protected source match".to_owned());
         }
     }
@@ -433,7 +434,8 @@ fn dry_run_inner<H: Host>(
     }
     // Unmeasured: unknown, not the earlier sample.
     report.avail_after_bytes = final_sample(host, &measured, deadline, &mut report, log, tier);
-    if !deadline_passed(host, deadline) && host.interrupted().is_none() {
+    if plan_as != PlanAs::Survey && !deadline_passed(host, deadline) && host.interrupted().is_none()
+    {
         let started = host.now();
         report.held_by_deleted_files = held(
             host,
@@ -473,7 +475,21 @@ pub fn dry_run_grouped<H: Host>(
     })
 }
 
-pub(super) fn dry_run_grouped_inner<H: Host>(
+/// One tier's plan for `survey` (docs/reference.md, `survey`): the dry
+/// run's, deleting nothing and taking no lock, without the note on what a
+/// reclaim would lock and without the end-of-plan scan for deleted files
+/// holding space. A survey plans each tier on its own, so one tier's error
+/// does not stop the others (a grouped dry run stops at it: policy order).
+pub fn survey_tier<H: Host>(
+    host: &H,
+    request: &Request,
+    owners: &[u32],
+    log: &mut dyn FnMut(&str),
+) -> Report {
+    dry_run_tier(host, request, owners, log, PlanAs::Survey)
+}
+
+fn dry_run_grouped_inner<H: Host>(
     host: &H,
     request: &Request,
     tiers: &[Tier],
@@ -494,7 +510,7 @@ pub(super) fn dry_run_grouped_inner<H: Host>(
     let mut for_tier = request.clone();
     for_tier.tier = first.clone();
     for_tier.timeout = bounded_tier_timeout(host, run_deadline, tier_timeouts[0]);
-    let mut report = dry_run_tier(host, &for_tier, owners, log, SayLock::Yes);
+    let mut report = dry_run_tier(host, &for_tier, owners, log, PlanAs::FirstDryRunTier);
     if matches!(report.status, Status::UsageError | Status::Error) {
         return report;
     }
@@ -524,7 +540,7 @@ pub(super) fn dry_run_grouped_inner<H: Host>(
         }
         for_tier.tier = tier.clone();
         for_tier.timeout = bounded_tier_timeout(host, run_deadline, *timeout);
-        let part = dry_run_tier(host, &for_tier, owners, log, SayLock::No);
+        let part = dry_run_tier(host, &for_tier, owners, log, PlanAs::LaterDryRunTier);
         report.overruns.extend(part.overruns.iter().cloned());
         if matches!(part.status, Status::UsageError | Status::Error) {
             report.errors.extend(part.errors);
@@ -567,13 +583,14 @@ pub(super) fn record_unplanned(report: &mut Report, log: &mut dyn FnMut(&str), u
     }
 }
 
-/// A plan in the making: the eligible candidates with their order key
-/// (the kind's idle measure), the skipped ones, why planning stopped
+/// A plan in the making: the eligible candidates (each with its
+/// `idle_since`, the kind's idle measure and their order key), the
+/// skipped ones, why planning stopped
 /// early (an error of the run, or the deadline), and, per source profile,
 /// how many candidates it found that the stop left unjudged.
 #[derive(Default)]
 pub(super) struct Planned {
-    pub(super) eligible: Vec<(Option<Timestamp>, PlanEntry)>,
+    pub(super) eligible: Vec<PlanEntry>,
     pub(super) skipped: Vec<PlanEntry>,
     pub(super) stopped: Option<Stop>,
     pub(super) unjudged: Vec<(String, u64)>,
@@ -652,6 +669,7 @@ pub(super) fn plan_tier_row(tier: &Tier, reason: Option<Reason>) -> PlanEntry {
         operation: tier.operation(),
         checkouts: tier.checkouts,
         build_evidence: None,
+        idle_since: None,
         detail: None,
         process_blockers: None,
         unknown_cause: None,
@@ -778,7 +796,10 @@ pub(super) fn plan_cargo<H: Host>(
                     deadline,
                 ) {
                     Ok(Ok(e)) => {
-                        eligible.push((e.last_build, entry(&target.path, None, Some(e.bytes))));
+                        eligible.push(PlanEntry {
+                            idle_since: e.last_build,
+                            ..entry(&target.path, None, Some(e.bytes))
+                        });
                     }
                     Ok(Err(skip)) => {
                         skipped.push(plan_skip(tier, &target.path, &skip));
@@ -878,7 +899,8 @@ pub(super) fn plan_fs<H: Host>(
                 let mut entry = plan_entry(tier, path, None, Some(e.bytes));
                 entry.build_evidence =
                     eligible_build_evidence(host, e.source_evidence.as_ref(), e.newest_change);
-                planned.eligible.push((e.newest_change, entry));
+                entry.idle_since = e.newest_change;
+                planned.eligible.push(entry);
             }
             Err(skip) => {
                 let mut entry = plan_skip(tier, path, skip);
@@ -1495,7 +1517,8 @@ pub(super) fn plan_fs_union<H: Host>(
             // row's records discovery, docs/reference.md, Output).
             entry.build_evidence =
                 eligible_build_evidence(host, tally.source_evidence.as_ref(), tally.newest_change);
-            planned.eligible.push((tally.newest_change, entry));
+            entry.idle_since = tally.newest_change;
+            planned.eligible.push(entry);
         } else {
             let (index, path, skip) =
                 first_skip.expect("a discovered union candidate has a verdict");

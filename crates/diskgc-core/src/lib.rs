@@ -63,6 +63,7 @@ pub mod resolve;
 pub mod select;
 pub mod snapshot;
 pub mod suggest;
+pub mod survey;
 pub mod tally;
 pub mod units;
 pub mod watch;

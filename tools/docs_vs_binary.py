@@ -562,9 +562,8 @@ def probe_errors(reference, run, report):
                 report.expect(set(err) == error_keys, "usage error", "errors[] keys",
                               sorted(error_keys), sorted(err))
                 report.expect(err["cause"] in causes, "usage error", "cause", sorted(causes), err["cause"])
-    for planned in ("watch", "survey"):
-        r = run.diskgc(planned, "--dry-run", "--json")
-        report.expect(r.code == 2, "planned command", f"`{planned}` exit", 2, r.code)
+    r = run.diskgc("watch", "--dry-run", "--json")
+    report.expect(r.code == 2, "usage error", "`watch --dry-run` exit (watch has no dry run)", 2, r.code)
 
 
 def probe_help_and_version(run, report):
@@ -737,6 +736,51 @@ def reached_paths(obj, path=""):
         for item in obj:
             found |= reached_paths(item, f"{path}[]")
     return found
+
+
+def probe_survey(reference, run, report, runs_survey):
+    """reference.md, `survey`: read-only, so it runs on the host, over the
+    scratch Cargo targets (the fixed-root /tmp built-ins are held to PATH and
+    do not run there). Its JSON's fields are the `Survey JSON` example's; a
+    build whose row has no `survey` refuses it with exit 2."""
+    s = run.scratch
+    r = run.diskgc("survey", "--json", "--select", "profile:cargo-target", f"{s}/targets")
+    if not runs_survey:
+        report.expect(r.code == 2, "survey", "`survey` in a build whose row has none", 2, r.code)
+        return
+    documented = json.loads(code_blocks(section(reference, "#### Survey JSON"), "json")[0])
+    schema = json_schema(documented)
+    enums = enum_values(documented)
+    every = run.diskgc("survey", "--json", f"{s}/targets")
+    for label, result in (("--select", r), ("every profile", every)):
+        obj = result.json()
+        if obj is None:
+            report.expect(False, "survey", f"survey JSON ({label})", "one object",
+                          f"exit {result.code}: {result.err[-200:]}")
+            continue
+        absent, extra = schema_diff(schema, obj)
+        report.expect(not absent, "survey fields", f"documented but absent ({label})", "present", absent)
+        report.expect(not extra, "survey fields", f"present but undocumented ({label})", "documented",
+                      extra)
+        for path, allowed in enums.items():
+            for value in observed_values(obj, path):
+                report.expect(value in allowed, "survey enums", path, sorted(allowed), value)
+        report.expect((result.code, obj.get("status"), obj.get("schema_version")) == (0, "dry_run", 1),
+                      "survey", f"exit, status, schema_version ({label})", (0, "dry_run", 1),
+                      (result.code, obj.get("status"), obj.get("schema_version")))
+        blocks = {b["profile"]: b for p in obj.get("paths", []) for b in p.get("summary", [])}
+        cargo = blocks.get("cargo-target") or {}
+        report.expect(cargo.get("found") == 2, "survey", f"cargo-target found ({label})", 2,
+                      cargo.get("found"))
+    text = run.diskgc("survey", "--list", "--select", "profile:cargo-target", f"{s}/targets")
+    report.expect(text.code == 0 and "profile cargo-target: 2 found" in text.out
+                  and f"{s}/targets/live/target" in text.out, "survey", "`survey --list` text",
+                  "the profile line and its candidates", f"exit {text.code}: {text.out[:200]!r}")
+    for argv in (["survey", "--json"], ["survey", "--json", "relative"]):
+        bad = run.diskgc(*argv)
+        report.expect(bad.code == 2 and set(bad.json() or {}) == {"status", "exit_code", "errors"},
+                      "survey", f"`{' '.join(argv)}` usage error object", "exit 2, three keys",
+                      f"exit {bad.code}, {sorted(bad.json() or {})}")
 
 
 def probe_ci_examples(reference, run, report, help_text):
@@ -961,7 +1005,9 @@ NOT_CHECKED = [
     "enum values the probes never produce (most skip reasons, process_blockers evidence): only "
     "observed values are checked against the documented sets",
     "`index` object fields: no build has an index yet (always null)",
-    "watch and survey syntax: planned, only their exit 2 is checked",
+    "watch syntax and output: only `watch --dry-run`'s exit 2 is checked (a watch runs until a signal)",
+    "survey's unmatched families and ages on the host: the scratch holds only the fixture targets; "
+    "the model and container tests (crates/diskgc-model/tests/survey.rs, survey_suite) cover them",
     "T, TiB and TB sizes: 1T exceeds most test filesystems, which is exit 2 for another reason",
     "the RLIMIT_NOFILE raise, signal handling during a running child, Docker/Nix backend skips",
     "the /etc/diskgc/config.yaml fallback: probes pin XDG_CONFIG_HOME and never write /etc",
@@ -1002,6 +1048,9 @@ def main(argv=None):
     report.guarded(probe_sizes_and_durations, reference, run, report)
     report.guarded(probe_ensure_arguments, run, report)
     report.guarded(probe_report_fields, reference, run, report, version, status_codes)
+    row = build_row(json.loads(DESCRIPTOR.read_text()), run.diskgc("--version").out,
+                    run.diskgc("profiles", "list", "--json").json())[1]
+    report.guarded(probe_survey, reference, run, report, "survey" in row["commands"])
     if not args.container:
         report.guarded(probe_ci_examples, reference, run, report, help_text)
     listed = run.diskgc("profiles", "list", "--json").json() or {}

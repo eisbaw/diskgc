@@ -38,8 +38,7 @@ const EMBEDDED: &str = include_str!("releases.json");
 pub const EVERY_ROW_RUNS: [Command; 3] = [Command::Ensure, Command::Check, Command::Profiles];
 
 /// A command a build may run, as a user types its first words. `--help`
-/// and `--version` are in every build; `survey` is in none yet, so it is
-/// not a value here (the binary refuses it as not implemented).
+/// and `--version` are in every build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Command {
     Ensure,
@@ -48,15 +47,18 @@ pub enum Command {
     WatchTallyOnly,
     Check,
     Profiles,
+    /// Read-only (docs/reference.md, `survey`).
+    Survey,
 }
 
 impl Command {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Ensure,
         Self::Watch,
         Self::WatchTallyOnly,
         Self::Check,
         Self::Profiles,
+        Self::Survey,
     ];
 
     /// As the descriptor and the help spell it.
@@ -67,6 +69,7 @@ impl Command {
             Self::WatchTallyOnly => "watch --tally-only",
             Self::Check => "check",
             Self::Profiles => "profiles",
+            Self::Survey => "survey",
         }
     }
 }

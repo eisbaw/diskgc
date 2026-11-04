@@ -53,7 +53,7 @@ pub use entry::{
     ensure, ensure_grouped, ensure_grouped_with_index, ensure_with_index, reclaimable,
 };
 pub use indexed::tally_sources;
-pub use plan::{dry_run, dry_run_grouped};
+pub use plan::{dry_run, dry_run_grouped, survey_tier};
 pub use preflight::{
     CAP_SYS_PTRACE, MeasureFailure, PrivilegeError, goal_bytes, privileges, process_visibility,
     reach_path,
@@ -135,15 +135,23 @@ pub fn timed_report_from<H: Host>(
 ) -> Report {
     let (started, wall) = origin.unwrap_or_else(|| (host.now(), host.wall_clock()));
     let mut report = run();
-    report.started_at = i32::try_from(wall.nanos)
-        .ok()
-        .and_then(|nanos| jiff::Timestamp::new(wall.secs, nanos).ok())
-        .map(|timestamp| timestamp.to_string());
+    report.started_at = rfc3339(wall);
     report.duration_ms = u64::try_from(host.now().saturating_since(started).as_millis()).ok();
     signal_report(host, report)
 }
 
-fn age_seconds(now: Timestamp, newest: Option<Timestamp>) -> Option<u64> {
+/// `wall` in RFC 3339 form (the report's `started_at`), or `None` outside
+/// the supported range.
+pub fn rfc3339(wall: Timestamp) -> Option<String> {
+    i32::try_from(wall.nanos)
+        .ok()
+        .and_then(|nanos| jiff::Timestamp::new(wall.secs, nanos).ok())
+        .map(|timestamp| timestamp.to_string())
+}
+
+/// Whole seconds from `newest` to `now`: `None` when unknown or in the
+/// future.
+pub fn age_seconds(now: Timestamp, newest: Option<Timestamp>) -> Option<u64> {
     let newest = newest?;
     let nanos = (i128::from(now.secs) - i128::from(newest.secs)) * 1_000_000_000
         + i128::from(now.nanos)
@@ -740,20 +748,20 @@ const SCAN_NOTE_PREFIX: &str = "process scan: ";
 /// logged the first time its exact text appears in the run; a note that
 /// changes (another count, another process) is logged again. Every other
 /// line passes through. Bounded by the distinct notes of one run.
-struct NotesOncePerRun<'l> {
+pub struct NotesOncePerRun<'l> {
     log: &'l mut dyn FnMut(&str),
     seen: BTreeSet<String>,
 }
 
 impl<'l> NotesOncePerRun<'l> {
-    fn new(log: &'l mut dyn FnMut(&str)) -> Self {
+    pub fn new(log: &'l mut dyn FnMut(&str)) -> Self {
         Self {
             log,
             seen: BTreeSet::new(),
         }
     }
 
-    fn line(&mut self, line: &str) {
+    pub fn line(&mut self, line: &str) {
         if line.starts_with(SCAN_NOTE_PREFIX) && !self.seen.insert(line.to_owned()) {
             return;
         }

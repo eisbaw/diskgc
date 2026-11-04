@@ -47,8 +47,9 @@ pub struct Planned {
     /// Every eligible row of the term.
     pub eligible: Sized,
     /// The eligible rows a reclaim would take before reaching the goal
-    /// ([`outcome::dry_run`]).
-    pub would_reclaim: Sized,
+    /// ([`outcome::dry_run`]); `None` for a plan without a goal
+    /// (`survey`, [`terms_without_goal`]).
+    pub would_reclaim: Option<Sized>,
     /// Candidates found but not judged: the plan stopped first. `None`
     /// when the term's planner did not report (the run stopped before it,
     /// or it failed).
@@ -118,18 +119,34 @@ impl Term<'_> {
 /// summary lists it apart.
 pub fn terms(report: &Report) -> Vec<Term<'_>> {
     if report.dry_run {
-        dry_run_terms(report)
+        dry_run_terms(report, Goal::Given)
     } else {
         live_terms(report)
     }
 }
 
-/// The term `tier`/`profile` in `terms`, added (empty) if missing.
+/// [`terms`] of a dry run planned without a goal (`survey`): no
+/// `would_reclaim`, since nothing would be reclaimed toward one.
+pub fn terms_without_goal(report: &Report) -> Vec<Term<'_>> {
+    assert!(report.dry_run, "a plan without a goal is a dry run");
+    dry_run_terms(report, Goal::None)
+}
+
+/// Whether the plan was made toward a goal (`ensure --dry-run`) or not
+/// (`survey`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Goal {
+    Given,
+    None,
+}
+
+/// The term `tier`/`profile` in `terms`, added (empty) if missing: a dry
+/// run's (`Some`, planned toward its goal or none) or a live run's.
 fn term<'t, 'a>(
     terms: &'t mut Vec<Term<'a>>,
     tier: &'a str,
     profile: &'a str,
-    dry_run: bool,
+    dry_run: Option<Goal>,
 ) -> &'t mut Term<'a> {
     let index = match terms
         .iter()
@@ -140,8 +157,11 @@ fn term<'t, 'a>(
             terms.push(Term {
                 tier,
                 profile,
-                planned: dry_run.then(Planned::default),
-                reclaimed: (!dry_run).then_some(Reclaimed {
+                planned: dry_run.map(|goal| Planned {
+                    would_reclaim: (goal == Goal::Given).then(Sized::default),
+                    ..Planned::default()
+                }),
+                reclaimed: dry_run.is_none().then_some(Reclaimed {
                     count: 0,
                     avail_delta_bytes: Some(0),
                 }),
@@ -153,7 +173,7 @@ fn term<'t, 'a>(
     &mut terms[index]
 }
 
-fn dry_run_terms(report: &Report) -> Vec<Term<'_>> {
+fn dry_run_terms(report: &Report, goal: Goal) -> Vec<Term<'_>> {
     let needed = outcome::shortfall(
         report.avail_before_bytes,
         report.min_free_bytes,
@@ -171,7 +191,7 @@ fn dry_run_terms(report: &Report) -> Vec<Term<'_>> {
     // The planners' terms first, in tier order: a term that found nothing
     // still has its block ("0 found" explains an empty plan).
     for planned in &report.terms {
-        let term = term(&mut terms, &planned.tier, &planned.profile, true);
+        let term = term(&mut terms, &planned.tier, &planned.profile, Some(goal));
         let counts = term.planned.as_mut().expect("a dry run's term");
         counts.not_judged = Some(
             counts
@@ -181,13 +201,15 @@ fn dry_run_terms(report: &Report) -> Vec<Term<'_>> {
         );
     }
     for entry in report.plan.iter().filter(|e| e.candidate.is_some()) {
-        let term = term(&mut terms, &entry.tier, &entry.profile, true);
+        let term = term(&mut terms, &entry.tier, &entry.profile, Some(goal));
         match entry.reason {
             None => {
                 let counts = term.planned.as_mut().expect("a dry run's term");
                 counts.eligible.add(1, entry.estimated_bytes);
-                if would.contains(&std::ptr::from_ref(entry)) {
-                    counts.would_reclaim.add(1, entry.estimated_bytes);
+                if let Some(would_reclaim) = counts.would_reclaim.as_mut()
+                    && would.contains(&std::ptr::from_ref(entry))
+                {
+                    would_reclaim.add(1, entry.estimated_bytes);
                 }
             }
             Some(reason) => term.kept_row(reason, 1, entry.estimated_bytes),
@@ -202,7 +224,7 @@ fn live_terms(report: &Report) -> Vec<Term<'_>> {
     // when that reclaim stopped part-way (its skip is not a keep).
     let mut acted: BTreeSet<(&str, &Path)> = BTreeSet::new();
     for action in &report.actions {
-        let term = term(&mut terms, &action.tier, &action.profile, false);
+        let term = term(&mut terms, &action.tier, &action.profile, None);
         let reclaimed = term.reclaimed.as_mut().expect("a live run's term");
         if acted.insert((&action.tier, &action.candidate)) {
             reclaimed.count = reclaimed.count.saturating_add(action.count);
@@ -219,7 +241,7 @@ fn live_terms(report: &Report) -> Vec<Term<'_>> {
         if acted.contains(&(skip.tier.as_str(), candidate)) {
             continue;
         }
-        term(&mut terms, &skip.tier, &skip.profile, false).kept_row(
+        term(&mut terms, &skip.tier, &skip.profile, None).kept_row(
             skip.reason,
             skip.count,
             skip.estimated_bytes,

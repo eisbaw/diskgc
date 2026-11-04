@@ -3,9 +3,10 @@
 //!
 //! So far: `ensure` with `--select` or configured groups, `--dry-run`
 //! and `--json` (task-10), the dry run of one kind `fs` tier (task-68),
-//! `profiles list`, `show NAME` and `test`, `check`, plus `--version`
-//! and `--help`, whose Profiles section is rendered from the built-in
-//! library. The other commands exit 2 saying which task brings them.
+//! `profiles list`, `show NAME` and `test`, `check`, `watch` and `survey`
+//! (their own modules), plus `--version` and `--help`, whose Profiles
+//! section is rendered from the built-in library. A command the build's
+//! row of the release descriptor leaves out exits 2.
 //!
 //! The flow of `ensure`, every step before the next:
 //!
@@ -46,6 +47,7 @@ use diskgc_core::watch::Mode;
 use diskgc_linux::LinuxHost;
 use diskgc_linux::host::{ConfigReadError, read_config_file, read_root_config_file};
 
+mod survey;
 mod watch;
 
 /// Exit code for usage, config and provisioning errors, including a kernel
@@ -95,7 +97,7 @@ diskgc --version
        diskgc --help";
 
 /// Every synopsis with the command it belongs to (`None`: every build's).
-fn synopses() -> [(Option<Command>, &'static str, &'static str); 6] {
+fn synopses() -> [(Option<Command>, &'static str, &'static str); 7] {
     [
         (Some(Command::Ensure), "ensure", ENSURE_SYNOPSIS),
         (Some(Command::Watch), "watch", watch::WATCH_RECLAIM_SYNOPSIS),
@@ -106,6 +108,7 @@ fn synopses() -> [(Option<Command>, &'static str, &'static str); 6] {
         ),
         (Some(Command::Profiles), "profiles", PROFILES_SYNOPSIS),
         (Some(Command::Check), "check", CHECK_SYNOPSIS),
+        (Some(Command::Survey), "survey", survey::SURVEY_SYNOPSIS),
         (None, "", INFO_SYNOPSIS),
     ]
 }
@@ -178,6 +181,13 @@ watch --tally-only runs as a service that keeps the index snapshot warm
   3 stdout or the host failed.
 ";
 
+/// `survey` in a build that runs it.
+const HELP_SURVEY: &str = "
+survey reads only: per PATH, what each profile finds (count, size, age,
+  what keeps it), and the top-level entries no profile matches, grouped by
+  name family; --list shows the candidates, --json one object of it all.
+";
+
 /// The help after the usage lines, for `build`: what it runs, from the
 /// release descriptor. The Profiles section that ends `--help` is
 /// rendered from the build's library ([`describe::help_section`]) and
@@ -191,6 +201,9 @@ fn help(build: &Build) -> String {
         out.push_str(HELP_WATCH);
     } else if build.allows(Command::WatchTallyOnly) {
         out.push_str(HELP_WATCH_TALLY_ONLY);
+    }
+    if build.allows(Command::Survey) {
+        out.push_str(HELP_SURVEY);
     }
     out.push('\n');
     out.push_str(&wrap(&commands_sentence(build)));
@@ -217,15 +230,24 @@ fn package_sentence(build: &Build) -> String {
 
 /// The build's commands, and what of the documented ones it leaves out.
 fn commands_sentence(build: &Build) -> String {
-    let missing = if build.allows(Command::Watch) {
-        "`survey` is"
-    } else if build.allows(Command::WatchTallyOnly) {
-        "a reclaiming `watch` and `survey` are"
-    } else {
-        "`watch` and `survey` are"
+    let mut missing: Vec<&str> = Vec::new();
+    if !build.allows(Command::Watch) {
+        missing.push(if build.allows(Command::WatchTallyOnly) {
+            "a reclaiming `watch`"
+        } else {
+            "`watch`"
+        });
+    }
+    if !build.allows(Command::Survey) {
+        missing.push("`survey`");
+    }
+    let missing = match missing.as_slice() {
+        [] => String::new(),
+        [one] => format!(" ({one} is not in it yet)"),
+        many => format!(" ({} are not in it yet)", many.join(" and ")),
     };
     format!(
-        "Commands in this version: {} ({missing} not in it yet). ensure runs \
+        "Commands in this version: {}{missing}. ensure runs \
          `--select` or configured groups with ordered or random tier ranking and \
          oldest or best-fit candidate order. PATH and every DIR are absolute.",
         build.commands_phrase()
@@ -331,8 +353,7 @@ enum Invocation {
     Watch(watch::WatchArgs),
     Profiles(ProfilesArgs),
     Check(Option<OsString>),
-    /// A command of the contract that no build has yet.
-    NotYet(&'static str),
+    Survey(survey::SurveyArgs),
     /// A command this build does not run (the release descriptor's row,
     /// [`admit`]).
     NotInBuild(Command),
@@ -361,9 +382,6 @@ enum ProfilesCommand {
     Show(String),
     Test,
 }
-
-/// The commands of docs/reference.md this version does not run yet.
-const NOT_YET: [&str; 1] = ["survey"];
 
 /// Whether the command line asks for JSON: any argument `--json`, or
 /// `--json=...` (then a usage error). Decided on the raw arguments, before
@@ -427,13 +445,14 @@ fn parse(args: &[OsString], build: &Build) -> Invocation {
             Ok(config) => Invocation::Check(config),
             Err(why) => Invocation::UsageError(format!("check: {why}")),
         },
+        [command, rest @ ..] if command == "survey" => match survey::parse_survey(rest) {
+            Ok(args) => Invocation::Survey(args),
+            Err(why) => Invocation::UsageError(format!("survey: {why}")),
+        },
         [first, ..] if first == "--version" || first == "-V" => {
             Invocation::UsageError("--version takes no arguments (`--json` aside)".to_owned())
         }
-        [command, ..] => match NOT_YET.iter().find(|name| command == *name) {
-            Some(name) => Invocation::NotYet(name),
-            None => Invocation::UsageError(unknown_command(&command.to_string_lossy(), build)),
-        },
+        [command, ..] => Invocation::UsageError(unknown_command(&command.to_string_lossy(), build)),
     }
 }
 
@@ -451,12 +470,14 @@ fn admit(args: &[OsString], invocation: Invocation, build: &Build) -> Invocation
         },
         Invocation::Profiles(_) => Command::Profiles,
         Invocation::Check(_) => Command::Check,
+        Invocation::Survey(_) => Command::Survey,
         Invocation::UsageError(_) => match first {
             Some("ensure") => Command::Ensure,
             Some("watch") if !build.allows(Command::Watch) => Command::WatchTallyOnly,
             Some("watch") => Command::Watch,
             Some("profiles") => Command::Profiles,
             Some("check") => Command::Check,
+            Some("survey") => Command::Survey,
             _ => return invocation,
         },
         _ => return invocation,
@@ -1349,14 +1370,7 @@ fn main() -> ExitCode {
                 }
             }
         },
-        Invocation::NotYet(command) => not_yet(
-            &format!(
-                "`{command}` is not in diskgc {} yet; its commands are {}",
-                env!("CARGO_PKG_VERSION"),
-                build.commands_phrase()
-            ),
-            json,
-        ),
+        Invocation::Survey(args) => survey::survey(&args, json),
         Invocation::NotInBuild(command) => not_yet(&not_in_build(command, &build), json),
         Invocation::UsageError(reason) => {
             // Reported before anything on the machine is read, as a bad
@@ -1850,6 +1864,20 @@ mod tests {
                 }
                 other => panic!("{row:?}: {other:?}"),
             }
+            // `survey`, read-only, runs where its row lists it; a syntax
+            // error of it is refused the same way where it does not.
+            for line in [&["survey", "/p"][..], &["survey"]] {
+                let line = args(line);
+                match admitted(&line) {
+                    Invocation::Survey(_) | Invocation::UsageError(_) => {
+                        assert!(row.allows(Command::Survey), "{row:?} {line:?}")
+                    }
+                    Invocation::NotInBuild(Command::Survey) => {
+                        assert!(!row.allows(Command::Survey), "{row:?} {line:?}")
+                    }
+                    other => panic!("{row:?}: {other:?}"),
+                }
+            }
             let runs_a_watch = row.allows(Command::Watch) || row.allows(Command::WatchTallyOnly);
             match admitted(&bad_watch) {
                 Invocation::UsageError(_) => assert!(runs_a_watch, "{row:?}"),
@@ -1900,7 +1928,15 @@ mod tests {
         );
         assert_eq!(
             development.commands_phrase(),
-            "ensure, watch, check and profiles"
+            "ensure, watch, check, profiles and survey"
+        );
+        assert_eq!(
+            not_in_build(Command::Survey, &v01),
+            concat!(
+                "`survey` is not in diskgc ",
+                env!("CARGO_PKG_VERSION"),
+                " yet; its commands are ensure, check and profiles"
+            )
         );
     }
 
@@ -1928,9 +1964,10 @@ mod tests {
             dev.contains("watch runs as a service: it reclaims"),
             "{dev}"
         );
-        assert!(dev.contains("(`survey` is not in it yet)"), "{dev}");
+        assert!(!dev.contains("not in it yet"), "{dev}");
+        assert!(dev.contains("survey reads only"), "{dev}");
         assert!(
-            dev.contains("Commands in this version: ensure, watch, check and profiles"),
+            dev.contains("Commands in this version: ensure, watch, check, profiles and survey"),
             "{dev}"
         );
         assert!(
@@ -2225,6 +2262,11 @@ mod tests {
             let error = watch::parse_watch(&args(&[flag, "1G", "/p"])).err();
             assert!(!error.is_some_and(|e| e.contains("unknown flag")), "{flag}");
         }
+        for flag in survey::SURVEY_FLAGS {
+            assert!(survey::SURVEY_SYNOPSIS.contains(flag), "{flag}");
+            let error = survey::parse_survey(&args(&[flag, "x", "/p"])).err();
+            assert!(!error.is_some_and(|e| e.contains("unknown flag")), "{flag}");
+        }
         for flag in CHECK_FLAGS {
             assert!(CHECK_SYNOPSIS.contains(flag), "{flag}");
             assert!(matches!(
@@ -2253,9 +2295,6 @@ mod tests {
             help.contains("share/doc/diskgc/examples/example.yaml"),
             "{help}"
         );
-        for command in NOT_YET {
-            assert_eq!(parse(&args(&[command])), Invocation::NotYet(command));
-        }
     }
 
     /// The entry budget's test seam (`EnsureOptions::test_entry_budget`).

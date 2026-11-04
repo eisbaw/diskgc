@@ -259,6 +259,7 @@ fn a_usage_error_shows_the_error_then_only_the_command_usage() {
         .iter()
         .filter(|c| row.allows(**c))
         .count();
+    let survey_lines = if row.allows(Run::Survey) { 2 } else { 0 };
     for (args, error, usage_lines) in [
         (
             &["ensure", "--dry-run", "--min-fre", "1G", "/nonexistent"][..],
@@ -283,7 +284,7 @@ fn a_usage_error_shows_the_error_then_only_the_command_usage() {
         (
             &[],
             "diskgc: error: no command given",
-            3 + watch_lines + 3 + 1 + 2,
+            3 + watch_lines + 3 + 1 + survey_lines + 2,
         ),
     ] {
         let out = diskgc(args);
@@ -967,13 +968,19 @@ fn json_anywhere_gives_one_object() {
             &["watch", "--tally-only", "--interval", "1m", "--json", "/x"],
             "watch: --interval is not valid with --tally-only",
         ),
+        // The development build runs `survey`, a release build refuses
+        // it (its row lists no `survey`).
         (
             &["survey", "--json"],
-            concat!(
-                "`survey` is not in diskgc ",
-                env!("CARGO_PKG_VERSION"),
-                " yet"
-            ),
+            if cfg!(feature = "release-catalog") {
+                concat!(
+                    "`survey` is not in diskgc ",
+                    env!("CARGO_PKG_VERSION"),
+                    " yet"
+                )
+            } else {
+                "survey: PATH is required"
+            },
         ),
     ] {
         let out = diskgc(args);

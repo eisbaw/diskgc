@@ -855,25 +855,28 @@ pub(super) fn term_texts(report: &Report) -> Vec<String> {
 /// judged (WHY)`, a live run's `reclaimed N (observed CHANGE) · kept ...`.
 /// Parts with nothing to say are left out, except a dry run's eligible
 /// count.
-fn term_text(term: &Term<'_>, why_stopped: &str) -> String {
+pub(super) fn term_text(term: &Term<'_>, why_stopped: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(found) = term.found() {
         parts.push(format!("{found} found"));
     }
     if let Some(planned) = term.planned {
-        let would = planned.would_reclaim;
-        let would_text = if would.count == planned.eligible.count || would.count == 0 {
-            format!("would reclaim {}", would.count)
-        } else {
-            format!("would reclaim {} {}", would.count, size_text(would))
-        };
+        // A plan without a goal (`survey`) would reclaim toward none.
+        let would_text = planned.would_reclaim.map(|would| {
+            if would.count == planned.eligible.count || would.count == 0 {
+                format!(" (would reclaim {})", would.count)
+            } else {
+                format!(" (would reclaim {} {})", would.count, size_text(would))
+            }
+        });
         parts.push(if planned.eligible.count == 0 {
             "0 eligible".to_owned()
         } else {
             format!(
-                "{} eligible {} ({would_text})",
+                "{} eligible {}{}",
                 planned.eligible.count,
-                size_text(planned.eligible)
+                size_text(planned.eligible),
+                would_text.unwrap_or_default()
             )
         });
     }
@@ -962,7 +965,7 @@ fn held_line(held: &[HeldEntry]) -> Option<String> {
 
 /// `value` on one line: control characters and backslashes escaped, so a
 /// path cannot forge a line of the summary.
-fn one_line(value: &str) -> String {
+pub(super) fn one_line(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         if ch.is_control() || ch == '\\' {

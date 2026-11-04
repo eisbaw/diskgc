@@ -540,7 +540,15 @@ impl Prepared {
     /// A supplied root that does not exist refuses the run (exit 2,
     /// [`refuse_missing_roots`]).
     pub fn refuse_missing_roots<H: Host>(&self, host: &H) -> Result<(), (ErrorCause, String)> {
-        refuse_missing_roots(host, self.config.as_ref(), &self.selection, self.uid)
+        let configured = self.selection.select.is_none();
+        refuse_missing_roots(
+            host,
+            self.config.as_ref(),
+            &self.selection.path,
+            &self.selection.roots,
+            configured,
+            self.uid,
+        )
     }
 
     /// Runs the executor on `request` ([`Self::request`]): the dry run, or
@@ -785,21 +793,24 @@ pub fn prepare<H: Delete>(
 /// executor's own host error (exit 3), not turned into a usage error. A
 /// root removed after this check is still the executor's `missing` skip.
 /// `check` previews the same decision ([`check_roots`]).
-fn refuse_missing_roots<H: Host>(
+///
+/// `configured_tiers`: the run runs the configuration's tiers, whose roots
+/// are checked too (`--select` and `survey` replace them, not `protect`).
+pub(crate) fn refuse_missing_roots<H: Host>(
     host: &H,
     config: Option<&Config>,
-    options: &Selection,
+    path: &Path,
+    roots: &[String],
+    configured_tiers: bool,
     uid: u32,
 ) -> Result<(), (ErrorCause, String)> {
     // (root as written, where), in the order the operator wrote them.
     let mut supplied: Vec<(&str, String)> = Vec::new();
     if let Some(config) = config {
-        // `--select` replaces the configured tiers, not `protect`.
-        supplied.extend(configured_roots(config, options.select.is_none()));
+        supplied.extend(configured_roots(config, configured_tiers));
     }
     supplied.extend(
-        options
-            .roots
+        roots
             .iter()
             .map(|root| (root.as_str(), "--roots".to_owned())),
     );
@@ -817,7 +828,7 @@ fn refuse_missing_roots<H: Host>(
     };
     // A missing PATH is the executor's first refusal (`PATH ...:
     // missing`): the more basic mistake is reported first.
-    if is_missing(&options.path) {
+    if is_missing(path) {
         return Ok(());
     }
     let mut from_config = false;

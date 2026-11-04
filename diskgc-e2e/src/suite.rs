@@ -44,7 +44,7 @@ use crate::{
     fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey,
     lifecycle_suite, meson_suite, nix_gc_suite, owner_pid_suite, packaging_suite,
     profile_vector_suite, project_cache_suite, pytest_contract_suite, release_suite, scale_suite,
-    signal_suite, stdout_suite, temp_safety_suite, watch_suite,
+    signal_suite, stdout_suite, survey_suite, temp_safety_suite, watch_suite,
 };
 
 /// Which gate runs a test.
@@ -601,6 +601,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: temp_safety_suite::nested_claude_shell_cache_reclaims_only_its_exact_entry,
+    },
+    Test {
+        name: "survey_reports_tmp_by_profile_and_family_and_changes_nothing",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: survey_suite::survey_reports_tmp_by_profile_and_family_and_changes_nothing,
     },
     Test {
         name: "laptop_tmp_groups_protect_live_work_and_reclaim_independent_cruft",

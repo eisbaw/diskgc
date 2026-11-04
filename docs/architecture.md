@@ -536,12 +536,14 @@ the order of work.
   entry fixture, not a contract.
 - **Sources of a run's index.** `watch` uses its own live index,
   seeded at start from a valid snapshot (the same validity rules).
-  `ensure` and `survey` load the snapshot as a **seed** when it is valid
-  (Snapshot, below), whatever its age, and run the synchronous tally on
+  `ensure` loads the snapshot as a **seed** when it is valid
+  (Snapshot, below), whatever its age, and runs the synchronous tally on
   it: discovery is redone for roots not listed in the last 5 minutes,
   and only the first tier's stale units are re-sized; either way the
-  seed only orders work. (`survey` sizes everything it reports.) Without a valid snapshot, or with `--no-index`, the synchronous
-  tally starts from nothing.
+  seed only orders work. Without a valid snapshot, or with `--no-index`, the synchronous
+  tally starts from nothing. `survey` is the dry run's plan (TASK-38):
+  it judges and sizes every candidate itself, so like `--dry-run` it
+  neither reads nor writes the snapshot.
 - **`--no-index`:** the run neither reads nor writes the snapshot (no
   snapshot operation at all; a user's reclaim on a host without the host
   lock still makes its per-user lock, which may be in
@@ -591,9 +593,9 @@ the order of work.
     no snapshot write. Warmth on a machine that is rarely short of
     space comes from `watch` or `watch --tally-only`, not from
     `ensure`. `survey` and
-    `--dry-run` do not write (read-only commands write no state); a
-    dry run does not read it either (its plan judges every candidate
-    whatever an index holds). Not after a terminating signal, and not
+    `--dry-run` do not write (read-only commands write no state), nor
+    read it (their plan judges every candidate whatever an index
+    holds). Not after a terminating signal, and not
     at or past the run's deadline (checked again right before the
     write). `ensure` seeds and writes only when its run tallies (it
     selects a tier the index serves).

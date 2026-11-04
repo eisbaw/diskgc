@@ -16,7 +16,7 @@
     "lib/systemd/system/diskgc-watch@.service"
   ],
   "development": {
-    "commands": ["ensure", "watch", "watch --tally-only", "check", "profiles"],
+    "commands": ["ensure", "watch", "watch --tally-only", "check", "profiles", "survey"],
     "catalog": null,
     "ships": [
       "lib/tmpfiles.d/diskgc.conf",
