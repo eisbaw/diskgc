@@ -3,8 +3,8 @@ id: TASK-116
 title: 'Design: survey --json schema and unmatched name families'
 status: To Do
 assignee: []
-created_date: '2026-10-23 16:18'
-updated_date: '2026-10-25 20:18'
+created_date: 2026-10-23 16:18
+updated_date: '2026-11-04T18:17:00Z'
 labels:
   - design
 dependencies: []
@@ -30,4 +30,6 @@ Design before implementation (audit 2026-10-23 of docs vs PRD). Deliverable is d
 Mark's design decisions (2026-10-23, binding): (1) survey --json is VERSIONED, MAY BREAK: a top-level schema version field; fields may change between minor releases; consumers must check the version. Not frozen like ensure's report. (2) Unmatched name families ARE in the JSON, with per family: pattern, count, total size, newest/oldest age, capped example paths. Resolves the reference.md contradiction in favour of inclusion. (3) The in-use scan is OPT-IN via a flag (e.g. --in-use): default survey reports matches/sizes/ages only; with the flag, one scan adds per-profile in-use counts.
 
 COMPASS round 4 (2026-10-25): relabelled: Mark ruled survey JSON versioned, may break.
+
+Mark 2026-11-04 (verbatim): "in-use detection runtime selectable via flag" - confirms decision (3): survey default without the /proc in-use scan, --in-use adds it. Implementing on t38-survey.
 <!-- SECTION:NOTES:END -->
