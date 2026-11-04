@@ -52,6 +52,7 @@ pub mod invocation;
 pub mod kernel;
 pub mod kind;
 pub mod liveness;
+pub mod nix_backend;
 pub mod outcome;
 pub mod places;
 pub mod podman_backend;

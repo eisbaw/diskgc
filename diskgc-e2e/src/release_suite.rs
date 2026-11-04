@@ -39,6 +39,8 @@ const EXCLUDED: &[&str] = &[
     // TASK-93, pending Mark's admission: development library only.
     "podman-dangling",
     "podman-unreferenced",
+    // TASK-36, pending Mark's admission: development library only.
+    "nix-garbage",
     "pytest-cache",
     "nix-user-cache",
     "bun-cache",

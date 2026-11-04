@@ -344,7 +344,8 @@ value the code can produce, and diskgc-core's
 `every_status_and_reason_is_a_documented_value` pins `Reason::ALL` plus
 `RESERVED_REASONS` to reference.md's enum exactly. `RESERVED_REASONS` are
 documented reasons nothing produces yet, each naming the task that adds
-its producer (`backend_unavailable`: TASK-36, TASK-113; `stale` got its
+its producer (none now: `backend_unavailable` got its producer in TASK-36,
+the `nix-daemon-*` and `nix-socket-absent` vectors; `stale` got its
 producer and vector in TASK-31, `races/unit-gone-before-rematch-is-stale`);
 the test fails once one enters `Reason::ALL` or is shown by a vector, so a
 reservation cannot outlive its producer;
@@ -893,8 +894,9 @@ Model scenarios required by [safety.md](safety.md) and
     by the step or 15 minutes pass, whichever is first (both orders);
     one back-off log line; `resume_below_bytes` and `wait_seconds` in the
     record match when the next cycle starts;
-  - `watch_retry_back_off_doubles_and_caps` (*open* with a Docker tier, no
-    backend reports `backend_unavailable` yet; the doubling and cap as
+  - `watch_retry_back_off_doubles_and_caps` (*open* with a Docker tier,
+    which does not report `backend_unavailable` yet (TASK-113; the Nix
+    kind does); the doubling and cap as
     `watch_path_on_another_device_backs_off_retry_doubling_and_deletes_nothing`): a Docker tier
     `backend_unavailable` at every cycle: cycles 1, 2, 4, 8, 15, 15
     minutes apart; the daemon back: the next cycle reclaims it and the
@@ -1659,17 +1661,37 @@ run over a project changes no regular file's atime).
 
 Designed (TASK-118), implemented by TASK-36 under
 `crates/diskgc-model/tests/vectors/backend/` (`nix-*.yaml`, profile
-`nix-garbage`, path `/nix/store`), in the shape of the Docker backend
-vectors. The host model gains a `nix:` block (the model schema is
-tentative, PRD): the client's canonical directory and `--version` text,
-the answers to `nix config show store` and the pinned `store info` query,
-the daemon probe's result (`serving`, `eof`, `timeout`, `wrong_magic`, or
-an errno), the daemon's `--query --roots` lines, and the GC's effect (store paths it removes, its exit or
-signal). The tree carries `/nix/store`, `/nix/var/nix` and its socket
-with their owners and modes, so the layout checks run on the model's
-`statx`. `expect.commands` pins every Nix argv and the exact child
-environment; a vector that expects a skip expects no GC command, and one
-that skips before step 8 also no `--query --roots`.
+`nix-garbage`, mostly path `/nix/store`), in the shape of the Docker
+backend vectors. The host model's `nix:` block (the model schema is
+tentative, PRD) holds the `--version` text, the answers to `nix config
+show store` (or its exit code) and the pinned `store info` query (and a
+later one, `store_info_later`, for the recheck), the daemon probe's
+result (`serving`, `eof`, `timeout`, `wrong_magic`, or an errno by
+name), diskgc's own `NIX_*` variables, the daemon's `--query --roots`
+lines, and the GC (`gc`: the store paths it removes, its exit, how long
+it takes, a signal while it runs). The tree carries the client's links,
+`/nix/store`, `/nix/var/nix`, its socket and the profiles with their
+owners and modes, so the client resolution, the layout checks and the
+generation listing run on the model's `statx` and `readlink`.
+`expect.nix_commands` (and `dry_run_nix_commands`) pin every Nix argv,
+in order, and the exact child environment (or diskgc's own, for `config
+show store`); the model shows the pinned descriptor as
+`unix:///proc/self/fd/N`. A vector that expects a skip expects no GC
+command, and one that skips before step 8 also no `--query --roots`. A
+dry run never runs either, in any vector (the checker fails one that
+does), and the model fails a GC started without the host lock inherited.
+The client is the installation's (`/run/current-system/sw/bin/nix-store`
+in the model's tree), its `nix` an ELF by its first bytes (`content`).
+TASK-36 review round 1 added `nix-client-is-a-script`,
+`nix-client-store-name-not-admitted`, `nix-client-dir-writable`,
+`nix-anchor-link-not-root`, `nix-anchor-in-a-writable-directory`,
+`nix-path-does-not-choose-the-client`, `nix-default-profile-anchor` and
+`nix-plugin-files-are-never-loaded` (every argv starts with `--option
+plugin-files ""`). Besides the table: `nix-client-not-multicall-link` (`nix-store -> ./nix`),
+`nix-store-dir-env-refused` and `nix-store-env-refused` (the two variants
+of `nix-state-dir-env-refused`), and
+`nix-tier-runs-without-a-complete-process-list` (as the Docker and Podman
+kinds, a Nix tier does not rely on diskgc's in-use check).
 
 | Vector | Model | Expected |
 |---|---|---|
@@ -2307,13 +2329,26 @@ filesystem, processes and mounts from the developer's system.
   from an offline scratch payload, creates a container and volume, and
   verifies their identities survive a traced diskgc run and the deletion
   oracle. Backend binding and prune cases remain with task-35.
-- **Nix GC** (TASK-36, its own image and `just` recipe): a pinned
-  multi-user Nix whose `nix-daemon` runs as container root on the
-  container's own `/nix` (tmpfs or overlay, never the host store; no host
-  socket mounted), diskgc as uid 1000, untrusted. A pre-scenario check
-  requires the store to contain only the image's paths. Scenarios:
+- **Nix GC** (TASK-36, its own image `localhost/diskgc-e2e-nix-gc` and
+  `just e2e-nix-gc`, part of `just e2e`; diskgc-e2e `nix_gc_suite.rs`): a
+  pinned multi-user CppNix 2.34.8 (the development machine's NixOS
+  nixpkgs revision) whose `nix-daemon` runs as container root on the
+  container's own store, diskgc as uid 1000, untrusted. The image carries
+  its own `/nix/store` and database (`includeNixDB`: its paths registered
+  and rooted). A pre-scenario check requires no mount at `/nix/store`
+  (so no host store) and exactly the database's registered paths in it;
+  then the store is copied onto a tmpfs of the scenario's own and moved
+  onto `/nix/store` (1775 root:nixbld), so what a GC frees is measured on
+  a filesystem nothing else writes (two containers at a time: each holds
+  a copy). The deletion oracle declares exactly the dead store paths
+  eligible, and below `/nix/var/nix` only the daemon's own database,
+  temporary roots, GC lock and GC socket as written concurrently: a
+  rooted path, generation, profile or GC root registration that
+  disappears is a violation. The survival and interruption scenarios also
+  compare every link below `profiles` and `gcroots` (and the out-link)
+  before and after: the same object, the same text. Scenarios:
   - `nix_gc_keeps_every_kind_of_root`: a direct root, an indirect out-link
-    root (`nix-build -o`), two generations of `/nix/var/nix/profiles/system`
+    root (`nix-store --realise --add-root`), two generations of `/nix/var/nix/profiles/system`
     and of a per-user profile, a temporary root held by a paused build,
     and a runtime root (a process with a store file open) all survive;
     dead paths are removed; the oracle lists the store before and after.
@@ -2322,13 +2357,27 @@ filesystem, processes and mounts from the developer's system.
     restarted with `--store 'local?state=/nix/var/nix-b'` over the same
     `/nix/store`, B registering a path rooted only in A; the reclaim
     skips `unsupported_backend` at the root check, and the path survives.
-  - `nix_gc_refuses_unlisted_versions`: a second pinned CppNix as client,
-    and a pinned Lix client, each `unsupported_backend`, with no GC run.
+  - `nix_gc_refuses_unlisted_versions`: a second pinned CppNix (the
+    flake's nixpkgs, 2.34.9) as the client root's default profile names:
+    `unsupported_backend`, with no GC run. Lix and other variants are
+    refused by the same allowlist and covered by the model vector
+    `nix-lix-client-refused` only (Mark, 2026-11-04: no Lix container).
   - `nix_gc_refuses_single_user_layout`: no daemon, store owned by uid
     1000: `unsupported_backend`.
   - `nix_gc_refuses_redirected_store`: `NIX_REMOTE=local?state=...`, a
-    user `nix.conf` `store` setting, and `NIX_REMOTE=ssh-ng://x`: skips
-    as specified, nothing deleted in either state.
+    user `nix.conf` `store` setting, `NIX_REMOTE=ssh-ng://x`, and a
+    relative `NIX_USER_CONF_FILES=nix.conf` (selecting `ssh-ng://…`) with
+    diskgc run from that file's directory: skips as specified, nothing
+    deleted in either state.
+  - `nix_gc_never_runs_a_wrapper_client` (TASK-36 review): a `nix-store`
+    wrapper first on diskgc's `PATH` is never run (the GC uses the
+    installation's client); root's default profile naming a store path
+    laid out as `…-nix-2.34.8/bin/nix` with a script `nix` is refused
+    `unsupported_backend` (not an ELF), and the script never runs.
+  - `nix_gc_never_loads_a_configured_plugin` (TASK-36 review): a marker
+    plugin named by `NIX_CONFIG` loads into a plain `nix config show
+    store` (the control) and never into diskgc's dry run or reclaim, by
+    `NIX_CONFIG` or a user `nix.conf`.
   - `nix_gc_daemon_down_is_a_skip`: the daemon stopped with its socket
     kept, and a socket-activated daemon (a listening socket handed to a
     daemon that exits at once): both `backend_unavailable`, exit 1 with no
@@ -2337,11 +2386,14 @@ filesystem, processes and mounts from the developer's system.
     with diskgc's user in `trusted-users`, once without; the same paths
     survive. Every admitted daemon version answers the probe's magic.
   - `nix_gc_sigterm_mid_gc`: 10,000 small dead paths, SIGTERM to diskgc
-    after the first `deleting` line on stderr: exit 143, the host lock
-    held until the client exits, every rooted path present, and a second,
-    uninterrupted GC completes; also SIGKILL to diskgc (TASK-36 AC3).
+    once the store shrinks (the GC is deleting): exit 143, the client's
+    group killed, the host lock held until the client exits, every rooted
+    path present, and a second, uninterrupted GC completes;
+    `nix_gc_sigkill_leaves_the_host_lock_with_the_client` the same with
+    SIGKILL to diskgc as soon as its GC client starts (TASK-36 AC2).
   - `nix_gc_overshoot_is_bounded_by_the_last_path`: one 64 MiB dead path,
-    need 1 MiB: at least 64 MiB freed, one GC, `met`.
+    need 1 MiB: at least 64 MiB freed, one GC, `met`; run with `--timeout
+    0` (no deadline).
   - `nix_gc_optimised_store_frees_at_the_end`: `auto-optimise-store =
     true`, dead paths sharing files through `.links`: the space appears
     only after the links phase; measured and reported, not asserted

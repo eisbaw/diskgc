@@ -462,8 +462,30 @@ fn source(
             )
         }
         Kind::NixStore => {
-            problems.push(format!("kind {kind} is not supported yet"));
-            return None;
+            // Exactly the shape of docs/reference.md (Profiles: a
+            // `nix-store` source profile): the store is not configurable,
+            // the action is the kind's, and nothing narrows a GC.
+            for (field, present) in [
+                ("find.paths", find.paths.is_some()),
+                ("find.exclude", find.exclude.is_some()),
+                ("find.type", find.r#type.is_some()),
+                ("examples", spec.examples.is_some()),
+                ("action", spec.action.is_some()),
+                ("where", spec.r#where.is_some()),
+                ("min_idle_for", spec.min_idle_for.is_some()),
+                ("checkouts", spec.checkouts.is_some()),
+            ] {
+                if present {
+                    problems.push(format!(
+                        "kind {kind} collects the bound Nix daemon's dead store paths through \
+                         Nix's own GC (docs/safety.md, nix-store), so it has no `{field}`"
+                    ));
+                }
+            }
+            if !matches!(roots, Some(Roots::Backend)) {
+                problems.push(format!("kind {kind} needs `find.roots: daemon`"));
+            }
+            (Finds::NixStore, Action::NixStoreGc, Examples::default())
         }
     };
     if let Some(contract) = where_.liveness_contract {

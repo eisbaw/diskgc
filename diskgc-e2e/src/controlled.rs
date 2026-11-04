@@ -427,6 +427,30 @@ impl<H: Host> Host for Controlled<H> {
         self.host.mountinfo()
     }
 
+    // The Nix operations are forwarded uncounted: no driver test pauses at
+    // them (the Nix GC scenarios run the real `ensure`, nix_gc_suite.rs).
+    fn nix_environment(&self) -> diskgc_core::host::NixEnvironment {
+        self.host.nix_environment()
+    }
+
+    fn nix_query(
+        &self,
+        client: &diskgc_core::host::NixClient<Self::Fd>,
+        query: diskgc_core::host::NixQuery,
+        socket: Option<&Self::Fd>,
+        environment: Option<&[(std::ffi::OsString, std::ffi::OsString)]>,
+    ) -> Result<String, HostError> {
+        self.host.nix_query(client, query, socket, environment)
+    }
+
+    fn nix_daemon_probe(
+        &self,
+        socket: &Self::Fd,
+        timeout: Duration,
+    ) -> Result<diskgc_core::host::DaemonProbe, HostError> {
+        self.host.nix_daemon_probe(socket, timeout)
+    }
+
     fn openat2(
         &self,
         base: Base<'_, Self::Fd>,
@@ -776,6 +800,27 @@ impl<H: Delete> Delete for Controlled<H> {
     fn run_command(&self, cwd: &Self::Fd, run: &CommandRun) -> CommandInvocation {
         self.before("run_command");
         self.host.run_command(cwd, run)
+    }
+
+    fn nix_roots(
+        &self,
+        client: &diskgc_core::host::NixClient<Self::Fd>,
+        socket: &Self::Fd,
+        targets: &[PathBuf],
+        environment: &[(std::ffi::OsString, std::ffi::OsString)],
+        deadline: MonoTime,
+    ) -> Result<String, HostError> {
+        self.host
+            .nix_roots(client, socket, targets, environment, deadline)
+    }
+
+    fn nix_gc(
+        &self,
+        client: &diskgc_core::host::NixClient<Self::Fd>,
+        socket: &Self::Fd,
+        run: &diskgc_core::host::NixGc,
+    ) -> CommandInvocation {
+        self.host.nix_gc(client, socket, run)
     }
 }
 

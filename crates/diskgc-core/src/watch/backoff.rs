@@ -34,8 +34,8 @@ pub const RETRY_FIRST: Duration = Duration::from_secs(60);
 pub const STEP_MIN_BYTES: u64 = 1 << 30;
 
 /// The skip reasons that make a cycle `retry`, by their JSON names
-/// (`backend_unavailable` is reserved until a backend kind reports it,
-/// [`crate::engine::RESERVED_REASONS`]).
+/// (`backend_unavailable`: kind `nix-store`, docs/reference.md, Backend
+/// skips and errors).
 pub const RETRY_SKIPS: [&str; 3] = ["backend_unavailable", "changed", "in_use_unknown"];
 
 /// Why no cycle starts yet.

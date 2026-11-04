@@ -853,7 +853,7 @@ under `profile`:
     "find": {"roots": ["/tmp"], "roots_required": false, "backend": null, "paths": ["zephyr-*-run.*"], "exclude": [], "type": "dir | file | any"},
     "min_idle_for": null,
     "where": {"idle_for": null, "has": null, "has_dir": null, "has_not": null, "app_not_running": null, "lacks_entry": null, "keep_newest": null, "newest_group": null, "protect_links": [], "protect_link_dirs": [], "protect_parent_link": null, "protect_cursor_extensions": null, "protect_toolchains": null, "source_anchor": null, "liveness_contract": null},
-    "action": {"type": "delete | command | cargo_lock_protocol | docker_builder_prune | docker_image_prune | docker_image_prune_all | podman_image_prune | podman_image_prune_all", "make_writable": false, "command": null, "cwd": null},
+    "action": {"type": "delete | command | cargo_lock_protocol | docker_builder_prune | docker_image_prune | docker_image_prune_all | podman_image_prune | podman_image_prune_all | nix_store_gc", "make_writable": false, "command": null, "cwd": null},
     "checkouts": "refuse | allow",
     "examples": {"root": null, "match": ["/tmp/zephyr-h5e5-run.jTm9zGlH"], "no_match": ["/tmp/zephyr-hal"]},
     "verified_with": null,
@@ -866,8 +866,10 @@ under `profile`:
 - `role` says how a selection names the profile: `source` as
   `profile:NAME`, `filter` as `filter:NAME`.
 - `kind`, `find`, `action`, `checkouts` and `examples` are `null` for a
-  filter; `examples` is also `null` for `cargo-target`, which takes none;
-  `verified_with` is set on built-in sources only.
+  filter; `examples` is also `null` for `cargo-target`, which takes none,
+  and for the backend kinds; `checkouts` is also `null` for `nix-store`,
+  which takes none (a GC has no file candidates); `verified_with` is set on
+  built-in sources only.
 - `liveness_class` is a built-in source's contract class, spelled as in
   YAML (`sound`, `producer-equivalent`, `verified-heuristic`, `tolerant`,
   `delegated`, `none`; [Liveness contracts](#liveness-contracts)), `null`
@@ -877,8 +879,8 @@ under `profile`:
 - `find.roots` is always a list: the fixed roots, or empty when
   `find.roots_required` is `true` (`roots: required`: a tier or `--roots`
   supplies them) or when `find.backend` names where the kind's storage
-  comes from (`"daemon"`, YAML's `roots: daemon`, for the Docker kinds and
-  `podman-images`; `null` for every other kind). `find.paths`,
+  comes from (`"daemon"`, YAML's `roots: daemon`, for the Docker kinds,
+  `podman-images` and `nix-store`; `null` for every other kind). `find.paths`,
   `find.exclude` and `find.type` are `null` for `cargo-target`.
 - `where` always has its fields, `null` when unused (link lists are empty);
   `idle_for` is a duration (`3d`).
@@ -887,7 +889,8 @@ under `profile`:
 - `action` has every field: `make_writable` (a boolean) for `delete`;
   `command` (the argv) and `cwd` (`candidate`, `parent`, or `null` when
   it is decided per candidate: `type: any` without `cwd`) for `command`;
-  neither for `cargo_lock_protocol`. Later kinds add their own `type`.
+  neither for `cargo_lock_protocol` and `nix_store_gc` (kind `nix-store`'s
+  one bounded GC). Later kinds add their own `type`.
 - On an error, the object every command fails with under `--json`
   ([Output](#output), Errors): `{"status": "usage_error", "exit_code": 2,
   "errors": [{"tier": null, "profile": null, "candidate": null, "cause":
@@ -1315,7 +1318,10 @@ One rule holds for every backend kind, at preflight and at the recheck
 right before acting:
 
 - **Skip** (the tier is excluded, reported in `skipped` with candidate
-  `null`, the other tiers run, and the exit code follows available space:
+  `null` at preflight, or with the storage candidate the plan showed (the
+  graph root, `/nix/store`, ...) at the recheck right before acting, as
+  every backend kind does; the other tiers run, and the exit code follows
+  available space:
   0, or 1 when nothing else failed): the host does not offer a supported,
   reachable backend of that kind, identified from a specific signal, never
   by turning failures into skips wholesale.
@@ -1338,9 +1344,14 @@ right before acting:
   fact, not a failure of this run; reporting it as an error would make
   every timer-driven run on such a host exit 3 (TASK-113's Podman shim).
   Narrow identification keeps a real failure of a supported backend loud.
+- The Nix daemon logs one line per diskgc probe (step 4 of
+  [safety.md](safety.md#nix-store)), `unexpected Nix daemon error: read
+  of 32768 bytes: Connection reset by peer`: diskgc closes the connection
+  after the daemon's magic answer. Two per reclaim, one per dry run; not
+  a fault.
 - `unsupported_store` is not a reason: store selection is part of binding
   a backend and reports `unsupported_backend` or `remote_backend`.
-- Status: the Nix kind is specified this way (TASK-36). Docker's code
+- Status: the Nix kind is implemented this way (TASK-36). Docker's code
   still reports a stopped daemon, `EACCES` and the Podman CLI shim as
   errors; TASK-113 brings it to this rule.
 
@@ -1355,8 +1366,8 @@ evidence, never by an operator's config.
 |---|---|---|
 | Docker CLI (`docker-build-cache` builder dispatch) | client 29.8.2 | native dind fixture ([safety.md](safety.md#docker-kinds)) |
 | Podman (`podman-images`: `info` output, `image prune` rules) | 5.8.7 | an isolated store's prune and the development machine's read-only queries ([safety.md](safety.md#podman-images)) |
-| Nix daemon (`nix-store`: GC and root semantics) | none yet; TASK-36 admits `2.34.8` when its container scenarios pass | [testing.md](testing.md#nix-store-backend-vectors) |
-| Nix client (`nix-store`: command line, `--query --roots` output) | none yet; TASK-36 admits `nix-store (Nix) 2.34.8` with that daemon | same |
+| Nix daemon (`nix-store`: GC and root semantics) | 2.34.8 | the Nix GC container scenarios on CppNix 2.34.8 (`nix develop -c just e2e-nix-gc`; TASK-36 records the runs); [testing.md](testing.md#nix-store-backend-vectors) |
+| Nix client (`nix-store`: command line, `--query --roots` output) | `nix-store (Nix) 2.34.8`, with that daemon | same |
 
 - Nix has two lists, because the GC's semantics live in the daemon and
   the client contributes only its command line and output format: the
@@ -1747,13 +1758,14 @@ spelling for a root the bound backend supplies, in every backend kind
 
 A `nix-store` source profile is exactly `name`, `category`, `description`,
 `kind: nix-store`, `find: {roots: daemon}` and, on a built-in,
-`verified_with`; any other field (`action`, `find.paths`, `where`,
+`verified_with` and `liveness_class`; any other field (`action`, `find.paths`, `where`,
 `min_idle_for`, `examples`, `checkouts`) is a load-time error. The store
 is not configurable: it is `/nix/store` of the bound system daemon
 ([safety.md](safety.md#nix-store)). Selected alone as `profile:NAME` (no
 filters, no union), it reports one plan row and one action with candidate
-`/nix/store`, or one skip with candidate `null`, and `estimated_bytes:
-null`. Its skip reasons are those of [Backend skips and
+`/nix/store`, or one skip (candidate `null` at preflight, `/nix/store` at
+the recheck: [Backend skips and errors](#backend-skips-and-errors)), and
+`estimated_bytes: null`. Its skip reasons are those of [Backend skips and
 errors](#backend-skips-and-errors) plus `changed`; the human `detail`
 names the evidence (the client's canonical path, both versions, the
 store URL seen, the generation link the daemon did not report) and is not
@@ -2230,7 +2242,7 @@ remain a release decision under TASK-67.
 | nix | `nix-user-cache` | `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
 | nix | `nix-shell-rc` | rc directories `nix-shell-*-*` and `nix-develop-*-*` directly in `/tmp` (not below shell temp directories); `liveness_contract: nix-shell`, `min_idle_for: 1h` ([Liveness contracts](#liveness-contracts)) | `delete` |
 | nix | `nix-shell-tmpdir` | planned: `nix-shell.*` directories under `/tmp`'s temp-prefix v1 preset, including below `/tmp/claude-{uid}`; dormant shells can use them without an observable descriptor or initial environment path | no safe action yet |
-| nix | `nix-garbage` | planned: dead store paths of the bound multi-user daemon (`{kind: nix-store, find: {roots: daemon}}`); protocol designed (TASK-118), unshipped until TASK-36 | no shipped action yet |
+| nix | `nix-garbage` | development library only, pending Mark's admission (TASK-36): dead store paths of the bound multi-user daemon (`{kind: nix-store, find: {roots: daemon}}`), Nix's own choice ([safety.md](safety.md#nix-store)) | one bounded `nix-store --gc` |
 | rust | `cargo-target` | Cargo `target/` dirs (roots required); `checkouts: allow`: build scripts clone sources into a target (a vendored dependency in `build/<pkg>/out/`), which is Cargo's own output, reclaimed by its lock protocol | lock protocol |
 | containers | `docker-build-cache` | BuildKit cache of the bound Docker Engine | prune |
 | containers | `docker-dangling` | untagged images | prune |
@@ -2526,7 +2538,7 @@ its task notes.
 | `containers-image-tmp` | containers/image and Buildah spools in `/var/tmp`; the real producers' lifecycle is unverified | `min_idle_for: 3d` only | none | Not a built-in. | Withdrawn (Mark, 2026-10-23). Counterexample: `vm_containers_image_dormant_spool_exposes_liveness_gap`. Re-admitted only under a new name after TASK-125 verifies the real lifecycle in a container test. |
 | `gradle-caches` | Gradle; its daemons lock cache entries only on demand | none for diskgc: Gradle's own retention-based cleanup owns the directory, but there is no cleaner diskgc could invoke on a measured directory, so it is not *delegated* | none | Not a built-in. | Excluded; tune Gradle's cache retention instead. |
 | `maven-repo` | Maven, `mvnd`, IDEs | none: a JVM holds a jar open only while it is loaded; the repository has no lock by default | none | Not a built-in. | Excluded. |
-| `nix-garbage` | the Nix store's own garbage collector | Nix's GC roots and lock (kind `nix-store`), not a `where` predicate | delegated | Not a built-in yet. | Governed by the `nix-store` protocol (TASK-36, TASK-118). |
+| `nix-garbage` | the system Nix daemon's own garbage collector, CppNix 2.34.8 (TASK-36 container scenarios) | Nix's GC roots, temporary and runtime roots, and its GC lock (kind `nix-store`), after diskgc's binding and root check ([safety.md](safety.md#nix-store)), not a `where` predicate | delegated | Nix collects what its own roots do not reach, by its own rules; a root database other than the bound daemon's, and processes outside the daemon's PID namespace, are not seen (safety.md, nix-store: What it does not prove). A GC's freed space can appear only at its end in an optimised store. | Shipped in the development library only (class delegated, admissible by the rule); in no release catalog until Mark admits it (TASK-36). Vectors: `nix-*` (backend). |
 
 ### Release notes (next release, draft)
 

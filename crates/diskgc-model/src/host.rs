@@ -45,12 +45,13 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use diskgc_core::host::{
-    Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, DevIno,
-    DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, HeldDir, Host,
-    HostError, Ids, LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES, MakeUserLock,
-    MapEntry, MonoTime, MountEntry, OpenHow, Pid, PidNamespace, PodmanQuery, Pressure, ProcError,
-    ProcFd, ProcLink, ProcStatus, Space, Stat, StateFile, StateLock, StateWritten, Timestamp,
-    TryLock, Unlink, UserLock, UserLockError, WaitLock, is_single_name,
+    Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, DaemonProbe, Delete,
+    DevIno, DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, HeldDir,
+    Host, HostError, Ids, LinkTarget, LockMode, Locked, MAX_COMMAND_OUTPUT_PREFIX_BYTES,
+    MakeUserLock, MapEntry, MonoTime, MountEntry, NixClient, NixEnvironment, NixGc, NixQuery,
+    OpenHow, Pid, PidNamespace, PodmanQuery, Pressure, ProcError, ProcFd, ProcLink, ProcStatus,
+    Space, Stat, StateFile, StateLock, StateWritten, Timestamp, TryLock, Unlink, UserLock,
+    UserLockError, WaitLock, is_single_name,
 };
 use diskgc_core::hostlock::USER_LOCK_NAME;
 
@@ -109,6 +110,9 @@ pub struct Call {
     /// Full command request, including argv and environment, only for
     /// `RunCommand`; the checked cwd is in `path` and `object`.
     pub command: Option<CommandRun>,
+    /// A Nix child's argv and environment, only for `NixQuery`, `NixRoots`
+    /// and `NixGc`; a pinned one's socket inode is in `object`.
+    pub nix: Option<NixCall>,
     /// `ok`, an errno, `busy`, `deadline passed`, `gone`, `denied` or
     /// `failed`.
     pub result: String,
@@ -123,6 +127,21 @@ impl fmt::Display for Call {
         write!(f, " -> {}", self.result)
     }
 }
+
+/// What a Nix child would run ([`Call::nix`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NixCall {
+    /// The program (in the client directory) and its arguments, as
+    /// `diskgc_core::nix_backend` builds them; the pinned socket's
+    /// descriptor shows as `N` (`unix:///proc/self/fd/N`): the model has no
+    /// descriptor numbers.
+    pub argv: Vec<OsString>,
+    /// `None`: diskgc's own environment, inherited; otherwise exactly this.
+    pub environment: Option<Vec<(OsString, OsString)>>,
+}
+
+/// The store URL the model shows for the pinned socket.
+pub const MODEL_PINNED_STORE: &str = "unix:///proc/self/fd/N";
 
 /// Who holds a lock (for test assertions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -495,6 +514,7 @@ impl ModelHost {
             object,
             entry,
             command,
+            nix: None,
             result: text,
         });
         inner.fire_calls(index, op, path.as_deref(), When::After);
@@ -509,6 +529,59 @@ impl ModelHost {
             .state_dir
             .as_ref()
             .map(|dir| dir.join(name))
+    }
+
+    /// [`Self::call`] for a Nix child: the trace entry also records what
+    /// it would run ([`Call::nix`]).
+    fn call_nix<R>(
+        &self,
+        op: Op,
+        path: PathBuf,
+        nix: NixCall,
+        run: impl FnOnce(&mut Inner) -> (R, Option<DevIno>, String),
+    ) -> R {
+        let result = self.call(op, Some(path), None, run);
+        let mut inner = self.inner.borrow_mut();
+        let index = inner
+            .trace
+            .iter()
+            .rposition(|call| call.op == op)
+            .expect("the call was just traced");
+        inner.trace[index].nix = Some(nix);
+        result
+    }
+
+    /// The bound client's `nix` must be what diskgc opened and checked: a
+    /// regular file named `nix` in its directory, the very inode there.
+    fn check_client(&self, client: &NixClient<ModelFd>) {
+        let ofd = self.fd_ofd(&client.nix);
+        let inner = self.inner.borrow();
+        let loc = inner.loc_of(ofd);
+        if inner.state.stat(loc).file_type != Some(FileType::Regular) {
+            violation("a Nix child executes a client descriptor that is not a regular file");
+        }
+        let named = inner.state.lookup_link(&client.dir.join("nix"));
+        if named.ok().map(|at| inner.state.dev_ino(at)) != Some(inner.state.dev_ino(loc)) {
+            violation(format!(
+                "the client descriptor is not {}/nix",
+                client.dir.display()
+            ));
+        }
+    }
+
+    fn nix_call(
+        &self,
+        client_dir: &Path,
+        program: &str,
+        arguments: Vec<OsString>,
+        environment: Option<Vec<(OsString, OsString)>>,
+    ) -> NixCall {
+        NixCall {
+            argv: std::iter::once(client_dir.join(program).into_os_string())
+                .chain(arguments)
+                .collect(),
+            environment,
+        }
     }
 
     fn wrap(&self, ofd: u64) -> ModelFd {
@@ -781,6 +854,16 @@ impl Inner {
 
     fn loc_of(&self, ofd: u64) -> Loc {
         self.state.ofds[&ofd].loc
+    }
+
+    /// The socket inode the pinned descriptor `ofd` refers to; a call
+    /// through anything else fails the test.
+    fn pinned_socket(&self, ofd: u64, op: &str) -> DevIno {
+        let loc = self.loc_of(ofd);
+        if self.state.stat(loc).file_type != Some(FileType::Socket) {
+            violation(format!("{op} through a descriptor that is not a socket"));
+        }
+        self.state.dev_ino(loc)
     }
 
     /// The state directory, created (mode 0700, diskgc's uid, with its
@@ -1440,6 +1523,153 @@ impl Host for ModelHost {
                 ),
             }
         })
+    }
+
+    fn nix_environment(&self) -> NixEnvironment {
+        let inner = self.inner.borrow();
+        let variable = |name: &str| inner.state.nix.environment.get(name).map(OsString::from);
+        NixEnvironment {
+            state_dir: variable("NIX_STATE_DIR"),
+            store_dir: variable("NIX_STORE_DIR"),
+            store: variable("NIX_STORE"),
+            daemon_socket_path: variable("NIX_DAEMON_SOCKET_PATH"),
+            home: inner.state.home.as_ref().map(OsString::from),
+        }
+    }
+
+    fn nix_query(
+        &self,
+        client: &NixClient<ModelFd>,
+        query: NixQuery,
+        socket: Option<&ModelFd>,
+        environment: Option<&[(OsString, OsString)]>,
+    ) -> Result<String, HostError> {
+        let client_dir = client.dir.as_path();
+        self.check_client(client);
+        if query.clean_environment() != environment.is_some() {
+            violation(format!(
+                "nix_query {query:?}: the child environment is given exactly for a clean query \
+                 and only then"
+            ));
+        }
+        if query.pinned() != socket.is_some() {
+            violation(format!(
+                "nix_query {query:?}: a pinned query goes through the pinned socket, any other \
+                 never does (socket given: {})",
+                socket.is_some()
+            ));
+        }
+        let (program, arguments) = diskgc_core::nix_backend::query_argv(query, MODEL_PINNED_STORE);
+        let socket_ofd = socket.map(|fd| self.fd_ofd(fd));
+        let call = self.nix_call(
+            client_dir,
+            program,
+            arguments,
+            environment.map(<[_]>::to_vec),
+        );
+        let path = client_dir.join(program);
+        let shown = call
+            .argv
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.call_nix(Op::NixQuery, path.clone(), call, |inner| {
+            let object = socket_ofd.map(|ofd| inner.pinned_socket(ofd, "nix_query"));
+            if let Some(errno) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("query Nix", &shown, errno)),
+                    object,
+                    errno_text(errno),
+                );
+            }
+            // `nix-store` is a link to the multi-call `nix`: exec follows
+            // it; the model only asks that the name is there.
+            if inner.state.lookup_link(&path).is_err() {
+                return (
+                    Err(HostError::errno("query Nix", &shown, Errno::ENOENT)),
+                    object,
+                    errno_text(Errno::ENOENT),
+                );
+            }
+            let nix = &inner.state.nix;
+            let answer = match query {
+                NixQuery::ClientVersion => nix.version_line.clone(),
+                NixQuery::ConfigShowStore => {
+                    if let Some(code) = nix.config_store_exit {
+                        let stderr = nix.config_store.clone().unwrap_or_default();
+                        return (
+                            Err(HostError::invalid(
+                                "query Nix",
+                                &shown,
+                                format!("exited {code}: {stderr}"),
+                            )),
+                            object,
+                            format!("exit {code}"),
+                        );
+                    }
+                    nix.config_store.clone()
+                }
+                NixQuery::StoreInfo => {
+                    inner.state.nix_store_info_queries += 1;
+                    let nix = &inner.state.nix;
+                    if inner.state.nix_store_info_queries > 1 {
+                        nix.store_info_later
+                            .clone()
+                            .or_else(|| nix.store_info.clone())
+                    } else {
+                        nix.store_info.clone()
+                    }
+                }
+            };
+            match answer {
+                Some(text) => (Ok(text), object, "ok".to_owned()),
+                None => model_error(format!(
+                    "nix_query {shown}: no answer in the host model's nix:"
+                )),
+            }
+        })
+    }
+
+    fn nix_daemon_probe(
+        &self,
+        socket: &ModelFd,
+        timeout: Duration,
+    ) -> Result<DaemonProbe, HostError> {
+        let ofd = self.fd_ofd(socket);
+        self.call(
+            Op::NixDaemonProbe,
+            Some(PathBuf::from(diskgc_core::nix_backend::SOCKET)),
+            None,
+            |inner| {
+                let object = Some(inner.pinned_socket(ofd, "nix_daemon_probe"));
+                if let Some(errno) = inner.injected.take() {
+                    return (
+                        Err(HostError::errno("probe Nix daemon", "socket", errno)),
+                        object,
+                        errno_text(errno),
+                    );
+                }
+                let Some(answer) = inner.state.nix.probe.clone() else {
+                    model_error("nix_daemon_probe: no nix.probe in the host model");
+                };
+                let result = match answer.as_str() {
+                    "serving" => Ok(DaemonProbe::Serving),
+                    "eof" => Ok(DaemonProbe::Eof),
+                    "timeout" => {
+                        let until = inner.state.elapsed + timeout;
+                        inner.advance_to(until);
+                        Ok(DaemonProbe::Timeout)
+                    }
+                    "wrong_magic" => Ok(DaemonProbe::WrongMagic(0x0bad_cafe)),
+                    name => match Errno::from_name(name) {
+                        Some(errno) => Err(HostError::errno("probe Nix daemon", "socket", errno)),
+                        None => model_error(format!("nix.probe: unknown answer {name:?}")),
+                    },
+                };
+                (result, object, answer)
+            },
+        )
     }
 
     fn read_backend_config(&self, path: &Path, limit: usize) -> Result<Option<Vec<u8>>, HostError> {
@@ -3213,5 +3443,187 @@ impl Delete for ModelHost {
                 (CommandInvocation::Started(Ok(answer)), object, format!("{answer:?}"))
             },
         )
+    }
+
+    fn nix_roots(
+        &self,
+        client: &NixClient<ModelFd>,
+        socket: &ModelFd,
+        targets: &[PathBuf],
+        environment: &[(OsString, OsString)],
+        deadline: MonoTime,
+    ) -> Result<String, HostError> {
+        self.check_client(client);
+        let arguments = diskgc_core::nix_backend::roots_argv(MODEL_PINNED_STORE, targets)
+            .unwrap_or_else(|why| violation(format!("nix_roots: {why}")));
+        let ofd = self.fd_ofd(socket);
+        let call = self.nix_call(
+            &client.dir,
+            "nix-store",
+            arguments,
+            Some(environment.to_vec()),
+        );
+        let path = client.dir.join("nix-store");
+        self.call_nix(Op::NixRoots, path, call, |inner| {
+            let object = Some(inner.pinned_socket(ofd, "nix_roots"));
+            if let Some(errno) = inner.injected.take() {
+                return (
+                    Err(HostError::errno("run Nix root check", "nix-store", errno)),
+                    object,
+                    errno_text(errno),
+                );
+            }
+            if !inner.state.sandbox_gate.is_open() {
+                return (
+                    Err(gate_refusal("run Nix root check", "nix-store")),
+                    object,
+                    "refused".to_owned(),
+                );
+            }
+            if deadline.0 <= UPTIME_AT_START + inner.state.elapsed {
+                return (
+                    Err(HostError::invalid(
+                        "run Nix root check",
+                        "nix-store",
+                        "the deadline passed before the child started",
+                    )),
+                    object,
+                    "deadline passed".to_owned(),
+                );
+            }
+            if let Some(code) = inner.state.nix.roots_exit {
+                return (
+                    Err(HostError::invalid(
+                        "run Nix root check",
+                        "nix-store",
+                        format!("exited {code}"),
+                    )),
+                    object,
+                    format!("exit {code}"),
+                );
+            }
+            match inner.state.nix.roots.clone() {
+                Some(text) => (Ok(text), object, "ok".to_owned()),
+                None => model_error("nix_roots: no nix.roots in the host model"),
+            }
+        })
+    }
+
+    fn nix_gc(
+        &self,
+        client: &NixClient<ModelFd>,
+        socket: &ModelFd,
+        run: &NixGc,
+    ) -> CommandInvocation {
+        self.check_client(client);
+        let arguments = diskgc_core::nix_backend::gc_argv(MODEL_PINNED_STORE, run.max_freed)
+            .unwrap_or_else(|why| violation(format!("nix_gc: {why}")));
+        let ofd = self.fd_ofd(socket);
+        let call = self.nix_call(
+            &client.dir,
+            "nix-store",
+            arguments,
+            Some(run.environment.clone()),
+        );
+        let path = client.dir.join("nix-store");
+        let subject = path.display().to_string();
+        self.call_nix(Op::NixGc, path, call, |inner| {
+            let object = Some(inner.pinned_socket(ofd, "nix_gc"));
+            if !inner.trace.iter().any(|call| call.op == Op::InheritLock) {
+                violation("nix_gc without the host lock inherited: a killed diskgc would free it");
+            }
+            if let Some(errno) = inner.injected.take() {
+                return (
+                    CommandInvocation::NotStarted(HostError::errno("run Nix GC", &subject, errno)),
+                    object,
+                    errno_text(errno),
+                );
+            }
+            if !inner.state.sandbox_gate.is_open() {
+                return (
+                    CommandInvocation::NotStarted(gate_refusal("run Nix GC", &subject)),
+                    object,
+                    "refused".to_owned(),
+                );
+            }
+            if inner.state.interrupted.is_some() {
+                return (
+                    CommandInvocation::NotStarted(HostError::invalid(
+                        "run Nix GC",
+                        &subject,
+                        "interrupted before child start",
+                    )),
+                    object,
+                    "interrupted".to_owned(),
+                );
+            }
+            if inner.state.own_uid == 0 {
+                return (
+                    CommandInvocation::NotStarted(HostError::invalid(
+                        "run Nix GC",
+                        &subject,
+                        "the Nix GC is refused when diskgc runs as root",
+                    )),
+                    object,
+                    "root refused".to_owned(),
+                );
+            }
+            let now = UPTIME_AT_START + inner.state.elapsed;
+            if run.deadline.0 <= now {
+                return (
+                    CommandInvocation::DeadlineBeforeStart,
+                    object,
+                    "DeadlineBeforeStart".to_owned(),
+                );
+            }
+            let Some(gc) = inner.state.nix.gc.clone() else {
+                model_error("nix_gc: no nix.gc in the host model");
+            };
+            for removed in &gc.removes {
+                if !diskgc_core::nix_backend::is_store_path(removed) {
+                    model_error(format!(
+                        "nix.gc.removes: {} is not a store path",
+                        removed.display()
+                    ));
+                }
+                inner.state.remove_path(removed).unwrap_or_else(|e| {
+                    model_error(format!("nix.gc.removes {}: {e:?}", removed.display()))
+                });
+            }
+            // LinuxHost kills the GC's group at once (no SIGTERM grace).
+            let grace = Duration::ZERO;
+            if let Some(signal) = gc.signal_during {
+                inner.state.interrupted.get_or_insert(match signal {
+                    crate::spec::ModelSignal::Int => diskgc_core::report::Signal::Int,
+                    crate::spec::ModelSignal::Term => diskgc_core::report::Signal::Term,
+                });
+                inner.state.signals += 1;
+                let until = inner.state.elapsed + grace;
+                inner.advance_to(until);
+                return (
+                    CommandInvocation::Started(Ok(CommandExit::TimedOut)),
+                    object,
+                    "signalled: TimedOut".to_owned(),
+                );
+            }
+            let takes = gc.takes.map_or(Duration::ZERO, |t| t.0);
+            if now + takes >= run.deadline.0 {
+                let until = run.deadline.0.saturating_sub(UPTIME_AT_START) + grace;
+                inner.advance_to(until);
+                return (
+                    CommandInvocation::Started(Ok(CommandExit::TimedOut)),
+                    object,
+                    "deadline: TimedOut".to_owned(),
+                );
+            }
+            let until = inner.state.elapsed + takes;
+            inner.advance_to(until);
+            let answer = CommandExit::Exited(i32::from(gc.exit.unwrap_or(0)));
+            (
+                CommandInvocation::Started(Ok(answer)),
+                object,
+                format!("{answer:?}"),
+            )
+        })
     }
 }

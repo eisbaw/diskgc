@@ -1,0 +1,101 @@
+# TASK-36, safety.md nix-store, Scope: a nix-store tier under --allow-root
+# is a static invocation error (exit 2) in both modes, before anything is
+# queried: root's `store = auto` is the direct local store, not the
+# daemon, and owners: cannot bound a GC.
+profile_vector: 1
+allow_root: true
+config: |
+  version: 1
+  owners: [tester]
+  groups:
+    - name: g
+      tiers:
+        - {name: nix, select: profile:nix-garbage}
+path: /nix/store
+min_free: 9G
+host:
+  host_model: 1
+  users: {tester: 1000}
+  clock: "2026-10-15T03:00:00Z"
+  home: /home/tester
+  own_uid: 0
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run:
+      .: {uid: 0, gid: 0, mode: "0755"}
+      diskgc: {.: {uid: 0, gid: 0, mode: "0755"}, lock: {uid: 0, gid: 0}}
+      current-system: {uid: 0, gid: 0, symlink: /nix/store/zzzz-nixos-system}
+    /home/tester: {.: {}}
+    /nix:
+      .: {uid: 0, gid: 0, mode: "0755"}
+      store:
+        .: {uid: 0, gid: 30000, mode: "1775"}
+        aaaa-nix-2.34.8:
+          .: {uid: 0, gid: 0, mode: "0555"}
+          bin:
+            .: {uid: 0, gid: 0, mode: "0555"}
+            nix: {uid: 0, gid: 0, mode: "0555", size: 4M, content: "\u007fELF\u0002\u0001\u0001"}
+            nix-store: {uid: 0, gid: 0, symlink: nix}
+        bbbb-system-1: {.: {uid: 0, gid: 0, mode: "0555"}, init: {uid: 0, gid: 0, mode: "0444", size: 100M}}
+        cccc-system-2: {.: {uid: 0, gid: 0, mode: "0555"}, init: {uid: 0, gid: 0, mode: "0444", size: 100M}}
+        eeee-user-env: {.: {uid: 0, gid: 0, mode: "0555"}, bin: {uid: 0, gid: 0, mode: "0444", size: 10M}}
+        ffff-rooted: {.: {uid: 0, gid: 0, mode: "0555"}, lib: {uid: 0, gid: 0, mode: "0444", size: 50M}}
+        dddd-dead: {.: {uid: 0, gid: 0, mode: "0555"}, big: {uid: 0, gid: 0, mode: "0444", size: 2G}}
+        zzzz-nixos-system:
+          .: {uid: 0, gid: 0, mode: "0555"}
+          sw:
+            .: {uid: 0, gid: 0, mode: "0555"}
+            bin: {.: {uid: 0, gid: 0, mode: "0555"}, nix-store: {uid: 0, gid: 0, symlink: /nix/store/aaaa-nix-2.34.8/bin/nix-store}}
+      var:
+        .: {uid: 0, gid: 0, mode: "0755"}
+        nix:
+          .: {uid: 0, gid: 0, mode: "0755"}
+          daemon-socket: {.: {uid: 0, gid: 0, mode: "0755"}, socket: {uid: 0, gid: 0, type: socket, mode: "0666"}}
+          gcroots: {.: {uid: 0, gid: 0, mode: "0755"}, direct: {uid: 0, gid: 0, symlink: /nix/store/ffff-rooted}}
+          profiles:
+            .: {uid: 0, gid: 0, mode: "0755"}
+            system: {uid: 0, gid: 0, symlink: system-2-link}
+            system-1-link: {uid: 0, gid: 0, symlink: /nix/store/bbbb-system-1}
+            system-2-link: {uid: 0, gid: 0, symlink: /nix/store/cccc-system-2}
+            per-user:
+              .: {uid: 0, gid: 0, mode: "0755"}
+              tester:
+                .: {mode: "0755"}
+                profile: {symlink: profile-1-link}
+                profile-1-link: {symlink: /nix/store/eeee-user-env}
+  nix:
+    version_line: "nix-store (Nix) 2.34.8\n"
+    config_store: "daemon\n"
+    store_info: '{"trusted":false,"url":"unix:///proc/self/fd/3","version":"2.34.8"}'
+    probe: serving
+    roots: |
+      /nix/var/nix/gcroots/direct -> /nix/store/ffff-rooted
+      /nix/var/nix/profiles/per-user/tester/profile-1-link -> /nix/store/eeee-user-env
+      /nix/var/nix/profiles/system-1-link -> /nix/store/bbbb-system-1
+      /nix/var/nix/profiles/system-2-link -> /nix/store/cccc-system-2
+    gc: {removes: [/nix/store/dddd-dead]}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors:
+    - {cause: safety, contains: nix-store GC is refused under --allow-root}
+  reclaim_exit: 2
+  errors:
+    - {cause: safety, contains: nix-store GC is refused under --allow-root}
+  actions: []
+  removed: []
+  skipped: []
+  preserved:
+    - /nix/store/aaaa-nix-2.34.8/bin/nix
+    - /nix/store/bbbb-system-1/init
+    - /nix/store/cccc-system-2/init
+    - /nix/store/eeee-user-env/bin
+    - /nix/store/ffff-rooted/lib
+    - /nix/var/nix/profiles/system-1-link
+    - /nix/var/nix/profiles/system-2-link
+    - /nix/var/nix/profiles/per-user/tester/profile-1-link
+    - /nix/var/nix/gcroots/direct
+    - /nix/store/dddd-dead/big
+  nix_commands: []
+  dry_run_nix_commands: []

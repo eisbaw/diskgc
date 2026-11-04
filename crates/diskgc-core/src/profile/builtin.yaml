@@ -67,6 +67,21 @@
   verified_with: Podman 5.8.7 read-only on the development machine (what --all would prune), 2026-11-03; the --all prune itself not yet run in a container
   liveness_class: delegated
 
+# TASK-36, development library only, pending Mark's admission: the dead
+# store paths of the system Nix daemon, collected by Nix's own GC through
+# the daemon socket as diskgc's user, bounded by the remaining need
+# (docs/safety.md, nix-store). Nix decides liveness; GC roots, profiles and
+# generations are never removed.
+- name: nix-garbage
+  category: nix
+  description: >-
+    Dead store paths of the system Nix daemon (multi-user /nix/store),
+    collected by one bounded nix-store --gc through the daemon socket
+  kind: nix-store
+  find: {roots: daemon}
+  verified_with: CppNix 2.34.8 client and daemon, disposable-container store and daemon (TASK-36)
+  liveness_class: delegated
+
 - name: cargo-target
   category: rust
   description: >-

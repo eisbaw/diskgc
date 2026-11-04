@@ -113,14 +113,19 @@ fn docker_backend_roots_match_the_documented_json_shape() {
 }
 
 /// `checkouts` is spelled out for every source, the default too
-/// (docs/reference.md, `profiles` command).
+/// (docs/reference.md, `profiles` command), but kind nix-store's, which
+/// has none.
 #[test]
 fn show_yaml_spells_out_checkouts_for_every_source() {
     for (from, library) in libraries() {
         for profile in library.profiles() {
             let yaml = show_yaml(profile, None);
             let has = yaml.lines().any(|l| l.starts_with("  checkouts: "));
-            assert_eq!(has, profile.role() == "source", "{from}:\n{yaml}");
+            let takes_checkouts = match &profile.body {
+                Body::Source(source) => !matches!(source.finds, Finds::NixStore),
+                Body::Filter(_) => false,
+            };
+            assert_eq!(has, takes_checkouts, "{from}:\n{yaml}");
         }
     }
 }
@@ -172,6 +177,16 @@ fn schema_form(json: &Value) -> Value {
                 }
                 Value::Object(find)
             }
+            // A `where` with no predicate (every field null, link lists
+            // empty) is the YAML without `where`, which kind nix-store
+            // requires.
+            ("where", Value::Object(fields))
+                if fields
+                    .values()
+                    .all(|v| v.is_null() || v.as_array().is_some_and(Vec::is_empty)) =>
+            {
+                continue;
+            }
             ("where" | "examples", Value::Object(fields)) => Value::Object(
                 fields
                     .iter()
@@ -190,7 +205,7 @@ fn schema_form(json: &Value) -> Value {
                 Some("command") => {
                     serde_json::json!({"command": action["command"], "cwd": action["cwd"]})
                 }
-                Some("cargo_lock_protocol") => continue,
+                Some("cargo_lock_protocol" | "nix_store_gc") => continue,
                 Some("docker_builder_prune") => Value::from("docker-builder-prune"),
                 Some("docker_image_prune") => Value::from("docker-image-prune"),
                 Some("docker_image_prune_all") => Value::from("docker-image-prune-all"),

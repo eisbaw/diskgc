@@ -77,6 +77,7 @@ pub mod lifecycle_suite;
 pub mod lock_release;
 pub mod meson_suite;
 pub mod model_materialize;
+pub mod nix_gc_suite;
 pub mod oracle;
 pub mod owner_pid_suite;
 pub mod packaging_suite;

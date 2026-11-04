@@ -118,6 +118,10 @@
         "$ref": "#/$defs/MountSpec"
       }
     },
+    "nix": {
+      "description": "The answers of the Nix client and daemon for kind `nix-store`\n(docs/testing.md, nix-store backend vectors). No real Nix is run;\nthe store layout, the client's links and the generations are the\n`tree`'s.",
+      "$ref": "#/$defs/NixSpec"
+    },
     "own_cap_effective": {
       "description": "diskgc's own effective (and permitted) capability set as its own\n`proc_status` shows it (`CapEff:`, bit n is capability n; YAML\ntakes `0x...`). Default: every capability up to\n`CAP_CHECKPOINT_RESTORE` (40) when `own_uid` is 0, as real root has\nthem, and none otherwise.",
       "type": [
@@ -637,7 +641,7 @@
           "minimum": 0
         },
         "fail": {
-          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_link`, `read_dir`, `read_head`,\n`unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`, the `/proc`\nreaders (`proc_identity`, `proc_identity_released`, `proc_fds`,\n`proc_links`, `proc_maps`, `proc_environ`, `proc_status`,\n`proc_uids`, `proc_cmdline`, `proc_root_lookup`, `pid_namespace`,\n`proc_nspid`, `pid_alive`), `docker_query` or `podman_query` (e.g.\n`ENOENT`: no Docker client installed) or `run_command` (the child\ndoes not start).",
+          "description": "The call the event is addressed to fails with this errno, given by\nname (e.g. `EIO`, `EACCES`), without acting.\nOnly with an `op` trigger, `when: before`, and an op that can fail\nthis way: `openat2`, `statx`, `read_link`, `read_dir`, `read_head`,\n`unlinkat`, `fchmod`, `bound_unix_sockets`, `statvfs`, the `/proc`\nreaders (`proc_identity`, `proc_identity_released`, `proc_fds`,\n`proc_links`, `proc_maps`, `proc_environ`, `proc_status`,\n`proc_uids`, `proc_cmdline`, `proc_root_lookup`, `pid_namespace`,\n`proc_nspid`, `pid_alive`), `docker_query` or `podman_query` (e.g.\n`ENOENT`: no Docker client installed), `nix_query`, `nix_roots`, or\n`run_command` or `nix_gc` (the child does not start).",
           "anyOf": [
             {
               "$ref": "#/$defs/ErrnoName"
@@ -1249,6 +1253,139 @@
         "size"
       ]
     },
+    "NixGcSpec": {
+      "description": "The modelled garbage collection.",
+      "type": "object",
+      "properties": {
+        "exit": {
+          "description": "Its exit code (default 0).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "removes": {
+          "description": "Store paths the GC removes (each a tree of the model), in order:\nNix's choice of what is dead, never diskgc's.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "signal_during": {
+          "description": "A signal reaches diskgc while the GC runs: its group gets SIGKILL\nat once.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelSignal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "takes": {
+          "description": "How long it runs on the virtual clock (default no time). A deadline\nwithin it stops it there: SIGKILL to its group at once (no grace).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Elapsed"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "NixSpec": {
+      "description": "The modelled Nix (kind `nix-store`). A query or run that the vector\nreaches without its answer here fails the test: every answer diskgc\nacts on is the vector's.",
+      "type": "object",
+      "properties": {
+        "config_store": {
+          "description": "`nix config show store`'s output in diskgc's environment, e.g.\n`\"auto\\n\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "config_store_exit": {
+          "description": "`nix config show store` exits with this code instead (stderr\n`config_store` or empty).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "environment": {
+          "description": "diskgc's own Nix variables (`NIX_STATE_DIR`, `NIX_STORE_DIR`,\n`NIX_STORE`, `NIX_DAEMON_SOCKET_PATH`): name to value.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "gc": {
+          "description": "What `nix-store --gc` does.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NixGcSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "probe": {
+          "description": "What the daemon probe sees: `serving`, `eof`, `timeout` (after the\nprobe's bound on the virtual clock), `wrong_magic`, or an errno by\nname (`ECONNREFUSED`, `EACCES`, ...).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roots": {
+          "description": "`nix-store --query --roots`'s output (lines `<root> -> <path>`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roots_exit": {
+          "description": "`--query --roots` exits with this code instead.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "store_info": {
+          "description": "The first `nix store info --json` through the pinned socket.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "store_info_later": {
+          "description": "Every later one (the recheck right before the GC); absent:\n`store_info` again. Models a daemon restarted with another version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version_line": {
+          "description": "`nix-store --version`'s output, e.g. `\"nix-store (Nix) 2.34.8\\n\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "Node": {
       "description": "A file (a mapping of attributes; {} is an empty file) or a directory (a mapping of entry names to nodes, with its own attributes under '.'; {.: {}} is an empty directory).",
       "oneOf": [
@@ -1333,6 +1470,10 @@
         "run_command",
         "docker_query",
         "podman_query",
+        "nix_query",
+        "nix_daemon_probe",
+        "nix_roots",
+        "nix_gc",
         "read_backend_config",
         "pressure",
         "lower_priority",

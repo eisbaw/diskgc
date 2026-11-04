@@ -249,6 +249,8 @@ fn the_built_in_library_loads() {
         // TASK-93, pending Mark's admission.
         "podman-dangling",
         "podman-unreferenced",
+        // TASK-36, pending Mark's admission.
+        "nix-garbage",
         "jest-cache",
         "npm-cache",
         "pip-cache",
@@ -1139,7 +1141,31 @@ fn kind_cargo_target_finds_by_structure_and_fixes_its_action() {
         ),
         (
             "- name: x\n  kind: nix-store\n  find: {roots: required}\n",
-            "kind nix-store is not supported yet",
+            "kind nix-store needs `find.roots: daemon`",
+        ),
+        (
+            "- name: x\n  kind: nix-store\n  find: {roots: daemon, paths: [x]}\n",
+            "so it has no `find.paths`",
+        ),
+        (
+            "- name: x\n  kind: nix-store\n  find: {roots: daemon}\n  action: delete\n",
+            "so it has no `action`",
+        ),
+        (
+            "- name: x\n  kind: nix-store\n  find: {roots: daemon}\n  where: {has: x}\n",
+            "so it has no `where`",
+        ),
+        (
+            "- name: x\n  kind: nix-store\n  find: {roots: daemon}\n  min_idle_for: 1d\n",
+            "so it has no `min_idle_for`",
+        ),
+        (
+            "- name: x\n  kind: nix-store\n  find: {roots: daemon}\n  checkouts: refuse\n",
+            "so it has no `checkouts`",
+        ),
+        (
+            "- name: x\n  kind: nix-store\n  find: {roots: daemon}\n  examples: {match: [/nix/store/a]}\n",
+            "so it has no `examples`",
         ),
     ] {
         assert_has(&user_errors(yaml), needle);

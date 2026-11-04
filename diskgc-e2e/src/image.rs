@@ -10,8 +10,9 @@
 //!   manifest`: the manifest [`crate::cargo_under_test::MANIFEST`] must be
 //!   there, and the Cargo tests are listed per toolchain) or none
 //!   (`toolchains none`: no Cargo test is listed, and no manifest is read);
-//! - which tests it runs (`tests all`, `tests portable`, or `tests docker`:
-//!   the last runs only [`crate::suite::DOCKER_ONLY_TESTS`]).
+//! - which tests it runs (`tests all`, `tests portable`, `tests docker` or
+//!   `tests nix-gc`: the last two run only [`crate::suite::DOCKER_ONLY_TESTS`]
+//!   or [`crate::suite::NIX_GC_ONLY_TESTS`]).
 //! - where this image runs a real tmpfiles implementation (`tmpfiles PATH`).
 //!
 //! The format is one `KEY VALUE` per line, `#` comments and blank lines
@@ -43,6 +44,8 @@ pub enum Tests {
     Portable,
     /// Only tests that need a native Docker Engine daemon.
     Docker,
+    /// Only tests that need the Nix GC image's own store and daemon.
+    NixGc,
 }
 
 /// A parsed descriptor.
@@ -116,9 +119,10 @@ impl Image {
                         "all" => Tests::All,
                         "portable" => Tests::Portable,
                         "docker" => Tests::Docker,
+                        "nix-gc" => Tests::NixGc,
                         other => {
                             return Err(format!(
-                                "tests must be all, portable or docker, got {other:?}"
+                                "tests must be all, portable, docker or nix-gc, got {other:?}"
                             ));
                         }
                     };
@@ -136,7 +140,7 @@ impl Image {
         }
         let name = name.ok_or("no name")?;
         let toolchains = toolchains.ok_or("no toolchains (manifest or none)")?;
-        let tests = tests.ok_or("no tests (all, portable or docker)")?;
+        let tests = tests.ok_or("no tests (all, portable, docker or nix-gc)")?;
         let tmpfiles = tmpfiles.ok_or("no tmpfiles (absolute path)")?;
         Ok(Self {
             name,
@@ -148,23 +152,27 @@ impl Image {
     }
 
     /// Whether the image runs `listed` (`NAME` or `NAME@TOOLCHAIN`). Docker
-    /// tests are kept off images without a Docker Engine daemon.
-    pub fn runs(
-        &self,
-        listed: &str,
-        nix_only: &[(&str, &str)],
-        docker_only: &[(&str, &str)],
-    ) -> bool {
+    /// and Nix GC tests are kept off images without their daemon.
+    pub fn runs(&self, listed: &str, only: &Only<'_>) -> bool {
         let base = listed.split('@').next().unwrap_or(listed);
+        let has = |list: &[(&str, &str)]| list.iter().any(|(name, _)| *name == base);
+        let special = has(only.docker) || has(only.nix_gc);
         match self.tests {
-            Tests::All => !docker_only.iter().any(|(name, _)| *name == base),
-            Tests::Portable => {
-                !docker_only.iter().any(|(name, _)| *name == base)
-                    && !nix_only.iter().any(|(name, _)| *name == base)
-            }
-            Tests::Docker => docker_only.iter().any(|(name, _)| *name == base),
+            Tests::All => !special,
+            Tests::Portable => !special && !has(only.nix),
+            Tests::Docker => has(only.docker),
+            Tests::NixGc => has(only.nix_gc),
         }
     }
+}
+
+/// The tests only some images run, each list with why
+/// ([`crate::suite::NIX_ONLY_TESTS`] and its siblings).
+#[derive(Debug, Clone, Copy)]
+pub struct Only<'a> {
+    pub nix: &'a [(&'a str, &'a str)],
+    pub docker: &'a [(&'a str, &'a str)],
+    pub nix_gc: &'a [(&'a str, &'a str)],
 }
 
 /// Fills `slot` with `value`, refusing a key given twice.
@@ -192,25 +200,43 @@ mod tests {
             nix.tmpfiles,
             PathBuf::from("/opt/diskgc-e2e/bin/systemd-tmpfiles")
         );
-        let nix_only = [("cargo_race_4", "needs the nightly")];
-        let docker_only = [("native_docker_engine_dind_smoke", "needs dockerd")];
-        assert!(nix.runs("cargo_race_4@1.99.1", &nix_only, &docker_only));
-        assert!(!nix.runs("native_docker_engine_dind_smoke", &nix_only, &docker_only));
+        let only = Only {
+            nix: &[("cargo_race_4", "needs the nightly")],
+            docker: &[("native_docker_engine_dind_smoke", "needs dockerd")],
+            nix_gc: &[("nix_gc_keeps_every_kind_of_root", "needs its own store")],
+        };
+        assert!(nix.runs("cargo_race_4@1.99.1", &only));
+        assert!(!nix.runs("native_docker_engine_dind_smoke", &only));
+        assert!(!nix.runs("nix_gc_keeps_every_kind_of_root", &only));
         let debian =
             Image::parse("name debian\nread-only /usr\ntoolchains manifest\ntests portable\ntmpfiles /usr/bin/systemd-tmpfiles\n")
                 .unwrap();
         assert_eq!(debian.tests, Tests::Portable);
-        assert!(debian.runs("journey@debian-1.99.1", &nix_only, &docker_only));
-        assert!(debian.runs("sandbox_trivial", &nix_only, &docker_only));
-        assert!(!debian.runs("cargo_race_4@debian-1.99.1", &nix_only, &docker_only));
-        assert!(!debian.runs("cargo_race_4", &nix_only, &docker_only));
+        assert!(debian.runs("journey@debian-1.99.1", &only));
+        assert!(debian.runs("sandbox_trivial", &only));
+        assert!(!debian.runs("cargo_race_4@debian-1.99.1", &only));
+        assert!(!debian.runs("cargo_race_4", &only));
+        assert!(!debian.runs("nix_gc_keeps_every_kind_of_root", &only));
         let docker = Image::parse(
             "name docker\ntoolchains none\ntests docker\ntmpfiles /usr/bin/sd-tmpfiles\n",
         )
         .unwrap();
         assert_eq!(docker.tmpfiles, PathBuf::from("/usr/bin/sd-tmpfiles"));
-        assert!(docker.runs("native_docker_engine_dind_smoke", &nix_only, &docker_only));
-        assert!(!docker.runs("sandbox_trivial", &nix_only, &docker_only));
+        assert!(docker.runs("native_docker_engine_dind_smoke", &only));
+        assert!(!docker.runs("sandbox_trivial", &only));
+        assert!(!docker.runs("nix_gc_keeps_every_kind_of_root", &only));
+        let nix_gc = Image::parse(
+            "name nix-gc
+toolchains none
+tests nix-gc
+tmpfiles /opt/diskgc-e2e/bin/systemd-tmpfiles
+",
+        )
+        .unwrap();
+        assert_eq!(nix_gc.tests, Tests::NixGc);
+        assert!(nix_gc.runs("nix_gc_keeps_every_kind_of_root", &only));
+        assert!(!nix_gc.runs("sandbox_trivial", &only));
+        assert!(!nix_gc.runs("native_docker_engine_dind_smoke", &only));
         let bare = Image::parse(
             "name bare\ntoolchains none\ntests portable\ntmpfiles /usr/bin/systemd-tmpfiles\n",
         )
@@ -272,7 +298,7 @@ mod tests {
             ("name x\ntoolchains maybe\ntests all\n", "manifest or none"),
             (
                 "name x\ntoolchains none\ntests some\n",
-                "all, portable or docker",
+                "all, portable, docker or nix-gc",
             ),
             (
                 "name x\nread-only usr\ntoolchains none\ntests all\n",

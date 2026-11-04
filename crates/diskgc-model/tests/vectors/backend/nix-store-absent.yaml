@@ -1,0 +1,43 @@
+# TASK-36, safety.md nix-store steps 1-2: no /nix/store. The client that
+# PATH names must live in a store path, so step 1 finds no client and the
+# tier is `missing`, before any Nix command (step 2's own `missing` for
+# an absent store is behind it).
+profile_vector: 1
+profile: nix-garbage
+path: /
+min_free: "100%"
+host:
+  host_model: 1
+  clock: "2026-10-15T03:00:00Z"
+  home: /home/tester
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run:
+      .: {uid: 0, gid: 0, mode: "0755"}
+      diskgc: {.: {uid: 0, gid: 0, mode: "0755"}, lock: {uid: 0, gid: 0}}
+      current-system: {uid: 0, gid: 0, symlink: /nix/store/zzzz-nixos-system}
+    /home/tester: {.: {}}
+    /nix: {.: {uid: 0, gid: 0, mode: "0755"}}
+  nix:
+    version_line: "nix-store (Nix) 2.34.8\n"
+    config_store: "daemon\n"
+    store_info: '{"trusted":false,"url":"unix:///proc/self/fd/3","version":"2.34.8"}'
+    probe: serving
+    roots: |
+      /nix/var/nix/gcroots/direct -> /nix/store/ffff-rooted
+      /nix/var/nix/profiles/per-user/tester/profile-1-link -> /nix/store/eeee-user-env
+      /nix/var/nix/profiles/system-1-link -> /nix/store/bbbb-system-1
+      /nix/var/nix/profiles/system-2-link -> /nix/store/cccc-system-2
+    gc: {removes: [/nix/store/dddd-dead]}
+expect:
+  plan:
+    - {candidate: null, reason: missing}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: null, reason: missing}
+  preserved: []
+  nix_commands: []
+  dry_run_nix_commands: []

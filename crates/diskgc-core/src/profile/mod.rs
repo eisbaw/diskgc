@@ -141,6 +141,7 @@ impl Source {
             Finds::DockerBuildCache => Kind::DockerBuildCache,
             Finds::DockerImages => Kind::DockerImages,
             Finds::PodmanImages => Kind::PodmanImages,
+            Finds::NixStore => Kind::NixStore,
         }
     }
 }
@@ -165,6 +166,9 @@ pub enum Finds {
     DockerImages,
     /// The bound local Podman store's images, one whole unit.
     PodmanImages,
+    /// The bound Nix daemon's dead store paths, one whole unit (kind
+    /// `nix-store`): Nix decides what is dead.
+    NixStore,
 }
 
 /// Where a source profile looks (docs/reference.md, Profiles).
@@ -292,6 +296,9 @@ pub enum Action {
     PodmanImagePrune {
         all: bool,
     },
+    /// Kind `nix-store`'s one bounded garbage collection through the bound
+    /// Nix daemon (docs/safety.md, nix-store), fixed by the kind.
+    NixStoreGc,
 }
 
 impl Action {
@@ -306,6 +313,9 @@ impl Action {
             ),
             Self::PodmanImagePrune { .. } => Some(
                 "Podman prune actions are refused under --allow-root: owners: cannot bound a store's images, and root's store is the rootful one",
+            ),
+            Self::NixStoreGc => Some(
+                "the nix-store GC is refused under --allow-root: root's Nix collects through the direct local store, not the daemon, and owners: cannot bound a garbage collection",
             ),
             Self::Delete { .. } | Self::CargoLockProtocol => None,
         }
@@ -344,6 +354,7 @@ impl fmt::Display for Action {
             Self::DockerImagePrune { all: true } => f.write_str("docker image prune --all"),
             Self::PodmanImagePrune { all: false } => f.write_str("podman image prune"),
             Self::PodmanImagePrune { all: true } => f.write_str("podman image prune --all"),
+            Self::NixStoreGc => f.write_str("nix-store --gc --max-freed"),
         }
     }
 }

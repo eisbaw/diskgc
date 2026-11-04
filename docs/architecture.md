@@ -1124,14 +1124,19 @@ is accepted until measured otherwise.
   (`openat2`, `statx`, `getdents` (names only), `flock`, `unlinkat`,
   `statvfs`, `mountinfo`, `/proc` reads), so the safety logic (flags,
   ordering, rechecks) lives in the core where the model can test it. Docker and Nix are domain-shaped, in two
-  operations. A **query** run (`docker context`/`builder`/`info`, `nix
-  store info --json`) is on `Host`: not gated, so `survey`, `--dry-run` and
-  `--tally-only` work anywhere; it takes a closed enum of queries that
-  `LinuxHost` maps to argv, never argv from the caller or from config. A
-  **deleting** run (a prune, a GC, every command action) is
-  `run(argv, env, deadline)` on `Delete`, behind the pre-release sandbox
-  gate. Each has one wrapper in `LinuxHost`, allowlisted by the source scan
-  ([safety.md](safety.md#pre-release-sandbox-gate)).
+  operations. A **query** run (`docker context`/`builder`/`info`; Nix's
+  `nix-store --version`, `nix config show store` and the pinned `nix store
+  info --json`, and the daemon's magic-number probe) is on `Host`: not
+  gated, so `survey`, `--dry-run` and `--tally-only` work anywhere; it
+  takes a closed enum of queries that map to constant argv, never argv
+  from the caller or from config. A **deleting** run (a prune, every
+  command action; Nix's root check and GC, `Delete::nix_roots` and
+  `Delete::nix_gc`, through the socket the core pinned) is on `Delete`,
+  behind the pre-release sandbox gate. Each has its wrapper in
+  `LinuxHost`, allowlisted by the source scan
+  ([safety.md](safety.md#pre-release-sandbox-gate)); Nix's argv and child
+  environment are constants of `diskgc_core::nix_backend`, which the model
+  vectors pin.
 - **What the in-use check reads** ([safety.md](safety.md#in-use)): the
   `/proc` readers; per process its `status`, `uid_map` and the owner of a
   live task's `fd` directory (`proc_status`, readable for every process);

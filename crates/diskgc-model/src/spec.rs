@@ -117,6 +117,12 @@ pub struct HostModel {
     /// --format json`) for backend model tests. No real Podman is run.
     #[serde(default, skip_serializing_if = "PodmanSpec::is_empty")]
     pub podman: PodmanSpec,
+    /// The answers of the Nix client and daemon for kind `nix-store`
+    /// (docs/testing.md, nix-store backend vectors). No real Nix is run;
+    /// the store layout, the client's links and the generations are the
+    /// `tree`'s.
+    #[serde(default, skip_serializing_if = "NixSpec::is_empty")]
+    pub nix: NixSpec,
     /// The system-wide pressure stall information (`Host::pressure`) over
     /// the run: each step holds from its `after` (time since the start of
     /// the run) until the next step's. Absent: the kernel has no PSI
@@ -203,6 +209,77 @@ impl PodmanSpec {
     fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// The modelled Nix (kind `nix-store`). A query or run that the vector
+/// reaches without its answer here fails the test: every answer diskgc
+/// acts on is the vector's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NixSpec {
+    /// `nix-store --version`'s output, e.g. `"nix-store (Nix) 2.34.8\n"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_line: Option<String>,
+    /// `nix config show store`'s output in diskgc's environment, e.g.
+    /// `"auto\n"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_store: Option<String>,
+    /// `nix config show store` exits with this code instead (stderr
+    /// `config_store` or empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_store_exit: Option<u8>,
+    /// The first `nix store info --json` through the pinned socket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_info: Option<String>,
+    /// Every later one (the recheck right before the GC); absent:
+    /// `store_info` again. Models a daemon restarted with another version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_info_later: Option<String>,
+    /// What the daemon probe sees: `serving`, `eof`, `timeout` (after the
+    /// probe's bound on the virtual clock), `wrong_magic`, or an errno by
+    /// name (`ECONNREFUSED`, `EACCES`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<String>,
+    /// diskgc's own Nix variables (`NIX_STATE_DIR`, `NIX_STORE_DIR`,
+    /// `NIX_STORE`, `NIX_DAEMON_SOCKET_PATH`): name to value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, String>,
+    /// `nix-store --query --roots`'s output (lines `<root> -> <path>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roots: Option<String>,
+    /// `--query --roots` exits with this code instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roots_exit: Option<u8>,
+    /// What `nix-store --gc` does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gc: Option<NixGcSpec>,
+}
+
+impl NixSpec {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The modelled garbage collection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NixGcSpec {
+    /// Store paths the GC removes (each a tree of the model), in order:
+    /// Nix's choice of what is dead, never diskgc's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removes: Vec<PathBuf>,
+    /// Its exit code (default 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<u8>,
+    /// How long it runs on the virtual clock (default no time). A deadline
+    /// within it stops it there: SIGKILL to its group at once (no grace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takes: Option<Elapsed>,
+    /// A signal reaches diskgc while the GC runs: its group gets SIGKILL
+    /// at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_during: Option<ModelSignal>,
 }
 
 fn is_zero_u8(value: &u8) -> bool {
@@ -797,8 +874,8 @@ pub struct EventSpec {
     /// `proc_links`, `proc_maps`, `proc_environ`, `proc_status`,
     /// `proc_uids`, `proc_cmdline`, `proc_root_lookup`, `pid_namespace`,
     /// `proc_nspid`, `pid_alive`), `docker_query` or `podman_query` (e.g.
-    /// `ENOENT`: no Docker client installed) or `run_command` (the child
-    /// does not start).
+    /// `ENOENT`: no Docker client installed), `nix_query`, `nix_roots`, or
+    /// `run_command` or `nix_gc` (the child does not start).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail: Option<ErrnoName>,
     /// A new filesystem is mounted on an existing directory (a user's
@@ -1003,6 +1080,10 @@ pub enum Op {
     RunCommand,
     DockerQuery,
     PodmanQuery,
+    NixQuery,
+    NixDaemonProbe,
+    NixRoots,
+    NixGc,
     ReadBackendConfig,
     Pressure,
     LowerPriority,
@@ -1066,6 +1147,10 @@ impl Op {
             Self::RunCommand => "run_command",
             Self::DockerQuery => "docker_query",
             Self::PodmanQuery => "podman_query",
+            Self::NixQuery => "nix_query",
+            Self::NixDaemonProbe => "nix_daemon_probe",
+            Self::NixRoots => "nix_roots",
+            Self::NixGc => "nix_gc",
             Self::ReadBackendConfig => "read_backend_config",
             Self::Pressure => "pressure",
             Self::LowerPriority => "lower_priority",

@@ -1,0 +1,98 @@
+# TASK-36, safety.md nix-store, --max-freed and the free-space goal: the
+# GC frees less than the need (Nix found only 10M dead): one GC only, then
+# the next tier (an fs tier) runs and meets the goal.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - {"name": "scratch-probe", "find": {"roots": ["/home/tester"], "paths": ["scratch-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/home/tester/scratch-a"]}}
+  groups:
+    - name: g
+      tiers:
+        - {name: nix, select: profile:nix-garbage}
+        - {name: scratch, select: profile:scratch-probe}
+path: /nix/store
+min_free: 7G
+host:
+  host_model: 1
+  clock: "2026-10-15T03:00:00Z"
+  home: /home/tester
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+  tree:
+    /run:
+      .: {uid: 0, gid: 0, mode: "0755"}
+      diskgc: {.: {uid: 0, gid: 0, mode: "0755"}, lock: {uid: 0, gid: 0}}
+      current-system: {uid: 0, gid: 0, symlink: /nix/store/zzzz-nixos-system}
+    /home/tester:
+      .: {}
+      scratch-a: {f: {size: 1500M}}
+    /nix:
+      .: {uid: 0, gid: 0, mode: "0755"}
+      store:
+        .: {uid: 0, gid: 30000, mode: "1775"}
+        aaaa-nix-2.34.8:
+          .: {uid: 0, gid: 0, mode: "0555"}
+          bin:
+            .: {uid: 0, gid: 0, mode: "0555"}
+            nix: {uid: 0, gid: 0, mode: "0555", size: 4M, content: "\u007fELF\u0002\u0001\u0001"}
+            nix-store: {uid: 0, gid: 0, symlink: nix}
+        bbbb-system-1: {.: {uid: 0, gid: 0, mode: "0555"}, init: {uid: 0, gid: 0, mode: "0444", size: 100M}}
+        cccc-system-2: {.: {uid: 0, gid: 0, mode: "0555"}, init: {uid: 0, gid: 0, mode: "0444", size: 100M}}
+        eeee-user-env: {.: {uid: 0, gid: 0, mode: "0555"}, bin: {uid: 0, gid: 0, mode: "0444", size: 10M}}
+        ffff-rooted: {.: {uid: 0, gid: 0, mode: "0555"}, lib: {uid: 0, gid: 0, mode: "0444", size: 50M}}
+        dddd-dead: {.: {uid: 0, gid: 0, mode: "0555"}, big: {uid: 0, gid: 0, mode: "0444", size: 2G}}
+        zzzz-nixos-system:
+          .: {uid: 0, gid: 0, mode: "0555"}
+          sw:
+            .: {uid: 0, gid: 0, mode: "0555"}
+            bin: {.: {uid: 0, gid: 0, mode: "0555"}, nix-store: {uid: 0, gid: 0, symlink: /nix/store/aaaa-nix-2.34.8/bin/nix-store}}
+        gggg-small-dead: {.: {uid: 0, gid: 0, mode: "0555"}, f: {uid: 0, gid: 0, mode: "0444", size: 10M}}
+      var:
+        .: {uid: 0, gid: 0, mode: "0755"}
+        nix:
+          .: {uid: 0, gid: 0, mode: "0755"}
+          daemon-socket: {.: {uid: 0, gid: 0, mode: "0755"}, socket: {uid: 0, gid: 0, type: socket, mode: "0666"}}
+          gcroots: {.: {uid: 0, gid: 0, mode: "0755"}, direct: {uid: 0, gid: 0, symlink: /nix/store/ffff-rooted}}
+          profiles:
+            .: {uid: 0, gid: 0, mode: "0755"}
+            system: {uid: 0, gid: 0, symlink: system-2-link}
+            system-1-link: {uid: 0, gid: 0, symlink: /nix/store/bbbb-system-1}
+            system-2-link: {uid: 0, gid: 0, symlink: /nix/store/cccc-system-2}
+            per-user:
+              .: {uid: 0, gid: 0, mode: "0755"}
+              tester:
+                .: {mode: "0755"}
+                profile: {symlink: profile-1-link}
+                profile-1-link: {symlink: /nix/store/eeee-user-env}
+  nix:
+    version_line: "nix-store (Nix) 2.34.8\n"
+    config_store: "daemon\n"
+    store_info: '{"trusted":false,"url":"unix:///proc/self/fd/3","version":"2.34.8"}'
+    probe: serving
+    roots: |
+      /nix/var/nix/gcroots/direct -> /nix/store/ffff-rooted
+      /nix/var/nix/profiles/per-user/tester/profile-1-link -> /nix/store/eeee-user-env
+      /nix/var/nix/profiles/system-1-link -> /nix/store/bbbb-system-1
+      /nix/var/nix/profiles/system-2-link -> /nix/store/cccc-system-2
+    gc: {removes: [/nix/store/gggg-small-dead]}
+expect:
+  plan:
+    - {candidate: /nix/store}
+    - {candidate: /home/tester/scratch-a}
+  reclaim_exit: 0
+  report: {status: met}
+  actions: [/nix/store, /home/tester/scratch-a]
+  removed: [/nix/store/gggg-small-dead, /home/tester/scratch-a]
+  skipped: []
+  preserved:
+    - /nix/store/aaaa-nix-2.34.8/bin/nix
+    - /nix/store/bbbb-system-1/init
+    - /nix/store/cccc-system-2/init
+    - /nix/store/eeee-user-env/bin
+    - /nix/store/ffff-rooted/lib
+    - /nix/var/nix/profiles/system-1-link
+    - /nix/var/nix/profiles/system-2-link
+    - /nix/var/nix/profiles/per-user/tester/profile-1-link
+    - /nix/var/nix/gcroots/direct
+    - /nix/store/dddd-dead/big

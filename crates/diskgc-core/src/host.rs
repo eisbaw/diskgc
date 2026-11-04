@@ -71,6 +71,7 @@ impl Errno {
     pub const ENOTEMPTY: Errno = Errno(39);
     pub const ELOOP: Errno = Errno(40);
     pub const EDQUOT: Errno = Errno(122);
+    pub const ECONNREFUSED: Errno = Errno(111);
 
     /// Every errno value with a [`Errno::name`].
     pub const NAMED: &[Errno] = &[
@@ -98,6 +99,7 @@ impl Errno {
         Self::ENOTEMPTY,
         Self::ELOOP,
         Self::EDQUOT,
+        Self::ECONNREFUSED,
     ];
 
     /// The errno called `name` (one of [`Errno::NAMED`]).
@@ -132,6 +134,7 @@ impl Errno {
             Self::ENOTEMPTY => "ENOTEMPTY",
             Self::ELOOP => "ELOOP",
             Self::EDQUOT => "EDQUOT",
+            Self::ECONNREFUSED => "ECONNREFUSED",
             _ => return None,
         })
     }
@@ -1236,6 +1239,59 @@ pub trait Host {
         ))
     }
 
+    /// The variables of diskgc's own environment that locate a Nix store
+    /// without showing in Nix's `store` setting, and `HOME`
+    /// (docs/safety.md, nix-store: Binding protocol, step 5 and the child
+    /// environment). Read, never set.
+    fn nix_environment(&self) -> NixEnvironment {
+        NixEnvironment::default()
+    }
+
+    /// Run one read-only Nix query (a [`NixQuery`]) by executing the bound
+    /// client's checked `nix` through its descriptor ([`NixClient`]), never
+    /// a path lookup, and return its bounded UTF-8 standard output. The
+    /// host maps the query to [`crate::nix_backend::query_argv`]'s constant
+    /// argv itself. A query that [`NixQuery::pinned`] goes through `socket`
+    /// (the daemon socket diskgc pinned `O_PATH`, inherited by the child as
+    /// `/proc/self/fd/N`) and must be given it, any other must not;
+    /// `environment` is exactly the child's (the core's
+    /// [`crate::nix_backend::child_environment`]) for a query that
+    /// [`NixQuery::clean_environment`], `None` (diskgc's own, in diskgc's
+    /// own working directory) for the one that does not. A query does not
+    /// delete and does not ask the pre-release deletion gate; a signal to
+    /// diskgc stops it.
+    fn nix_query(
+        &self,
+        _client: &NixClient<Self::Fd>,
+        _query: NixQuery,
+        _socket: Option<&Self::Fd>,
+        _environment: Option<&[(OsString, OsString)]>,
+    ) -> Result<String, HostError> {
+        Err(HostError::invalid(
+            "query Nix",
+            "backend",
+            "this host does not provide Nix queries",
+        ))
+    }
+
+    /// Connect to the pinned daemon socket `socket`, send the worker
+    /// protocol's opening magic number and wait at most `timeout` for the
+    /// daemon's answer, then close (docs/safety.md, nix-store: Binding
+    /// protocol, step 4). An errno of the connection (`ECONNREFUSED`,
+    /// `EACCES`, ...) is an error carrying that errno; the caller decides
+    /// what it means.
+    fn nix_daemon_probe(
+        &self,
+        _socket: &Self::Fd,
+        _timeout: Duration,
+    ) -> Result<DaemonProbe, HostError> {
+        Err(HostError::invalid(
+            "probe Nix daemon",
+            "backend",
+            "this host does not probe a Nix daemon",
+        ))
+    }
+
     /// The first `limit` bytes of a backend's configuration file at `path`
     /// (a `storage.conf`), symlinks followed as the backend itself follows
     /// them; `Ok(None)` when no such file exists. Read-only, non-blocking,
@@ -1970,6 +2026,89 @@ pub enum PodmanQuery {
     Info,
 }
 
+/// Closed set of read-only Nix queries ([`Host::nix_query`]); the argv of
+/// each is [`crate::nix_backend::query_argv`]'s, never a caller's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NixQuery {
+    /// `nix-store --version`, in the child environment.
+    ClientVersion,
+    /// `nix --extra-experimental-features nix-command config show store`,
+    /// in diskgc's own environment: the store the caller's Nix selects
+    /// (it opens no store).
+    ConfigShowStore,
+    /// `nix --extra-experimental-features nix-command store info --json
+    /// --store unix:///proc/self/fd/N`, through the pinned socket, in the
+    /// child environment: the daemon's version and whether diskgc's user
+    /// is trusted.
+    StoreInfo,
+}
+
+impl NixQuery {
+    /// Whether the query goes through the pinned daemon socket.
+    pub fn pinned(self) -> bool {
+        matches!(self, Self::StoreInfo)
+    }
+
+    /// Whether the query runs in the child environment
+    /// ([`crate::nix_backend::child_environment`]) instead of diskgc's own.
+    pub fn clean_environment(self) -> bool {
+        !matches!(self, Self::ConfigShowStore)
+    }
+}
+
+/// What [`Host::nix_daemon_probe`] saw before it closed the connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonProbe {
+    /// The daemon answered the worker protocol's magic number: it is
+    /// serving and accepted diskgc's user.
+    Serving,
+    /// End of file before the answer: the daemon refused the user
+    /// (`allowed-users`), or a socket-activated service failed to start.
+    Eof,
+    /// No answer within the bound.
+    Timeout,
+    /// Eight bytes that are not the daemon's magic number.
+    WrongMagic(u64),
+}
+
+/// The bound Nix client (docs/safety.md, nix-store, step 1): its store
+/// path's `bin/` directory, shown in messages and argv, and its multi-call
+/// `nix`, open for reading after its checks. Every Nix child execs that
+/// descriptor (`/proc/self/fd/N`, `argv[0]` `nix` or `nix-store`), so what
+/// runs is the file diskgc checked, not whatever a path names later.
+#[derive(Debug)]
+pub struct NixClient<F> {
+    pub dir: PathBuf,
+    pub nix: F,
+}
+
+/// The Nix variables of diskgc's own environment ([`Host::nix_environment`]):
+/// each `None` when unset.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NixEnvironment {
+    pub state_dir: Option<OsString>,
+    pub store_dir: Option<OsString>,
+    pub store: Option<OsString>,
+    pub daemon_socket_path: Option<OsString>,
+    /// `HOME`, passed on to the child environment.
+    pub home: Option<OsString>,
+}
+
+/// The one deleting Nix run of a tier: a garbage collection through the
+/// pinned daemon socket ([`Delete::nix_gc`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NixGc {
+    /// `--max-freed`: at least 1 (Nix deletes nothing with 0).
+    pub max_freed: u64,
+    /// Exactly the child's environment
+    /// ([`crate::nix_backend::child_environment`]).
+    pub environment: Vec<(OsString, OsString)>,
+    /// Human label (tier and profile) of every child-output line on stderr.
+    pub output_prefix: String,
+    pub deadline: MonoTime,
+    pub second_signal: SecondSignal,
+}
+
 /// Client variables that can redirect a Docker command away from its active
 /// context. The backend binder checks these
 /// before querying or pruning.
@@ -2055,6 +2194,36 @@ pub trait Delete: Host {
     /// called [`Host::inherit_lock`] on the host lock before this call: the
     /// child inherits that fd across exec and holds the lock if diskgc dies.
     fn run_command(&self, cwd: &Self::Fd, run: &CommandRun) -> CommandInvocation;
+
+    /// `nix-store --store unix:///proc/self/fd/N --query --roots TARGETS`
+    /// through the pinned daemon `socket`, in the child environment, and
+    /// its bounded standard output (docs/safety.md, nix-store, step 8).
+    /// Deleting, so gated: Nix's root discovery unlinks `gcroots/auto`
+    /// registrations whose out-link is gone. `targets` are store paths
+    /// directly in `/nix/store`, checked again by the host; the child is
+    /// stopped (and the call fails) at `deadline` or on a signal.
+    fn nix_roots(
+        &self,
+        client: &NixClient<Self::Fd>,
+        socket: &Self::Fd,
+        targets: &[PathBuf],
+        environment: &[(OsString, OsString)],
+        deadline: MonoTime,
+    ) -> Result<String, HostError>;
+
+    /// `nix-store --store unix:///proc/self/fd/N --gc --max-freed N`
+    /// through the pinned daemon `socket` (docs/safety.md, nix-store, step
+    /// 9), run like [`Delete::run_command`]: gated, in its own process
+    /// group, cwd `/`, the child environment, output on stderr with the
+    /// prefix, holding the inherited host lock; at the deadline or on a
+    /// signal its group gets SIGKILL at once (the work is the daemon's,
+    /// which stops when the client hangs up).
+    fn nix_gc(
+        &self,
+        client: &NixClient<Self::Fd>,
+        socket: &Self::Fd,
+        run: &NixGc,
+    ) -> CommandInvocation;
 }
 
 #[cfg(test)]

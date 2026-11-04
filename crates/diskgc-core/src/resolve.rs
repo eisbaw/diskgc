@@ -616,6 +616,134 @@ impl ResolveError {
     }
 }
 
+/// One symlink met by [`follow_links`]: where it is, its owner, and its
+/// directory's owner and permission bits (a link is only as trustworthy as
+/// who could have made it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hop {
+    /// The link's own path (every component before it resolved).
+    pub link: PathBuf,
+    pub owner: Option<u32>,
+    /// The directory holding the link, resolved.
+    pub dir: PathBuf,
+    pub dir_owner: Option<u32>,
+    pub dir_perm: Option<u32>,
+}
+
+/// Where following a path's symlinks ended ([`follow_links`]).
+#[derive(Debug)]
+pub enum Followed {
+    /// A component does not exist (or is not a directory).
+    Missing,
+    /// More than [`MAX_LINK_HOPS`] symlinks.
+    TooManyLinks,
+    /// The path with every symlink resolved, the stat of what is there
+    /// (not followed), and every symlink met on the way, in order.
+    End {
+        path: PathBuf,
+        stat: Box<Stat>,
+        hops: Vec<Hop>,
+    },
+}
+
+/// Symlinks [`follow_links`] follows at most: the kernel's own bound
+/// (`MAXSYMLINKS`).
+pub const MAX_LINK_HOPS: usize = 40;
+
+/// Resolve every symlink of the absolute `path` one component at a time
+/// over the port (`statx` not followed, `readlink`), as the kernel would at
+/// `exec`, at most [`MAX_LINK_HOPS`] links, recording each. The host never
+/// follows a link itself, and every directory is opened `O_PATH` by a path
+/// with no symlink left in it. Unlike [`resolve`], links are followed and
+/// mounts crossed: for locating a program the caller then judges by its
+/// hops and its end, never for a candidate.
+pub fn follow_links<H: Host>(host: &H, path: &Path) -> Result<Followed, HostError> {
+    let dir_how = OpenHow {
+        access: Access::Path,
+        directory: true,
+        nofollow: true,
+        resolve: ResolveFlags {
+            beneath: false,
+            no_symlinks: true,
+            no_xdev: false,
+        },
+    };
+    let mut real = PathBuf::from("/");
+    let mut pending: Vec<std::ffi::OsString> = Vec::new();
+    push_components(&mut pending, path);
+    let mut hops = Vec::new();
+    while let Some(name) = pending.pop() {
+        if name == "." {
+            continue;
+        }
+        if name == ".." {
+            real.pop();
+            continue;
+        }
+        let dir = match host.openat2(Base::Root, &real, dir_how) {
+            Ok(dir) => dir,
+            Err(error) if error.is(Errno::ENOENT) || error.is(Errno::ENOTDIR) => {
+                return Ok(Followed::Missing);
+            }
+            Err(error) => return Err(error),
+        };
+        let stat = match host.statx(Base::Dir(&dir), Path::new(&name)) {
+            Ok(stat) => stat,
+            Err(error) if error.is(Errno::ENOENT) || error.is(Errno::ENOTDIR) => {
+                return Ok(Followed::Missing);
+            }
+            Err(error) => return Err(error),
+        };
+        if stat.file_type == Some(FileType::Symlink) {
+            if hops.len() == MAX_LINK_HOPS {
+                return Ok(Followed::TooManyLinks);
+            }
+            let at_dir = host.statx(Base::Dir(&dir), Path::new(""))?;
+            hops.push(Hop {
+                link: real.join(&name),
+                owner: stat.uid,
+                dir: real.clone(),
+                dir_owner: at_dir.uid,
+                dir_perm: at_dir.perm,
+            });
+            let text = host.read_link(&dir, &name)?;
+            if text.is_absolute() {
+                real = PathBuf::from("/");
+            }
+            push_components(&mut pending, &text);
+            continue;
+        }
+        real.push(&name);
+        if pending.is_empty() {
+            return Ok(Followed::End {
+                path: real,
+                stat: Box::new(stat),
+                hops,
+            });
+        }
+        if stat.file_type != Some(FileType::Directory) {
+            return Ok(Followed::Missing);
+        }
+    }
+    // Only `/` itself (or `..` above it): no file.
+    Ok(Followed::Missing)
+}
+
+/// Push `path`'s components onto `pending` so that they pop in order.
+fn push_components(pending: &mut Vec<std::ffi::OsString>, path: &Path) {
+    use std::path::Component;
+    let names: Vec<std::ffi::OsString> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name.to_owned()),
+            Component::CurDir => Some(".".into()),
+            Component::ParentDir => Some("..".into()),
+            Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect();
+    pending.extend(names.into_iter().rev());
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     //! The decision logic against a scripted host. What the kernel does with

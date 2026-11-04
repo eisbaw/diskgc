@@ -41,6 +41,7 @@
 
 mod entry;
 mod indexed;
+mod nix_walk;
 mod plan;
 mod policy;
 mod preflight;
@@ -465,6 +466,61 @@ fn final_sample<H: Host>(
     }
 }
 
+/// How a backend's deleting child (a Docker or Podman prune, the Nix GC)
+/// ended: whether it started, and the outcome its action records. A
+/// refused gate stops the run; a nonzero exit or a signal is an error of
+/// the action; the deadline (or a signal to diskgc, which the caller's
+/// status reports) stops it.
+fn backend_child_end(
+    invocation: CommandInvocation,
+    candidate: &Path,
+    name: &str,
+    op: &'static str,
+) -> (bool, ReclaimEnd) {
+    let attempted = matches!(invocation, CommandInvocation::Started(_));
+    let candidate = candidate.to_owned();
+    let end = match invocation {
+        CommandInvocation::NotStarted(error) if error.cause == Cause::SandboxGate => {
+            ReclaimEnd::GateRefused {
+                path: candidate,
+                error,
+            }
+        }
+        CommandInvocation::NotStarted(error) => ReclaimEnd::Failed {
+            path: candidate,
+            error,
+        },
+        CommandInvocation::DeadlineBeforeStart => {
+            ReclaimEnd::Stopped(Stop::DeadlinePassed { path: candidate })
+        }
+        CommandInvocation::Started(Ok(CommandExit::Exited(0))) => ReclaimEnd::Complete,
+        CommandInvocation::Started(Ok(CommandExit::Exited(code))) => ReclaimEnd::Failed {
+            error: HostError::invalid(
+                op,
+                candidate.display(),
+                format!("{name} client exited {code}"),
+            ),
+            path: candidate,
+        },
+        CommandInvocation::Started(Ok(CommandExit::Signaled(signal))) => ReclaimEnd::Failed {
+            error: HostError::invalid(
+                op,
+                candidate.display(),
+                format!("{name} client died from signal {signal}"),
+            ),
+            path: candidate,
+        },
+        CommandInvocation::Started(Ok(CommandExit::TimedOut)) => {
+            ReclaimEnd::Stopped(Stop::DeadlinePassed { path: candidate })
+        }
+        CommandInvocation::Started(Err(error)) => ReclaimEnd::Failed {
+            path: candidate,
+            error,
+        },
+    };
+    (attempted, end)
+}
+
 /// A `skipped` row of `tier`'s profile with `detail`: `candidate` `None`
 /// for the tier as a whole (its profile refused before discovery: a
 /// missing executable, an unavailable backend).
@@ -516,13 +572,16 @@ fn discover<H: Host>(
                 ),
             });
         }
-        SourceKind::DockerBuildCache | SourceKind::DockerImages | SourceKind::PodmanImages => {
+        SourceKind::DockerBuildCache
+        | SourceKind::DockerImages
+        | SourceKind::PodmanImages
+        | SourceKind::NixStore => {
             return Err(Stop::Failed {
                 path: PathBuf::new(),
                 error: HostError::invalid(
                     "discover",
                     &tier.profile,
-                    "Docker and Podman tiers do not use Cargo discovery",
+                    "Docker, Podman and Nix tiers do not use Cargo discovery",
                 ),
             });
         }
@@ -858,7 +917,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             Action::Command { .. }
             | Action::DockerBuilderPrune
             | Action::DockerImagePrune { .. }
-            | Action::PodmanImagePrune { .. } => false,
+            | Action::PodmanImagePrune { .. }
+            | Action::NixStoreGc => false,
         }
     }
 
@@ -929,17 +989,10 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     }
 
     /// `candidate` `None`: the backend as a whole was skipped.
-    fn skip_backend(
-        &mut self,
-        which: Which,
-        candidate: Option<&Path>,
-        reason: Reason,
-        detail: &str,
-    ) {
+    fn skip_backend(&mut self, name: &str, candidate: Option<&Path>, reason: Reason, detail: &str) {
         (self.log)(&format!(
-            "{}: skip {} backend: {reason}: {detail}",
-            self.tier.name,
-            which.name()
+            "{}: skip {name} backend: {reason}: {detail}",
+            self.tier.name
         ));
         let entry = skip_entry(self.tier, candidate, reason, Some(detail.to_owned()));
         self.report.skipped.push(entry);
@@ -988,11 +1041,16 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         match rebound {
             Ok(Binding::Bound(rebound)) if rebound == bound => {}
             Ok(Binding::Bound(_)) => {
-                self.skip_backend(which, Some(&candidate), Reason::Changed, which.changed());
+                self.skip_backend(
+                    which.name(),
+                    Some(&candidate),
+                    Reason::Changed,
+                    which.changed(),
+                );
                 return;
             }
             Ok(Binding::Skipped(skip)) => {
-                self.skip_backend(which, Some(&candidate), skip.reason, &skip.detail);
+                self.skip_backend(which.name(), Some(&candidate), skip.reason, &skip.detail);
                 return;
             }
             Err(error) => {
@@ -1032,48 +1090,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         };
         let started = self.host.now();
         let invocation = self.host.run_command(&cwd.fd, &run);
-        let attempted = matches!(invocation, CommandInvocation::Started(_));
-        let end = match invocation {
-            CommandInvocation::NotStarted(error) if error.cause == Cause::SandboxGate => {
-                ReclaimEnd::GateRefused {
-                    path: candidate.clone(),
-                    error,
-                }
-            }
-            CommandInvocation::NotStarted(error) => ReclaimEnd::Failed {
-                path: candidate.clone(),
-                error,
-            },
-            CommandInvocation::DeadlineBeforeStart => ReclaimEnd::Stopped(Stop::DeadlinePassed {
-                path: candidate.clone(),
-            }),
-            CommandInvocation::Started(Ok(CommandExit::Exited(0))) => ReclaimEnd::Complete,
-            CommandInvocation::Started(Ok(CommandExit::Exited(code))) => ReclaimEnd::Failed {
-                path: candidate.clone(),
-                error: HostError::invalid(
-                    which.prune_op(),
-                    candidate.display(),
-                    format!("{} client exited {code}", which.name()),
-                ),
-            },
-            CommandInvocation::Started(Ok(CommandExit::Signaled(signal))) => ReclaimEnd::Failed {
-                path: candidate.clone(),
-                error: HostError::invalid(
-                    which.prune_op(),
-                    candidate.display(),
-                    format!("{} client died from signal {signal}", which.name()),
-                ),
-            },
-            CommandInvocation::Started(Ok(CommandExit::TimedOut)) => {
-                ReclaimEnd::Stopped(Stop::DeadlinePassed {
-                    path: candidate.clone(),
-                })
-            }
-            CommandInvocation::Started(Err(error)) => ReclaimEnd::Failed {
-                path: candidate.clone(),
-                error,
-            },
-        };
+        let (attempted, end) =
+            backend_child_end(invocation, &candidate, which.name(), which.prune_op());
         let _ = self.record(
             &candidate,
             Outcome {
@@ -1249,11 +1267,20 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                         let (which, client, bound) = (*which, client.clone(), bound.clone());
                         self.walk_backend(which, &client, bound);
                     }
-                    Backend::Files | Backend::Command(_) => {
+                    Backend::Files | Backend::Command(_) | Backend::Nix(_) => {
                         unreachable!("a backend tier is prepared with its backend")
                     }
                 }
             }
+            SourceKind::NixStore => match &self.backend {
+                Backend::Nix(bound) => {
+                    let bound = bound.clone();
+                    self.walk_nix(&bound);
+                }
+                Backend::Files | Backend::Command(_) | Backend::Prune { .. } => {
+                    unreachable!("a Nix tier is prepared with its bound daemon")
+                }
+            },
         }
         if !self.deadline_hit && !self.run_stopped && !self.stop_if_interrupted() {
             let started = self.host.now();
@@ -1854,7 +1881,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             Action::CargoLockProtocol
             | Action::DockerBuilderPrune
             | Action::DockerImagePrune { .. }
-            | Action::PodmanImagePrune { .. } => unreachable!("fs action admitted by ensure"),
+            | Action::PodmanImagePrune { .. }
+            | Action::NixStoreGc => unreachable!("fs action admitted by ensure"),
         };
         let reclaimed = matches!(outcome.end, ReclaimEnd::Complete) && !outcome.attempted_command;
         match self.record(&found.path, outcome) {
@@ -2889,5 +2917,98 @@ mod lock_refusal_tests {
         let gone = lock_refusal(report(), &mut |_| {}, missing());
         assert_eq!(gone.status, Status::UsageError);
         assert_eq!(gone.errors[0].cause, ErrorCause::Provisioning);
+    }
+}
+
+/// TASK-36 moved the Docker and Podman prune's end mapping out of
+/// `walk_backend` into [`backend_child_end`], shared with the Nix GC: each
+/// way a child can end, for each backend, as the prune always recorded it.
+#[cfg(test)]
+mod backend_child_end_tests {
+    use super::{
+        Cause, CommandExit, CommandInvocation, HostError, ReclaimEnd, Stop, Which,
+        backend_child_end,
+    };
+    use crate::docker_backend::Storage;
+    use std::path::Path;
+
+    #[test]
+    fn every_child_end_maps_as_the_prune_recorded_it() {
+        let candidate = Path::new("/store");
+        for (name, op) in [
+            Which::Docker(Storage::BuildCache),
+            Which::Docker(Storage::Images),
+            Which::Podman,
+        ]
+        .map(|which| (which.name(), which.prune_op()))
+        .into_iter()
+        .chain([("Nix", "Nix GC")])
+        {
+            let gate = HostError::sandbox_gate("run command", "x", "closed");
+            assert_eq!(gate.cause, Cause::SandboxGate);
+            let (started, end) = backend_child_end(
+                CommandInvocation::NotStarted(gate.clone()),
+                candidate,
+                name,
+                op,
+            );
+            assert!(!started);
+            assert!(matches!(end, ReclaimEnd::GateRefused { error, .. } if error == gate));
+            let other = HostError::invalid("run command", "x", "no");
+            let (started, end) = backend_child_end(
+                CommandInvocation::NotStarted(other.clone()),
+                candidate,
+                name,
+                op,
+            );
+            assert!(!started);
+            assert!(matches!(end, ReclaimEnd::Failed { error, .. } if error == other));
+            let (started, end) =
+                backend_child_end(CommandInvocation::DeadlineBeforeStart, candidate, name, op);
+            assert!(!started);
+            assert!(matches!(
+                end,
+                ReclaimEnd::Stopped(Stop::DeadlinePassed { .. })
+            ));
+            let started_with =
+                |exit| backend_child_end(CommandInvocation::Started(Ok(exit)), candidate, name, op);
+            let (started, end) = started_with(CommandExit::Exited(0));
+            assert!(started);
+            assert!(matches!(end, ReclaimEnd::Complete));
+            let (_, end) = started_with(CommandExit::Exited(2));
+            let ReclaimEnd::Failed { error, .. } = end else {
+                panic!("exit 2 is a failure")
+            };
+            assert_eq!(error.op, op);
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{name} client exited 2"))
+            );
+            let (_, end) = started_with(CommandExit::Signaled(9));
+            let ReclaimEnd::Failed { error, .. } = end else {
+                panic!("a signal is a failure")
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{name} client died from signal 9"))
+            );
+            let (started, end) = started_with(CommandExit::TimedOut);
+            assert!(started);
+            assert!(matches!(
+                end,
+                ReclaimEnd::Stopped(Stop::DeadlinePassed { .. })
+            ));
+            let failed = HostError::invalid("forward command output", "x", "broken");
+            let (started, end) = backend_child_end(
+                CommandInvocation::Started(Err(failed.clone())),
+                candidate,
+                name,
+                op,
+            );
+            assert!(started);
+            assert!(matches!(end, ReclaimEnd::Failed { error, .. } if error == failed));
+        }
     }
 }

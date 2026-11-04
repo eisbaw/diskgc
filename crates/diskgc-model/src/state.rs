@@ -509,6 +509,10 @@ pub struct State {
     pub command_error_after_start: bool,
     pub docker: crate::spec::DockerSpec,
     pub podman: crate::spec::PodmanSpec,
+    pub nix: crate::spec::NixSpec,
+    /// `nix store info` queries answered so far (the first gets
+    /// `nix.store_info`, every later one `nix.store_info_later`).
+    pub nix_store_info_queries: u32,
     /// Podman queries answered so far ([`crate::spec::PodmanSpec::info_later`]).
     pub podman_queries: u32,
     /// The socket files a socket is bound to (in diskgc's network
@@ -572,6 +576,8 @@ impl State {
             command_error_after_start: false,
             docker: crate::spec::DockerSpec::default(),
             podman: crate::spec::PodmanSpec::default(),
+            nix: crate::spec::NixSpec::default(),
+            nix_store_info_queries: 0,
             podman_queries: 0,
             bound_sockets: BTreeSet::new(),
             kernel,

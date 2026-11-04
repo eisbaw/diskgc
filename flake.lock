@@ -80,6 +80,23 @@
         "type": "github"
       }
     },
+    "nixpkgsNixUnderTest": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791254437,
+        "narHash": "sha256-qMSsgG+9tIdx282dMqGuJAUK3t6F36clM6efd0rXfes=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "b25309931cfda5f0b8805f462a29897eeae50168",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "b25309931cfda5f0b8805f462a29897eeae50168",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "crane": "crane",
@@ -87,6 +104,7 @@
         "nixpkgs515": "nixpkgs515",
         "nixpkgs58": "nixpkgs58",
         "nixpkgs68": "nixpkgs68",
+        "nixpkgsNixUnderTest": "nixpkgsNixUnderTest",
         "rust-overlay": "rust-overlay",
         "zephyr-src": "zephyr-src"
       }

@@ -39,14 +39,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use diskgc_core::host::{
-    Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, Delete, Dev, DevIno,
-    DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey, HeldDir, Host,
-    HostError, LinkTarget, LockMode, Locked, LoopIdentity, MAX_COMMAND_OUTPUT_PREFIX_BYTES,
-    MakeUserLock, MapEntry, MonoTime, MountEntry, OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace,
-    PodmanQuery, Pressure, ProcError, ProcFd, ProcLink, ProcStatus, ProcView, SecondSignal, Space,
-    Stat, StateFile, StateLock, StateWritten, Timestamp, TryLock, UidMap, Unlink, UserLock,
+    Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, DaemonProbe, Delete,
+    Dev, DevIno, DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey,
+    HeldDir, Host, HostError, LinkTarget, LockMode, Locked, LoopIdentity,
+    MAX_COMMAND_OUTPUT_PREFIX_BYTES, MakeUserLock, MapEntry, MonoTime, MountEntry, NixClient,
+    NixEnvironment, NixGc, NixQuery, OpenHow, PROC_PID_INIT_INO, Pid, PidNamespace, PodmanQuery,
+    Pressure, ProcError, ProcFd, ProcLink, ProcStatus, ProcView, SecondSignal, Space, Stat,
+    StateFile, StateLock, StateWritten, Timestamp, TryLock, UidMap, Unlink, UserLock,
     UserLockError, WaitLock, is_single_name, read_proc_view,
 };
+use diskgc_core::nix_backend;
 use diskgc_core::report::Signal;
 use rustix::event::PollFlags;
 use rustix::fs::{AtFlags, CWD, FlockOperation, Mode, OFlags, PROC_SUPER_MAGIC, ResolveFlags};
@@ -1889,11 +1891,39 @@ impl Host for LinuxHost {
     }
 
     fn docker_query(&self, query: DockerQuery) -> Result<String, HostError> {
-        run_backend_query_ungated(BackendQuery::Docker(query), None, DOCKER_QUERY_TIMEOUT)
+        run_backend_query_ungated(BackendQuery::Docker(query), None, BACKEND_QUERY_TIMEOUT)
     }
 
     fn podman_query(&self, query: PodmanQuery) -> Result<String, HostError> {
-        run_backend_query_ungated(BackendQuery::Podman(query), None, DOCKER_QUERY_TIMEOUT)
+        run_backend_query_ungated(BackendQuery::Podman(query), None, BACKEND_QUERY_TIMEOUT)
+    }
+
+    fn nix_environment(&self) -> NixEnvironment {
+        NixEnvironment {
+            state_dir: std::env::var_os("NIX_STATE_DIR"),
+            store_dir: std::env::var_os("NIX_STORE_DIR"),
+            store: std::env::var_os("NIX_STORE"),
+            daemon_socket_path: std::env::var_os("NIX_DAEMON_SOCKET_PATH"),
+            home: std::env::var_os("HOME"),
+        }
+    }
+
+    fn nix_query(
+        &self,
+        client: &NixClient<LinuxFd>,
+        query: NixQuery,
+        socket: Option<&LinuxFd>,
+        environment: Option<&[(OsString, OsString)]>,
+    ) -> Result<String, HostError> {
+        run_nix_query_ungated(self, client, query, socket, environment)
+    }
+
+    fn nix_daemon_probe(
+        &self,
+        socket: &LinuxFd,
+        timeout: Duration,
+    ) -> Result<DaemonProbe, HostError> {
+        probe_nix_daemon(socket, timeout, &|| self.interrupted().is_some())
     }
 
     fn read_backend_config(&self, path: &Path, limit: usize) -> Result<Option<Vec<u8>>, HostError> {
@@ -3391,6 +3421,195 @@ impl Delete for LinuxHost {
         }
         run_command_permitted(&permit, self, cwd, run)
     }
+
+    fn nix_roots(
+        &self,
+        client: &NixClient<LinuxFd>,
+        socket: &LinuxFd,
+        targets: &[PathBuf],
+        environment: &[(OsString, OsString)],
+        deadline: MonoTime,
+    ) -> Result<String, HostError> {
+        let shown_program = client.dir.join("nix-store");
+        let subject = shown_program.display().to_string();
+        let permit = gate("run Nix root check", &subject)?;
+        nix_child_preconditions(self, client, &subject, "run Nix root check")?;
+        if deadline <= self.now() {
+            return Err(HostError::invalid(
+                "run Nix root check",
+                &subject,
+                "the deadline passed before the child started",
+            ));
+        }
+        let socket = socket.as_fd().as_raw_fd();
+        let mut command = nix_command_permitted(
+            &permit,
+            client,
+            NixDeleting::Roots(targets),
+            socket,
+            environment,
+        )
+        .map_err(|why| HostError::invalid("run Nix root check", &subject, why))?;
+        command
+            .stdin(process::Stdio::null())
+            .stdout(process::Stdio::piped())
+            .stderr(process::Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|error| io_error(NIX_ROOTS_LABELS.start, &subject, &error))?;
+        collect_output_until(
+            &mut child,
+            &subject,
+            instant_of(self.now(), deadline),
+            "the root check outlived the tier's deadline",
+            &NIX_ROOTS_LABELS,
+            &|| self.interrupted().is_some(),
+        )
+    }
+
+    fn nix_gc(
+        &self,
+        client: &NixClient<LinuxFd>,
+        socket: &LinuxFd,
+        run: &NixGc,
+    ) -> CommandInvocation {
+        let shown_program = client.dir.join("nix-store");
+        let subject = shown_program.display().to_string();
+        let permit = match gate("run Nix GC", &subject) {
+            Ok(permit) => permit,
+            Err(error) => return CommandInvocation::NotStarted(error),
+        };
+        if let Err(error) = nix_child_preconditions(self, client, &subject, "run Nix GC") {
+            return CommandInvocation::NotStarted(error);
+        }
+        if run.output_prefix.is_empty()
+            || run.output_prefix.len() > MAX_COMMAND_OUTPUT_PREFIX_BYTES
+            || run.output_prefix.contains('\n')
+            || run.output_prefix.contains('\r')
+        {
+            return CommandInvocation::NotStarted(HostError::invalid(
+                "run Nix GC",
+                &subject,
+                format!(
+                    "output prefix must be non-empty, at most {MAX_COMMAND_OUTPUT_PREFIX_BYTES} bytes, and contain no line break"
+                ),
+            ));
+        }
+        let raw = socket.as_fd().as_raw_fd();
+        let command = match nix_command_permitted(
+            &permit,
+            client,
+            NixDeleting::Gc(run.max_freed),
+            raw,
+            &run.environment,
+        ) {
+            Ok(command) => command,
+            Err(why) => {
+                return CommandInvocation::NotStarted(HostError::invalid(
+                    "run Nix GC",
+                    &subject,
+                    why,
+                ));
+            }
+        };
+        // cwd `/`: an `O_PATH` directory fd, as the executor's for a prune.
+        let root = match rustix::fs::open(
+            "/",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => LinuxFd {
+                fd,
+                shown: PathBuf::from("/"),
+            },
+            Err(error) => {
+                return CommandInvocation::NotStarted(HostError::errno(
+                    "open Nix GC cwd",
+                    "/",
+                    errno_of(error),
+                ));
+            }
+        };
+        let shown = CommandRun {
+            executable: shown_program,
+            arguments: command.get_args().map(OsStr::to_owned).collect(),
+            environment: run.environment.clone(),
+            docker_info: None,
+            output_prefix: run.output_prefix.clone(),
+            deadline: run.deadline,
+            second_signal: run.second_signal,
+        };
+        // No SIGTERM grace: the work is the daemon's, which stops when the
+        // client hangs up; the client holds the host lock until it ends
+        // (observed: a TERMed client lived on for seconds).
+        start_command_permitted(
+            &permit,
+            self,
+            &root,
+            &shown,
+            command,
+            Some(raw),
+            Duration::ZERO,
+        )
+    }
+}
+
+/// `deadline` on the monotonic clock as an [`Instant`] from `now`; `None`
+/// for one too far away to represent (no deadline: `--timeout 0` is
+/// `MonoTime(Duration::MAX)`).
+fn instant_of(now: MonoTime, deadline: MonoTime) -> Option<Instant> {
+    Instant::now().checked_add(deadline.0.saturating_sub(now.0))
+}
+
+/// What every deleting Nix child checks before it starts (the queries' own
+/// checks are in [`run_nix_query_ungated`]): not interrupted, diskgc not
+/// root (the executor refuses `--allow-root` first), the client in a store
+/// path's `bin/`.
+fn nix_child_preconditions(
+    host: &LinuxHost,
+    client: &NixClient<LinuxFd>,
+    subject: &str,
+    op: &'static str,
+) -> Result<(), HostError> {
+    if host.interrupted().is_some() {
+        return Err(HostError::invalid(
+            op,
+            subject,
+            "interrupted before child start",
+        ));
+    }
+    if host.effective_uid() == 0 {
+        return Err(HostError::invalid(
+            op,
+            subject,
+            "the Nix GC and root check are refused when diskgc runs as root",
+        ));
+    }
+    check_nix_client_dir(&client.dir, op)
+}
+
+/// The client directory the binding found: `/nix/store/<name>/bin`.
+fn check_nix_client_dir(client_dir: &Path, op: &'static str) -> Result<(), HostError> {
+    let in_store_bin = client_dir.file_name() == Some(OsStr::new("bin"))
+        && client_dir.parent().is_some_and(nix_backend::is_store_path);
+    if in_store_bin {
+        Ok(())
+    } else {
+        Err(HostError::invalid(
+            op,
+            client_dir.display(),
+            "the Nix client directory is not /nix/store/<name>/bin",
+        ))
+    }
+}
+
+/// `program` and `arguments`, for messages.
+fn shown_argv(program: &Path, arguments: &[OsString]) -> String {
+    std::iter::once(program.as_os_str())
+        .chain(arguments.iter().map(OsString::as_os_str))
+        .map(OsStr::to_string_lossy)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `dir` itself, opened anew `O_RDONLY | O_DIRECTORY | O_NOATIME`: `.` below `dir`
@@ -3458,7 +3677,7 @@ const COMMAND_OUTPUT_DRAIN_AFTER_EXIT: Duration = Duration::from_secs(1);
 const COMMAND_STDERR_BACKPRESSURE: Duration = Duration::from_millis(50);
 const COMMAND_TERMINATION_GRACE: Duration = Duration::from_secs(10);
 
-const DOCKER_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+const BACKEND_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const DOCKER_QUERY_MAX_OUTPUT: usize = 1024 * 1024;
 
 /// An `O_PATH` reference to the verified socket inode. A Docker client
@@ -3642,14 +3861,347 @@ fn run_backend_query_ungated(
     collect_query_output(&mut child, &subject, timeout, labels)
 }
 
+const NIX_QUERY_LABELS: QueryLabels = QueryLabels {
+    start: "start Nix query",
+    fcntl: "fcntl Nix output",
+    query: "query Nix",
+    observe: "observe Nix query exit",
+    wait: "wait Nix query",
+    read: "read Nix output",
+};
+
+const NIX_ROOTS_LABELS: QueryLabels = QueryLabels {
+    start: "start Nix root check",
+    fcntl: "fcntl Nix root check output",
+    query: "run Nix root check",
+    observe: "observe Nix root check exit",
+    wait: "wait Nix root check",
+    read: "read Nix root check output",
+};
+
+/// The closed set of read-only Nix queries ([`NixQuery`]), executing the
+/// bound client's checked descriptor; a pinned one through `socket`,
+/// inherited as `/proc/self/fd/N`. Bounded like every backend query, and
+/// stopped by a signal to diskgc.
+fn run_nix_query_ungated(
+    host: &LinuxHost,
+    client: &NixClient<LinuxFd>,
+    query: NixQuery,
+    socket: Option<&LinuxFd>,
+    environment: Option<&[(OsString, OsString)]>,
+) -> Result<String, HostError> {
+    check_nix_client_dir(&client.dir, "query Nix")?;
+    if query.pinned() != socket.is_some() {
+        return Err(HostError::invalid(
+            "query Nix",
+            format!("{query:?}"),
+            "a pinned query goes through the pinned socket, any other never does",
+        ));
+    }
+    if query.clean_environment() != environment.is_some() {
+        return Err(HostError::invalid(
+            "query Nix",
+            format!("{query:?}"),
+            "the child environment is given exactly for a clean query, and only then",
+        ));
+    }
+    let raw = socket.map(|socket| socket.as_fd().as_raw_fd());
+    let (mut command, shown) = nix_query_command(client, query, raw, environment);
+    let mut child = command
+        .spawn()
+        .map_err(|error| io_error(NIX_QUERY_LABELS.start, &shown, &error))?;
+    collect_output_until(
+        &mut child,
+        &shown,
+        Some(Instant::now() + BACKEND_QUERY_TIMEOUT),
+        &format!("read-only query exceeded {BACKEND_QUERY_TIMEOUT:?}"),
+        &NIX_QUERY_LABELS,
+        &|| host.interrupted().is_some(),
+    )
+}
+
+/// The command of a Nix query, not yet started, and its argv for messages:
+/// the client's `nix` executed through its descriptor with `argv[0]` the
+/// query's program, the argv of [`nix_backend::query_argv`], in its own
+/// process group with piped output. `nix config show store` keeps diskgc's
+/// environment and working directory (a relative `NIX_USER_CONF_FILES`
+/// names a file by it); every other query gets exactly `environment`, in
+/// `/`.
+fn nix_query_command(
+    client: &NixClient<LinuxFd>,
+    query: NixQuery,
+    socket: Option<RawFd>,
+    environment: Option<&[(OsString, OsString)]>,
+) -> (process::Command, String) {
+    let store = socket.map(nix_backend::pinned_store).unwrap_or_default();
+    let (program, arguments) = nix_backend::query_argv(query, &store);
+    let shown = shown_argv(&client.dir.join(program), &arguments);
+    let mut command = process::Command::new(client_exec_path(client));
+    command.arg0(program).args(&arguments);
+    nix_query_environment(&mut command, environment);
+    command
+        .process_group(0)
+        .stdin(process::Stdio::null())
+        .stdout(process::Stdio::piped())
+        .stderr(process::Stdio::piped());
+    inherit_in_child(&mut command, socket);
+    (command, shown)
+}
+
+/// A query's environment and working directory: exactly `environment` in
+/// `/`, or (`None`) diskgc's own environment and working directory.
+fn nix_query_environment(
+    command: &mut process::Command,
+    environment: Option<&[(OsString, OsString)]>,
+) {
+    if let Some(environment) = environment {
+        command
+            .env_clear()
+            .envs(environment.iter().cloned())
+            .current_dir("/");
+    }
+}
+
+/// The deleting Nix runs ([`nix_command_permitted`]).
+#[derive(Debug, Clone, Copy)]
+enum NixDeleting<'a> {
+    /// `--query --roots` of these store paths (step 8).
+    Roots(&'a [PathBuf]),
+    /// `--gc --max-freed` (step 9).
+    Gc(u64),
+}
+
+/// A deleting Nix child's command (the root check, the GC): the client's
+/// checked `nix` executed through its descriptor as `nix-store`, the argv of
+/// [`nix_backend::roots_argv`] or [`nix_backend::gc_argv`] through
+/// `socket`, exactly `environment`, in `/` and its own process group; the
+/// caller starts it. The [`Permit`] proves the gate allowed it.
+fn nix_command_permitted(
+    _gate: &Permit,
+    client: &NixClient<LinuxFd>,
+    run: NixDeleting<'_>,
+    socket: RawFd,
+    environment: &[(OsString, OsString)],
+) -> Result<process::Command, String> {
+    let store = nix_backend::pinned_store(socket);
+    let arguments = match run {
+        NixDeleting::Roots(targets) => nix_backend::roots_argv(&store, targets)?,
+        NixDeleting::Gc(max_freed) => nix_backend::gc_argv(&store, max_freed)?,
+    };
+    let mut command = process::Command::new(client_exec_path(client));
+    command
+        .arg0("nix-store")
+        .args(arguments)
+        .env_clear()
+        .envs(environment.iter().cloned())
+        .current_dir("/")
+        .process_group(0);
+    inherit_in_child(&mut command, Some(socket));
+    Ok(command)
+}
+
+/// The path the child execs: the client's `nix` through the descriptor
+/// diskgc checked (the child inherits it until exec, which resolves the
+/// path before close-on-exec closes it), so what runs is that inode.
+fn client_exec_path(client: &NixClient<LinuxFd>) -> String {
+    format!("/proc/self/fd/{}", client.nix.as_fd().as_raw_fd())
+}
+
+/// Leave the pinned socket `raw` (if any) open across exec in `command`'s
+/// child (it reaches it as `/proc/self/fd/<raw>`), and give the child the
+/// open-file limit diskgc was started with.
+fn inherit_in_child(command: &mut process::Command, raw: Option<RawFd>) {
+    // SAFETY: after fork the child changes one inherited descriptor flag
+    // and its open-file limit by syscall (async-signal-safe); the parent
+    // keeps its descriptor close-on-exec.
+    unsafe {
+        command.pre_exec(move || {
+            if let Some(raw) = raw {
+                let fd = BorrowedFd::borrow_raw(raw);
+                rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::empty())
+                    .map_err(std::io::Error::from)?;
+            }
+            crate::nofile::restore_inherited_in_child()
+        });
+    }
+}
+
+/// The worker protocol's opening magic numbers (CppNix
+/// `worker-protocol.hh`), each sent as a little-endian 64-bit number.
+const NIX_WORKER_MAGIC_1: u64 = 0x6e69_7863;
+const NIX_WORKER_MAGIC_2: u64 = 0x6478_696f;
+
+/// How long the probe waits between connection attempts while the
+/// listener's backlog is full (`EAGAIN`), and at most per poll.
+const NIX_PROBE_SLICE: Duration = Duration::from_millis(20);
+
+/// docs/safety.md, nix-store, step 4: connect to the pinned socket through
+/// `/proc/self/fd/N` (an `AF_UNIX` connect takes only a path; the name is
+/// diskgc's own descriptor of the socket it checked, on the `/proc` that
+/// [`LinuxHost::new`] checked is procfs), send the client's magic number,
+/// wait for the daemon's, close. Nothing else of the protocol is spoken. `stop` (a signal to
+/// diskgc) ends the wait as an error.
+fn probe_nix_daemon(
+    socket: &LinuxFd,
+    timeout: Duration,
+    stop: &dyn Fn() -> bool,
+) -> Result<DaemonProbe, HostError> {
+    use rustix::net::{AddressFamily, SendFlags, SocketAddrUnix, SocketFlags, SocketType};
+    const OP: &str = "probe Nix daemon";
+    let subject = nix_backend::SOCKET;
+    let until = Instant::now() + timeout;
+    let path = format!("/proc/self/fd/{}", socket.as_fd().as_raw_fd());
+    let address = SocketAddrUnix::new(path.as_str())
+        .map_err(|error| HostError::errno(OP, subject, errno_of(error)))?;
+    let connection = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+        None,
+    )
+    .map_err(|error| HostError::errno(OP, subject, errno_of(error)))?;
+    let interrupted = || HostError::invalid(OP, subject, "interrupted by a signal");
+    loop {
+        match rustix::net::connect(&connection, &address) {
+            Ok(()) | Err(rustix::io::Errno::ISCONN) => break,
+            // A full backlog on a Unix socket: the attempt failed; try
+            // again until the bound.
+            Err(rustix::io::Errno::AGAIN) => {
+                if stop() {
+                    return Err(interrupted());
+                }
+                if Instant::now() >= until {
+                    return Ok(DaemonProbe::Timeout);
+                }
+                thread::sleep(NIX_PROBE_SLICE);
+            }
+            Err(rustix::io::Errno::INPROGRESS | rustix::io::Errno::ALREADY) => {
+                if !wait_for(&connection, PollFlags::OUT, until, stop)? {
+                    return Ok(DaemonProbe::Timeout);
+                }
+            }
+            Err(rustix::io::Errno::INTR) => {}
+            Err(error) => return Err(HostError::errno(OP, subject, errno_of(error))),
+        }
+    }
+    let magic = NIX_WORKER_MAGIC_1.to_le_bytes();
+    let mut sent = 0;
+    while sent < magic.len() {
+        match rustix::net::send(&connection, &magic[sent..], SendFlags::NOSIGNAL) {
+            Ok(n) => sent += n,
+            Err(rustix::io::Errno::AGAIN) => {
+                if !wait_for(&connection, PollFlags::OUT, until, stop)? {
+                    return Ok(DaemonProbe::Timeout);
+                }
+            }
+            Err(rustix::io::Errno::INTR) => {}
+            // The daemon closed first: it refused the user.
+            Err(rustix::io::Errno::PIPE | rustix::io::Errno::CONNRESET) => {
+                return Ok(DaemonProbe::Eof);
+            }
+            Err(error) => return Err(HostError::errno(OP, subject, errno_of(error))),
+        }
+    }
+    let mut answer = [0u8; 8];
+    let mut read = 0;
+    while read < answer.len() {
+        match rustix::net::recv(
+            &connection,
+            &mut answer[read..],
+            rustix::net::RecvFlags::empty(),
+        ) {
+            Ok((0, _)) => return Ok(DaemonProbe::Eof),
+            Ok((n, _)) => read += n,
+            Err(rustix::io::Errno::AGAIN) => {
+                if !wait_for(&connection, PollFlags::IN, until, stop)? {
+                    return Ok(DaemonProbe::Timeout);
+                }
+            }
+            Err(rustix::io::Errno::INTR) => {}
+            Err(rustix::io::Errno::CONNRESET) => return Ok(DaemonProbe::Eof),
+            Err(error) => return Err(HostError::errno(OP, subject, errno_of(error))),
+        }
+    }
+    let answer = u64::from_le_bytes(answer);
+    Ok(if answer == NIX_WORKER_MAGIC_2 {
+        DaemonProbe::Serving
+    } else {
+        DaemonProbe::WrongMagic(answer)
+    })
+}
+
+/// Wait until `fd` is ready for `events` (`true`) or `until` passes
+/// (`false`), in slices so `stop` (a signal to diskgc) is seen: an error.
+fn wait_for(
+    fd: &OwnedFd,
+    events: PollFlags,
+    until: Instant,
+    stop: &dyn Fn() -> bool,
+) -> Result<bool, HostError> {
+    loop {
+        if stop() {
+            return Err(HostError::invalid(
+                "probe Nix daemon",
+                nix_backend::SOCKET,
+                "interrupted by a signal",
+            ));
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(false);
+        }
+        let slice = left.min(NIX_PROBE_SLICE * 5);
+        let mut fds = [rustix::event::PollFd::new(fd, events)];
+        let wait = rustix::event::Timespec {
+            tv_sec: slice.as_secs().cast_signed(),
+            tv_nsec: slice.subsec_nanos().into(),
+        };
+        match rustix::event::poll(&mut fds, Some(&wait)) {
+            Ok(0) | Err(rustix::io::Errno::INTR) => continue,
+            Ok(_) => return Ok(true),
+            Err(error) => {
+                return Err(HostError::errno(
+                    "probe Nix daemon",
+                    nix_backend::SOCKET,
+                    errno_of(error),
+                ));
+            }
+        }
+    }
+}
+
 /// Keep the group leader waitable until its entire group has been dealt
 /// with. A descendant may inherit a pipe after the leader exits, and
 /// reaping the leader early would free the process-group ID before KILL.
+/// A read-only query gets at most [`BACKEND_QUERY_TIMEOUT`] and is not
+/// stopped by a signal (it is that short).
 fn collect_query_output(
     child: &mut process::Child,
     subject: &str,
     timeout: Duration,
     labels: &QueryLabels,
+) -> Result<String, HostError> {
+    collect_output_until(
+        child,
+        subject,
+        Some(Instant::now() + timeout.min(BACKEND_QUERY_TIMEOUT)),
+        &format!("read-only query exceeded {timeout:?}"),
+        labels,
+        &|| false,
+    )
+}
+
+/// [`collect_query_output`]'s work: both pipes drained within the byte
+/// bound until the child's group is done, `until` (the error says
+/// `overdue`) or `stop` answers true (the error says interrupted); the
+/// whole group is killed either way, the leader reaped last.
+fn collect_output_until(
+    child: &mut process::Child,
+    subject: &str,
+    until: Option<Instant>,
+    overdue: &str,
+    labels: &QueryLabels,
+    stop: &dyn Fn() -> bool,
 ) -> Result<String, HostError> {
     let pid = match rustix::process::Pid::from_raw(child.id().cast_signed()) {
         Some(pid) => pid,
@@ -3679,17 +4231,20 @@ fn collect_query_output(
         let _ = child.wait();
         return Err(error);
     }
-    let deadline = Instant::now() + timeout.min(DOCKER_QUERY_TIMEOUT);
+    let deadline = until;
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
     let mut stdout_eof = false;
     let mut stderr_eof = false;
     let observed = loop {
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            break Err(HostError::invalid(labels.query, subject, overdue));
+        }
+        if stop() {
             break Err(HostError::invalid(
                 labels.query,
                 subject,
-                format!("read-only query exceeded {timeout:?}"),
+                "interrupted by a signal",
             ));
         }
         if !stdout_eof {
@@ -3876,6 +4431,34 @@ fn run_command_permitted(
     if let Some(pin) = &docker_pin {
         command.env("DOCKER_HOST", &pin.host);
     }
+    let docker_fd: Option<RawFd> = docker_pin.as_ref().map(|pin| pin.fd.as_raw_fd());
+    // The pin stays open (this frame) until the child has started.
+    start_command_permitted(
+        _gate,
+        host,
+        cwd,
+        run,
+        command,
+        docker_fd,
+        COMMAND_TERMINATION_GRACE,
+    )
+}
+
+/// Start `command` (built by a gated caller from `run`) and drive it as
+/// [`Delete::run_command`] says: in its own process group, with its
+/// working directory set by `fchdir` to `cwd`, `inherited` (a pinned
+/// socket) left open across exec, output forwarded with the prefix, the
+/// deadline and signals watched. The [`Permit`] is the caller's.
+fn start_command_permitted(
+    _gate: &Permit,
+    host: &LinuxHost,
+    cwd: &LinuxFd,
+    run: &CommandRun,
+    mut command: process::Command,
+    inherited: Option<RawFd>,
+    grace: Duration,
+) -> CommandInvocation {
+    let subject = run.executable.display().to_string();
     if run.deadline <= host.now() {
         return CommandInvocation::DeadlineBeforeStart;
     }
@@ -3891,7 +4474,6 @@ fn run_command_permitted(
         .stdout(process::Stdio::piped())
         .stderr(process::Stdio::piped());
     let cwd_fd = cwd.as_fd().as_raw_fd();
-    let docker_fd: Option<RawFd> = docker_pin.as_ref().map(|pin| pin.fd.as_raw_fd());
     // SAFETY: the closure calls syscalls on an fd held by the parent
     // through spawn (the child inherits it until pre_exec returns) and
     // `restore_inherited_in_child` (atomic loads, one syscall). It does not
@@ -3902,7 +4484,7 @@ fn run_command_permitted(
             // owns its copy of the same fd until exec.
             let fd = BorrowedFd::borrow_raw(cwd_fd);
             rustix::process::fchdir(fd).map_err(std::io::Error::from)?;
-            if let Some(raw_fd) = docker_fd {
+            if let Some(raw_fd) = inherited {
                 let fd = BorrowedFd::borrow_raw(raw_fd);
                 rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::empty())
                     .map_err(std::io::Error::from)?;
@@ -3938,7 +4520,15 @@ fn run_command_permitted(
     // a second signal ([`leaves_running`]); either way the cleanup below
     // has nothing to do (it must not signal a group it left running).
     let mut leader_settled = false;
-    let result = drive_command_output(host, run, &subject, pid, &mut child, &mut leader_settled);
+    let result = drive_command_output(
+        host,
+        run,
+        &subject,
+        pid,
+        &mut child,
+        &mut leader_settled,
+        grace,
+    );
     if !leader_settled && let Err(failure) = &result {
         // An output or wait failure must not leave a trusted cleaner
         // running after the caller has been told the action failed. A signal
@@ -3948,7 +4538,7 @@ fn run_command_permitted(
         // never killed unawaited, and the error says so.
         if host.interrupted().is_some() || host.now() >= run.deadline {
             let _ = signal_command_group(pid, rustix::process::Signal::TERM, &subject);
-            let until = host.now().checked_add(COMMAND_TERMINATION_GRACE);
+            let until = host.now().checked_add(grace);
             while until.is_some_and(|until| host.now() < until) {
                 if leaves_running(host, run) {
                     return CommandInvocation::Started(Err(left_running(
@@ -3999,6 +4589,7 @@ fn left_running(subject: &str, context: &str) -> HostError {
 /// deadline. A child cannot fill one pipe and block this thread from
 /// observing the other or the deadline. Its output is forwarded to stderr
 /// with a prefix; diskgc's stdout stays reserved for the result.
+#[allow(clippy::too_many_arguments)]
 fn drive_command_output(
     host: &LinuxHost,
     run: &CommandRun,
@@ -4006,6 +4597,7 @@ fn drive_command_output(
     pid: rustix::process::Pid,
     child: &mut process::Child,
     leader_settled: &mut bool,
+    grace: Duration,
 ) -> Result<CommandExit, HostError> {
     let mut stdout = child.stdout.take().ok_or_else(|| {
         HostError::invalid("run command", subject, "spawned child has no stdout pipe")
@@ -4049,16 +4641,16 @@ fn drive_command_output(
     }
     loop {
         if host.interrupted().is_some() {
-            terminate!(COMMAND_TERMINATION_GRACE);
+            terminate!(grace);
         }
         let forwarded = drain_command_output(&mut stdout, &mut out_line, target)
             .and_then(|()| drain_command_output(&mut stderr, &mut err_line, target));
         if let Err(error) = forwarded {
             if host.interrupted().is_some() {
-                terminate!(COMMAND_TERMINATION_GRACE);
+                terminate!(grace);
             }
             if host.now() >= run.deadline {
-                terminate!(COMMAND_TERMINATION_GRACE);
+                terminate!(grace);
             }
             return Err(error);
         }
@@ -4069,7 +4661,7 @@ fn drive_command_output(
                 | rustix::process::WaitIdOptions::NOWAIT,
         ) {
             Ok(exited) => exited.is_some(),
-            Err(_) if host.interrupted().is_some() => terminate!(COMMAND_TERMINATION_GRACE),
+            Err(_) if host.interrupted().is_some() => terminate!(grace),
             Err(error) => {
                 return Err(HostError::errno(
                     "observe command exit",
@@ -4090,15 +4682,15 @@ fn drive_command_output(
                 target,
             ) {
                 Ok(drain) => drain,
-                Err(_) if host.interrupted().is_some() => terminate!(COMMAND_TERMINATION_GRACE),
+                Err(_) if host.interrupted().is_some() => terminate!(grace),
                 Err(_) if host.now() >= run.deadline => OutputDrain::Deadline,
                 Err(error) => return Err(error),
             };
             if host.interrupted().is_some() {
-                terminate!(COMMAND_TERMINATION_GRACE);
+                terminate!(grace);
             }
             if drain == OutputDrain::Deadline || host.now() >= run.deadline {
-                terminate!(COMMAND_TERMINATION_GRACE);
+                terminate!(grace);
             }
             // A background cleaner may close its inherited output pipes.
             // Kill any surviving member before reaping the leader; its
@@ -4111,7 +4703,7 @@ fn drive_command_output(
             return command_exit(status, subject);
         }
         if host.now() >= run.deadline {
-            terminate!(COMMAND_TERMINATION_GRACE);
+            terminate!(grace);
         }
         host.sleep(poll.min(run.deadline.saturating_since(host.now())));
     }
@@ -4489,6 +5081,125 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// TASK-36: a Nix query in the child environment execs with exactly
+    /// the core's child environment (none of diskgc's own `NIX_*`) in `/`;
+    /// `nix config show store`'s keeps diskgc's own environment and working
+    /// directory, which it must read (a relative `NIX_USER_CONF_FILES`).
+    /// Through the same helper, a real exec reading its own
+    /// `/proc/self/environ` and `/proc/self/cwd`.
+    #[test]
+    fn nix_queries_exec_with_exactly_the_child_environment_in_root() {
+        let _fd_table = fd_table_guard();
+        let cat = on_path("cat");
+        let run = |args: &[&str], environment: Option<&[(OsString, OsString)]>| {
+            let mut command = process::Command::new(&cat);
+            command
+                .args(args)
+                .stdout(process::Stdio::piped())
+                .stderr(process::Stdio::piped());
+            nix_query_environment(&mut command, environment);
+            let mut child = command.spawn().expect("spawn");
+            collect_query_output(
+                &mut child,
+                "probe",
+                Duration::from_secs(5),
+                &NIX_QUERY_LABELS,
+            )
+            .expect("output")
+        };
+        let clean = nix_backend::child_environment(Some(OsStr::new("/home/x")));
+        assert_eq!(
+            run(&["/proc/self/environ"], Some(&clean)),
+            "HOME=/home/x\0NIX_USER_CONF_FILES=\0"
+        );
+        let own = std::env::current_dir().expect("cwd");
+        let cwd_of = |environment| {
+            let mut command = process::Command::new(on_path("sleep"));
+            command.arg("5");
+            nix_query_environment(&mut command, environment);
+            let mut child = command.spawn().expect("spawn");
+            let cwd = std::fs::read_link(format!("/proc/{}/cwd", child.id()));
+            let _ = child.kill();
+            let _ = child.wait();
+            cwd
+        };
+        assert_eq!(cwd_of(Some(&clean)).expect("cwd"), Path::new("/"));
+        assert_eq!(cwd_of(None).expect("cwd"), own);
+        let inherited = run(&["/proc/self/environ"], None);
+        assert!(
+            inherited.split('\0').any(|var| var.starts_with("PATH=")),
+            "config show store keeps diskgc's environment: {inherited:?}"
+        );
+    }
+
+    /// TASK-36 review (Codex 1): a Nix child execs the client descriptor
+    /// diskgc checked, as `/proc/self/fd/N` with `argv[0]` the program it
+    /// dispatches on, although that descriptor is close-on-exec; a script
+    /// cannot run that way (its interpreter would open the closed path).
+    #[test]
+    fn a_nix_child_execs_the_checked_descriptor_by_argv0() {
+        let _fd_table = fd_table_guard();
+        let open = |path: &Path| LinuxFd {
+            fd: rustix::fs::open(path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
+                .expect("open"),
+            shown: path.to_owned(),
+        };
+        let client = NixClient {
+            dir: PathBuf::from("/nix/store/x-nix-2.34.8/bin"),
+            nix: open(&on_path("sh")),
+        };
+        let mut child = process::Command::new(client_exec_path(&client))
+            .arg0("nix-store")
+            .args(["-c", "printf '%s' \"$0\""])
+            .stdout(process::Stdio::piped())
+            .stderr(process::Stdio::piped())
+            .spawn()
+            .expect("exec through the descriptor");
+        let out = collect_query_output(
+            &mut child,
+            "probe",
+            Duration::from_secs(5),
+            &NIX_QUERY_LABELS,
+        )
+        .expect("output");
+        assert_eq!(out, "nix-store");
+        let dir = TempDir::new();
+        let script = dir.0.join("nix");
+        std::fs::write(&script, "#!/bin/sh\necho ran\n").expect("script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let wrapper = NixClient {
+            dir: dir.0.clone(),
+            nix: open(&script),
+        };
+        let ran = process::Command::new(client_exec_path(&wrapper))
+            .stdout(process::Stdio::piped())
+            .stderr(process::Stdio::piped())
+            .output()
+            .expect("spawn");
+        assert!(
+            !ran.status.success(),
+            "a script ran through a close-on-exec descriptor"
+        );
+    }
+
+    fn on_path(name: &str) -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| panic!("{name} on PATH"))
+    }
+
+    /// TASK-36 review (mped B1): no deadline (`--timeout 0` is
+    /// `MonoTime(Duration::MAX)`) is no `Instant`, not an overflow.
+    #[test]
+    fn an_unbounded_deadline_is_no_instant() {
+        let now = MonoTime(Duration::from_secs(3600));
+        assert_eq!(instant_of(now, MonoTime(Duration::MAX)), None);
+        let soon = instant_of(now, MonoTime(Duration::from_secs(3601))).expect("an instant");
+        assert!(soon > Instant::now());
+        assert!(instant_of(now, now).expect("now").elapsed() < Duration::from_secs(1));
+    }
+
     /// TASK-93 review: every Docker query keeps diskgc's own working
     /// directory (a relative `DOCKER_CONFIG` must name what it always
     /// named) and the error texts it always had; a Podman query runs in
@@ -4714,6 +5425,65 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// TASK-36, docs/safety.md nix-store step 4, on the real kernel: the
+    /// probe connects through `/proc/self/fd/N` of an `O_PATH` pin and
+    /// tells a serving daemon (magic answered), a closed connection (EOF),
+    /// silence (timeout), a wrong answer and a socket nobody listens on
+    /// (`ECONNREFUSED`) apart. The listener stands in for the daemon; the
+    /// container scenarios run the real one.
+    #[test]
+    fn the_daemon_probe_classifies_what_the_socket_does() {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::net::UnixListener;
+        let dir = TempDir::new();
+        let path = dir.0.join("s");
+        let pin = |path: &Path| LinuxFd {
+            fd: rustix::fs::open(
+                path,
+                OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("pin socket"),
+            shown: path.to_owned(),
+        };
+        let serve = |answer: Option<u64>| {
+            let _ = std::fs::remove_file(&path);
+            let listener = UnixListener::bind(&path).expect("listen");
+            let socket = pin(&path);
+            let daemon = std::thread::spawn(move || {
+                let (mut conn, _) = listener.accept().expect("accept");
+                let mut magic = [0u8; 8];
+                conn.read_exact(&mut magic).expect("client magic");
+                assert_eq!(u64::from_le_bytes(magic), NIX_WORKER_MAGIC_1);
+                match answer {
+                    Some(answer) => conn.write_all(&answer.to_le_bytes()).expect("answer"),
+                    None => drop(conn),
+                }
+                listener
+            });
+            let probed = probe_nix_daemon(&socket, Duration::from_secs(5), &|| false);
+            let listener = daemon.join().expect("daemon thread");
+            (probed, listener)
+        };
+        assert_eq!(serve(Some(NIX_WORKER_MAGIC_2)).0, Ok(DaemonProbe::Serving));
+        assert_eq!(serve(None).0, Ok(DaemonProbe::Eof));
+        assert_eq!(serve(Some(0x1234)).0, Ok(DaemonProbe::WrongMagic(0x1234)));
+        // Accepted (in the backlog), never answered.
+        let _ = std::fs::remove_file(&path);
+        let silent = UnixListener::bind(&path).expect("listen");
+        let started = Instant::now();
+        assert_eq!(
+            probe_nix_daemon(&pin(&path), Duration::from_millis(300), &|| false),
+            Ok(DaemonProbe::Timeout)
+        );
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        drop(silent);
+        // The socket inode remains, nobody listens: refused.
+        let refused =
+            probe_nix_daemon(&pin(&path), Duration::from_secs(1), &|| false).expect_err("refused");
+        assert!(refused.is(Errno::ECONNREFUSED), "{refused}");
     }
 
     #[test]
@@ -7152,9 +7922,20 @@ mod tests {
         for file in &scanned {
             let view = &file.source.with_strings;
             for pos in 0..view.len().saturating_sub(literal.len()) {
+                // The Nix daemon probe connects to its pinned socket, and a
+                // Nix child execs the checked client, as
+                // `/proc/self/fd/N`: an `AF_UNIX` connect and an exec take
+                // only a path (no dirfd), and the name is the process's own
+                // descriptor (TASK-36). `/proc` is the procfs
+                // `LinuxHost::new` checked (`PROC_SUPER_MAGIC`); only a
+                // mount in diskgc's own namespace could replace it since.
                 if view[pos..pos + literal.len()] == literal[..]
                     && !file.is_excluded(pos)
                     && !file.line_text(pos).starts_with("const PROC: &str =")
+                    && !matches!(
+                        file.enclosing_fn(pos),
+                        Some("probe_nix_daemon" | "client_exec_path")
+                    )
                 {
                     found.push(file.at(pos));
                 }

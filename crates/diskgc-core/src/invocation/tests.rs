@@ -226,10 +226,14 @@ fn proposed_catalog_refuses_excluded_config_tiers_even_when_later() {
     for excluded in [
         "docker-build-cache",
         "podman-unreferenced",
+        "nix-garbage",
         "pip-cache",
         "pytest-cache",
     ] {
-        let roots = if excluded.starts_with("docker-") || excluded.starts_with("podman-") {
+        let roots = if excluded.starts_with("docker-")
+            || excluded.starts_with("podman-")
+            || excluded.starts_with("nix-")
+        {
             ""
         } else {
             "        roots: [/tmp]\n"

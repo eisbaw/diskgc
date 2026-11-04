@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::prune_backend::{self, Which};
+use super::prune_backend::BackendKind;
 use super::{
     CandidateQueue, FsUnionSourceRef, Measured, NegatedKind, NegatedSource, NotesOncePerRun,
     Protection, Refresh, Request, SourceKind, Tier, bounded_tier_timeout, deadline_of,
@@ -145,9 +145,9 @@ fn dry_run_inner<H: Host>(
             return report;
         }
     };
-    if let Some(which) = Which::of(tier) {
+    if let Some(which) = BackendKind::of(tier) {
         let started = host.now();
-        let inspected = prune_backend::inspect(host, measured.space, which);
+        let inspected = which.inspect_candidate(host, measured.space, tier);
         record_deadline_overrun(
             host,
             &mut report,
@@ -160,8 +160,7 @@ fn dry_run_inner<H: Host>(
             return deadline_before_plan(host, &measured, deadline, report, log, tier);
         }
         match inspected {
-            Ok(Binding::Bound(bound)) => {
-                let candidate = bound.candidate(tier);
+            Ok(Binding::Bound(candidate)) => {
                 log(&format!(
                     "{}: {} backend bound to {}",
                     tier.name,
@@ -289,9 +288,10 @@ fn dry_run_inner<H: Host>(
                 )
             }
         }
-        SourceKind::DockerBuildCache | SourceKind::DockerImages | SourceKind::PodmanImages => {
-            unreachable!("handled above")
-        }
+        SourceKind::DockerBuildCache
+        | SourceKind::DockerImages
+        | SourceKind::PodmanImages
+        | SourceKind::NixStore => unreachable!("handled above"),
     };
     record_deadline_overrun(host, &mut report, deadline, started, "plan", &request.path);
     // A deadline here keeps what was judged (TASK-227): each planner stops

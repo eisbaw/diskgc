@@ -26,12 +26,13 @@
 //!    run that tallied either leaves a snapshot or says why not (PRD: each
 //!    `ensure` that tallies leaves a snapshot).
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::backend::Binding;
 use crate::command_action::{self, Preflight, Ready};
 use crate::engine::Reason;
-use crate::host::{Delete, Host, MonoTime, SecondSignal};
+use crate::host::{Delete, Host, HostError, MonoTime, SecondSignal};
 use crate::hostlock::{self, LockError};
 use crate::profile::Action;
 use crate::report::{Final, Report, Status, after_lock_timeout, conclude, human_space_values};
@@ -168,7 +169,8 @@ pub fn reclaimable(tier: &Tier) -> Result<(), String> {
         | (SourceKind::Fs(_), Action::Delete { .. } | Action::Command { .. })
         | (SourceKind::DockerBuildCache, Action::DockerBuilderPrune)
         | (SourceKind::DockerImages, Action::DockerImagePrune { .. })
-        | (SourceKind::PodmanImages, Action::PodmanImagePrune { .. }) => Ok(()),
+        | (SourceKind::PodmanImages, Action::PodmanImagePrune { .. })
+        | (SourceKind::NixStore, Action::NixStoreGc) => Ok(()),
         (_, action) => Err(format!(
             "tier `{}` (`{}`): profile `{}` removes with `{action}`, which this build does not \
              run",
@@ -451,6 +453,10 @@ pub(super) enum Backend {
         client: Ready,
         bound: Bound,
     },
+    /// A Nix GC: the daemon bound under the host lock (bound again, its
+    /// socket pinned, right before the root check and the GC). The client
+    /// is the binding's own (docs/safety.md, nix-store, step 1).
+    Nix(crate::nix_backend::Bound),
 }
 
 impl Backend {
@@ -460,7 +466,7 @@ impl Backend {
     pub(super) fn command(&self) -> &Ready {
         match self {
             Self::Command(ready) => ready,
-            Self::Files | Self::Prune { .. } => {
+            Self::Files | Self::Prune { .. } | Self::Nix(_) => {
                 unreachable!("a command action runs only with its command resolved")
             }
         }
@@ -771,7 +777,16 @@ impl<H: Delete> Tallied<'_, H> {
                 else {
                     return Ok(None);
                 };
-                let Some(bound) = self.bind_backend(&tier, which, report, log)? else {
+                let space = self.measured.space;
+                let Some(bound) = self.bind_backend(
+                    &tier,
+                    which.name(),
+                    || prune_backend::inspect(self.host, space, which),
+                    |bound| bound.candidate(&tier),
+                    report,
+                    log,
+                )?
+                else {
                     return Ok(None);
                 };
                 Backend::Prune {
@@ -779,6 +794,29 @@ impl<H: Delete> Tallied<'_, H> {
                     client,
                     bound,
                 }
+            }
+            Action::NixStoreGc => {
+                // The pinned descriptors close here; the walk binds again,
+                // pins and compares right before the GC (safety.md,
+                // nix-store, step 7).
+                let space = self.measured.space;
+                let Some(bound) = self.bind_backend(
+                    &tier,
+                    prune_backend::NIX,
+                    || {
+                        crate::nix_backend::inspect(self.host, space).map(|binding| match binding {
+                            Binding::Bound(pinned) => Binding::Bound(pinned.bound),
+                            Binding::Skipped(skipped) => Binding::Skipped(skipped),
+                        })
+                    },
+                    |_| PathBuf::from(crate::nix_backend::STORE_DIR),
+                    report,
+                    log,
+                )?
+                else {
+                    return Ok(None);
+                };
+                Backend::Nix(bound)
             }
         };
         Ok(Some(PreparedTier { tier, backend }))
@@ -842,16 +880,18 @@ impl<H: Delete> Tallied<'_, H> {
     /// The backend of `tier` bound (docs/reference.md, Backend skips and
     /// errors). `Ok(None)`: the tier is excluded, as a skip of the backend
     /// or an error of the tier.
-    fn bind_backend(
+    fn bind_backend<B>(
         &self,
         tier: &Tier,
-        which: Which,
+        name: &str,
+        inspect: impl FnOnce() -> Result<Binding<B>, HostError>,
+        candidate: impl Fn(&B) -> PathBuf,
         report: &mut Report,
         log: &mut dyn FnMut(&str),
-    ) -> Result<Option<Bound>, PastDeadline> {
+    ) -> Result<Option<B>, PastDeadline> {
         let (host, deadline) = (self.host, self.deadline);
         let started = host.now();
-        let inspected = prune_backend::inspect(host, self.measured.space, which);
+        let inspected = inspect();
         record_deadline_overrun(
             host,
             report,
@@ -866,20 +906,16 @@ impl<H: Delete> Tallied<'_, H> {
         match inspected {
             Ok(Binding::Bound(bound)) => {
                 log(&format!(
-                    "{}: {} backend bound to {}",
+                    "{}: {name} backend bound to {}",
                     tier.name,
-                    which.name(),
-                    bound.candidate(tier).display()
+                    candidate(&bound).display()
                 ));
                 Ok(Some(bound))
             }
             Ok(Binding::Skipped(skip)) => {
                 log(&format!(
-                    "{}: skip {} backend: {}: {}",
-                    tier.name,
-                    which.name(),
-                    skip.reason,
-                    skip.detail
+                    "{}: skip {name} backend: {}: {}",
+                    tier.name, skip.reason, skip.detail
                 ));
                 report
                     .skipped
@@ -890,7 +926,7 @@ impl<H: Delete> Tallied<'_, H> {
                 record_error(
                     report,
                     log,
-                    run_error(tier, format!("bind {} backend: {error}", which.name())),
+                    run_error(tier, format!("bind {name} backend: {error}")),
                 );
                 Ok(None)
             }

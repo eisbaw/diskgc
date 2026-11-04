@@ -1077,6 +1077,53 @@ pub(crate) const GATED_ALLOWED: &[Allowed] = &[
         gate: Gate::Permit,
         matches: 1,
     },
+    // run_command_permitted's second half, shared with the Nix GC: starts
+    // the command a gated caller built, holding that caller's Permit.
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "start_command_permitted",
+        gate: Gate::Permit,
+        matches: 1,
+    },
+    // The deleting Nix runs (TASK-36): the root check (Nix's root discovery
+    // unlinks stale gcroots/auto registrations) and the GC, argv from
+    // diskgc_core::nix_backend's constants, exactly the child environment.
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "nix_command_permitted",
+        gate: Gate::Permit,
+        matches: 2,
+    },
+    // The read-only Nix queries: the closed NixQuery enum, argv from
+    // diskgc_core::nix_backend::query_argv, started only by
+    // run_nix_query_ungated.
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "nix_query_command",
+        gate: Gate::Ungated(
+            "closed NixQuery enum (version, config show store, store info) maps only to \
+             read-only constant argv",
+        ),
+        matches: 2,
+    },
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "nix_query_environment",
+        gate: Gate::Ungated(
+            "sets a Nix query's environment and working directory on a command \
+             nix_query_command made; builds and starts nothing",
+        ),
+        matches: 1,
+    },
+    Allowed {
+        file: "crates/diskgc-linux/src/host.rs",
+        function: "inherit_in_child",
+        gate: Gate::Ungated(
+            "adds a pre_exec hook (one inherited fd flag, the open-file limit) to a command \
+             one of the Nix builders above made; builds and starts nothing",
+        ),
+        matches: 1,
+    },
     // The sole ungated child-starting command: fixed, read-only Docker and
     // Podman queries, built from a closed QuerySpec (constant argv, fixed
     // working directory) and started only by run_backend_query_ungated.

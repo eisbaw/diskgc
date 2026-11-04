@@ -251,6 +251,8 @@ pub enum SourceKind {
     DockerImages,
     /// The bound local Podman store's images (kind `podman-images`).
     PodmanImages,
+    /// The bound Nix daemon's dead store paths (kind `nix-store`).
+    NixStore,
 }
 
 /// `--select EXPR` checked against a library and its roots bound
@@ -484,6 +486,7 @@ impl Tier {
             Finds::DockerBuildCache => SourceKind::DockerBuildCache,
             Finds::DockerImages => SourceKind::DockerImages,
             Finds::PodmanImages => SourceKind::PodmanImages,
+            Finds::NixStore => SourceKind::NixStore,
         };
         let mut idle_before: Option<IdleFor> = None;
         let mut negated = Vec::new();

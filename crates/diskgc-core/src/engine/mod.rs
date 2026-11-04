@@ -773,6 +773,11 @@ pub enum Reason {
     /// A backend tier's backend is one diskgc has not verified
     /// (docs/reference.md, Backend skips and errors).
     UnsupportedBackend,
+    /// A backend tier's backend is installed and selected but not serving
+    /// diskgc's user: its socket absent, the connection refused, or the
+    /// daemon not answering or refusing the user (docs/reference.md,
+    /// Backend skips and errors).
+    BackendUnavailable,
     /// An index unit that is not what discovery would find now: gone,
     /// replaced by another object under its name, or no longer found by
     /// its source under the tier's root (docs/architecture.md, The reclaim
@@ -783,7 +788,7 @@ pub enum Reason {
 impl Reason {
     /// Every reason (keep it next to [`Reason::as_str`], whose match is
     /// exhaustive: a new reason is added to both).
-    pub const ALL: [Reason; 32] = [
+    pub const ALL: [Reason; 33] = [
         Reason::Missing,
         Reason::NotOwner,
         Reason::Unreadable,
@@ -815,6 +820,7 @@ impl Reason {
         Reason::ProducerUnknown,
         Reason::RemoteBackend,
         Reason::UnsupportedBackend,
+        Reason::BackendUnavailable,
         Reason::Stale,
     ];
 
@@ -852,6 +858,7 @@ impl Reason {
             Self::ProducerUnknown => "producer_unknown",
             Self::RemoteBackend => "remote_backend",
             Self::UnsupportedBackend => "unsupported_backend",
+            Self::BackendUnavailable => "backend_unavailable",
             Self::Stale => "stale",
         }
     }
@@ -863,7 +870,7 @@ impl Reason {
 /// appear, because the report's reason is a [`Reason`]. The task that adds
 /// a producer adds the variant to [`Reason`] and removes the entry here
 /// (`every_skip_reason_has_a_vector` fails until it does).
-pub const RESERVED_REASONS: [(&str, &str); 1] = [("backend_unavailable", "TASK-36, TASK-113")];
+pub const RESERVED_REASONS: [(&str, &str); 0] = [];
 
 impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

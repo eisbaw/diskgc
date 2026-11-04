@@ -85,6 +85,7 @@ e2e: _gcroot-dev
     python3 tools/disk_stage.py containers just _runner e2e-runner-release --log-dir tmp/e2e-logs-release run --suite release --budget-secs 300
     python3 tools/disk_stage.py containers just _runner e2e-runner-release-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
     python3 tools/disk_stage.py containers just _e2e-docker fast 300
+    python3 tools/disk_stage.py containers just _e2e-nix-gc 900
     python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
     python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-release-tmp-reclaim
     python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-old-kernel-pidfd
@@ -136,6 +137,7 @@ e2e-full: _gcroot-dev
     python3 tools/disk_stage.py containers just _runner e2e-runner-release-debian --log-dir tmp/e2e-logs-release-debian run --suite release --budget-secs 300
     python3 tools/disk_stage.py containers just _e2e-debian
     python3 tools/disk_stage.py containers just _e2e-docker full 900
+    python3 tools/disk_stage.py containers just _e2e-nix-gc 900
     python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-historical-ctime
     python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-release-tmp-reclaim
     python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-old-kernel-pidfd
@@ -166,6 +168,13 @@ e2e-docker: _gcroot-dev
     python3 tools/disk_stage.py containers just _e2e-docker full 900
     just _e2e-cleanup
 
+# Nix GC tests in their own image: a container store and Nix daemon (TASK-36).
+e2e-nix-gc: _gcroot-dev
+    python3 tools/disk_stage.py check python3 tools/deadline.py 3600 just check
+    python3 tools/disk_stage.py flake-check nix build -L --no-link .#checks.x86_64-linux.e2e-tests
+    python3 tools/disk_stage.py containers just _e2e-nix-gc 900
+    just _e2e-cleanup
+
 # No dev shell root here, to stay fast: the gate recipes root it.
 # One container test by NAME, keeping the container on failure.
 e2e-one NAME:
@@ -179,6 +188,10 @@ e2e-debian-one NAME:
 e2e-docker-one NAME:
     python3 tools/disk_stage.py containers just _runner e2e-runner-docker --log-dir tmp/e2e-logs-docker one {{NAME}}
 
+# One Nix GC test by NAME in its image, kept on failure.
+e2e-nix-gc-one NAME:
+    python3 tools/disk_stage.py containers just _runner e2e-runner-nix-gc --log-dir tmp/e2e-logs-nix-gc one {{NAME}}
+
 # The Debian image's run, shared by e2e-debian and e2e-full; its own log
 # directory, since test names repeat across images.
 _e2e-debian:
@@ -187,6 +200,11 @@ _e2e-debian:
 # Run the selected native Docker Engine suite with its own logs and deadline.
 _e2e-docker SUITE BUDGET:
     just _runner e2e-runner-docker --log-dir tmp/e2e-logs-docker run --suite {{SUITE}} --budget-secs {{BUDGET}}
+
+# The Nix GC suite with its own logs, two containers at a time: each moves
+# a copy of its image's store onto a tmpfs (about 0.6 GiB of RAM each).
+_e2e-nix-gc BUDGET:
+    just _runner e2e-runner-nix-gc --log-dir tmp/e2e-logs-nix-gc run --suite fast --budget-secs {{BUDGET}} --jobs 2
 
 # Builds runner package NAME to an out-link under .gcroots/ (gitignored, at
 # the repo root so `cargo clean` keeps it) and runs it with ARGS. The

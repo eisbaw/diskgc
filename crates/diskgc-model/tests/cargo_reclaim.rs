@@ -1284,6 +1284,32 @@ impl Delete for Gated {
             "not in a test container",
         ))
     }
+    fn nix_roots(
+        &self,
+        _: &diskgc_core::host::NixClient<ModelFd>,
+        _: &ModelFd,
+        _: &[PathBuf],
+        _: &[(std::ffi::OsString, std::ffi::OsString)],
+        _: MonoTime,
+    ) -> Result<String, HostError> {
+        Err(HostError::sandbox_gate(
+            "run Nix root check",
+            "?",
+            "not in a test container",
+        ))
+    }
+    fn nix_gc(
+        &self,
+        _: &diskgc_core::host::NixClient<ModelFd>,
+        _: &ModelFd,
+        _: &diskgc_core::host::NixGc,
+    ) -> diskgc_core::host::CommandInvocation {
+        diskgc_core::host::CommandInvocation::NotStarted(HostError::sandbox_gate(
+            "run Nix GC",
+            "?",
+            "not in a test container",
+        ))
+    }
 }
 
 // ---- Step 3: one scan serves the parts within Freshness (TASK-173) ----

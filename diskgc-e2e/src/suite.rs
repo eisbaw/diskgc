@@ -42,9 +42,9 @@ use crate::{
     cargo_reclaim_suite, cargo_suite, cli_contract_suite, cli_runtime_suite, differential_suite,
     docker_suite, docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
     fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey,
-    lifecycle_suite, meson_suite, owner_pid_suite, packaging_suite, profile_vector_suite,
-    project_cache_suite, pytest_contract_suite, release_suite, scale_suite, signal_suite,
-    stdout_suite, temp_safety_suite, watch_suite,
+    lifecycle_suite, meson_suite, nix_gc_suite, owner_pid_suite, packaging_suite,
+    profile_vector_suite, project_cache_suite, pytest_contract_suite, release_suite, scale_suite,
+    signal_suite, stdout_suite, temp_safety_suite, watch_suite,
 };
 
 /// Which gate runs a test.
@@ -262,6 +262,75 @@ pub static DOCKER_ONLY_TESTS: &[(&str, &str)] = &[
         "needs native Docker Engine and BuildKit in the pinned dind image",
     ),
 ];
+
+/// Tests that need the Nix GC image's own store and Nix daemon
+/// (docs/testing.md, Nix GC; TASK-36). Never listed by another image: the
+/// others' `/nix/store` is read-only or absent, and none runs a daemon.
+pub static NIX_GC_ONLY_TESTS: &[(&str, &str)] = &[
+    (
+        "nix_gc_keeps_every_kind_of_root",
+        "needs the Nix GC image's own store and daemon",
+    ),
+    (
+        "nix_gc_trusted_and_untrusted_user",
+        "needs the Nix GC image's own store and daemon",
+    ),
+    (
+        "nix_gc_refuses_a_daemon_with_another_root_database",
+        "needs the Nix GC image's own store and daemon",
+    ),
+    (
+        "nix_gc_refuses_unlisted_versions",
+        "needs the Nix GC image's pinned clients",
+    ),
+    (
+        "nix_gc_refuses_single_user_layout",
+        "needs the Nix GC image's own store",
+    ),
+    (
+        "nix_gc_refuses_redirected_store",
+        "needs the Nix GC image's own store and daemon",
+    ),
+    (
+        "nix_gc_daemon_down_is_a_skip",
+        "needs the Nix GC image's own store and daemon",
+    ),
+    (
+        "nix_gc_sigterm_mid_gc",
+        "needs the Nix GC image's own store and daemon",
+    ),
+    (
+        "nix_gc_sigkill_leaves_the_host_lock_with_the_client",
+        "needs the Nix GC image's own store and daemon",
+    ),
+    (
+        "nix_gc_overshoot_is_bounded_by_the_last_path",
+        "needs the Nix GC image's own store and daemon",
+    ),
+    (
+        "nix_gc_optimised_store_frees_at_the_end",
+        "needs the Nix GC image's own store and daemon",
+    ),
+    (
+        "nix_gc_pinned_socket_survives_replacement",
+        "needs the Nix GC image's own store and daemon",
+    ),
+    (
+        "nix_gc_never_runs_a_wrapper_client",
+        "needs the Nix GC image's own store, daemon and client anchor",
+    ),
+    (
+        "nix_gc_never_loads_a_configured_plugin",
+        "needs the Nix GC image's own store, daemon and marker plugin",
+    ),
+];
+
+/// Every image's special lists, as [`Image::runs`] takes them.
+pub const ONLY: crate::image::Only<'static> = crate::image::Only {
+    nix: NIX_ONLY_TESTS,
+    docker: DOCKER_ONLY_TESTS,
+    nix_gc: NIX_GC_ONLY_TESTS,
+};
 
 pub const DOCKER_DIND_TEST: &str = "native_docker_engine_dind_smoke";
 pub const DOCKER_PACKAGING_TEST: &str = "docker_shipped_tmpfiles_and_example_work_in_container";
@@ -864,6 +933,90 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: docker_suite::native_docker_prune_child_keeps_lock_after_parent_kill,
+    },
+    Test {
+        name: "nix_gc_never_runs_a_wrapper_client",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_never_runs_a_wrapper_client,
+    },
+    Test {
+        name: "nix_gc_never_loads_a_configured_plugin",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_never_loads_a_configured_plugin,
+    },
+    Test {
+        name: "nix_gc_keeps_every_kind_of_root",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_keeps_every_kind_of_root,
+    },
+    Test {
+        name: "nix_gc_trusted_and_untrusted_user",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_trusted_and_untrusted_user,
+    },
+    Test {
+        name: "nix_gc_refuses_a_daemon_with_another_root_database",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_refuses_a_daemon_with_another_root_database,
+    },
+    Test {
+        name: "nix_gc_refuses_unlisted_versions",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_refuses_unlisted_versions,
+    },
+    Test {
+        name: "nix_gc_refuses_single_user_layout",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_refuses_single_user_layout,
+    },
+    Test {
+        name: "nix_gc_refuses_redirected_store",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_refuses_redirected_store,
+    },
+    Test {
+        name: "nix_gc_daemon_down_is_a_skip",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_daemon_down_is_a_skip,
+    },
+    Test {
+        name: "nix_gc_sigterm_mid_gc",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_sigterm_mid_gc,
+    },
+    Test {
+        name: "nix_gc_sigkill_leaves_the_host_lock_with_the_client",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_sigkill_leaves_the_host_lock_with_the_client,
+    },
+    Test {
+        name: "nix_gc_overshoot_is_bounded_by_the_last_path",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_overshoot_is_bounded_by_the_last_path,
+    },
+    Test {
+        name: "nix_gc_optimised_store_frees_at_the_end",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_optimised_store_frees_at_the_end,
+    },
+    Test {
+        name: "nix_gc_pinned_socket_survives_replacement",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_pinned_socket_survives_replacement,
     },
     Test {
         name: "native_docker_dangling_and_build_cache_prune",
@@ -1823,9 +1976,7 @@ fn listing() -> Result<(String, Vec<(String, Tier)>), String> {
         .iter()
         .map(|t| (t.name.to_owned(), t.tier))
         .chain(cargo_suite::listing(&toolchains));
-    let lines: Vec<_> = all
-        .filter(|(name, _)| image.runs(name, NIX_ONLY_TESTS, DOCKER_ONLY_TESTS))
-        .collect();
+    let lines: Vec<_> = all.filter(|(name, _)| image.runs(name, &ONLY)).collect();
     ensure!(!lines.is_empty(), "image {} lists no test", image.name);
     Ok((image.name, lines))
 }
@@ -1880,11 +2031,12 @@ pub fn run(name: &str) -> i32 {
         }
     };
     let image = match Image::load() {
-        Ok(image) if !image.runs(name, NIX_ONLY_TESTS, DOCKER_ONLY_TESTS) => {
+        Ok(image) if !image.runs(name, &ONLY) => {
             let base = name.split('@').next().unwrap_or(name);
             let why = NIX_ONLY_TESTS
                 .iter()
                 .chain(DOCKER_ONLY_TESTS.iter())
+                .chain(NIX_GC_ONLY_TESTS.iter())
                 .find(|(n, _)| *n == base)
                 .map_or("", |(_, why)| *why);
             eprintln!(
@@ -2913,6 +3065,18 @@ mod tests {
                 "{name} is in NIX_ONLY_TESTS but is no test"
             );
             assert!(why.len() > 20, "{name}: say why it is Nix-only");
+        }
+    }
+
+    /// The same for the Nix GC image's list: each a test, each says why.
+    #[test]
+    fn every_nix_gc_only_test_exists_and_says_why() {
+        for (name, why) in NIX_GC_ONLY_TESTS {
+            assert!(
+                TESTS.iter().any(|t| t.name == *name),
+                "{name} is in NIX_GC_ONLY_TESTS but is no test"
+            );
+            assert!(why.len() > 20, "{name}: say why it is Nix-GC-only");
         }
     }
 

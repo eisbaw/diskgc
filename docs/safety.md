@@ -3866,11 +3866,11 @@ Limits:
 
 ## `nix-store`
 
-Status: designed (TASK-118), unshipped. The profile loader refuses kind
-`nix-store` until TASK-36 implements this protocol with the vectors and
-container scenarios in [testing.md](testing.md#nix-store-backend-vectors)
-and admits the first version to the allowlist
-([reference.md](reference.md#backend-version-allowlist)).
+Status: designed (TASK-118), implemented (TASK-36) with the vectors and
+container scenarios in [testing.md](testing.md#nix-store-backend-vectors),
+CppNix 2.34.8 admitted ([reference.md](reference.md#backend-version-allowlist)).
+The built-in `nix-garbage` is in the development library only, pending
+Mark's admission; in no release catalog.
 
 The kind runs one Nix garbage collection through the **system Nix daemon,
 as diskgc's own user**, bounded by the remaining need:
@@ -3912,21 +3912,40 @@ byte bound. It never names a store path to delete.
 also `--dry-run`): read-only queries on `Host`, ungated. The
 first failing step decides the reason.
 
-1. **Client.** `nix-store` is resolved on diskgc's `PATH` and logged, like
-   a command action's program. Following its links must end in a store
-   path's `bin/` directory, `/nix/store/<hash>-<name>/bin/`, in which
-   `nix` is a regular executable owned by root and `nix-store` is a
-   symlink whose text is exactly `nix` (CppNix ships one multi-call binary
-   that dispatches on `argv[0]`; observed on 2.34.8). Not found:
-   `missing`. Anything else (a distribution's `/usr/bin/nix-store`, a
-   wrapper script): `unsupported_backend`. diskgc runs
-   `<that dir>/nix-store` and `<that dir>/nix`, never a `PATH` lookup
-   again: the directory lies inside an immutable store path, so the
-   version queried is the binary that runs, and `argv[0]` keeps the
-   dispatch. Every `nix` command below carries
-   `--extra-experimental-features nix-command` in its constant argv: a
-   stock `/etc/nix/nix.conf` does not enable it, and the child reads no
+1. **Client.** The installation's own client, never one diskgc's `PATH`
+   picks: the first of `/run/current-system/sw/bin/nix-store` (the NixOS
+   system profile) and `/nix/var/nix/profiles/default/bin/nix-store`
+   (root's default profile, the multi-user installer's) that leads to a
+   file. Its symlinks are followed one component at a time over the port,
+   never by the host, and every link on the way must be root's and lie in
+   a store path or in a directory of root's that group and others cannot
+   write: only an administrator chose it. The chain must end at a regular
+   executable file named `nix`, root's, in
+   `/nix/store/<hash>-nix-<admitted version>/bin/`, the store path and its
+   `bin/` root's and read-only, `nix-store` there a symlink whose text is
+   exactly `nix` (CppNix ships one multi-call binary that dispatches on
+   `argv[0]`), and the file an ELF executable, read on the descriptor
+   diskgc keeps: never a script or wrapper, which could answer the
+   version query and then run something else. The directory is the one
+   that holds the regular file (the development machine's chain:
+   [Evidence](#evidence-why-url-and-store-directory-checks-are-not-a-binding)).
+   Not found: `missing`. Anything else: `unsupported_backend`. Every Nix
+   child executes that descriptor (`/proc/self/fd/N`, `argv[0]` `nix` or
+   `nix-store`), so what runs is the file checked, whatever a path names
+   later. Every command below starts with `--option plugin-files ""`: no
+   plugin a configuration names is loaded (in 2.34.8 plugins load while
+   the first flags are processed, before the command runs, so a
+   `plugin-files` from `NIX_CONFIG` or a user's `nix.conf` would otherwise
+   run its code in diskgc's read-only query, dry runs included). Every
+   `nix` command also carries `--extra-experimental-features nix-command`:
+   a stock `/etc/nix/nix.conf` does not enable it, and the child reads no
    other configuration.
+   What this does not prove: that the binary at the anchor is the one the
+   daemon runs (an unprivileged user cannot read the daemon's executable,
+   checked on the development machine: `readlink /proc/<nix-daemon>/exe`
+   is refused), nor its contents beyond its name and ELF header: an ELF in
+   a store path named `…-nix-2.34.8` that root's profile names is
+   accepted.
 2. **Layout**, reached as in [Path traversal](#path-traversal) (no
    symlink on the way):
    - `/nix/store` is a directory owned by root with the sticky bit set
@@ -3973,7 +3992,11 @@ first failing step decides the reason.
    show store` runs in diskgc's own environment: it reflects `NIX_REMOTE`,
    `NIX_CONFIG` and the user's `nix.conf` and opens no store (observed:
    exit 0 for `ssh-ng://…` and `local?root=/nonexistent`). The value must
-   be `auto`, `daemon` or `unix:///nix/var/nix/daemon-socket/socket`.
+   be `auto`, `daemon` or `unix:///nix/var/nix/daemon-socket/socket`. It runs
+   in diskgc's own working directory too: a relative
+   `NIX_USER_CONF_FILES` names a file by it (observed: from a project
+   directory `nix.conf` selects `ssh-ng://…`, from `/` the same variable
+   reads nothing and Nix says `auto`).
    `auto` then selects that daemon: with the default state directory,
    which step 2 found writable only by root, and diskgc not root, Nix
    2.34.8 picks the daemon socket when it exists. Values
@@ -3991,7 +4014,11 @@ first failing step decides the reason.
    client list, and the daemon's version must be on the daemon list
    ([reference.md](reference.md#backend-version-allowlist)). Anything else,
    including `(Lix, like Nix)` and `(Determinate Nix …)`:
-   `unsupported_backend`, the detail naming both versions.
+   `unsupported_backend`, the detail naming the versions. The client's
+   version query runs first of the Nix commands, right after step 5's
+   variable check and before `nix config show store`: a client of another
+   variant is refused by its version line before any other query of it
+   runs (Lix's command line differs).
 
 A tier that passes is bound: its plan row has candidate `/nix/store`,
 `estimated_bytes: null` and the operation text. A dry run stops here; it
@@ -4001,10 +4028,15 @@ eligible.
 **Immediately before the GC** (reclaim only, under the host lock, when the
 tier's turn comes and the goal is not yet met):
 
-7. **Recheck.** Pin the socket again and compare device, inode, owner and
-   type with preflight; the client directory and the pinned query's daemon
-   version must be unchanged. Any difference: `changed`,
-   nothing run.
+7. **Recheck.** Steps 1 to 6 again, each fact compared with the
+   preflight's as soon as it is read and before any admission rule judges
+   it: the client directory and its `nix` file's device and inode, the
+   store's and the socket's device and inode
+   (before their owner and type are checked), the client's version line,
+   the pinned daemon's version and its trust in diskgc's user. Any
+   difference: `changed`, nothing more run (a daemon upgraded to a version
+   not on the list is `changed` too). The socket pinned here is the one
+   the root check and the GC go through.
 8. **Root database.** diskgc lists `/nix/var/nix/profiles` and each
    `/nix/var/nix/profiles/per-user/*` (one level each, at most 4,096
    entries per directory, no symlink followed) and takes every generation
@@ -4016,7 +4048,8 @@ tier's turn comes and the goal is not yet met):
    can delete old generations (diskgc never does). It then runs
    `nix-store --store unix:///proc/self/fd/<N> --query --roots <targets>`
    and requires each generation link to appear exactly as
-   `<link> -> <target>`. Nix reports a root under the path where its own
+   `<link> -> <target>` (one line each on standard output, observed on
+   2.34.8 for system and per-user generations). Nix reports a root under the path where its own
    root discovery found it, below its own state directory's `profiles`
    (`findRoots`, `findRootsNoTemp` in 2.34.8), so a daemon with another
    state directory reports other paths. A missing one:
@@ -4030,7 +4063,9 @@ tier's turn comes and the goal is not yet met):
    for it too, but its other roots are not the system's). This is a
    gated deleting run, not a query: Nix's root discovery unlinks
    registrations in `gcroots/auto` whose out-link no longer exists
-   (TASK-98), which the GC that follows does too, but a dry run must not.
+   (TASK-98) and the temporary-roots files of processes that are gone
+   (`removing stale temporary roots file`, observed on 2.34.8), which the
+   GC that follows does too, but a dry run must not.
    A generation removed between the listing and the query fails the
    check, closed. It repeats the GC's root discovery, including the
    runtime-root scan of `/proc`, so its time counts against the tier's
@@ -4087,10 +4122,22 @@ as a root; and diskgc's `/nix/store` is on the requested filesystem.
   protocol itself would put the check and the GC on one connection; that
   cost is not taken. This is a root-made change in a window of seconds.
 - **The state directory's identity**, beyond the generations (step 8).
+- **Another user's profiles can disable the tier.** The root check lists
+  every user's `per-user/<name>` directory: a user who keeps more than
+  1,024 generation links in total (or 4,096 entries in one directory)
+  makes it refuse (`unsupported_backend`), and a generation link to a
+  store path the daemon does not hold valid makes `--query --roots` fail
+  (an error). Either stops diskgc's GC for everyone until the operator
+  deletes the user's old generations; it never makes diskgc delete
+  anything.
 - **Runtime roots outside the daemon's PID namespace.** Nix protects store
   paths open or mapped by processes it can see; a process in another PID
   namespace that uses a store path without a root is not protected. This
   is Nix's limit, the same for its own GC.
+- **The same client between the checks and the exec.** The client
+  directory is a store path, which only the daemon writes; a GC by
+  someone else that collected the client itself between the recheck and
+  the exec makes the child fail to start (an error, nothing run).
 
 ### GC roots, profiles and generations are never removed
 
@@ -4161,9 +4208,14 @@ own race in that phase with concurrent optimisation (a link count read as
 - A GC can take minutes (root discovery including runtime roots from
   `/proc`, liveness per path, deletion, the `.links` scan). Deadlines are
   cooperative ([Deadlines](#deadlines)): at the tier's or the run's
-  deadline the client's process group gets SIGTERM, then SIGKILL after
-  10 s; SIGINT and SIGTERM to diskgc do the same and exit 130 / 143. The
-  action is reported with its measured delta.
+  deadline the client's process group gets SIGKILL at once, without the
+  10 s grace of a command action (the work is the daemon's, which stops
+  when its client hangs up; a TERMed client was observed to live on for
+  seconds, holding the host lock); SIGINT and SIGTERM to diskgc do the
+  same and exit 130 / 143. The action is reported with its measured
+  delta. A signal also ends the probe and every Nix query at once (an
+  error), so a hung daemon cannot hold a stopping diskgc for its 10 s
+  bounds.
 - What an interruption leaves: deleted paths were dead; Nix invalidates a
   path before deleting its files, so one interrupted mid-deletion is an
   invalid directory the next GC removes; unused `.links` entries wait for
@@ -4175,8 +4227,8 @@ own race in that phase with concurrent optimisation (a link count read as
 
 | Situation | Outcome |
 |---|---|
-| No `nix-store` on `PATH`, or no `/nix/store` | skip `missing` |
-| Client not a CppNix multi-call store path; single-user layout; symlinked or writable socket ancestor; `NIX_STATE_DIR`, `NIX_STORE_DIR`, `NIX_STORE` or `NIX_DAEMON_SOCKET_PATH` not the default; another local store selected; unlisted version or variant; a generation the daemon does not count as a root, none to check, or too many | skip `unsupported_backend` |
+| Neither client anchor leads to a file, or no `/nix/store` | skip `missing` |
+| Client not root's choice (a link on the way not root's, or in a directory others can write); not an ELF `nix` in a root-owned, read-only `/nix/store/<hash>-nix-<admitted version>/bin` with `nix-store -> nix`; single-user layout; symlinked or writable socket ancestor; `NIX_STATE_DIR`, `NIX_STORE_DIR`, `NIX_STORE` or `NIX_DAEMON_SOCKET_PATH` not the default; another local store selected; unlisted version or variant; a generation the daemon does not count as a root, none to check, or too many | skip `unsupported_backend` |
 | Remote store selected (`NIX_REMOTE`, `NIX_CONFIG`, `nix.conf`) | skip `remote_backend` |
 | `/nix/store` on another filesystem | skip `other_fs` |
 | Daemon socket absent; connection refused or `EACCES`; no magic answer within 10 s or end of file first (daemon not started, user refused by `allowed-users`) | skip `backend_unavailable` |
@@ -4208,15 +4260,58 @@ generations. Nix documents `real` and `state` as separate settings for the
 [local store](https://nix.dev/manual/nix/2.34/store/types/local-store) and
 [local daemon client](https://nix.dev/manual/nix/2.34/store/types/local-daemon-store.html).
 
+The client chain on the development machine (2026-11-04): the system's
+`nix-store` leads through `…f82x…-nix-2.34.8/bin/nix-store -> nix` to that
+wrapper output's `bin/nix`, itself a link into the CLI's store path
+`/nix/store/ima4…-nix-2.34.8/bin/nix`, whose `bin/` holds the `nix-store
+-> nix` link too; that `bin/` is the client (step 1). Its root's default
+profile has no Nix: `/run/current-system/sw/bin/nix-store` is the anchor
+there. In the Nix GC image root's default profile names the Nix under
+test.
+
 Verified on Nix 2.34.8 (2026-10-15): an untrusted, non-root user can
 delete dead store paths through the daemon (`nix-store --delete` on a
-freshly added path); `--gc --max-freed` uses the same daemon operation but
-has not been run on the development machine, so as not to delete its real
-garbage. The GC semantics above (`--max-freed` check, deletion order,
-byte count, `.links` phase, hang-up interruption, the daemon's refusal of
-`--ignore-liveness`) are read from the Nix 2.34.8 sources (`gc.cc`,
-`local-store.cc`, `unix/file-system.cc`, `daemon.cc`) and are to be
-confirmed by the container scenarios.
+freshly added path). The GC semantics above (`--max-freed` check, deletion
+order, byte count, `.links` phase, hang-up interruption, the daemon's
+refusal of `--ignore-liveness`) are read from the Nix 2.34.8 sources
+(`gc.cc`, `local-store.cc`, `unix/file-system.cc`, `daemon.cc`). Observed
+in the container scenarios (2026-11-04, CppNix 2.34.8 client and daemon,
+the daemon as container root on the container's own store; never on the
+development machine):
+
+- `--max-freed 1` deletes one dead path, prints `deleted more than 1
+  bytes; stopping`, and still runs the `deleting unused links` phase.
+- One 64 MiB dead path with a need of 1 MiB: the whole path goes,
+  67,108,864 bytes measured, one GC, goal met.
+- With `auto-optimise-store`, two dead paths sharing a 16 MiB file
+  through `.links` (link count 3): 16,785,408 bytes measured after the
+  GC, the shared file's `.links` entry gone with it.
+- Every kind of root survives (a direct root, an indirect out-link, two
+  system and two per-user generations, the input of a running build, a
+  file a process holds open), untrusted and trusted; the root check took
+  52 ms and 73 ms there, the GC 75 ms and 77 ms.
+- SIGTERM to diskgc while the GC deletes 10,000 paths (first round,
+  with a 10 s SIGTERM grace): the client did not end on its group's
+  SIGTERM at once (it lived 2.4 s and 11.9 s in two runs, the second
+  ended by the grace's SIGKILL); the host lock stayed held until it
+  ended; the daemon stopped (2,448 of 10,000 deleted) and a second GC
+  finished the rest. Hence SIGKILL at once (Host lock, deadlines and
+  signals). SIGKILL to diskgc as its client starts:
+  the client went on (571 ms) holding the inherited host lock, which was
+  free once it ended.
+- The daemon probe: the daemon answers the magic number; with
+  `allowed-users = root` it closes the connection first (end of file); a
+  stopped daemon's socket refuses. Each probe leaves one line in the
+  daemon's log, `unexpected Nix daemon error: read of 32768 bytes:
+  Connection reset by peer` (diskgc closes after the magic answer): two
+  per reclaim (preflight and recheck), one per dry run
+  ([reference.md](reference.md#backend-skips-and-errors)).
+- A configured plugin (`plugin-files` naming a missing file) makes a
+  plain `nix config show store` and `nix-store --version` fail as they
+  load it; with `--option plugin-files ""` first neither loads it (also
+  under `extra-plugin-files`, which 2.34.8 does not know). A relative
+  `NIX_USER_CONF_FILES=nix.conf` selecting `ssh-ng://…` is read from the
+  directory it is run in, and not from `/`.
 
 ## Command actions
 

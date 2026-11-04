@@ -11,6 +11,13 @@
       flake = false;
     };
     nixpkgs68.url = "github:NixOS/nixpkgs/63dacb46bf939521bdc93981b4cbb7ecb58427a0";
+    # Test-only: the CppNix the nix-store kind is admitted for (2.34.8), from
+    # the nixpkgs revision of the development machine's NixOS, whose `nix`
+    # is the same store path as that machine's system Nix (TASK-36).
+    nixpkgsNixUnderTest = {
+      url = "github:NixOS/nixpkgs/b25309931cfda5f0b8805f462a29897eeae50168";
+      flake = false;
+    };
     crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -30,6 +37,7 @@
       nixpkgs515,
       nixpkgs58,
       nixpkgs68,
+      nixpkgsNixUnderTest,
       crane,
       rust-overlay,
       zephyr-src,
@@ -47,6 +55,7 @@
       pkgs515 = import nixpkgs515 { inherit system; };
       pkgs58 = import nixpkgs58 { inherit system; };
       pkgs68 = import nixpkgs68 { inherit system; };
+      pkgsNixUnderTest = import nixpkgsNixUnderTest { inherit system; };
       inherit (pkgs) lib;
 
       # The product toolchain, pinned by rust-toolchain.toml (single source).
@@ -1031,6 +1040,88 @@
         };
       };
 
+      # The Nix GC image (docs/testing.md, Nix GC; TASK-36): its own Nix
+      # store and database (`includeNixDB`: the image's paths registered and
+      # rooted under gcroots/docker), never the host's, and a multi-user Nix
+      # whose daemon the tests start as container root. The Nix under test
+      # is CppNix 2.34.8 (the admitted version, nix_backend.rs); the other
+      # client, reached only through /opt/nix-clients, is the one its
+      # version refusal is tested with: CppNix from this flake's nixpkgs
+      # (another version; Lix and other variants are refused by the same
+      # allowlist, covered by the model vectors only). Its closure is
+      # registered and rooted through nixGcClients, so the image's own paths
+      # are never garbage.
+      nixUnderTest =
+        assert pkgsNixUnderTest.nix.version == "2.34.8";
+        pkgsNixUnderTest.nix;
+      # A Nix plugin that only marks that it was loaded (its constructor
+      # creates /tmp/nix-plugin-loaded): the regression that no configured
+      # plugin runs in a diskgc child (TASK-36 review, Codex 2). Built with
+      # the Nix under test's toolchain, so it loads into that Nix.
+      nixMarkerPlugin = pkgsNixUnderTest.runCommandCC "diskgc-e2e-nix-marker-plugin" { } ''
+        mkdir -p $out/lib
+        cat > marker.c <<'C'
+        #include <fcntl.h>
+        #include <unistd.h>
+        __attribute__((constructor)) static void loaded(void) {
+          int fd = open("/tmp/nix-plugin-loaded", O_WRONLY | O_CREAT, 0644);
+          if (fd >= 0) close(fd);
+        }
+        C
+        $CC -shared -fPIC -o $out/lib/libdiskgc-e2e-marker.so marker.c
+      '';
+      nixGcClients = pkgs.runCommand "diskgc-e2e-nix-clients" { } ''
+        mkdir -p $out/clients
+        ln -s ${pkgs.nix} $out/clients/nix-${pkgs.nix.version}
+        ln -s ${nixMarkerPlugin}/lib/libdiskgc-e2e-marker.so $out/marker-plugin.so
+      '';
+      e2eNixGcImage = pkgs.dockerTools.streamLayeredImage {
+        name = "localhost/diskgc-e2e-nix-gc";
+        contents = [
+          pkgs.busybox
+          pkgs.strace
+          # systemd-tmpfiles, which the harness applies the shipped rule
+          # with at setup (the under-test directory links to it).
+          pkgs.systemd
+          nixUnderTest
+          nixGcClients
+        ];
+        includeNixDB = true;
+        fakeRootCommands = ''
+          ${e2eImageCommon [
+            "name nix-gc"
+            "toolchains none"
+            "tests nix-gc"
+            "tmpfiles /opt/diskgc-e2e/bin/systemd-tmpfiles"
+          ]}
+          # The build group of a multi-user store (`/nix/store` is
+          # 1775 root:nixbld); builds run as the daemon's root here
+          # (build-users-group empty), so it has no members.
+          printf '%s\n' 'nixbld:x:30000:' >> etc/group
+          ln -s ${nixGcClients}/clients opt/nix-clients
+          ln -s ${nixGcClients}/marker-plugin.so opt/nix-marker-plugin.so
+          # The installation's client anchor (nix_backend::CLIENT_ANCHORS):
+          # root's default profile names the Nix under test, as a
+          # multi-user install's does.
+          mkdir -p nix/var/nix/profiles
+          ln -s ${nixUnderTest} nix/var/nix/profiles/default
+          # A stock system configuration (no nix-command): the client's
+          # argv must enable what it uses. No substituters: the container
+          # has no network.
+          mkdir -p etc/nix
+          printf '%s\n' \
+            'build-users-group =' \
+            'sandbox = false' \
+            'substituters =' > etc/nix/nix.conf
+          chmod 0644 etc/nix/nix.conf
+        '';
+        config = {
+          Cmd = [ "/bin/sh" ];
+          Env = [ "PATH=/bin" ];
+          WorkingDir = "/";
+        };
+      };
+
       # The host-side runner with the image and binaries baked into its
       # arguments: `nix run .#e2e-runner -- run --suite fast`. A compiled
       # wrapper (makeBinaryWrapper), not a shell script.
@@ -1056,6 +1147,7 @@
       # The same runner on the Debian image: `nix run .#e2e-runner-debian`.
       e2eRunnerDebian = mkE2eRunner "diskgc-e2e-runner-debian" e2eDebianImage "standard" e2eUnderTest;
       e2eRunnerDocker = mkE2eRunner "diskgc-e2e-runner-docker" e2eDockerImage "dind" e2eUnderTest;
+      e2eRunnerNixGc = mkE2eRunner "diskgc-e2e-runner-nix-gc" e2eNixGcImage "standard" e2eUnderTest;
       e2eRunnerRelease = mkE2eRunner "diskgc-e2e-runner-release" e2eBaseImage "standard" e2eReleaseUnderTest;
       e2eRunnerReleaseDebian = mkE2eRunner "diskgc-e2e-runner-release-debian" e2eDebianImage "standard" e2eReleaseUnderTest;
       vmHistoricalCtime = import ./diskgc-e2e/vm-historical-ctime.nix {
@@ -1174,12 +1266,14 @@
         e2e-runner = e2eRunner;
         e2e-runner-debian = e2eRunnerDebian;
         e2e-runner-docker = e2eRunnerDocker;
+        e2e-runner-nix-gc = e2eRunnerNixGc;
         e2e-runner-release = e2eRunnerRelease;
         e2e-runner-release-debian = e2eRunnerReleaseDebian;
         e2e-base-image = e2eBaseImage;
         e2e-vm-image = e2eVmImage;
         e2e-debian-image = e2eDebianImage;
         e2e-docker-image = e2eDockerImage;
+        e2e-nix-gc-image = e2eNixGcImage;
         e2e-under-test = e2eUnderTest;
         e2e-release-under-test = e2eReleaseUnderTest;
       }
@@ -1476,6 +1570,7 @@
         e2e-runner = e2eRunner;
         e2e-runner-debian = e2eRunnerDebian;
         e2e-runner-docker = e2eRunnerDocker;
+        e2e-runner-nix-gc = e2eRunnerNixGc;
         e2e-runner-release = e2eRunnerRelease;
         e2e-runner-release-debian = e2eRunnerReleaseDebian;
       }

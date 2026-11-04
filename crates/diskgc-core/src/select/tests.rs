@@ -24,7 +24,7 @@ use crate::profile::{self, Library};
 const TEST_PROFILES: &str = include_str!("test-profiles.yaml");
 
 /// STAND-INS for kinds that have no profile schema yet.
-const NOT_BUILT_IN_KINDS: &[(&str, Kind, &str)] = &[("nix-garbage", Kind::NixStore, "nix GC")];
+const NOT_BUILT_IN_KINDS: &[(&str, Kind, &str)] = &[];
 
 /// A source's action: a real one, or a stand-in's description.
 #[derive(Debug, Clone, PartialEq, Eq)]

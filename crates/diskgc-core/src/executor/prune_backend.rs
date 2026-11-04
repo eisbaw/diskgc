@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use crate::backend::Binding;
 use crate::docker_backend::{self, DockerInfo, Storage};
 use crate::host::{Host, HostError};
+use crate::nix_backend;
 use crate::places::Space;
 use crate::podman_backend;
 use crate::profile::Action;
@@ -31,7 +32,7 @@ impl Which {
             SourceKind::DockerBuildCache => Some(Self::Docker(Storage::BuildCache)),
             SourceKind::DockerImages => Some(Self::Docker(Storage::Images)),
             SourceKind::PodmanImages => Some(Self::Podman),
-            SourceKind::CargoTarget | SourceKind::Fs(_) => None,
+            SourceKind::CargoTarget | SourceKind::Fs(_) | SourceKind::NixStore => None,
         }
     }
 
@@ -166,5 +167,55 @@ impl Bound {
                 unreachable!("Podman tier with non-Podman action admitted by ensure")
             }
         }
+    }
+}
+
+/// Any backend kind, as the plan sees it: a prune ([`Which`]) or the Nix
+/// GC (kind `nix-store`, [`crate::nix_backend`], whose reclaim is
+/// [`super::Reclaim::walk_nix`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BackendKind {
+    Prune(Which),
+    Nix,
+}
+
+/// The Nix backend's name in log lines and errors.
+pub(super) const NIX: &str = "Nix";
+
+impl BackendKind {
+    /// `None`: the tier is not of a backend kind.
+    pub(super) fn of(tier: &Tier) -> Option<Self> {
+        match tier.source {
+            SourceKind::NixStore => Some(Self::Nix),
+            _ => Which::of(tier).map(Self::Prune),
+        }
+    }
+
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Prune(which) => which.name(),
+            Self::Nix => NIX,
+        }
+    }
+
+    /// Bind the backend for the plan: its candidate, the storage it frees.
+    /// The Nix binding's pinned descriptors are closed here; the reclaim
+    /// binds again before it acts.
+    pub(super) fn inspect_candidate<H: Host>(
+        self,
+        host: &H,
+        space: Space,
+        tier: &Tier,
+    ) -> Result<Binding<PathBuf>, HostError> {
+        Ok(match self {
+            Self::Prune(which) => match inspect(host, space, which)? {
+                Binding::Bound(bound) => Binding::Bound(bound.candidate(tier)),
+                Binding::Skipped(skipped) => Binding::Skipped(skipped),
+            },
+            Self::Nix => match nix_backend::inspect(host, space)? {
+                Binding::Bound(_) => Binding::Bound(PathBuf::from(nix_backend::STORE_DIR)),
+                Binding::Skipped(skipped) => Binding::Skipped(skipped),
+            },
+        })
     }
 }

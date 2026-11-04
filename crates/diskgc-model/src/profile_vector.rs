@@ -138,6 +138,14 @@ pub struct Expected {
     /// order; absent: not compared (the invariants still apply).
     #[serde(default)]
     pub commands: Option<Vec<CommandVerdict>>,
+    /// Complete list of the reclaim's Nix children (queries, the root
+    /// check, the GC), in order: argv and environment; absent: not
+    /// compared (a dry run never runs the root check or the GC either way).
+    #[serde(default)]
+    pub nix_commands: Option<Vec<NixCommandVerdict>>,
+    /// The same for the dry run, which runs read-only queries only.
+    #[serde(default)]
+    pub dry_run_nix_commands: Option<Vec<NixCommandVerdict>>,
     /// A subset of the reclaim's JSON report: every key given must be
     /// there with that value (objects recursively, arrays elementwise).
     #[serde(default)]
@@ -201,6 +209,41 @@ pub struct CommandVerdict {
     pub cwd: PathBuf,
     /// The executable followed by its arguments.
     pub argv: Vec<String>,
+}
+
+/// One Nix child ([`crate::host::NixCall`]).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NixCommandVerdict {
+    /// The program followed by its arguments; the pinned socket is
+    /// `unix:///proc/self/fd/N`.
+    pub argv: Vec<String>,
+    /// Exactly these `NAME=VALUE`s; absent: diskgc's own environment.
+    #[serde(default)]
+    pub env: Option<Vec<String>>,
+}
+
+/// The Nix children of a run, as a vector states them.
+fn nix_commands(host: &ModelHost) -> Vec<NixCommandVerdict> {
+    host.trace()
+        .iter()
+        .filter_map(|call| call.nix.as_ref())
+        .map(|nix| NixCommandVerdict {
+            argv: nix
+                .argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
+            env: nix.environment.as_ref().map(|environment| {
+                environment
+                    .iter()
+                    .map(|(name, value)| {
+                        format!("{}={}", name.to_string_lossy(), value.to_string_lossy())
+                    })
+                    .collect()
+            }),
+        })
+        .collect()
 }
 
 /// What a passing vector produced, for coverage questions asked of the
@@ -395,9 +438,23 @@ impl ProfileVector {
         if let Some(subset) = &self.expect.dry_run_report {
             json_subset(subset, &json(&dry_run)?, "dry_run_report")?;
         }
-        for op in [Op::Unlinkat, Op::Fchmod, Op::RunCommand] {
+        for op in [
+            Op::Unlinkat,
+            Op::Fchmod,
+            Op::RunCommand,
+            Op::NixRoots,
+            Op::NixGc,
+        ] {
             if planning.trace().iter().any(|call| call.op == op) {
                 return Err(format!("dry-run called {op}"));
+            }
+        }
+        if let Some(expected) = &self.expect.dry_run_nix_commands {
+            let actual = nix_commands(&planning);
+            if &actual != expected {
+                return Err(format!(
+                    "dry-run nix_commands {actual:#?}, expected {expected:#?}"
+                ));
             }
         }
 
@@ -484,7 +541,13 @@ impl ProfileVector {
         };
         let host = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
         let warnings = invocation::check_roots(&host, &config);
-        for op in [Op::Unlinkat, Op::Fchmod, Op::RunCommand] {
+        for op in [
+            Op::Unlinkat,
+            Op::Fchmod,
+            Op::RunCommand,
+            Op::NixRoots,
+            Op::NixGc,
+        ] {
             if host.trace().iter().any(|call| call.op == op) {
                 return Err(format!("check called {op}"));
             }
@@ -608,6 +671,7 @@ impl ProfileVector {
         // action). An action runs at most once; a run left over is a
         // command diskgc had no checked candidate for.
         let mut unpaired: Vec<(&PathBuf, Option<&str>)> = Vec::new();
+        let mut nix_actions = 0;
         for entry in &reclaim.actions {
             match action_of(library, &entry.profile)? {
                 Action::Command { .. } => unpaired.push((&entry.candidate, None)),
@@ -617,6 +681,7 @@ impl ProfileVector {
                 Action::PodmanImagePrune { .. } => {
                     unpaired.push((&entry.candidate, Some("podman")));
                 }
+                Action::NixStoreGc => nix_actions += 1,
                 Action::Delete { .. } | Action::CargoLockProtocol => {}
             }
         }
@@ -653,6 +718,24 @@ impl ProfileVector {
                 "command action {} has no run in it or its parent",
                 candidate.display()
             ));
+        }
+        // A Nix action is its one GC; a GC is a Nix action's.
+        let gcs = host
+            .trace()
+            .iter()
+            .filter(|call| call.op == Op::NixGc)
+            .count();
+        if gcs != nix_actions {
+            return Err(format!(
+                "{gcs} Nix GC run(s) for {nix_actions} nix-store action(s): each action is \
+                 exactly one GC"
+            ));
+        }
+        if let Some(expected) = &self.expect.nix_commands {
+            let actual = nix_commands(host);
+            if &actual != expected {
+                return Err(format!("nix_commands {actual:#?}, expected {expected:#?}"));
+            }
         }
         if let Some(expected) = &self.expect.commands {
             let actual: Vec<CommandVerdict> = runs

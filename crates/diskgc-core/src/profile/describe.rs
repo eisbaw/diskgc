@@ -138,6 +138,7 @@ fn action_type(action: &Action) -> &'static str {
         Action::DockerImagePrune { all: true } => "docker_image_prune_all",
         Action::PodmanImagePrune { all: false } => "podman_image_prune",
         Action::PodmanImagePrune { all: true } => "podman_image_prune_all",
+        Action::NixStoreGc => "nix_store_gc",
     }
 }
 
@@ -203,7 +204,11 @@ pub fn list_text(library: &Library) -> String {
                     Roots::Required => "required".to_owned(),
                     Roots::Backend => "daemon".to_owned(),
                 },
-                s.checkouts.as_str().to_owned(),
+                if matches!(s.finds, Finds::NixStore) {
+                    dash()
+                } else {
+                    s.checkouts.as_str().to_owned()
+                },
             ),
             Body::Filter(_) => (dash(), dash(), dash(), dash()),
         };
@@ -289,7 +294,7 @@ fn action_json(action: &Action) -> Json {
     let (make_writable, command, cwd) = match action {
         Action::Delete { make_writable } => (Json::Bool(*make_writable), None, None),
         Action::Command { argv, cwd } => (Json::Null, Some(argv), *cwd),
-        Action::CargoLockProtocol => (Json::Null, None, None),
+        Action::CargoLockProtocol | Action::NixStoreGc => (Json::Null, None, None),
         Action::DockerBuilderPrune
         | Action::DockerImagePrune { .. }
         | Action::PodmanImagePrune { .. } => (Json::Null, None, None),
@@ -314,7 +319,7 @@ fn find_json(source: &Source) -> Json {
             Json::str(entry_type.name()),
         ),
         Finds::CargoTargets => (Json::Null, Json::Null, Json::Null),
-        Finds::DockerBuildCache | Finds::DockerImages | Finds::PodmanImages => {
+        Finds::DockerBuildCache | Finds::DockerImages | Finds::PodmanImages | Finds::NixStore => {
             (Json::Null, Json::Null, Json::Null)
         }
     };
@@ -349,6 +354,9 @@ pub fn profile_json(p: &Profile) -> Json {
         Body::Source(source) => &source.where_,
         Body::Filter(where_) => where_,
     };
+    // Kind nix-store takes no `checkouts` (docs/reference.md, `profiles`
+    // command): it has no file candidates.
+    let nix_store = source.is_some_and(|s| matches!(s.finds, Finds::NixStore));
     Json::Obj(vec![
         ("name", Json::str(&p.name)),
         ("origin", Json::str(p.origin.name())),
@@ -368,7 +376,9 @@ pub fn profile_json(p: &Profile) -> Json {
         ("action", Json::opt(source, |s| action_json(&s.action))),
         (
             "checkouts",
-            Json::opt(source, |s| Json::str(s.checkouts.as_str())),
+            Json::opt(source.filter(|_| !nix_store), |s| {
+                Json::str(s.checkouts.as_str())
+            }),
         ),
         (
             "examples",
@@ -538,6 +548,10 @@ fn yaml_action(action: &Action) -> String {
         Action::DockerImagePrune { all: true } => "  action: docker-image-prune-all\n".to_owned(),
         Action::PodmanImagePrune { all: false } => "  action: podman-image-prune\n".to_owned(),
         Action::PodmanImagePrune { all: true } => "  action: podman-image-prune-all\n".to_owned(),
+        Action::NixStoreGc => {
+            "  # action: one bounded GC through the bound Nix daemon, fixed by kind nix-store\n"
+                .to_owned()
+        }
     }
 }
 
@@ -608,7 +622,11 @@ pub fn show_yaml(profile: &Profile, config: Option<&Path>) -> String {
                 out.push_str(&format!("  min_idle_for: {}\n", format_duration(minimum.0)));
             }
             out.push_str(&yaml_action(&source.action));
-            out.push_str(&format!("  checkouts: {}\n", source.checkouts.as_str()));
+            // Kind nix-store takes no `checkouts` (it has no file
+            // candidates); every other source spells out its setting.
+            if !matches!(source.finds, Finds::NixStore) {
+                out.push_str(&format!("  checkouts: {}\n", source.checkouts.as_str()));
+            }
             if matches!(source.finds, Finds::Paths { .. }) {
                 out.push_str("  examples:\n");
                 if let Some(root) = &source.examples.root {

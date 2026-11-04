@@ -172,12 +172,14 @@ const CATEGORIES: [(&str, &[&str]); 4] = [
 fn not_applicable(action: &Action) -> &'static [&'static str] {
     match action {
         // Docker and Podman prunes act on a backend's own store, whose
-        // protections are the backend's (containers using an image);
-        // protect and !profile take only fs and cargo-target sources, and no
-        // walk runs (docs/safety.md, Docker kinds, Podman images).
+        // protections are the backend's (containers using an image), and
+        // the Nix GC on the store whose roots are Nix's; protect and
+        // !profile take only fs and cargo-target sources, and no walk runs
+        // (docs/safety.md, Docker kinds, Podman images, nix-store).
         Action::DockerBuilderPrune
         | Action::DockerImagePrune { .. }
-        | Action::PodmanImagePrune { .. } => &["in_use", "protected_or_negated", "nested_guard"],
+        | Action::PodmanImagePrune { .. }
+        | Action::NixStoreGc => &["in_use", "protected_or_negated", "nested_guard"],
         Action::Delete { .. } | Action::CargoLockProtocol | Action::Command { .. } => &[],
     }
 }
