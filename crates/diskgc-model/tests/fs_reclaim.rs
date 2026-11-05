@@ -2923,7 +2923,9 @@ fn a_blocking_scan_is_replaced_at_the_short_limit() {
 /// any candidate is in use unknown (`in_use_unknown`, not `in_use` with
 /// evidence it does not have), and those skips count toward the tier's
 /// three-in-a-row breaker: after three, the rest of the tier is skipped
-/// unchecked, without a scan each.
+/// unchecked, without a scan each. Waiting would not end such a process
+/// (unlike a busy host, TASK-340: no back-off), and the unchecked ones
+/// name it: cause `unreadable_process` and its pid, not a busy host.
 #[test]
 fn an_unreadable_process_counts_toward_the_in_use_unknown_breaker() {
     let tree: String = ["a", "b", "c", "d", "e"]
@@ -2935,6 +2937,7 @@ fn an_unreadable_process_counts_toward_the_in_use_unknown_breaker() {
         &tree,
         "  - {pid: 9, exe: /usr/bin/tool, proc: failed}\n",
     ));
+    let started = host.now();
     let report = ensure(&host, &tmp("profile:pytest-of-dir"));
     assert!(actions(&report).is_empty(), "{report:#?}");
     let reasons: Vec<Reason> = report.skipped.iter().map(|s| s.reason).collect();
@@ -2944,7 +2947,21 @@ fn an_unreadable_process_counts_toward_the_in_use_unknown_breaker() {
         .iter()
         .partition(|s| !s.detail.as_deref().unwrap_or("").starts_with("not checked"));
     assert_eq!((checked.len(), unchecked.len()), (3, 2), "{report:#?}");
-    for skip in checked {
+    // The tier's back-off starts at 2 s; the run's own pauses (re-reads of
+    // the refused process) are far shorter.
+    let took = host.now().saturating_since(started);
+    assert!(
+        took < Duration::from_secs(2),
+        "no back-off for a process that cannot be inspected: {took:?}"
+    );
+    for skip in checked.iter().chain(&unchecked) {
+        assert_eq!(
+            skip.unknown_cause,
+            Some(diskgc_core::engine::UnknownCause::UnreadableProcess),
+            "{skip:?}"
+        );
+    }
+    for skip in checked.into_iter().chain(unchecked) {
         assert_eq!(
             skip.process_blockers
                 .as_deref()

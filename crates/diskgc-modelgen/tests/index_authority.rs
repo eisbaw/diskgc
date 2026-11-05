@@ -491,9 +491,11 @@ fn acted(report: &Report) -> BTreeSet<PathBuf> {
     report.actions.iter().map(|a| a.candidate.clone()).collect()
 }
 
-/// Whether `skip` is one the busy-host breaker made: after three
-/// candidates in a row of a tier end `in_use_unknown`, the tier's rest is
-/// skipped `in_use_unknown` unchecked (docs/safety.md, In use: Freshness).
+/// Whether `skip` is one the three-in-a-row breaker made: after three
+/// candidates in a row of a tier end `in_use_unknown` for a cause other
+/// than a busy host (here, a process diskgc cannot read; a busy host makes
+/// the tier back off instead, TASK-340), the tier's rest is skipped
+/// `in_use_unknown` unchecked (docs/safety.md, In use: Freshness).
 /// The detail is the only mark of it in the report;
 /// [`a_reordered_queue_moves_the_busy_host_breaker`] fails if it changes.
 fn breaker_skip(skip: &SkipEntry) -> bool {

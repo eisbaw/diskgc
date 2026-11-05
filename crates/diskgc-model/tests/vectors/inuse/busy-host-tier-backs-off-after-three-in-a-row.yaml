@@ -1,9 +1,11 @@
 # `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
-# TASK-144: three candidates in a row of one tier end `in_use_unknown`
-# (every scan finishes 2 s after it started, twice the freshness bound):
-# the host is taken to be too busy for this run, and the tier's remaining
-# candidates are skipped `in_use_unknown` unchecked, without more scans
-# (nine stale scans, not fifteen). Nothing is deleted; exit 1, not 3.
+# TASK-144, TASK-340: three candidates in a row of one tier end
+# `in_use_unknown` (each of the first nine scans finishes 2 s after it
+# started, twice the freshness bound): the host is taken to be too busy for
+# now, and the tier backs off (2 s) before checking the fourth, instead of
+# skipping its rest unchecked. The host has settled by then: the fourth and
+# fifth are checked on fresh scans and reclaimed. Nothing is deleted on a
+# stale scan; exit 1 (every candidate judged, still below --min-free).
 profile_vector: 1
 user_profiles:
   - {"name": "zephyr-tmp-probe", "find": {"roots": ["/tmp"], "paths": ["zephyr-*"], "type": "dir"}, "action": "delete", "examples": {"match": ["/tmp/zephyr-scratch"]}}
@@ -44,12 +46,10 @@ expect:
     - {candidate: /tmp/zephyr-4}
     - {candidate: /tmp/zephyr-5}
   reclaim_exit: 1
-  actions: []
-  removed: []
+  actions: [/tmp/zephyr-4, /tmp/zephyr-5]
+  removed: [/tmp/zephyr-4, /tmp/zephyr-5]
   skipped:
     - {candidate: /tmp/zephyr-1, reason: in_use_unknown}
     - {candidate: /tmp/zephyr-2, reason: in_use_unknown}
     - {candidate: /tmp/zephyr-3, reason: in_use_unknown}
-    - {candidate: /tmp/zephyr-4, reason: in_use_unknown}
-    - {candidate: /tmp/zephyr-5, reason: in_use_unknown}
-  preserved: [/tmp/zephyr-1/data, /tmp/zephyr-2/data, /tmp/zephyr-3/data, /tmp/zephyr-4/data, /tmp/zephyr-5/data]
+  preserved: [/tmp/zephyr-1/data, /tmp/zephyr-2/data, /tmp/zephyr-3/data]

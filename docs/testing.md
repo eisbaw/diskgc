@@ -577,9 +577,32 @@ Model scenarios required by [safety.md](safety.md) and
 - a host too busy for a fresh in-use scan (every scan finishing older
   than the freshness bound): nothing is deleted on a stale scan, the
   candidate is skipped `in_use_unknown` after its three attempts and the
-  next one is still tried, and after three in a row the tier's rest is
-  skipped unchecked, any other outcome resetting the count
-  (`vectors/inuse/busy-host-*`, TASK-144);
+  next one is still tried, any other outcome resetting the count
+  (`vectors/inuse/busy-host-*`, TASK-144); after three in a row the tier
+  backs off before each further check, the pause growing, and checks
+  every candidate it reaches in full (TASK-340; diskgc-model
+  `tests/busy_host.rs` through the executor): a storm that settles is
+  waited out and the rest reclaimed, in a plain, a union and a Cargo
+  tier; a storm of exactly three costs one pause and two in a row none; a
+  storm until the deadline deletes nothing, uses the deadline and no more,
+  ends `deadline` (exit 124, not `exhausted`) with the unreached
+  candidates in no row and `kept` counting only the checked ones; a pause
+  that oversleeps the deadline ends at once and is reported in
+  `overruns`; a tier's own `timeout` reached during a storm excludes the
+  tier with an error naming the busy host, and the next tier runs; space
+  freed by someone else during a pause ends the tier at the goal without
+  another deletion; a signal ends a pause within one slice. A `watch`
+  cycle in such a storm holds the lock to the cycle's deadline and no
+  longer, records `deadline` (class `retry`), and the next cycle reclaims
+  (`tests/watch.rs`,
+  `a_busy_host_holds_a_cycle_to_its_deadline_and_the_next_cycle_reclaims`).
+  A process that cannot be inspected counts toward the three but skips
+  the tier's rest without a back-off, each skip naming it
+  (`unreadable_process`, its pid; diskgc-model
+  `an_unreadable_process_counts_toward_the_in_use_unknown_breaker`). Not
+  in a container: a fork storm cannot be timed to diskgc's listings there
+  (the kernel cases pin only that no unsettled scan clears), and a process
+  diskgc cannot inspect, which a container can make, does not back off;
 - a bind mount of a subdirectory of a protected tree (TASK-260;
   `/mnt/x` binds `/gen/x` of `/tmp`'s filesystem): a candidate under the
   bind is `protected` while the match is the bind source's ancestor
@@ -1924,7 +1947,9 @@ rests on its documentation, an isolated-store prune of dangling images
   sockets and so can name another of a candidate's refusals than the
   eligibility walk's first, a reporting difference only (TASK-261: the
   sizing walk's refusal reason differs from the eligibility walk's), or
-  the busy-host breaker skipped it unchecked: the breaker counts
+  the three-in-a-row breaker skipped it unchecked (since TASK-340 it
+  trips only for a cause other than a busy host, which backs off
+  instead; here, a process diskgc cannot read): the breaker counts
   `in_use_unknown` ends in a row and any other end resets the count, so
   where it trips depends on the order the index gives the queue; the
   candidate is still refused, and this property's generated models'

@@ -903,9 +903,9 @@ pub struct Skip {
 /// on it, not on the detail text (TASK-263 review, mped S2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnknownCause {
-    /// No in-use scan stayed fresh or settled (a busy host), or the tier
-    /// stopped checking after candidates in a row were so: a later run may
-    /// judge it.
+    /// No in-use scan stayed fresh or settled for the candidate (a busy
+    /// host): a later run may judge it. Three in a row make the tier back
+    /// off, never skip candidates unchecked (TASK-340).
     Busy,
     /// A process of the user could not be inspected (TASK-190; its
     /// `process_blockers` name it).
@@ -942,7 +942,9 @@ impl UnknownCause {
     /// the device, so that running again later does not help: an
     /// incomplete process list, a loop device. A busy host passes, and an
     /// unreadable process may end; those keep the "host too busy" wording
-    /// they had before causes were recorded.
+    /// they had before causes were recorded. (Which a tier waits out after
+    /// three in a row is another matter: only a busy host, docs/safety.md,
+    /// In use: Freshness.)
     pub fn stays(self) -> bool {
         matches!(self, Self::IncompleteProcessList | Self::LoopDevice)
     }

@@ -835,8 +835,10 @@ judging a candidate. If that scan is unsettled too, whether the candidate
 is in use cannot be told: it is skipped `in_use_unknown`, not `in_use`
 (TASK-190, decided 2026-10-25 on Mark's delegation: `in_use` would give a
 harness evidence of a use that was never seen), and it counts toward the
-tier's three-in-a-row limit (Freshness, below), so a sustained fork storm
-costs at most three candidates' scans per tier, not two per candidate.
+tier's three in a row (Freshness, below): after three, the tier backs
+off before each further candidate, so a sustained fork storm costs, once
+the pause has grown to its cap, one candidate's two scans a minute
+instead of two per candidate back to back, and ends at the deadline.
 The next candidate starts a new scan immediately. Other blocking scans can
 be reused for less than half a second from completion. A machine that
 keeps starting processes faster than the scan reads them costs reclaim
@@ -927,8 +929,9 @@ reclaim on any desktop):
 - any other unreadable process of the user makes every candidate
   `in_use_unknown` (it could be using any of them, and whether it does
   cannot be told; the skip names it, evidence `unreadable`), counted
-  toward the three-in-a-row limit like an unsettled scan (TASK-190): one
-  whose reads fail for another reason (also another user's: a failed
+  toward the three in a row like an unsettled scan (TASK-190), but three
+  of them skip the tier's rest naming it, without a back-off (Freshness):
+  one whose reads fail for another reason (also another user's: a failed
   read says nothing about who may read it), one whose status cannot be
   read, and one refused although it is dumpable, unprivileged and the
   user's (a shell started with `newgrp` or `sg`: the kernel also compares
@@ -1225,15 +1228,64 @@ Cargo target stops at the part that hit it, as for `in_use`. A signal
 during a retry pause ends it within 50 ms and stops the run. After three
 candidates in a row of one tier (in the order taken) end `in_use_unknown`
 (a stale scan, an unsettled scan, or a process that cannot be inspected),
-the host is taken to be too busy for this run: the tier's remaining
-candidates are skipped `in_use_unknown` without a scan, and any other
-outcome resets the count. A later tier starts again from zero. Refusing
-needs no freshness. Index blocks
+the last of them decides. A stale or unsettled scan (`unknown_cause:
+busy`): the host is taken to be too busy for now, and the tier **backs off**
+before each further candidate: 2 s, doubling with each further candidate
+in a row that ends so, at most 60 s (TASK-340). The candidate after a
+pause is checked in full against a new scan under this bound, as any
+other: the pause only spaces the checks out, and nothing is deleted on a
+scan made before it. Any other end of a checked candidate resets the
+count and the pause (one refused before its check, such as a protected
+one, neither counts nor resets); a later tier starts again from zero. After each pause the space is sampled
+again, so a goal someone else's deletion reached meanwhile ends the tier.
+A signal ends a pause within 50 ms and stops the run. The back-off never
+runs past the tier's deadline (the run's, or the tier's own `timeout`):
+a deadline it reaches ends the tier there, with the candidate it waited
+for and the rest of the tier not judged (they are in no row of the
+report). At the run's deadline the run ends `deadline` below
+`--min-free` (exit 124: retry later), never `exhausted` (exit 1: every
+candidate judged); at a tier's own `timeout` that tier is excluded with an
+error and the later tiers run, as for any tier that reaches it (exit 3
+below `--min-free`, [reference.md](reference.md#exit-codes-ensure)).
+Any other cause (`unknown_cause` in [reference.md](reference.md#output):
+a process of the user that cannot be inspected, a loop device's backing
+file, a process list that stopped being complete) keeps every candidate
+while it lasts and does not pass by waiting (the processes left unexcused
+above are mostly long-lived, such as a `newgrp` shell; one in the middle of
+an exec is read again first): the tier's remaining candidates are skipped
+`in_use_unknown` without a scan, each with that cause, detail and process
+(TASK-340; before it, one that cannot be inspected was reported `busy`).
+Refusing needs no freshness. Index blocks
 ([architecture.md](architecture.md#memory-budget-and-collapse)) only
 group candidates for scheduling; each member is found again when its
 block is expanded and gets its own check under this bound, which a scan
 kept as above may answer: a use that starts after that scan is limit 5
 above.
+
+What the three in a row bound, and how they still do: a sustained fork
+storm must neither make diskgc spin (every candidate's attempts back to
+back, a loop of `/proc` scans adding to the load) nor hold the host lock
+for ever. Before TASK-340 the tier gave up its rest after three, which
+bounded both, but at the cost of the run: on the development laptop at
+load 20 to 30 (three parallel builds), a `--timeout 30h` `ensure` of
+`nix-shell-rc` found three unsettled scans in a row after 159 s, skipped
+146,467 candidates unchecked and reported `exhausted` (dogfood
+2026-11-04). Now a storm that never settles costs one candidate's check
+(three scans, or two unsettled ones) at most once a minute once the pause
+is capped, and the tier, the run and the lock end at the deadline:
+`ensure --timeout` (default 10 min), a `watch` cycle's `--timeout`
+(1 min to 24 h, never none; the cycle then backs off as `retry`,
+[reference.md](reference.md#the-reclaim-cycle), and the background tally
+stays paused while the cycle holds the lock), or a tier's own `timeout`.
+Each candidate checked during the storm is kept `in_use_unknown`
+(`unknown_cause: busy`), each one checked. A pause sleeps by the clock
+and is cut at the deadline; one that oversleeps it is reported in
+`overruns` (operation `busy back-off`). The cost moves to other reclaims:
+while a storm lasts the lock stays held, mostly by a sleeping diskgc, so
+another `ensure` waiting for it is more likely to end `lock_timeout` (75)
+at its own deadline than when the tier gave up at once. Limit: `ensure --timeout 0`
+asks for no deadline, and keeps backing off until the host settles or a
+signal stops it, as it waits for the host lock without one (Host lock).
 
 **Visibility:** without root, other users' `/proc/<pid>/fd` cannot be read,
 so their use of *your* files is not seen; nor is the use of the user's own

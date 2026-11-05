@@ -898,10 +898,13 @@ struct Reclaim<'a, 'l, H: Delete> {
     /// Candidates in a row, in the order taken, whose reclaim ended
     /// `in_use_unknown` ([`IN_USE_UNKNOWN_IN_A_ROW_MAX`]).
     in_use_unknown_in_a_row: usize,
-    /// The cause and detail of the latest of them when that cause stays
-    /// ([`UnknownCause::stays`]): the candidates skipped unchecked then
-    /// take it instead of a busy host.
-    in_use_unknown_cause: Option<(UnknownCause, String)>,
+    /// The latest of them, when its cause is not a busy host (a process
+    /// that cannot be inspected, a loop device, an incomplete process list
+    /// keep every candidate while they last, and waiting does not end
+    /// them): the tier's rest is skipped unchecked with its cause, detail
+    /// and process. `None` with a count of three or more: a busy host, and
+    /// the tier backs off instead ([`Reclaim::before_check`]).
+    in_use_unknown_last: Option<Skip>,
     /// The run's index, which the reclaim walk takes its queue from
     /// ([`indexed`]); `None` for a tier that discovers only.
     index: Option<&'a mut TallyState>,
@@ -920,13 +923,61 @@ struct Reclaim<'a, 'l, H: Delete> {
 }
 
 /// After this many candidates in a row of one tier end `in_use_unknown`
-/// (each spent its [`crate::inuse::FRESH_ATTEMPTS`]), the host is taken to
-/// be too busy for this run: the tier's remaining candidates are skipped
-/// `in_use_unknown` unchecked rather than each spending its own scans and
-/// pauses (docs/safety.md, In use: Freshness). Three: one unlucky
-/// candidate, or two, is a spike; three in a row (at least nine stale
-/// scans) is the load the run is in.
+/// (each spent its [`crate::inuse::FRESH_ATTEMPTS`], or its scan did not
+/// settle), the host is taken to be too busy for now: before each further
+/// candidate the tier backs off ([`busy_back_off`]) instead of spending one
+/// candidate's scans and pauses after another (docs/safety.md, In use:
+/// Freshness). Three: one unlucky candidate, or two, is a spike; three in a
+/// row (at least nine stale scans, or six unsettled ones) is the load the
+/// run is in. For any other cause (a process that cannot be inspected, a
+/// loop device, an incomplete process list) waiting does not help: it keeps
+/// every candidate while it lasts, so the tier's rest is skipped unchecked,
+/// naming it.
 const IN_USE_UNKNOWN_IN_A_ROW_MAX: usize = 3;
+
+/// The tier's first back-off on a busy host ([`IN_USE_UNKNOWN_IN_A_ROW_MAX`]):
+/// longer than a candidate's own retry pauses
+/// ([`crate::inuse::FRESH_RETRY_PAUSES`]), which the load outlasted.
+const BUSY_BACK_OFF_FIRST: Duration = Duration::from_secs(2);
+
+/// The longest back-off: in a storm that does not end, the tier checks one
+/// candidate (at most [`crate::inuse::FRESH_ATTEMPTS`] scans) per minute
+/// until the deadline, so it neither spins nor gives up its rest while the
+/// deadline leaves time for the host to settle (TASK-340). Tentative, like
+/// every back-off constant (PRD, Irreversibility map).
+const BUSY_BACK_OFF_MAX: Duration = Duration::from_secs(60);
+
+/// The pause before the next check after `in_a_row` candidates in a row
+/// ended `in_use_unknown` (at least [`IN_USE_UNKNOWN_IN_A_ROW_MAX`]):
+/// [`BUSY_BACK_OFF_FIRST`], doubling with each further one, capped at
+/// [`BUSY_BACK_OFF_MAX`].
+fn busy_back_off(in_a_row: usize) -> Duration {
+    let doublings = in_a_row.saturating_sub(IN_USE_UNKNOWN_IN_A_ROW_MAX);
+    let factor = u32::try_from(doublings)
+        .ok()
+        .and_then(|d| 1u32.checked_shl(d))
+        .unwrap_or(u32::MAX);
+    BUSY_BACK_OFF_FIRST
+        .saturating_mul(factor)
+        .min(BUSY_BACK_OFF_MAX)
+}
+
+/// What a tier does before checking its next candidate after candidates
+/// in a row ended `in_use_unknown` ([`Reclaim::before_check`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BeforeCheck {
+    /// Check it. `Some(avail)`: the tier backed off first, and `avail` is
+    /// the space sampled after the pause (someone else may have freed the
+    /// goal meanwhile).
+    Check(Option<u64>),
+    /// Skipped unchecked (reported): the candidates before it could not be
+    /// checked for a cause other than a busy host, which waiting does not
+    /// end.
+    Skipped,
+    /// The tier stops (reported): the deadline came during the back-off,
+    /// a signal ended it, or the space after it could not be sampled.
+    Stop,
+}
 
 impl<H: Delete> Reclaim<'_, '_, H> {
     fn stop_if_interrupted(&mut self) -> bool {
@@ -1140,35 +1191,91 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         );
     }
 
-    /// Whether the tier has given up checking (see
-    /// [`IN_USE_UNKNOWN_IN_A_ROW_MAX`]); then `candidate` is skipped
-    /// `in_use_unknown` unchecked, and `true`.
-    fn too_busy_to_check(&mut self, candidate: &Path, profile: &str) -> bool {
+    /// Before checking `candidate`: nothing while fewer than
+    /// [`IN_USE_UNKNOWN_IN_A_ROW_MAX`] candidates in a row ended
+    /// `in_use_unknown`. After that many, a busy host makes the tier back
+    /// off first ([`Self::back_off`]); any other cause skips it unchecked
+    /// with that cause, detail and process.
+    fn before_check(&mut self, candidate: &Path, profile: &str) -> BeforeCheck {
         if self.in_use_unknown_in_a_row < IN_USE_UNKNOWN_IN_A_ROW_MAX {
-            return false;
+            return BeforeCheck::Check(None);
         }
-        let skip = match &self.in_use_unknown_cause {
-            Some((cause, detail)) => Skip::in_use_unknown(
-                candidate.to_owned(),
-                *cause,
-                format!(
-                    "not checked: the {} candidates before it in this tier could not be \
-                     checked: {detail}",
-                    self.in_use_unknown_in_a_row
-                ),
+        let Some(last) = &self.in_use_unknown_last else {
+            return self.back_off(candidate);
+        };
+        let skip = Skip {
+            path: candidate.to_owned(),
+            detail: format!(
+                "not checked: the {} candidates before it in this tier could not be checked: {}",
+                self.in_use_unknown_in_a_row, last.detail
             ),
-            None => Skip::in_use_unknown(
-                candidate.to_owned(),
-                UnknownCause::Busy,
-                format!(
-                    "not checked: the host was too busy to check the {} candidates before it \
-                     in this tier; kept, run again when the host is less busy",
-                    self.in_use_unknown_in_a_row
-                ),
-            ),
+            measured_bytes: None,
+            ..last.clone()
         };
         self.skip_as(candidate, profile, &skip);
-        true
+        BeforeCheck::Skipped
+    }
+
+    /// Whether the tier ended backing off for a busy host (its deadline
+    /// came first): a tier timeout then says so.
+    pub(super) fn ended_busy(&self) -> bool {
+        self.in_use_unknown_in_a_row >= IN_USE_UNKNOWN_IN_A_ROW_MAX
+            && self.in_use_unknown_last.is_none()
+    }
+
+    /// The busy host's back-off ([`busy_back_off`]) before checking
+    /// `candidate`, never past the tier's deadline: a deadline it reaches
+    /// stops the tier there, leaving `candidate` and the rest of the tier
+    /// unjudged (the run's status says so: `deadline`); a signal ends it
+    /// within [`crate::inuse::PAUSE_SLICE`]. After it, a fresh sample of
+    /// the space. Nothing is deleted on a scan made before the pause: the
+    /// check of `candidate` judges against a scan within the freshness bound
+    /// as always ([`Checker`]).
+    fn back_off(&mut self, candidate: &Path) -> BeforeCheck {
+        let wanted = busy_back_off(self.in_use_unknown_in_a_row);
+        let started = self.host.now();
+        let pause = self.deadline.map_or(wanted, |deadline| {
+            wanted.min(deadline.saturating_since(started))
+        });
+        (self.log)(&format!(
+            "{}: the host is too busy: {} candidates in a row could not be checked; waiting \
+             {} ms before checking {}",
+            self.tier.name,
+            self.in_use_unknown_in_a_row,
+            pause.as_millis(),
+            candidate.display()
+        ));
+        let until = started.checked_add(pause).unwrap_or(started);
+        let slept = crate::inuse::sleep_until_unless_interrupted(self.host, until);
+        self.record_overrun("busy back-off", candidate, started, self.host.now());
+        if slept.is_err() {
+            self.run_stopped = true;
+            (self.log)(&format!(
+                "{}: interrupted while waiting for the host to settle",
+                self.tier.name
+            ));
+            return BeforeCheck::Stop;
+        }
+        if self.past_deadline() {
+            self.deadline_hit = true;
+            (self.log)(&format!(
+                "{}: the host stayed too busy to check candidates until the deadline: {} and \
+                 the rest of this tier are not judged",
+                self.tier.name,
+                candidate.display()
+            ));
+            return BeforeCheck::Stop;
+        }
+        let sampling = self.host.now();
+        let sampled = sample(self.host, self.measured);
+        self.record_overrun("statvfs", &self.measured.path, sampling, self.host.now());
+        match sampled {
+            Ok(space) => BeforeCheck::Check(Some(space.avail_bytes)),
+            Err(error) => {
+                self.host_failure(error);
+                BeforeCheck::Stop
+            }
+        }
     }
 
     fn skip(&mut self, candidate: &Path, skip: &Skip) {
@@ -1571,8 +1678,16 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 );
                 continue;
             }
-            if self.too_busy_to_check(&target.path, &self.tier.profile.clone()) {
-                continue;
+            match self.before_check(&target.path, &self.tier.profile.clone()) {
+                BeforeCheck::Check(None) => {}
+                BeforeCheck::Check(Some(now)) => {
+                    avail = now;
+                    if avail >= self.measured.target {
+                        continue; // the goal, observed at the top
+                    }
+                }
+                BeforeCheck::Skipped => continue,
+                BeforeCheck::Stop => return,
             }
             (self.log)(&match &tally {
                 Some(tally) => format!(
@@ -1782,7 +1897,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
 
     /// One `fs` candidate's reclaim, after discovery (or the index's
     /// re-match) and its tally: the protected re-check, the deadline, the
-    /// busy-host give-up, the kind's protocol (every check again under the
+    /// busy host's back-off, the kind's protocol (every check again under the
     /// candidate's lock), and the record. The available space after it.
     fn act_fs(
         &mut self,
@@ -1815,12 +1930,24 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             ));
             return Acted::Stop;
         }
-        if self.too_busy_to_check(&found.path, &self.tier.profile.clone()) {
-            return Acted::Next {
-                avail,
-                reclaimed: false,
-            };
-        }
+        let avail = match self.before_check(&found.path, &self.tier.profile.clone()) {
+            BeforeCheck::Check(None) => avail,
+            BeforeCheck::Check(Some(now)) if now < self.measured.target => now,
+            // The goal, observed by the caller before its next candidate.
+            BeforeCheck::Check(Some(now)) => {
+                return Acted::Next {
+                    avail: now,
+                    reclaimed: false,
+                };
+            }
+            BeforeCheck::Skipped => {
+                return Acted::Next {
+                    avail,
+                    reclaimed: false,
+                };
+            }
+            BeforeCheck::Stop => return Acted::Stop,
+        };
         (self.log)(&match &tally {
             Some(tally) => format!(
                 "{}: checking {} (est. {}, {} entries, newest change {})",
@@ -2190,8 +2317,16 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 return;
             }
             let first_profile = sources[candidate.found_by[0].0].profile;
-            if self.too_busy_to_check(path, first_profile) {
-                continue;
+            match self.before_check(path, first_profile) {
+                BeforeCheck::Check(None) => {}
+                BeforeCheck::Check(Some(now)) => {
+                    avail = now;
+                    if avail >= self.measured.target {
+                        continue; // the goal, observed at the top
+                    }
+                }
+                BeforeCheck::Skipped => continue,
+                BeforeCheck::Stop => return,
             }
             (self.log)(&format!(
                 "{}: checking {} ({}), found by {} source term(s)",
@@ -2494,10 +2629,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             });
         }
         let in_use_unknown = match &outcome.end {
-            ReclaimEnd::Skipped(skip) if skip.reason == Reason::InUseUnknown => Some((
-                skip.unknown_cause.unwrap_or(UnknownCause::Busy),
-                skip.detail.clone(),
-            )),
+            ReclaimEnd::Skipped(skip) if skip.reason == Reason::InUseUnknown => Some(skip.clone()),
             _ => None,
         };
         match outcome.end {
@@ -2527,23 +2659,30 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             }
         }
         // After the skip's own log line, so the give-up line follows it.
-        if let Some((cause, detail)) = in_use_unknown {
+        if let Some(skip) = in_use_unknown {
             self.in_use_unknown_in_a_row += 1;
-            self.in_use_unknown_cause = cause.stays().then_some((cause, detail));
+            // Only a busy host passes by itself (TASK-340).
+            let busy = skip.unknown_cause.is_none_or(|c| c == UnknownCause::Busy);
+            self.in_use_unknown_last = (!busy).then_some(skip);
             if self.in_use_unknown_in_a_row == IN_USE_UNKNOWN_IN_A_ROW_MAX {
-                let why = match &self.in_use_unknown_cause {
-                    Some(_) => "a cause that stays, named in each skip",
-                    None => "the host is too busy",
+                let then = match &self.in_use_unknown_last {
+                    Some(_) => {
+                        "(a cause waiting does not end, named in each skip): the rest of this \
+                         tier is skipped unchecked"
+                    }
+                    None => {
+                        "(the host is too busy): the tier backs off before each further check, \
+                         until one succeeds or the deadline"
+                    }
                 };
                 (self.log)(&format!(
-                    "{}: {} candidates in a row could not be checked ({why}): the rest of this \
-                     tier is skipped unchecked",
+                    "{}: {} candidates in a row could not be checked {then}",
                     self.tier.name, self.in_use_unknown_in_a_row
                 ));
             }
         } else {
             self.in_use_unknown_in_a_row = 0;
-            self.in_use_unknown_cause = None;
+            self.in_use_unknown_last = None;
         }
         if self.run_stopped { None } else { after }
     }

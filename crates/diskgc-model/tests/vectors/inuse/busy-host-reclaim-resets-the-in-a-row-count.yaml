@@ -1,8 +1,9 @@
 # `zephyr-tmp-probe`: user profile with the matching set of a built-in withdrawn in TASK-122.
-# TASK-144: the tier stops checking only after three candidates in a row
-# end `in_use_unknown`; any other outcome resets the count. Here 1 gets
-# no fresh scan, 2 is reclaimed, 3 and 4 get none (two in a row), so 5 is
-# still checked, gets a fresh scan, and is reclaimed. Each stale scan
+# TASK-144: the tier changes course (TASK-340: backs off) only after three
+# candidates in a row end `in_use_unknown`; any other outcome resets the
+# count. Here 1 gets no fresh scan, 2 is reclaimed, 3 and 4 get none (two
+# in a row), so 5 is still checked at once, gets a fresh scan, and is
+# reclaimed. Each stale scan
 # finishes 2 s after it started, twice the freshness bound; the fresh one
 # for 2 is 600 ms old when checked, and 2's deletion takes 500 ms, so it is
 # 1.1 s old when 3 is checked and 3 cannot reuse it (a delete reuses a scan

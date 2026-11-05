@@ -413,6 +413,11 @@ stacked on `PATH` does not change what is watched):
   Sampling continues at every `--interval`: it is what ends a back-off
   early.
 
+A cycle on a busy host backs off between checks as `ensure` does, and
+holds the lock (the background tally paused) until the host settles or
+the cycle's deadline ([safety.md](safety.md#in-use), Freshness); a cycle
+that ends at that deadline is `deadline`, class `retry` below.
+
 The cycle's outcome is the status `ensure` would report for the same run
 (Exit codes (`ensure`), JSON `status`): `met`, `exhausted`, `error`,
 `lock_timeout`, `deadline`, `interrupted`, or `usage_error` (only `cause:
@@ -1227,7 +1232,7 @@ The first matching row wins:
 | 130 / 143 | Interrupted by SIGINT / SIGTERM. |
 | 75 | Deadline reached while waiting for another reclaim, and a fresh sample is still below `--min-free` (EX_TEMPFAIL). Nothing was deleted; retry later. If the other holder freed enough meanwhile, the result is 0. |
 | 0 | Final sample of available space ≥ `--min-free`. |
-| 124 | Deadline reached during reclaim, below `--min-free`; or during a dry run (its plan has every candidate judged before it). |
+| 124 | Deadline reached during reclaim, below `--min-free` (also while a tier waited for a busy host to settle: the candidates it had not reached were not judged, [safety.md](safety.md#in-use), Freshness); or during a dry run (its plan has every candidate judged before it). |
 | 3 | A host or planning operation failed (including the first or final space sample), or a tier failed or was excluded as misconfigured below `--min-free`. A dry run may have a partial plan; a reclaim may have deleted something. The report says what. Also returned if writing the result to stdout fails; stderr names the write error, and the report may be absent or partial. |
 | 1 | Every eligible candidate was processed without errors, still below `--min-free`. The report lists what was skipped and why. |
 
@@ -1500,14 +1505,17 @@ is `host`.
   0.1 contract that ignores unknown fields is unaffected) says why an
   `in_use_unknown` could not be judged, and is `null` for every other
   reason and for an aggregated row: `busy` (no in-use scan stayed fresh
-  or settled, or the tier stopped checking after such candidates in a
-  row: a later run may judge it), `unreadable_process` (a process of the
+  or settled for this candidate, checked in full: a later run may judge
+  it; since TASK-340 a busy host makes a tier back off, never skip
+  candidates unchecked), `unreadable_process` (a process of the
   user could not be inspected; `process_blockers` names it),
   `incomplete_process_list` (`hidepid`, a PID namespace other than the
   initial one, or its facts unread or changed during the run) and
   `loop_device` (a loop device's backing file cannot be told apart from
   the candidate; until the device is detached; [safety.md](safety.md#in-use)).
-  The dry run's plan does not carry it.
+  A candidate a tier skipped unchecked after three in a row (its detail
+  starts `not checked:`) carries the cause of the last of them, and its
+  process, never `busy` (TASK-340). The dry run's plan does not carry it.
 - `skipped[].process_blockers` is `null` when the refusal cannot be
   attributed to an observed process, including flock contention, an
   unsettled process scan and grouped rows. Otherwise it is a nonempty array
@@ -1570,7 +1578,10 @@ is `host`.
   - A dry run has `reclaimed` `null`; a live run has `found`,
     `eligible`, `would_reclaim` and `not_judged` `null` (a reclaim judges
     a candidate only when it takes it and stops at the goal, so it has no
-    such count).
+    such count). A candidate a live run did not reach (the goal, a
+    signal, the deadline, also one a tier waited for a busy host until)
+    is in no row and no count; status `deadline` or `interrupted` says
+    the run stopped before it judged them all.
 - A Cargo target whose profile directories hold only lock files is omitted
   from a live `ensure` result's `skipped` list and human skipped count; a
   stderr line names it (`TIER: PATH: its profile directories hold nothing
@@ -3051,6 +3062,18 @@ line says it was reproduced.
   a kernel older than 5.8 it named the kernel instead of the typo (exit 2
   either way) (static reading; reproduced on master before this change
   with a tmpfs over `/proc`).
+- TASK-340: after three candidates in a row of a tier end `in_use_unknown`
+  on a busy host (stale or unsettled in-use scans), the tier backs off and
+  checks again within its deadline instead of skipping its rest
+  unchecked; a storm that lasts until the deadline ends the run
+  `deadline` (124), no longer `exhausted` (1) with every remaining
+  candidate counted `kept` (dogfood 2026-11-04: 146,467 `nix-shell-rc`
+  candidates given up after 159 s of a 30 h run;
+  [safety.md](safety.md#in-use), Freshness). Three kept by a process
+  diskgc cannot inspect still skip the tier's rest, which now names that
+  process (`unknown_cause: unreadable_process`), not a busy host. 0.1.0:
+  yes; it has the same give-up after three (static reading; reproduced on
+  master before this change in the model).
 
 **What it does.** One command frees space, a service keeps its index
 warm, two read-only ones explain it:
@@ -3249,10 +3272,15 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   static musl binary scans slower than a glibc build), a candidate whose
   three attempts all see a stale scan is kept `in_use_unknown`, as is one
   whose scan's process list keeps growing (a fork storm) or that a process
-  of the user diskgc cannot inspect could be using; after
-  three such candidates in a row the rest of that tier is skipped for the
-  run. Nothing is deleted on a stale scan; the exit code follows the
-  space, and the summary says to run again when the host is less busy.
+  of the user diskgc cannot inspect could be using. After three stale or
+  unsettled ones in a row the tier backs off before each further check
+  until the host settles ([safety.md](safety.md#in-use), Freshness), and a storm
+  that lasts until the deadline ends the run `deadline` (124) with the
+  rest of the tier not judged; three kept by a process diskgc cannot
+  inspect skip the rest of the tier, naming it. Nothing is deleted on a
+  stale scan, and the summary says to run again when the host is less
+  busy. With `--timeout 0` (no deadline) a host that never settles keeps
+  the run waiting, holding the lock, until a signal stops it.
 - A program running from a Cargo target is protected by process
   heuristics only (Cargo holds no lock while it runs), and Linux has no
   unlink-by-inode: diskgc is not a defence against a hostile local user

@@ -1624,6 +1624,27 @@ fn sleep_unless_interrupted<H: Host>(host: &H, pause: Duration) -> Result<(), ()
     Ok(())
 }
 
+/// Sleeps until `until` (the host's monotonic clock) in slices of at most
+/// [`PAUSE_SLICE`], ending early (`Err`) once a signal arrived (before or
+/// during it). Each slice is what is left by the clock, not by the slices
+/// asked for, so slices that oversleep on a loaded host do not add up past
+/// `until` (the reclaim walk's back-off on a busy host, `executor`,
+/// TASK-340, which can last a minute).
+pub(crate) fn sleep_until_unless_interrupted<H: Host>(host: &H, until: MonoTime) -> Result<(), ()> {
+    // Bounded: each pass sleeps a nonzero slice of what is left, and the
+    // clock only moves on.
+    loop {
+        if host.interrupted().is_some() {
+            return Err(());
+        }
+        let left = until.saturating_since(host.now());
+        if left.is_zero() {
+            return Ok(());
+        }
+        host.sleep(left.min(PAUSE_SLICE));
+    }
+}
+
 /// A directory candidate is deleted only under its lock, and only if the
 /// locked directory is the one the walk recorded (it could have been
 /// replaced between the open and the walk); a non-directory is never

@@ -694,7 +694,7 @@ impl<H: Delete> Tallied<'_, H> {
                 deadline_hit: false,
                 run_stopped: false,
                 in_use_unknown_in_a_row: 0,
-                in_use_unknown_cause: None,
+                in_use_unknown_last: None,
                 index: index.as_deref_mut(),
                 tallied: &mut *tallied,
                 run_started: self.run_started,
@@ -706,6 +706,7 @@ impl<H: Delete> Tallied<'_, H> {
             };
             reclaim.run(self.owners);
             let (timed_out, stopped) = (reclaim.deadline_hit, reclaim.run_stopped);
+            let busy = reclaim.ended_busy();
             if timed_out {
                 // A tier without a timeout of its own (every `--select`
                 // run) can only have met the run's deadline.
@@ -713,11 +714,13 @@ impl<H: Delete> Tallied<'_, H> {
                     deadline_hit = true;
                     break;
                 }
-                record_error(
-                    report,
-                    log,
-                    run_error(&tier, "tier timeout passed; the tier is excluded"),
-                );
+                let message = if busy {
+                    "tier timeout passed while the host was too busy to check its candidates \
+                     (docs/safety.md, In use: Freshness); the tier is excluded"
+                } else {
+                    "tier timeout passed; the tier is excluded"
+                };
+                record_error(report, log, run_error(&tier, message));
                 continue;
             }
             if stopped {

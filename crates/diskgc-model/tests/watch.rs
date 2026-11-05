@@ -605,6 +605,50 @@ fn watch_path_on_another_device_backs_off_retry_doubling_and_deletes_nothing() {
     assert_eq!(host_locks(&host), 0, "refused before the host lock");
 }
 
+/// TASK-340: a cycle on a busy host (each of its in-use scans finishes
+/// 2 s after it started, twice the freshness bound) backs off between its
+/// checks, the pauses growing, until the cycle's deadline and never past
+/// it: a `deadline` record, class `retry`, nothing deleted, the host lock
+/// given up at the deadline. The storm is over by the next cycle, a
+/// minute later, which reclaims to the goal. Master's cycle gave up after
+/// three candidates and reported `exhausted`.
+#[test]
+fn a_busy_host_holds_a_cycle_to_its_deadline_and_the_next_cycle_reclaims() {
+    // Cycle 1: three stale candidates (21.75 s), then pauses of 2, 4 and
+    // 8 s, each followed by one more stale candidate (7.25 s), and the
+    // last pause cut at the deadline (60 s): six candidates, 18 scans.
+    let mut events = String::from("events:\n");
+    for nth in 1..=18 {
+        events.push_str(&format!(
+            "  - {{at: {{op: proc_environ, nth: {nth}, when: after}}, advance: 2s}}\n"
+        ));
+    }
+    events.push_str("  - {at: {elapsed: 10m}, signal: term}\n");
+    // 1 GiB available, 2 GiB asked: four of the eight 500 MiB candidates.
+    let host = host(&yaml("5G", &old_candidates(8, "500M"), &events));
+    let run = watch(&host, &reclaim("2G", "3G", "10s"));
+    assert!(run.records.len() >= 2, "{:#?}", run.records);
+    let (_, first) = &run.records[0];
+    assert_eq!(first["status"], "deadline", "{first:#}");
+    assert_eq!(first["watch"]["backoff"]["class"], "retry");
+    assert_eq!(first["actions"].as_array().map(Vec::len), Some(0));
+    let duration = first["duration_ms"].as_u64().expect("a duration");
+    assert!(
+        (60_000..62_000).contains(&duration),
+        "the cycle used its 60 s deadline and no more: {duration} ms"
+    );
+    assert!(run.has("waiting 2000 ms before checking"));
+    assert!(run.has("until the deadline"));
+    let (_, second) = &run.records[1];
+    assert_eq!(second["status"], "met", "{second:#}");
+    assert!(avail(&host) >= 2 << 30);
+    assert_eq!(
+        host_locks(&host),
+        2,
+        "one lock per cycle, released after each"
+    );
+}
+
 /// [`watch`] with another `PATH`.
 fn watch_at(host: &ModelHost, mode: &Mode, path: &str) -> Watched {
     let selection = Selection {
