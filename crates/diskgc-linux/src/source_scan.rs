@@ -1003,6 +1003,15 @@ pub(crate) const GATED: &[Pattern] = &[
 /// (docs/safety.md, Pre-release sandbox gate).
 pub(crate) const GATED_ALLOWED: &[Allowed] = &[
     Allowed {
+        file: "crates/diskgc-linux/src/command_output.rs",
+        function: "write_stderr",
+        gate: Gate::Ungated(
+            "write to diskgc's own fd 2 only: command output already read from the child's \
+             pipes, forwarded as log (TASK-342); no file is opened, created or removed",
+        ),
+        matches: 1,
+    },
+    Allowed {
         file: "crates/diskgc-linux/src/host.rs",
         function: "install_interrupt_handlers_ungated",
         gate: Gate::Ungated(

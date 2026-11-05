@@ -30,7 +30,10 @@ fn command_port_traces_checked_cwd_and_exit() {
     let run = request(&host);
     assert!(matches!(
         host.run_command(&cwd.fd, &run),
-        CommandInvocation::Started(Ok(CommandExit::Exited(0)))
+        CommandInvocation::Started {
+            exit: Ok(CommandExit::Exited(0)),
+            lines_not_forwarded: 0
+        }
     ));
     let call = host.trace().into_iter().last().unwrap();
     assert_eq!(call.op, Op::RunCommand);
@@ -51,7 +54,10 @@ fn command_port_preserves_a_nonzero_exit() {
     let cwd = common::dir(&host, "/tmp/a");
     assert!(matches!(
         host.run_command(&cwd.fd, &request(&host)),
-        CommandInvocation::Started(Ok(CommandExit::Exited(17)))
+        CommandInvocation::Started {
+            exit: Ok(CommandExit::Exited(17)),
+            ..
+        }
     ));
     assert_eq!(host.trace().last().unwrap().result, "Exited(17)");
 }
@@ -97,7 +103,10 @@ fn output_failure_after_spawn_remains_an_attempted_command() {
     let host = common::host(&common::tmp_yaml("command_error_after_start: true"));
     let cwd = common::dir(&host, "/tmp/a");
     let result = host.run_command(&cwd.fd, &request(&host));
-    let CommandInvocation::Started(Err(error)) = result else {
+    let CommandInvocation::Started {
+        exit: Err(error), ..
+    } = result
+    else {
         panic!("output failure should retain started state: {result:?}");
     };
     assert!(error.detail.contains("after spawn"), "{error}");

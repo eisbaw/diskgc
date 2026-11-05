@@ -109,6 +109,11 @@ pub struct HostModel {
     /// spawned. The filesystem itself is unchanged by the model command.
     #[serde(default, skip_serializing_if = "is_false")]
     pub command_error_after_start: bool,
+    /// How many lines of a started command's output (a command action,
+    /// a prune, the Nix GC) diskgc's stderr is modelled as not taking
+    /// (default 0): reported with the invocation, never its outcome.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub command_lines_not_forwarded: u64,
     /// Closed Docker query responses and client redirects for backend model
     /// tests. No real daemon or filesystem is contacted by ModelHost.
     #[serde(default, skip_serializing_if = "DockerSpec::is_empty")]
@@ -280,6 +285,10 @@ pub struct NixGcSpec {
     /// at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal_during: Option<ModelSignal>,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 fn is_zero_u8(value: &u8) -> bool {

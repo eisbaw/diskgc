@@ -1997,8 +1997,8 @@ pub struct CommandRun {
     /// this daemon identity through that same inode before starting prune.
     pub docker_info: Option<crate::docker_backend::DockerInfo>,
     /// Human label supplied by the executor (tier and profile). Every
-    /// child-output line is written to stderr with this prefix; child bytes
-    /// never reach diskgc's result-only stdout.
+    /// forwarded child-output line is written to stderr with this prefix;
+    /// child bytes never reach diskgc's result-only stdout.
     pub output_prefix: String,
     pub deadline: MonoTime,
     /// What a second signal during the child's SIGTERM grace does: the
@@ -2140,13 +2140,36 @@ pub enum CommandExit {
 }
 
 /// Whether a deleting command actually started. Once `spawn` succeeds,
-/// errors from output forwarding or waiting still describe an attempted
-/// action: the caller must sample space and include the action in its report.
+/// errors from reading its output or waiting for it still describe an
+/// attempted action: the caller must sample space and include the action
+/// in its report.
 #[derive(Debug)]
 pub enum CommandInvocation {
     NotStarted(HostError),
     DeadlineBeforeStart,
-    Started(Result<CommandExit, HostError>),
+    Started {
+        exit: Result<CommandExit, HostError>,
+        /// Lines of the child's output (a line longer than 4096 bytes
+        /// counts once per 4096-byte segment) that diskgc's stderr did not
+        /// take: forwarding is lossy and never holds up the child or fails
+        /// the action (docs/safety.md, Command actions). The caller logs it;
+        /// it never changes the action's outcome.
+        lines_not_forwarded: u64,
+    },
+}
+
+impl CommandInvocation {
+    /// [`CommandInvocation::Started`]'s `lines_not_forwarded`; 0 for a
+    /// command that did not start.
+    pub fn lines_not_forwarded(&self) -> u64 {
+        match self {
+            Self::Started {
+                lines_not_forwarded,
+                ..
+            } => *lines_not_forwarded,
+            Self::NotStarted(_) | Self::DeadlineBeforeStart => 0,
+        }
+    }
 }
 
 /// Whether `name` is a single path component: not empty, no `/`, not `.`
@@ -2202,7 +2225,11 @@ pub trait Delete: Host {
     /// asks the sandbox gate before starting a child, terminates its process
     /// group at `deadline` or on a signal (SIGTERM, SIGKILL after a 10 s
     /// grace), and waits for the leader, unless `second_signal` says to
-    /// leave it running. The caller must have
+    /// leave it running. Its output goes to stderr with the prefix, lossily:
+    /// the child's pipes are always drained, what stderr does not take is
+    /// counted in `lines_not_forwarded`, and a slow or blocked stderr never
+    /// fails, stops or holds up the child (docs/safety.md, Command
+    /// actions). The caller must have
     /// called [`Host::inherit_lock`] on the host lock before this call: the
     /// child inherits that fd across exec and holds the lock if diskgc dies.
     fn run_command(&self, cwd: &Self::Fd, run: &CommandRun) -> CommandInvocation;
@@ -2227,7 +2254,7 @@ pub trait Delete: Host {
     /// through the pinned daemon `socket` (docs/safety.md, nix-store, step
     /// 9), run like [`Delete::run_command`]: gated, in its own process
     /// group, cwd `/`, the child environment, output on stderr with the
-    /// prefix, holding the inherited host lock; at the deadline or on a
+    /// prefix (lossily, as there), holding the inherited host lock; at the deadline or on a
     /// signal its group gets SIGKILL at once (the work is the daemon's,
     /// which stops when the client hangs up).
     fn nix_gc(

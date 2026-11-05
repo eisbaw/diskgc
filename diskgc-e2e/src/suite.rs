@@ -308,6 +308,10 @@ pub static NIX_GC_ONLY_TESTS: &[(&str, &str)] = &[
         "needs the Nix GC image's own store and daemon",
     ),
     (
+        "nix_gc_on_a_slow_stderr_completes_and_counts_unforwarded_output",
+        "needs the Nix GC image's own store and daemon",
+    ),
+    (
         "nix_gc_optimised_store_frees_at_the_end",
         "needs the Nix GC image's own store and daemon",
     ),
@@ -1015,6 +1019,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: nix_gc_suite::nix_gc_overshoot_is_bounded_by_the_last_path,
+    },
+    Test {
+        name: "nix_gc_on_a_slow_stderr_completes_and_counts_unforwarded_output",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: nix_gc_suite::nix_gc_on_a_slow_stderr_completes_and_counts_unforwarded_output,
     },
     Test {
         name: "nix_gc_optimised_store_frees_at_the_end",
@@ -1866,10 +1876,16 @@ pub static TESTS: &[Test] = &[
         run: ensure_suite::command_action_orphaned_output_is_killed_before_reap,
     },
     Test {
-        name: "command_action_stalled_stderr_fails_without_hanging",
+        name: "command_action_stalled_stderr_neither_fails_nor_hangs",
         tier: Tier::Fast,
         expect: Expect::Pass,
-        run: ensure_suite::command_action_stalled_stderr_fails_without_hanging,
+        run: ensure_suite::command_action_stalled_stderr_neither_fails_nor_hangs,
+    },
+    Test {
+        name: "command_action_on_a_slow_stderr_completes_and_counts_unforwarded_output",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: ensure_suite::command_action_on_a_slow_stderr_completes_and_counts_unforwarded_output,
     },
     Test {
         name: "command_action_leader_exit_drain_obeys_tier_deadline",

@@ -37,6 +37,12 @@
       "maximum": 255,
       "minimum": 0
     },
+    "command_lines_not_forwarded": {
+      "description": "How many lines of a started command's output (a command action,\na prune, the Nix GC) diskgc's stderr is modelled as not taking\n(default 0): reported with the invocation, never its outcome.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
     "docker": {
       "description": "Closed Docker query responses and client redirects for backend model\ntests. No real daemon or filesystem is contacted by ModelHost.",
       "$ref": "#/$defs/DockerSpec"

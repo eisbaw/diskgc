@@ -930,7 +930,10 @@ processes:
         };
         assert!(matches!(
             host.run_command(&a.fd, &run),
-            CommandInvocation::Started(Ok(diskgc_core::host::CommandExit::Exited(0)))
+            CommandInvocation::Started {
+                exit: Ok(diskgc_core::host::CommandExit::Exited(0)),
+                ..
+            }
         ));
         let dev = diskgc_core::host::Dev {
             major: 0,

@@ -26,6 +26,9 @@ use crate::profile::Cwd;
 pub struct CommandResult {
     pub attempted: bool,
     pub end: ReclaimEnd,
+    /// The command's output lines that stderr did not take
+    /// ([`CommandInvocation::Started`]); for the action's log line only.
+    pub lines_not_forwarded: u64,
     /// Source whose fresh locked judgement selected the candidate.
     pub selected: Option<usize>,
 }
@@ -137,6 +140,7 @@ pub fn run_command_alternatives_checked<H: Delete>(
     let mut result = CommandResult {
         attempted: false,
         end: ReclaimEnd::Complete,
+        lines_not_forwarded: 0,
         selected: None,
     };
     if let Err(end) = protocol(host, alternatives, checker, command, &mut result, policy) {
@@ -356,7 +360,9 @@ fn protocol<H: Delete>(
                 if host.now() >= clear.fresh_until() {
                     return Ok(None);
                 }
-                let (started, ended) = start_command(host, cwd_fd, &run, path);
+                let invocation = host.run_command(cwd_fd, &run);
+                result.lines_not_forwarded += invocation.lines_not_forwarded();
+                let (started, ended) = command_end(invocation, path);
                 result.attempted |= started;
                 Ok(Some(CommandPass::Ran(ended)))
             },
@@ -380,18 +386,14 @@ enum CommandPass {
     RefusedAtBoundary(Skip),
 }
 
-/// Runs the command `run` for the candidate at `path`: whether it started,
-/// and how it ended (exit 0 complete, any other exit or a signal an error
-/// of the candidate, a deadline before or during it a stop of the run, the
-/// sandbox gate an error of the run).
-fn start_command<H: Delete>(
-    host: &H,
-    cwd_fd: &H::Fd,
-    run: &crate::host::CommandRun,
-    path: &Path,
-) -> (bool, Result<(), ReclaimEnd>) {
-    let exit = match host.run_command(cwd_fd, run) {
-        CommandInvocation::Started(exit_result) => exit_result,
+/// How the command run for the candidate at `path` went: whether it
+/// started, and how it ended (exit 0 complete, any other exit or a signal
+/// an error of the candidate, a deadline before or during it a stop of the
+/// run, the sandbox gate an error of the run). Output stderr did not take
+/// is no part of it.
+fn command_end(invocation: CommandInvocation, path: &Path) -> (bool, Result<(), ReclaimEnd>) {
+    let exit = match invocation {
+        CommandInvocation::Started { exit, .. } => exit,
         CommandInvocation::DeadlineBeforeStart => {
             return (
                 false,

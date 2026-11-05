@@ -474,6 +474,17 @@ fn final_sample<H: Host>(
     }
 }
 
+/// What a command action's log line adds when diskgc's stderr did not take
+/// all of the command's output (docs/safety.md, Command actions): the
+/// count, never a change of the action's outcome. Empty for none.
+fn not_forwarded_note(lines: u64) -> String {
+    if lines == 0 {
+        String::new()
+    } else {
+        format!(", {lines} lines of command output not forwarded: stderr was not accepting output")
+    }
+}
+
 /// How a backend's deleting child (a Docker or Podman prune, the Nix GC)
 /// ended: whether it started, and the outcome its action records. A
 /// refused gate stops the run; a nonzero exit or a signal is an error of
@@ -485,7 +496,7 @@ fn backend_child_end(
     name: &str,
     op: &'static str,
 ) -> (bool, ReclaimEnd) {
-    let attempted = matches!(invocation, CommandInvocation::Started(_));
+    let attempted = matches!(invocation, CommandInvocation::Started { .. });
     let candidate = candidate.to_owned();
     let end = match invocation {
         CommandInvocation::NotStarted(error) if error.cause == Cause::SandboxGate => {
@@ -501,8 +512,14 @@ fn backend_child_end(
         CommandInvocation::DeadlineBeforeStart => {
             ReclaimEnd::Stopped(Stop::DeadlinePassed { path: candidate })
         }
-        CommandInvocation::Started(Ok(CommandExit::Exited(0))) => ReclaimEnd::Complete,
-        CommandInvocation::Started(Ok(CommandExit::Exited(code))) => ReclaimEnd::Failed {
+        CommandInvocation::Started {
+            exit: Ok(CommandExit::Exited(0)),
+            ..
+        } => ReclaimEnd::Complete,
+        CommandInvocation::Started {
+            exit: Ok(CommandExit::Exited(code)),
+            ..
+        } => ReclaimEnd::Failed {
             error: HostError::invalid(
                 op,
                 candidate.display(),
@@ -510,7 +527,10 @@ fn backend_child_end(
             ),
             path: candidate,
         },
-        CommandInvocation::Started(Ok(CommandExit::Signaled(signal))) => ReclaimEnd::Failed {
+        CommandInvocation::Started {
+            exit: Ok(CommandExit::Signaled(signal)),
+            ..
+        } => ReclaimEnd::Failed {
             error: HostError::invalid(
                 op,
                 candidate.display(),
@@ -518,10 +538,13 @@ fn backend_child_end(
             ),
             path: candidate,
         },
-        CommandInvocation::Started(Ok(CommandExit::TimedOut)) => {
-            ReclaimEnd::Stopped(Stop::DeadlinePassed { path: candidate })
-        }
-        CommandInvocation::Started(Err(error)) => ReclaimEnd::Failed {
+        CommandInvocation::Started {
+            exit: Ok(CommandExit::TimedOut),
+            ..
+        } => ReclaimEnd::Stopped(Stop::DeadlinePassed { path: candidate }),
+        CommandInvocation::Started {
+            exit: Err(error), ..
+        } => ReclaimEnd::Failed {
             path: candidate,
             error,
         },
@@ -1098,6 +1121,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         };
         let started = self.host.now();
         let invocation = self.host.run_command(&cwd.fd, &run);
+        let note = not_forwarded_note(invocation.lines_not_forwarded());
         let (attempted, end) =
             backend_child_end(invocation, &candidate, which.name(), which.prune_op());
         let _ = self.record(
@@ -1111,7 +1135,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 removed_entries: 0,
                 attempted_command: attempted,
                 end,
-                note: String::new(),
+                note,
             },
         );
     }
@@ -1886,7 +1910,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     removed_entries: 0,
                     attempted_command: done.attempted,
                     end: done.end,
-                    note: String::new(),
+                    note: not_forwarded_note(done.lines_not_forwarded),
                 }
             }
             Action::CargoLockProtocol
@@ -2207,7 +2231,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             );
             let term_negated: Vec<&[NegatedSource]> =
                 sources.iter().map(|source| source.negated).collect();
-            let (selected, removed_entries, attempted_command, end) = match &self.tier.action {
+            let (selected, removed_entries, attempted_command, end, note) = match &self.tier.action
+            {
                 Action::Delete { make_writable } => {
                     let done = fs_kind::reclaim_alternatives_checked(
                         self.host,
@@ -2226,7 +2251,13 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                             .skip(self.host, self.deadline, path, at)
                         },
                     );
-                    (done.selected, done.removed_entries, false, done.end)
+                    (
+                        done.selected,
+                        done.removed_entries,
+                        false,
+                        done.end,
+                        String::new(),
+                    )
                 }
                 Action::Command { argv, cwd } => {
                     let command_sources: Vec<_> = contributors
@@ -2264,7 +2295,13 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                             )
                         },
                     );
-                    (done.selected, 0, done.attempted, done.end)
+                    (
+                        done.selected,
+                        0,
+                        done.attempted,
+                        done.end,
+                        not_forwarded_note(done.lines_not_forwarded),
+                    )
                 }
                 _ => unreachable!("filesystem unions admit delete or command"),
             };
@@ -2287,7 +2324,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 removed_entries,
                 attempted_command,
                 end,
-                note: String::new(),
+                note,
             };
             match self.record_as(reported_path, &profile, outcome) {
                 Some(after) => avail = after,
@@ -2411,13 +2448,14 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         if complete || outcome.removed_entries > 0 || outcome.attempted_command {
             if outcome.attempted_command {
                 (self.log)(&format!(
-                    "{}: {} {}: command finished with {:?}, observed change {}, {} ms",
+                    "{}: {} {}: command finished with {:?}, observed change {}, {} ms{}",
                     self.tier.name,
                     profile,
                     candidate.display(),
                     outcome.end,
                     signed_bytes(delta),
-                    took.as_millis()
+                    took.as_millis(),
+                    outcome.note
                 ));
             } else {
                 (self.log)(&format!(
@@ -2981,8 +3019,17 @@ mod backend_child_end_tests {
                 end,
                 ReclaimEnd::Stopped(Stop::DeadlinePassed { .. })
             ));
-            let started_with =
-                |exit| backend_child_end(CommandInvocation::Started(Ok(exit)), candidate, name, op);
+            let started_with = |exit| {
+                backend_child_end(
+                    CommandInvocation::Started {
+                        exit: Ok(exit),
+                        lines_not_forwarded: 0,
+                    },
+                    candidate,
+                    name,
+                    op,
+                )
+            };
             let (started, end) = started_with(CommandExit::Exited(0));
             assert!(started);
             assert!(matches!(end, ReclaimEnd::Complete));
@@ -3011,9 +3058,12 @@ mod backend_child_end_tests {
                 end,
                 ReclaimEnd::Stopped(Stop::DeadlinePassed { .. })
             ));
-            let failed = HostError::invalid("forward command output", "x", "broken");
+            let failed = HostError::invalid("read command output", "x", "broken");
             let (started, end) = backend_child_end(
-                CommandInvocation::Started(Err(failed.clone())),
+                CommandInvocation::Started {
+                    exit: Err(failed.clone()),
+                    lines_not_forwarded: 0,
+                },
                 candidate,
                 name,
                 op,

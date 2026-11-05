@@ -507,6 +507,7 @@ pub struct State {
     /// Exit code of modelled command actions; a real child is never run.
     pub command_exit: u8,
     pub command_error_after_start: bool,
+    pub command_lines_not_forwarded: u64,
     pub docker: crate::spec::DockerSpec,
     pub podman: crate::spec::PodmanSpec,
     pub nix: crate::spec::NixSpec,
@@ -574,6 +575,7 @@ impl State {
             sandbox_gate: crate::spec::GateSpec::Open,
             command_exit: 0,
             command_error_after_start: false,
+            command_lines_not_forwarded: 0,
             docker: crate::spec::DockerSpec::default(),
             podman: crate::spec::PodmanSpec::default(),
             nix: crate::spec::NixSpec::default(),

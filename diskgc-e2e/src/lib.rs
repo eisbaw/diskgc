@@ -92,6 +92,7 @@ pub mod runner;
 pub mod scale_suite;
 pub mod scratch;
 pub mod signal_suite;
+pub mod slow_stderr;
 pub mod snapshot;
 pub mod stdout_suite;
 pub mod strace;

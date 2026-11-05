@@ -143,8 +143,9 @@ usage: diskgc-e2e-driver [--pause-at POINT]... [--kill-at POINT]... [--max-open-
                                   output open past a short tier deadline
     command-closed-pipes CWD PID   exit the leader while a descendant closes
                                   output pipes and continues running
-    command-stalled-stderr CWD PID fill the driver's stderr pipe with no
-                                  reader before forwarding command output
+    command-stalled-stderr CWD DONE fill the driver's stderr pipe with no
+                                  reader, then run a chatty command that
+                                  writes DONE when it finishes
 Runs only inside a diskgc test container.";
 
 /// A parsed command line.
@@ -334,8 +335,8 @@ pub fn run<H: Delete>(
         ("command-closed-pipes", [cwd, pid]) => {
             command_descendant(host, Path::new(cwd), Path::new(pid), true, false, &mut out)?;
         }
-        ("command-stalled-stderr", [cwd, pid]) => {
-            command_stalled_stderr(host, Path::new(cwd), Path::new(pid), &mut out)?;
+        ("command-stalled-stderr", [cwd, done]) => {
+            command_stalled_stderr(host, Path::new(cwd), Path::new(done), &mut out)?;
         }
         _ => return Err(format!("bad operation {operation:?} {args:?}")),
     }
@@ -717,8 +718,7 @@ fn host_lock<H: Host>(host: &H, gate: &Path, out: &mut Lines<'_>) -> Result<(), 
 /// the lock before allowing the shell to exit.
 fn started_command(result: CommandInvocation) -> Result<CommandExit, String> {
     match result {
-        CommandInvocation::Started(Ok(exit)) => Ok(exit),
-        CommandInvocation::Started(Err(error)) => Err(error.to_string()),
+        CommandInvocation::Started { exit, .. } => exit.map_err(|error| error.to_string()),
         CommandInvocation::NotStarted(error) => Err(format!("command did not start: {error}")),
         CommandInvocation::DeadlineBeforeStart => {
             Err("command deadline passed before spawn".to_owned())
@@ -844,7 +844,9 @@ fn command_orphan<H: Delete>(host: &H, cwd: &Path, out: &mut Lines<'_>) -> Resul
         second_signal: SecondSignal::WaitOutGrace,
     };
     match host.run_command(&checked.fd, &run) {
-        CommandInvocation::Started(Err(error)) => out.ok(format!("command error={error}")),
+        CommandInvocation::Started {
+            exit: Err(error), ..
+        } => out.ok(format!("command error={error}")),
         other => return Err(format!("orphaned output returned {other:?}")),
     }
     Ok(())
@@ -900,13 +902,16 @@ fn command_descendant<H: Delete>(
     Ok(())
 }
 
-/// A full blocking pipe as fd 2 exposes any synchronous forwarding that
-/// would wait forever for a consumer. The real stderr is restored before
-/// this operation reports its result to the harness.
+/// A full blocking pipe as fd 2, never read while the command runs: the
+/// most a consumer can stall (TASK-342). The chatty child writes
+/// [`STALLED_STDERR_LINES`] lines to stdout and stderr, then `finished` to
+/// `done_file`: its result must be its own exit, its output drained and
+/// counted as not forwarded, and its end prompt. The real stderr is
+/// restored before this operation reports its result to the harness.
 fn command_stalled_stderr<H: Delete>(
     host: &H,
     cwd: &Path,
-    pid_file: &Path,
+    done_file: &Path,
     out: &mut Lines<'_>,
 ) -> Result<(), String> {
     let checked = resolve(host, cwd, Want::Directory).map_err(|e| e.to_string())?;
@@ -928,25 +933,31 @@ fn command_stalled_stderr<H: Delete>(
     rustix::fs::fcntl_setfl(&write_end, flags & !rustix::fs::OFlags::NONBLOCK)
         .map_err(|e| e.to_string())?;
     rustix::stdio::dup2_stderr(&write_end).map_err(|e| e.to_string())?;
+    let half = STALLED_STDERR_LINES / 2;
+    let script = format!(
+        "i=0; while [ $i -lt {half} ]; do echo \"stalled out $i\"; echo \"stalled err $i\" >&2; \
+         i=$((i+1)); done; echo finished > \"$1\""
+    );
     let run = CommandRun {
         docker_info: None,
         executable: PathBuf::from("/bin/sh"),
         arguments: vec![
             OsString::from("-c"),
-            OsString::from("sleep 30 & echo $! > \"$1\"; echo command-output"),
+            OsString::from(script),
             OsString::from("sh"),
-            pid_file.as_os_str().to_owned(),
+            done_file.as_os_str().to_owned(),
         ],
         environment: Vec::new(),
         output_prefix: "test-tier/test-profile".to_owned(),
         deadline: host
             .now()
-            .checked_add(std::time::Duration::from_secs(2))
+            .checked_add(std::time::Duration::from_secs(20))
             .ok_or("deadline overflow")?,
         second_signal: SecondSignal::WaitOutGrace,
     };
     let started = host.now();
     let result = host.run_command(&checked.fd, &run);
+    let took = host.now().saturating_since(started);
     let stderr_flags = rustix::fs::fcntl_getfl(rustix::stdio::stderr());
     rustix::stdio::dup2_stderr(&saved).map_err(|e| format!("restore stderr: {e}"))?;
     drop(read_end);
@@ -955,15 +966,25 @@ fn command_stalled_stderr<H: Delete>(
         return Err("command port left the driver's stderr nonblocking".to_owned());
     }
     match result {
-        CommandInvocation::Started(Err(error)) => out.ok(format!("command error={error}")),
+        CommandInvocation::Started {
+            exit,
+            lines_not_forwarded,
+        } => {
+            match exit {
+                Ok(exit) => out.ok(format!("command exit={exit:?}")),
+                Err(error) => out.ok(format!("command error={error}")),
+            }
+            out.ok(format!("command lines_not_forwarded={lines_not_forwarded}"));
+        }
         other => return Err(format!("stalled stderr returned {other:?}")),
     }
-    out.ok(format!(
-        "command duration_ms={}",
-        host.now().saturating_since(started).as_millis()
-    ));
+    out.ok(format!("command duration_ms={}", took.as_millis()));
     Ok(())
 }
+
+/// How many lines `command-stalled-stderr`'s child writes, half to each
+/// pipe: some 200 KiB, more than the stalled pipe or any read-ahead holds.
+pub const STALLED_STDERR_LINES: u64 = 5000;
 
 /// The flags of `cargo-reclaim`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

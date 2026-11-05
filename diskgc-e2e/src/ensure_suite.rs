@@ -22,6 +22,7 @@ use crate::cargo_under_test::{Cargo, SMOKE, Toolchain};
 use crate::holder::Holder;
 use crate::lock_release::{flock_free_within_release_bound, flock_held};
 use crate::oracle::{Fixture, Oracle};
+use crate::slow_stderr::SlowStderr;
 use crate::suite::{Ctx, HOST_LOCK, TestResult};
 use crate::under_test::Run;
 use crate::{Owner, ROOT, TESTER, ensure, info};
@@ -2618,38 +2619,181 @@ pub fn command_action_orphaned_output_is_killed_before_reap(ctx: &Ctx) -> TestRe
     judged.assert_clean()
 }
 
-/// A full blocking fd 2 must fail forwarding promptly and kill the command
-/// group. The test driver fills an unread pipe before invoking the port.
-pub fn command_action_stalled_stderr_fails_without_hanging(ctx: &Ctx) -> TestResult {
+/// TASK-342: a full blocking fd 2 that nobody reads must neither fail nor
+/// hang a command action. The chatty child (the driver's
+/// `command-stalled-stderr`) runs to its end and writes its done file; its
+/// own exit is the result; the port returns soon after, its output drained
+/// and counted as not forwarded rather than waited for.
+pub fn command_action_stalled_stderr_neither_fails_nor_hangs(ctx: &Ctx) -> TestResult {
     let cwd = ctx.scratch.mkdir("stalled-stderr-cwd", 0o755, TESTER)?;
-    let pid_file = cwd.join("child.pid");
+    let done = ctx.home.path("stalled-stderr-done");
     let oracle = Oracle::arm(Fixture::new())?;
     let run = ctx.run_as_tester(
         &ctx.driver(),
         &[
             "command-stalled-stderr",
             cwd.to_str().ok_or("non-UTF-8 cwd")?,
-            pid_file.to_str().ok_or("non-UTF-8 pid file")?,
+            done.to_str().ok_or("non-UTF-8 done file")?,
         ],
     )?;
     let judged = oracle.judge(&run)?;
     run.expect_code(0)?;
     ensure!(
-        run.stdout.contains("command error=")
-            && run
-                .stdout
-                .contains("stderr is not accepting output without blocking"),
-        "stalled stderr was not reported: {}\n{}",
+        run.stdout.contains("command exit=Exited(0)"),
+        "a stalled stderr failed or stopped the command: {}\n{}",
         run.stdout,
         run.stderr
     );
-    ensure_command_duration_below(&run.stdout, 700)?;
-    ensure_command_descendant_exited(&pid_file)?;
+    ensure!(
+        std::fs::read_to_string(&done).is_ok_and(|text| text == "finished\n"),
+        "the command did not run to its end (killed?): {}",
+        run.stdout
+    );
+    // Nothing reached the unread pipe: the segment the writer is blocked
+    // in counts as not forwarded too.
+    ensure!(
+        run.stdout.lines().any(|line| line.ends_with(&format!(
+            " command lines_not_forwarded={}",
+            crate::driver::STALLED_STDERR_LINES
+        ))),
+        "not every line of the command was counted as not forwarded: {}",
+        run.stdout
+    );
+    ensure_command_duration_below(&run.stdout, 5000)?;
     ensure!(
         free_within_release_bound()?,
-        "host lock remained held after forwarding failed"
+        "host lock remained held after the command"
     );
     judged.assert_clean()
+}
+
+/// TASK-342, through the CLI: diskgc's stderr is a pipe read 4 KiB every
+/// 250 ms ([`SlowStderr`]) while a command action writes 20,000 lines. The
+/// action completes on its own exit (the candidate gone, the cleaner's done
+/// file written, no error), and every
+/// line is accounted for: forwarded with its prefix, or counted in the
+/// action's log line as not forwarded.
+pub fn command_action_on_a_slow_stderr_completes_and_counts_unforwarded_output(
+    ctx: &Ctx,
+) -> TestResult {
+    const LINES: u64 = 20_000;
+    let candidate = ctx.scratch.mkdir("chatty-candidate", 0o755, TESTER)?;
+    ctx.scratch.write_file(
+        "chatty-candidate/data",
+        &vec![0x5a; 1024 * 1024],
+        0o644,
+        TESTER,
+    )?;
+    let done = ctx.home.path("chatty-done");
+    let half = LINES / 2;
+    let script = format!(
+        "#!/bin/sh\nset -eu\ni=0\nwhile [ $i -lt {half} ]; do echo \"chatty out $i\"; echo \"chatty err $i\" >&2; i=$((i+1)); done\n/bin/rm -r -- \"$1\"\necho finished > {}\n",
+        done.display()
+    );
+    let cleaner = ctx
+        .home
+        .write_file("chatty-cleaner", script.as_bytes(), 0o755, TESTER)?;
+    let config = format!(
+        "version: 1\nprofiles:\n  - name: chatty\n    find: {{roots: [/tmp], paths: [chatty-candidate], type: dir}}\n    action: {{command: [{}, \"{{path}}\"]}}\n    examples: {{match: [/tmp/chatty-candidate]}}\n",
+        cleaner.display()
+    );
+    ctx.home
+        .write_file("diskgc-chatty.yaml", config.as_bytes(), 0o644, TESTER)?;
+    let oracle = Oracle::arm(Fixture::new().eligible(candidate.clone()))?;
+    let (slow, stderr) = SlowStderr::start()?;
+    let started = Instant::now();
+    let spawned = ctx.spawn_as_tester_with_stderr(
+        &ctx.diskgc(),
+        &[
+            "ensure",
+            "--json",
+            "--config",
+            "/home/tester/diskgc-chatty.yaml",
+            "--min-free",
+            "100%",
+            "--timeout",
+            "60s",
+            "--select",
+            "profile:chatty",
+            "/tmp",
+        ],
+        stderr,
+    )?;
+    let run = spawned.wait()?;
+    let took = started.elapsed();
+    let stderr = slow.finish()?;
+    info!(
+        "ensure on a slow stderr -> {:?} in {took:?}\n--- stdout\n{}--- stderr (slow pipe)\n{}",
+        run.code,
+        run.stdout,
+        tail(&stderr, 40)
+    );
+    let judged = oracle.judge(&run)?;
+    let result = report(&run)?;
+    // Removing the candidate may be all `/tmp`'s tmpfs needs for `100%`
+    // (met, exit 0) or not (exhausted, exit 1); never an error (exit 3).
+    ensure!(
+        matches!(
+            (run.code, result["status"].as_str()),
+            (Some(0), Some("met")) | (Some(1), Some("exhausted"))
+        ),
+        "a slow stderr changed the run's outcome: exit {:?}: {result}",
+        run.code
+    );
+    ensure!(
+        result["errors"].as_array().is_some_and(Vec::is_empty)
+            && result["actions"]
+                .as_array()
+                .is_some_and(|actions| actions.len() == 1),
+        "the action was not one error-free action: {result}"
+    );
+    ensure!(!candidate.exists(), "the cleaner left its candidate");
+    ensure!(
+        std::fs::read_to_string(&done).is_ok_and(|text| text == "finished\n"),
+        "the cleaner did not run to its end (killed?)"
+    );
+    let forwarded = u64::try_from(
+        stderr
+            .lines()
+            .filter(|line| line.contains(": chatty out ") || line.contains(": chatty err "))
+            .count(),
+    )
+    .map_err(|e| e.to_string())?;
+    let not_forwarded = not_forwarded_lines(&stderr)?;
+    info!("forwarded {forwarded}, counted as not forwarded {not_forwarded}");
+    ensure!(
+        not_forwarded > 0,
+        "the slow pipe took every line, so nothing tested the drop path"
+    );
+    ensure!(
+        (LINES..=LINES + 1).contains(&(forwarded + not_forwarded)),
+        "{forwarded} forwarded + {not_forwarded} counted as not forwarded != {LINES} written"
+    );
+    judged.assert_clean()
+}
+
+/// The count in a command action's log line (`..., N lines of command
+/// output not forwarded: ...`); 0 when no line says so.
+pub(crate) fn not_forwarded_lines(stderr: &str) -> Result<u64, String> {
+    let mut total = 0;
+    for line in stderr.lines() {
+        if let Some((head, _)) = line.split_once(" lines of command output not forwarded") {
+            let count = head
+                .rsplit(' ')
+                .next()
+                .ok_or_else(|| format!("no count in {line:?}"))?;
+            total += count
+                .parse::<u64>()
+                .map_err(|e| format!("count {count:?} in {line:?}: {e}"))?;
+        }
+    }
+    Ok(total)
+}
+
+/// The last `lines` lines of `text`, for a log.
+fn tail(text: &str, lines: usize) -> String {
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(lines)..].join("\n")
 }
 
 /// Draining an output pipe held open after leader exit is bounded by the

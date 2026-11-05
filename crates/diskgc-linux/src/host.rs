@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
@@ -34,10 +34,10 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
-use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::command_output::{self, Forwarding};
 use diskgc_core::host::{
     Access, Base, BoundSocket, CommandExit, CommandInvocation, CommandRun, DaemonProbe, Delete,
     Dev, DevIno, DirListing, DockerEnvironment, DockerQuery, Environ, Errno, FileType, FsKey,
@@ -3736,7 +3736,13 @@ fn fchmod_permitted(_gate: &Permit, dir: &LinuxFd, mode: Mode) -> rustix::io::Re
 const COMMAND_OUTPUT_CHUNK: usize = 4096;
 const COMMAND_READS_PER_PUMP: usize = 16;
 const COMMAND_OUTPUT_DRAIN_AFTER_EXIT: Duration = Duration::from_secs(1);
-const COMMAND_STDERR_BACKPRESSURE: Duration = Duration::from_millis(50);
+/// How long a command's queued output may still take to reach stderr after
+/// the command ended within its deadline, before the rest is withdrawn and
+/// counted as not forwarded (crate::command_output).
+const COMMAND_OUTPUT_FLUSH: Duration = Duration::from_secs(1);
+/// The same after the deadline: TERM output gets a brief chance only, so
+/// the run's overrun stays the termination grace.
+const COMMAND_OUTPUT_TAIL: Duration = Duration::from_millis(50);
 const COMMAND_TERMINATION_GRACE: Duration = Duration::from_secs(10);
 
 const BACKEND_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -4393,36 +4399,6 @@ fn read_query_pipe(
     Ok(false)
 }
 
-struct OutputMessage {
-    fd: OwnedFd,
-    bytes: Vec<u8>,
-    done: SyncSender<std::io::Result<()>>,
-}
-
-/// One writer for the process, ever. The zero-capacity channel holds no
-/// queued output. If a consumer stalls the writer in `write_all`, later
-/// actions fail to hand off output; they never create another blocked thread.
-static COMMAND_OUTPUT_WRITER: OnceLock<Result<SyncSender<OutputMessage>, String>> = OnceLock::new();
-
-fn command_output_writer(subject: &str) -> Result<&'static SyncSender<OutputMessage>, HostError> {
-    match COMMAND_OUTPUT_WRITER.get_or_init(|| {
-        let (send, receive) = mpsc::sync_channel::<OutputMessage>(0);
-        thread::Builder::new()
-            .name("diskgc-command-output".to_owned())
-            .spawn(move || {
-                for message in receive {
-                    let result = std::fs::File::from(message.fd).write_all(&message.bytes);
-                    let _ = message.done.send(result);
-                }
-            })
-            .map_err(|error| format!("start command output writer: {error}"))?;
-        Ok(send)
-    }) {
-        Ok(send) => Ok(send),
-        Err(error) => Err(HostError::invalid("forward command output", subject, error)),
-    }
-}
-
 fn run_command_permitted(
     _gate: &Permit,
     host: &LinuxHost,
@@ -4531,6 +4507,18 @@ fn start_command_permitted(
             "interrupted before child start",
         ));
     }
+    // Started before the child, so a writer that cannot start leaves
+    // nothing running.
+    let forwarder = match command_output::to_stderr() {
+        Ok(forwarder) => forwarder,
+        Err(why) => {
+            return CommandInvocation::NotStarted(HostError::invalid(
+                "forward command output",
+                &subject,
+                why,
+            ));
+        }
+    };
     command
         .process_group(0)
         .stdout(process::Stdio::piped())
@@ -4572,12 +4560,16 @@ fn start_command_permitted(
     let Some(pid) = rustix::process::Pid::from_raw(child.id().cast_signed()) else {
         let _ = child.kill();
         let _ = child.wait();
-        return CommandInvocation::Started(Err(HostError::invalid(
-            "run command",
-            &subject,
-            "spawned child returned an invalid pid",
-        )));
+        return CommandInvocation::Started {
+            exit: Err(HostError::invalid(
+                "run command",
+                &subject,
+                "spawned child returned an invalid pid",
+            )),
+            lines_not_forwarded: 0,
+        };
     };
+    let forwarding = forwarder.begin();
     // Settled: the leader was reaped, or the group was left running after
     // a second signal ([`leaves_running`]); either way the cleanup below
     // has nothing to do (it must not signal a group it left running).
@@ -4590,10 +4582,13 @@ fn start_command_permitted(
         &mut child,
         &mut leader_settled,
         grace,
+        &forwarding,
     );
     if !leader_settled && let Err(failure) = &result {
-        // An output or wait failure must not leave a trusted cleaner
-        // running after the caller has been told the action failed. A signal
+        // A failure to read the output pipes or to wait (never a stderr
+        // that does not take output: forwarding cannot fail) must not leave
+        // a trusted cleaner running after the caller has been told the
+        // action failed. It is killed at once, without the TERM grace. A signal
         // or deadline uses the same TERM grace even if output setup failed.
         // Only within that grace, after TERM was sent, may a second signal
         // under `watch`'s policy end it: the group is then left running,
@@ -4603,10 +4598,11 @@ fn start_command_permitted(
             let until = host.now().checked_add(grace);
             while until.is_some_and(|until| host.now() < until) {
                 if leaves_running(host, run) {
-                    return CommandInvocation::Started(Err(left_running(
-                        &subject,
-                        &format!("after {failure}"),
-                    )));
+                    return CommandInvocation::Started {
+                        exit: Err(left_running(&subject, &format!("after {failure}"))),
+                        lines_not_forwarded: forwarding
+                            .finish(Duration::ZERO, &|| host.interrupted().is_some()),
+                    };
                 }
                 // An exited leader does not prove its descendants exited.
                 // Keep it waitable to pin the process-group ID until KILL.
@@ -4619,7 +4615,18 @@ fn start_command_permitted(
         let _ = signal_command_group(pid, rustix::process::Signal::KILL, &subject);
         let _ = child.wait();
     }
-    CommandInvocation::Started(result)
+    // The child is gone (or left running by a second signal): what it
+    // wrote gets a bounded chance to reach stderr; the rest is counted.
+    let now = host.now();
+    let flush = if now < run.deadline {
+        COMMAND_OUTPUT_FLUSH.min(run.deadline.saturating_since(now))
+    } else {
+        COMMAND_OUTPUT_TAIL
+    };
+    CommandInvocation::Started {
+        exit: result,
+        lines_not_forwarded: forwarding.finish(flush, &|| host.interrupted().is_some()),
+    }
 }
 
 /// Whether a running child's SIGTERM grace ends now, the child left
@@ -4660,6 +4667,7 @@ fn drive_command_output(
     child: &mut process::Child,
     leader_settled: &mut bool,
     grace: Duration,
+    forwarding: &Forwarding<'_>,
 ) -> Result<CommandExit, HostError> {
     let mut stdout = child.stdout.take().ok_or_else(|| {
         HostError::invalid("run command", subject, "spawned child has no stdout pipe")
@@ -4679,6 +4687,7 @@ fn drive_command_output(
         deadline: run.deadline,
         prefix: &prefix,
         subject,
+        forwarding,
     };
     let mut out_line = OutputLine::default();
     let mut err_line = OutputLine::default();
@@ -4705,9 +4714,9 @@ fn drive_command_output(
         if host.interrupted().is_some() {
             terminate!(grace);
         }
-        let forwarded = drain_command_output(&mut stdout, &mut out_line, target)
+        let drained = drain_command_output(&mut stdout, &mut out_line, target)
             .and_then(|()| drain_command_output(&mut stderr, &mut err_line, target));
-        if let Err(error) = forwarded {
+        if let Err(error) = drained {
             if host.interrupted().is_some() {
                 terminate!(grace);
             }
@@ -4771,10 +4780,11 @@ fn drive_command_output(
     }
 }
 
-/// After a deadline or signal, TERM output has its own bounded forwarding
-/// window. A stalled parent stderr cannot delay KILL indefinitely. The
-/// deadline and signal cancellation both allow up to 10 seconds before
-/// KILL. The executor maps the result to interruption when its flag is set.
+/// After a deadline or signal, the output pipes are still drained during
+/// the TERM grace (a stalled stderr cannot delay KILL: forwarding only
+/// queues). The deadline and signal cancellation both allow up to 10
+/// seconds before KILL. The executor maps the result to interruption when
+/// its flag is set.
 #[allow(clippy::too_many_arguments)]
 fn terminate_command_group(
     host: &LinuxHost,
@@ -4813,7 +4823,7 @@ fn terminate_command_group(
             && (drain_command_output(stdout, out_line, grace_target).is_err()
                 || drain_command_output(stderr, err_line, grace_target).is_err())
         {
-            // Forwarding failure cannot shorten the child's grace period.
+            // A read failure cannot shorten the child's grace period.
             draining = false;
         }
         host.sleep(Duration::from_millis(20).min(grace.saturating_since(host.now())));
@@ -4823,20 +4833,12 @@ fn terminate_command_group(
         .wait()
         .map_err(|e| io_error("wait command", subject, &e))?;
     *leader_settled = true;
-    // Already-readable bytes and unterminated lines get one further bounded
-    // chance to reach stderr. Failure is expected when its consumer stalled.
-    let tail_deadline = host
-        .now()
-        .checked_add(COMMAND_STDERR_BACKPRESSURE)
-        .ok_or_else(|| HostError::invalid("run command", subject, "clock overflow"))?;
-    let tail_target = OutputTarget {
-        deadline: tail_deadline,
-        ..target
-    };
-    let _ = drain_command_output(stdout, out_line, tail_target);
-    let _ = drain_command_output(stderr, err_line, tail_target);
-    let _ = out_line.flush(tail_target);
-    let _ = err_line.flush(tail_target);
+    // Already-readable bytes and unterminated lines are queued too; the
+    // caller's tail flush decides how long they may take to reach stderr.
+    let _ = drain_command_output(stdout, out_line, target);
+    let _ = drain_command_output(stderr, err_line, target);
+    out_line.flush(target);
+    err_line.flush(target);
     Ok(CommandExit::TimedOut)
 }
 
@@ -4846,12 +4848,15 @@ enum OutputDrain {
     Deadline,
 }
 
+/// Where a command's output goes: prefixed, to its [`Forwarding`]. The
+/// deadline bounds the drain after the leader exited.
 #[derive(Clone, Copy)]
 struct OutputTarget<'a> {
     host: &'a LinuxHost,
     deadline: MonoTime,
     prefix: &'a str,
     subject: &'a str,
+    forwarding: &'a Forwarding<'a>,
 }
 
 fn finish_command_output(
@@ -4891,8 +4896,8 @@ fn finish_command_output(
             Duration::from_millis(5).min(target.deadline.saturating_since(target.host.now())),
         );
     }
-    out_line.flush(target)?;
-    err_line.flush(target)?;
+    out_line.flush(target);
+    err_line.flush(target);
     Ok(if target.host.now() >= target.deadline {
         OutputDrain::Deadline
     } else {
@@ -4907,19 +4912,20 @@ struct OutputLine {
 }
 
 impl OutputLine {
-    fn push(&mut self, bytes: &[u8], target: OutputTarget<'_>) -> Result<(), HostError> {
+    fn push(&mut self, bytes: &[u8], target: OutputTarget<'_>) {
         for &byte in bytes {
             self.bytes.push(byte);
             if byte == b'\n' || self.bytes.len() == COMMAND_OUTPUT_CHUNK {
-                self.flush(target)?;
+                self.flush(target);
             }
         }
-        Ok(())
     }
 
-    fn flush(&mut self, target: OutputTarget<'_>) -> Result<(), HostError> {
+    /// Hands the line (or segment) so far to the forwarding, which never
+    /// waits for stderr.
+    fn flush(&mut self, target: OutputTarget<'_>) {
         if self.bytes.is_empty() {
-            return Ok(());
+            return;
         }
         let mut segment = Vec::with_capacity(target.prefix.len() + self.bytes.len() + 1);
         segment.extend_from_slice(target.prefix.as_bytes());
@@ -4927,95 +4933,8 @@ impl OutputLine {
         if !self.bytes.ends_with(b"\n") {
             segment.push(b'\n');
         }
-        write_command_stderr(segment, target)?;
+        target.forwarding.forward(segment);
         self.bytes.clear();
-        Ok(())
-    }
-}
-
-fn write_command_stderr(bytes: Vec<u8>, target: OutputTarget<'_>) -> Result<(), HostError> {
-    let writer = command_output_writer(target.subject)?;
-    let fd = rustix::io::fcntl_dupfd_cloexec(std::io::stderr().as_fd(), 3)
-        .map_err(|e| HostError::errno("duplicate stderr", target.subject, errno_of(e)))?;
-    let (done_send, done_receive) = mpsc::sync_channel(1);
-    let mut message = OutputMessage {
-        fd,
-        bytes,
-        done: done_send,
-    };
-    let backpressure_until = target
-        .host
-        .now()
-        .checked_add(COMMAND_STDERR_BACKPRESSURE)
-        .unwrap_or(target.deadline)
-        .min(target.deadline);
-    loop {
-        match writer.try_send(message) {
-            Ok(()) => break,
-            Err(TrySendError::Full(held)) => {
-                message = held;
-                let now = target.host.now();
-                if now >= backpressure_until {
-                    return Err(HostError::invalid(
-                        "forward command output",
-                        target.subject,
-                        "stderr writer is not accepting output without blocking",
-                    ));
-                }
-                target
-                    .host
-                    .sleep(Duration::from_millis(2).min(backpressure_until.saturating_since(now)));
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                return Err(HostError::invalid(
-                    "forward command output",
-                    target.subject,
-                    "stderr writer stopped",
-                ));
-            }
-        }
-    }
-    loop {
-        // A completion already in the channel wins at the boundary. Do not
-        // call an otherwise completed write a timeout due to scheduler lag.
-        match done_receive.try_recv() {
-            Ok(Ok(())) => return Ok(()),
-            Ok(Err(error)) => {
-                return Err(io_error("forward command output", target.subject, &error));
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                return Err(HostError::invalid(
-                    "forward command output",
-                    target.subject,
-                    "stderr writer stopped without a result",
-                ));
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-        }
-        let now = target.host.now();
-        if now >= backpressure_until {
-            return Err(HostError::invalid(
-                "forward command output",
-                target.subject,
-                "stderr is not accepting output without blocking",
-            ));
-        }
-        match done_receive
-            .recv_timeout(Duration::from_millis(2).min(backpressure_until.saturating_since(now)))
-        {
-            Ok(Ok(())) => return Ok(()),
-            Ok(Err(error)) => {
-                return Err(io_error("forward command output", target.subject, &error));
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(HostError::invalid(
-                    "forward command output",
-                    target.subject,
-                    "stderr writer stopped without a result",
-                ));
-            }
-        }
     }
 }
 
@@ -5034,10 +4953,10 @@ fn drain_command_output<R: Read>(
         match source.read(&mut bytes) {
             Ok(0) => {
                 line.eof = true;
-                line.flush(target)?;
+                line.flush(target);
                 return Ok(());
             }
-            Ok(n) => line.push(&bytes[..n], target)?,
+            Ok(n) => line.push(&bytes[..n], target),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(io_error("read command output", target.subject, &e)),
@@ -5089,6 +5008,7 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::path::PathBuf;
     use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+    use std::sync::mpsc;
     use std::time::Instant;
 
     /// Serialises the tests that copy this process's fd table (spawning a

@@ -4076,8 +4076,10 @@ tier's turn comes and the goal is not yet met):
    (Nix deletes nothing with `--max-freed 0`). The child is the canonical
    client with the constant argv above, in its own process group, cwd `/`,
    holding the inherited host lock, its output on stderr with the tier and
-   profile prefix. Its exit, signal or timeout is recorded; a nonzero exit
-   or a signal is an error of the action.
+   profile prefix, forwarded as a command action's
+   ([Command actions](#command-actions): lossy, never failing the GC). Its
+   exit, signal or timeout is recorded; a nonzero exit or a signal is an
+   error of the action.
 10. **Measure.** A fresh sample gives the action's `avail_delta_bytes`; the
     tier is done after one GC (Overshoot below).
 
@@ -4369,18 +4371,51 @@ forwarded to diskgc's stderr with the action label on every line. An output
 line longer than 4096 bytes is emitted in 4096-byte segments, each with its
 own prefix, so even a child that never writes a newline cannot grow diskgc's
 output buffer without bound. The action label is limited to 256 bytes, so a
-forwarded segment also has a fixed maximum size. Failure to read or forward
-output fails the action; if the group leader is still held, diskgc kills its process group
-before returning the error. The result on diskgc's stdout is never mixed
-with child output. One process-wide writer thread forwards complete segments
-through close-on-exec duplicates of stderr. No inherited stderr flags are
-changed, and no stdio mutex is held during a write. Its zero-capacity channel
-holds no queued segments: a stalled consumer can block at most that one
-writer thread, while the action fails after at most 50 ms of backpressure
-(or at the earlier tier deadline) and kills its child group. Later actions
-fail to hand off output while the writer remains blocked; they cannot start
-more blocked writers. A leader-exit drain stops at the tier deadline, even
-when the output pipes remain open.
+forwarded segment also has a fixed maximum size. The result on diskgc's
+stdout is never mixed with child output.
+
+**Forwarding is lossy and never in the child's way** (TASK-342). The
+action's result is the child's exit status and the measured change in
+available space; how fast diskgc's stderr takes output (a log file on a
+busy disk, a slow terminal, a stalled journal or pipe consumer) never
+fails, stops or holds up the child:
+
+- The pipes are always drained: reading hands each segment to a bounded
+  queue and never waits for stderr, so the child never blocks on a full
+  pipe because of diskgc's stderr.
+- One process-wide writer thread writes the queue to fd 2, one segment at
+  a time, and is the only thread that may block on a stalled stderr. It
+  writes fd 2 itself: no duplicate is held while a segment waits, no
+  stdio lock is taken, and no inherited stderr flags are changed (a
+  nonblocking fd 2 is waited for with `poll`).
+- The queue holds at most 1 MiB, counting 64 bytes of overhead per
+  segment. A segment that does not fit pushes out the oldest queued ones,
+  so the end of a command's output is what waits.
+- When the child is gone, its queued output gets up to 1 s (never past the
+  tier deadline; 50 ms after it; no time after a signal) to reach stderr; whatever of the action
+  is still queued is then withdrawn. Nothing of an action is written after
+  the action ended, except a segment the writer was already writing.
+- Every segment pushed out, withdrawn, failed to write or still being
+  written when the action ended is counted. The count is the action's
+  stderr log line's last part, `N lines of command output not forwarded:
+  stderr was not accepting output` (a segment counts as a line; the
+  segment still being written may yet arrive, so the count can exceed the
+  loss by one, never fall short of it). `--json` carries neither the
+  command's output nor this count: both are log, not result.
+
+With a stalled stderr each command action can so take up to 1 s longer;
+memory stays bounded by the queue, and no thread beyond the one writer
+ever blocks on stderr. A writer thread that cannot be started leaves the
+action not started, an error. diskgc's own log lines (`ensure`'s and
+`watch`'s, the count included) do not go through this queue: they are
+written to stderr directly, so a stderr that takes nothing at all holds
+diskgc at its next own log line, after the action.
+
+Failure to read the output pipes, or to wait for the child, fails the
+action; if the group leader is still held, diskgc kills its process group
+before returning the error: at once (SIGKILL), unless a signal or the
+deadline already calls for the TERM grace. A leader-exit drain stops at
+the tier deadline, even when the output pipes remain open.
 
 ## Path traversal
 

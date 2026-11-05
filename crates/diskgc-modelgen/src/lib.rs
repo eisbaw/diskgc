@@ -302,6 +302,7 @@ pub fn host_model(
                 sandbox_gate: diskgc_model::spec::GateSpec::Open,
                 command_exit: 0,
                 command_error_after_start: false,
+                command_lines_not_forwarded: 0,
                 docker: Default::default(),
                 podman: Default::default(),
                 nix: Default::default(),

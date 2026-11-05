@@ -211,6 +211,7 @@ pub fn load(model: &HostModel) -> Result<(State, Vec<Event>), LoadError> {
     state.sandbox_gate = model.sandbox_gate;
     state.command_exit = model.command_exit;
     state.command_error_after_start = model.command_error_after_start;
+    state.command_lines_not_forwarded = model.command_lines_not_forwarded;
     state.docker = model.docker.clone();
     state.podman = model.podman.clone();
     state.nix = model.nix.clone();

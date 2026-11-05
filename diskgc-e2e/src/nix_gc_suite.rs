@@ -22,9 +22,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::ensure_suite::report;
+use crate::ensure_suite::{not_forwarded_lines, report};
 use crate::lock_release::{RELEASE_BOUND, flock_free_within_release_bound, flock_held};
 use crate::oracle::{Fixture, Oracle};
+use crate::slow_stderr::SlowStderr;
 use crate::suite::{Ctx, HOST_LOCK, TestResult};
 use crate::under_test::{self, Run, TESTER_ENV};
 use crate::{ensure, info};
@@ -1535,6 +1536,102 @@ fn interrupted_gc(ctx: &Ctx, interrupt: Interrupt) -> TestResult {
     }
     Ok(())
 }
+
+/// docs/testing.md `nix_gc_on_a_slow_stderr_completes_and_counts_unforwarded_output`
+/// (TASK-342; dogfood 2026-11-04, where one slow `deleting` line failed a
+/// real GC with exit 3): 10,000 dead paths, so `nix-store --gc` writes
+/// 10,000 `deleting` lines while diskgc's stderr is a pipe read 4 KiB every
+/// 250 ms ([`SlowStderr`]). The GC runs to its end: every dead path gone,
+/// every root kept, the action error-free (exit 1, `exhausted`: nothing
+/// meets `100%`), and every `deleting` line forwarded or counted in the
+/// action's log line as not forwarded.
+pub fn nix_gc_on_a_slow_stderr_completes_and_counts_unforwarded_output(ctx: &Ctx) -> TestResult {
+    own_store(2048)?;
+    let _daemon = Daemon::start(ctx, &[])?;
+    let rooted = add_files(ctx, &[("sys-1", 4096, b's'), ("sys-2", 8192, b't')])?;
+    make_generations(ctx, [&rooted[0], &rooted[1]], [&rooted[0], &rooted[1]])?;
+    let names: Vec<String> = (0..10_000).map(|i| format!("chatty-{i:05}")).collect();
+    let mut dead = Vec::new();
+    for chunk in names.chunks(2000) {
+        let distinct: Vec<(String, usize)> = chunk.iter().map(|name| (name.clone(), 64)).collect();
+        dead.extend(add_distinct(ctx, &distinct)?);
+    }
+    let links = protected_links(&[])?;
+    let mut fixture = nix_state_writers(Fixture::new());
+    for path in &dead {
+        fixture = fixture.eligible(path.clone());
+    }
+    let oracle = Oracle::arm(fixture)?;
+    let (slow, stderr) = SlowStderr::start()?;
+    let started = Instant::now();
+    let spawned = under_test::spawn_as_tester_with_stderr(
+        &ctx.ledger,
+        &ctx.records,
+        Path::new("/"),
+        &ctx.diskgc(),
+        &ensure_args("100%"),
+        stderr,
+    )?;
+    let run = spawned.wait()?;
+    let took = started.elapsed();
+    let stderr = slow.finish()?;
+    let deleting = stderr
+        .lines()
+        .filter(|line| line.contains(": deleting '/nix/store/"))
+        .count();
+    let not_forwarded = not_forwarded_lines(&stderr)?;
+    info!(
+        "GC on a slow stderr: exit {:?} in {took:?}; {deleting} deleting lines forwarded, \
+         {not_forwarded} lines counted as not forwarded\n--- stdout\n{}--- stderr (without \
+         deleting lines)\n{}",
+        run.code,
+        run.stdout,
+        stderr
+            .lines()
+            .filter(|line| !line.contains(": deleting '/nix/store/"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    oracle.judge(&run)?.assert_clean()?;
+    assert_links_kept(&links, &protected_links(&[])?)?;
+    let report = report(&run)?;
+    ensure!(
+        run.code == Some(1)
+            && report["status"] == "exhausted"
+            && report["errors"].as_array().is_some_and(Vec::is_empty),
+        "a slow stderr changed the GC's outcome: exit {:?}: {report}",
+        run.code
+    );
+    nix_action(&report)?;
+    let left = dead.iter().filter(|p| exists(p)).count();
+    ensure!(left == 0, "{left} dead paths left after the GC");
+    for path in &rooted {
+        ensure!(exists(path), "rooted {} was removed", path.display());
+    }
+    // The GC takes seconds; forwarding 10,000 lines at 16 KiB/s would take
+    // a minute, so the drop path must have run.
+    ensure!(
+        not_forwarded > 0,
+        "the slow pipe took every line, so nothing tested the drop path"
+    );
+    // The count covers every `deleting` line not seen, and exceeds them by
+    // at most Nix's few other lines (roots, links, the summary) and the
+    // segment being written at the end.
+    let accounted = u64::try_from(deleting).map_err(|e| e.to_string())? + not_forwarded;
+    let dead_paths = u64::try_from(dead.len()).map_err(|e| e.to_string())?;
+    ensure!(
+        (dead_paths..=dead_paths + NIX_GC_OTHER_LINES).contains(&accounted),
+        "{deleting} deleting lines forwarded + {not_forwarded} counted as not forwarded is not \
+         within {NIX_GC_OTHER_LINES} lines above the {dead_paths} dead paths"
+    );
+    Ok(())
+}
+
+/// An allowance for the lines `nix-store --gc` writes besides one
+/// `deleting` line per path (finding roots, deleting unused links, the
+/// summary, an occasional warning), plus the one segment the not-forwarded
+/// count may include twice.
+const NIX_GC_OTHER_LINES: u64 = 20;
 
 /// Files of distinct contents (their names repeated to `size`), added.
 fn add_distinct(ctx: &Ctx, files: &[(String, usize)]) -> Result<Vec<PathBuf>, String> {

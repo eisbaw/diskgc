@@ -3453,6 +3453,59 @@ fn a_nonzero_command_exit_is_reported_with_exit_three() {
     );
 }
 
+/// TASK-342: output diskgc's stderr did not take never fails an action.
+/// A command that exits 0 with 18,734 lines not forwarded is a successful
+/// action like any other (no error, the run's exit from the space alone),
+/// and its log line says how many lines were not forwarded.
+#[test]
+fn output_stderr_did_not_take_is_counted_in_the_log_and_never_fails_the_action() {
+    let tree = format!("  /tmp/pytest-of-b: {}\n", old_dir("900M"));
+    let host = host(&yaml("", &tree, "command_lines_not_forwarded: 18734\n"));
+    let uid = executor::privileges(&host, false).unwrap_or_else(|e| panic!("{e}"));
+    let mut lines = Vec::new();
+    let report = executor::ensure(&host, &tmp("profile:cleaner"), &[uid], &mut |l| {
+        lines.push(l.to_owned());
+    });
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert_eq!(report.status, Status::Exhausted, "{report:#?}");
+    assert_eq!(report.exit_code(), 1);
+    assert_eq!(report.actions.len(), 1, "{report:#?}");
+    let action_lines: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains(": command finished with Complete"))
+        .collect();
+    assert_eq!(action_lines.len(), 1, "{lines:#?}");
+    assert!(
+        action_lines[0].ends_with(
+            ", 18734 lines of command output not forwarded: stderr was not accepting output"
+        ),
+        "{lines:#?}"
+    );
+}
+
+/// Without lost output the action's line carries no such note.
+#[test]
+fn a_command_whose_output_was_all_forwarded_logs_no_note() {
+    let tree = format!("  /tmp/pytest-of-b: {}\n", old_dir("900M"));
+    let host = host(&yaml("", &tree, ""));
+    let uid = executor::privileges(&host, false).unwrap_or_else(|e| panic!("{e}"));
+    let mut lines = Vec::new();
+    let report = executor::ensure(&host, &tmp("profile:cleaner"), &[uid], &mut |l| {
+        lines.push(l.to_owned());
+    });
+    assert!(report.errors.is_empty(), "{report:#?}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(": command finished with Complete")),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("not forwarded")),
+        "{lines:#?}"
+    );
+}
+
 #[test]
 fn env_invokes_the_inner_executable_resolved_during_preflight() {
     let tree = format!("  /tmp/pytest-of-b: {}\n", old_dir("900M"));

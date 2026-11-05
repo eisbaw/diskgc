@@ -3428,19 +3428,30 @@ impl Delete for ModelHost {
                         "DeadlineBeforeStart".to_owned(),
                     );
                 }
+                let lines_not_forwarded = inner.state.command_lines_not_forwarded;
                 if inner.state.command_error_after_start {
                     return (
-                        CommandInvocation::Started(Err(HostError::invalid(
-                            "forward command output",
-                            &subject,
-                            "modelled failure after spawn",
-                        ))),
+                        CommandInvocation::Started {
+                            exit: Err(HostError::invalid(
+                                "read command output",
+                                &subject,
+                                "modelled failure after spawn",
+                            )),
+                            lines_not_forwarded,
+                        },
                         object,
                         "started: output error".to_owned(),
                     );
                 }
                 let answer = CommandExit::Exited(i32::from(inner.state.command_exit));
-                (CommandInvocation::Started(Ok(answer)), object, format!("{answer:?}"))
+                (
+                    CommandInvocation::Started {
+                        exit: Ok(answer),
+                        lines_not_forwarded,
+                    },
+                    object,
+                    format!("{answer:?}"),
+                )
             },
         )
     }
@@ -3601,7 +3612,10 @@ impl Delete for ModelHost {
                 let until = inner.state.elapsed + grace;
                 inner.advance_to(until);
                 return (
-                    CommandInvocation::Started(Ok(CommandExit::TimedOut)),
+                    CommandInvocation::Started {
+                        exit: Ok(CommandExit::TimedOut),
+                        lines_not_forwarded: inner.state.command_lines_not_forwarded,
+                    },
                     object,
                     "signalled: TimedOut".to_owned(),
                 );
@@ -3611,7 +3625,10 @@ impl Delete for ModelHost {
                 let until = run.deadline.0.saturating_sub(UPTIME_AT_START) + grace;
                 inner.advance_to(until);
                 return (
-                    CommandInvocation::Started(Ok(CommandExit::TimedOut)),
+                    CommandInvocation::Started {
+                        exit: Ok(CommandExit::TimedOut),
+                        lines_not_forwarded: inner.state.command_lines_not_forwarded,
+                    },
                     object,
                     "deadline: TimedOut".to_owned(),
                 );
@@ -3620,7 +3637,10 @@ impl Delete for ModelHost {
             inner.advance_to(until);
             let answer = CommandExit::Exited(i32::from(gc.exit.unwrap_or(0)));
             (
-                CommandInvocation::Started(Ok(answer)),
+                CommandInvocation::Started {
+                    exit: Ok(answer),
+                    lines_not_forwarded: inner.state.command_lines_not_forwarded,
+                },
                 object,
                 format!("{answer:?}"),
             )

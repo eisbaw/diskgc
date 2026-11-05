@@ -466,9 +466,12 @@ How the format reads (the schema documents every key):
   `LinuxHost` has it (`open`, the default; `closed`: `may_delete` and the
   deleting calls are refused; `refuses_deletes`: only the deleting calls
   are). `command_exit` is the exit code of a modelled command action
-  (default 0); `command_error_after_start: true` models a forwarding or
-  wait error after spawn, so the executor must still report an action and
-  observed space change. The model records argv, environment and checked
+  (default 0); `command_error_after_start: true` models a read or wait
+  error after spawn, so the executor must still report an action and
+  observed space change; `command_lines_not_forwarded` (default 0) is the
+  count of output lines stderr did not take that every started command
+  (an action, a prune, the Nix GC) reports, which the executor logs on
+  the action's line and never turns into a failure (TASK-342). The model records argv, environment and checked
   cwd but starts no real child. The modelled command path is `/usr/bin:/bin`:
   a `docker:` answer is given only while an executable `docker` is there
   (otherwise ENOENT, as `LinuxHost`'s spawn: no client installed). It
@@ -1045,9 +1048,23 @@ Model scenarios required by [safety.md](safety.md) and
 - `command_action_orphaned_output_is_killed_before_reap`: a leader exits
   normally while its descendant holds the output pipes open; the bounded
   drain fails, kills the still-reserved process group, and releases the lock.
-- `command_action_stalled_stderr_fails_without_hanging`: an unread full
-  parent stderr pipe fails output forwarding promptly and kills the child
-  group.
+- `command_action_stalled_stderr_neither_fails_nor_hangs` (TASK-342): an
+  unread full blocking parent stderr pipe while a child writes 5,000
+  lines: the child runs to its end (its done file written), the result is
+  its exit 0, the port returns within 5 s, every line is counted as not
+  forwarded, and the pipe's flags stay blocking.
+- `command_action_on_a_slow_stderr_completes_and_counts_unforwarded_output`
+  (TASK-342): the CLI with its stderr a pipe read 4 KiB every 250 ms
+  while a command action writes 20,000 lines: the action completes
+  error-free (candidate gone, done file written, exit 0 or 1 by the
+  space, never 3), and the forwarded lines plus the count on the action's line
+  add up to the lines written (at most one more).
+- The forwarder itself (diskgc-linux `command_output` unit tests, with a
+  sink the test blocks or fails): queueing never waits for a stalled
+  sink, the queue stays within its bound and drops its oldest segments,
+  a failed write counts against its own action only, the end of an
+  action withdraws and counts what is left, and nothing is lost when the
+  sink keeps up.
 - `command_action_leader_exit_drain_obeys_tier_deadline`: a descendant holds
   output open after leader exit, but draining ends at the tier deadline.
 - `command_action_closed_pipe_descendant_is_killed`: a descendant closes both
@@ -1776,6 +1793,7 @@ kinds, a Nix tier does not rely on diskgc's in-use check).
 | Vector | Model | Expected |
 |---|---|---|
 | `nix-gc-collects-through-the-pinned-daemon` | multi-user layout, multi-call client 2.34.8 in `/nix/store`, daemon 2.34.8, roots answer lists every generation | plan `/nix/store` eligible, `estimated_bytes: null`; commands, each through `<dir>/nix` or `<dir>/nix-store` with `--extra-experimental-features nix-command` on every `nix`: `config show store`, pinned `store info`, `--query --roots <every generation>`, `--gc --max-freed <goal − avail>`, the pinned ones with `--store unix:///proc/self/fd/N` and env exactly `HOME` and `NIX_USER_CONF_FILES=`; the dead path removed, the rooted one and the generations preserved |
+| `nix-gc-output-not-forwarded-is-no-failure` | as `nix-gc-collects-through-the-pinned-daemon`, but `command_lines_not_forwarded: 18734`: diskgc's stderr did not take most of the GC client's output (TASK-342) | the GC is still one error-free action: exit 0, `met`; the count goes to the action's log line only |
 | `nix-dry-run-runs-no-root-query` | as above, `--dry-run` | plan eligible; commands are queries only (no `--query --roots`, no GC) |
 | `nix-client-missing` | no `nix-store` on `PATH` | `missing`, no Nix command |
 | `nix-store-absent` | no `/nix/store` | `missing` |
@@ -2478,6 +2496,13 @@ filesystem, processes and mounts from the developer's system.
     true`, dead paths sharing files through `.links`: the space appears
     only after the links phase; measured and reported, not asserted
     against a timing.
+  - `nix_gc_on_a_slow_stderr_completes_and_counts_unforwarded_output`
+    (TASK-342, from the 0.2 dogfood GC that one slow `deleting` line
+    failed with exit 3): 10,000 dead paths while diskgc's stderr is a pipe
+    read 4 KiB every 250 ms: the GC runs to its end (every dead path gone,
+    every root kept, no error, exit 1 at `100%`), and the forwarded
+    `deleting` lines plus the count on the action's line cover every dead
+    path.
   - `nix_gc_pinned_socket_survives_replacement`: container root replaces
     the socket pathname with a decoy listener after preflight: `changed`;
     replaced after the recheck instead: the GC still reaches the original

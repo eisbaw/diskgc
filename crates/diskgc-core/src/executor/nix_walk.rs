@@ -16,7 +16,7 @@ use super::prune_backend::NIX;
 /// The detail of a binding that differs at the recheck in a way
 /// [`nix_backend::recheck`] does not name itself.
 const CHANGED: &str = "Nix client, daemon version, daemon socket or store changed before the GC";
-use super::{Outcome, Protect, ProtectAt, Reclaim, backend_child_end, sample};
+use super::{Outcome, Protect, ProtectAt, Reclaim, backend_child_end, not_forwarded_note, sample};
 
 impl<H: Delete> Reclaim<'_, '_, H> {
     /// The Nix GC of the daemon `bound` under the host lock before any tier
@@ -182,6 +182,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         let started = self.host.now();
         let invocation = self.host.nix_gc(&pinned.client, &pinned.socket, &run);
         drop(pinned);
+        let note = not_forwarded_note(invocation.lines_not_forwarded());
         let (attempted, end) = backend_child_end(invocation, &candidate, NIX, "Nix GC");
         // Step 10: measured by the action's own samples.
         let _ = self.record(
@@ -195,7 +196,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 removed_entries: 0,
                 attempted_command: attempted,
                 end,
-                note: String::new(),
+                note,
             },
         );
     }

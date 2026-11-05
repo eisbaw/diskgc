@@ -1313,7 +1313,9 @@ development builds, the pre-release sandbox gate,
 - stderr carries progress logs: one line per action with tier, profile,
   candidate, observed change in available space, duration. Output of child
   commands (Docker, Nix, command actions) goes to stderr, prefixed with the
-  tier and profile name. Each tier logs where it looked (`N target(s)
+  tier and profile name, as far as stderr takes it: lines it does not take
+  in time are dropped and counted on the action's line, never failing the
+  action ([safety.md](safety.md#command-actions)). Each tier logs where it looked (`N target(s)
   below ROOT`), or `nothing searched` when none of its roots is on
   `PATH`'s filesystem. A note of a process scan (`process scan: ...`, e.g.
   how many processes of other users were not inspected) is logged once per
