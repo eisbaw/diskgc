@@ -80,10 +80,20 @@ fn the_0_1_row_is_what_v0_1_0_shipped() {
     );
 }
 
-/// 0.2's catalog is 0.1's plus `nix-garbage` (Mark, 2026-11-04, TASK-335),
-/// through the same narrowing the binary uses; 0.1's stays without it.
+/// 0.2's catalog is 0.1's plus `nix-garbage` (Mark, 2026-11-04, TASK-335)
+/// and five of TASK-350's project-tree sources (Mark, 2026-11-05,
+/// TASK-359; `node-modules` stays out), through the same narrowing the
+/// binary uses; 0.1's stays without them.
 #[test]
-fn the_0_2_catalog_is_0_1_plus_nix_garbage() {
+fn the_0_2_catalog_is_0_1_plus_nix_garbage_and_the_project_tree_caches() {
+    const ADDED: [&str; 6] = [
+        "nix-garbage",
+        "pytest-cache",
+        "python-pycache",
+        "mypy-cache",
+        "python-venv",
+        "node-compile-cache",
+    ];
     let names = |release: &str| -> Vec<String> {
         let library = Catalog::from(super::release(release).expect(release))
             .library(Library::builtin().expect("built-ins"))
@@ -92,10 +102,15 @@ fn the_0_2_catalog_is_0_1_plus_nix_garbage() {
         library.profiles().map(|p| p.name.clone()).collect()
     };
     let mut want = names("0.1");
-    assert!(!want.iter().any(|n| n == "nix-garbage"), "{want:?}");
-    want.push("nix-garbage".to_owned());
+    assert!(
+        !want.iter().any(|n| ADDED.contains(&n.as_str())),
+        "{want:?}"
+    );
+    want.extend(ADDED.iter().map(|n| (*n).to_owned()));
     want.sort();
-    assert_eq!(names("0.2"), want);
+    let got = names("0.2");
+    assert!(!got.iter().any(|n| n == "node-modules"), "{got:?}");
+    assert_eq!(got, want);
     assert_eq!(release("0.2").expect("0.2").catalog, Some(Release::V0_2));
 }
 

@@ -18,12 +18,17 @@ use crate::{TESTER, ensure};
 // The release candidate's (0.2) catalog: 0.1's, signed off by TASK-65
 // (Mark, 2026-10-24: Cargo, the two /tmp built-ins with a liveness
 // contract, and the idle filters), plus nix-garbage (Mark, 2026-11-04,
-// TASK-335).
+// TASK-335) and five project-tree sources (Mark, 2026-11-05, TASK-359).
 const ADMITTED: &[&str] = &[
     "cargo-target",
     "nix-garbage",
     "nix-shell-rc",
     "pytest-tmp",
+    "pytest-cache",
+    "python-pycache",
+    "mypy-cache",
+    "python-venv",
+    "node-compile-cache",
     "idle-1h",
     "idle-1d",
     "idle-2d",
@@ -42,12 +47,9 @@ const EXCLUDED: &[&str] = &[
     // TASK-93, pending Mark's admission: development library only.
     "podman-dangling",
     "podman-unreferenced",
-    "pytest-cache",
     "nix-user-cache",
     "bun-cache",
     "go-mod-cache",
-    "python-pycache",
-    "mypy-cache",
     "cmake-build-anchored",
     "meson-build-anchored",
     "autotools-build-anchored",
@@ -61,7 +63,6 @@ const EXCLUDED: &[&str] = &[
     "jest-cache",
     "west-build-anchored",
     "platformio-cache",
-    "node-compile-cache",
     "brave-browser-cache",
     "chrome-browser-cache",
     "chromium-browser-cache",
@@ -73,8 +74,8 @@ const EXCLUDED: &[&str] = &[
     // TASK-94, pending Mark's admission: development library only.
     "rustup-toolchains",
     "elan-toolchains",
+    // TASK-350's family member held back (TASK-357).
     "node-modules",
-    "python-venv",
     // TASK-78, pending Mark's admission of the app names: development
     // library only.
     "teams-for-linux-electron-cache",
@@ -159,6 +160,45 @@ pub(crate) fn profile_names(output: &str) -> Result<BTreeSet<String>, String> {
     Ok(names)
 }
 
+/// The gate-lifted release-candidate package (`diskgc-release`; the
+/// release runner's default `diskgc`) for a scenario of the admitted
+/// built-in `name`: checked to be a release-catalog build (every built-in
+/// it lists is in some release catalog, as only a `release-catalog` build
+/// narrows) whose catalog lists `name`, which `profiles show` then shows.
+/// Run before the scenario's fixture moves, under an oracle with nothing
+/// eligible (TASK-335's `nix-garbage`, TASK-359's project-tree sources).
+pub(crate) fn release_candidate_with(ctx: &Ctx, name: &str) -> Result<PathBuf, String> {
+    let binary = binary_path(ctx, "diskgc-release");
+    let list = run_binary(ctx, "diskgc-release", &["profiles", "list", "--json"], 0)?;
+    let listed: Value = serde_json::from_str(&list.stdout)
+        .map_err(|e| format!("parse profiles list: {e}: {}", list.stdout))?;
+    let profiles = listed["profiles"]
+        .as_array()
+        .ok_or_else(|| format!("profiles list has no profiles: {listed}"))?;
+    let unreleased: Vec<&Value> = profiles
+        .iter()
+        .filter(|p| p["releases"].as_array().is_none_or(Vec::is_empty))
+        .map(|p| &p["name"])
+        .collect();
+    ensure!(
+        !profiles.is_empty() && unreleased.is_empty(),
+        "{} is not a release-catalog build: it lists {unreleased:?} outside every release catalog",
+        binary.display()
+    );
+    let names = profile_names(&list.stdout)?;
+    ensure!(
+        names.contains(name),
+        "the release candidate's catalog lacks {name}: {names:?}"
+    );
+    run_binary(
+        ctx,
+        "diskgc-release",
+        &["profiles", "show", name, "--json"],
+        0,
+    )?;
+    Ok(binary)
+}
+
 pub fn candidate_catalog_refuses_every_excluded_builtin(ctx: &Ctx) -> TestResult {
     let list = run(ctx, &["profiles", "list", "--json"], 0)?;
     let names = profile_names(&list.stdout)?;
@@ -183,7 +223,7 @@ pub fn candidate_catalog_refuses_every_excluded_builtin(ctx: &Ctx) -> TestResult
     );
 
     let help = run(ctx, &["--help"], 0)?;
-    for name in ["cargo-target", "nix-garbage", "nix-shell-rc", "pytest-tmp"] {
+    for name in ADMITTED.iter().filter(|name| !name.starts_with("idle-")) {
         ensure!(help.stdout.contains(name), "help omits {name}");
         let shown = run(ctx, &["profiles", "show", name, "--json"], 0)?;
         ensure!(

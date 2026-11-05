@@ -2840,6 +2840,29 @@ clock's now. Roots `/home/tester/src` (the development machine's
 - `candidate_catalog_project_tree_family_matches_the_development_build`
   (host PID namespace): the release path, below.
 
+Through the gate-lifted package (TASK-359, after Mark admitted five of
+the family to 0.2 on 2026-11-05; host PID namespace, Nix image, in the
+fast suite and in the Nix release runner's `--suite release`): each first
+requires the `release-candidate` package's narrowed catalog to list the
+profile (`profiles list`, `profiles show`), then runs the same scenario
+with that binary instead of the development build.
+
+- `release_candidate_pytest_cache_reclaim_then_a_live_session_rewrites_it`,
+  `release_candidate_python_pycache_reclaim_then_a_live_importer_recompiles`,
+  `release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept` and
+  `release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles`:
+  the four scenarios above, live counterexamples included, unchanged.
+  None of these profiles has a floor, so no clock offset is needed.
+- `release_candidate_python_venv_keeps_projects_inside_the_30_day_floor`:
+  the package has no sandbox clock offset, so only the keep side of the
+  floor runs. Environments made now by `python -m venv` and `uv venv`
+  are planned reclaimable by the development package (gated, so it reads
+  the 31-day offset; the release runner's `diskgc` is the candidate),
+  the positive control; with the same offset installed, the candidate
+  keeps both `not_idle`, and its reclaim deletes nothing. The reclaim
+  past the floor, the live interpreter and the activated-shell scenarios
+  run only the development build and the candidate catalog below.
+
 **Package-manager cache family** (TASK-351; diskgc-e2e `pkg_cache_suite.rs`,
 Nix image only, except the last). Class *delegated*: the tool's own cleaner
 acts, so what a run in flight survives is the tool's locking, recorded per
@@ -2931,7 +2954,8 @@ deterministically.
 **The candidate catalog** (`diskgc-candidate-catalog` in the under-test
 bundle). The release-candidate package carries the real catalog only, and
 the PRD lets no other build lift the sandbox gate, so a profile awaiting
-admission cannot run through the gate-lifted package. Instead the flake
+admission (since TASK-359 only `node-modules` of this family) cannot run
+through the gate-lifted package. Instead the flake
 builds the release build's catalog code path (`release-catalog`: this
 version's release row, its commands, the user-profile refusal, the
 catalog's scope checks and narrowing) from a source copy whose
@@ -2939,14 +2963,17 @@ builtin.yaml also lists `diskgc-e2e/candidate-catalog`'s profiles in this
 release's catalog (`tools/candidate_catalog.py`); it keeps the gate (and
 so the sandbox clock offset) and, like the release candidate, has no
 PID-namespace exception. The scenario checks that its catalog is exactly
-the release candidate's plus that list, and that the list is the family
-it tests; then, over one fixture with every member and a live Node, its
-dry run plans exactly what the development build's does, and its
-reclaims delete exactly the reclaimable set. What it does not show: the
-gate-lifted package itself with these profiles (that build carries only
-admitted ones), and, for the 30-day floor without the clock offset, a
-guest whose clock was held back as `vm-release-tmp-reclaim` does; both
-follow an admission.
+the release candidate's plus that list, that the list is part of the
+family it tests and disjoint from the release catalog, and that every
+member is in one of the two; then, over one fixture with every member and
+a live Node, its dry run plans exactly what the development build's
+does, and its reclaims delete exactly the reclaimable set. It still
+covers the admitted five, since its catalog holds them too, and is the
+only release-catalog-path run of `python-venv` past its floor. What it
+does not show: the gate-lifted package with `node-modules` (not
+admitted), and, for the 30-day floor without the clock offset, a guest
+whose clock was held back as `vm-release-tmp-reclaim` does; no such
+guest runs `python-venv` yet.
 
 Not exercised: pnpm, Yarn and Bun layouts; `virtualenv`; an editable
 install made by a real build backend (none is available offline); mypy's
@@ -3574,7 +3601,7 @@ check compares the `release-candidate` binary with a positive development
 control. The default package remains gated. The separate
 `release-candidate` output combines this version's release row (its
 commands and its catalog: Cargo, `nix-shell-rc`, `pytest-tmp`,
-`nix-garbage`, the idle filters) and
+`nix-garbage`, five project-tree sources, the idle filters) and
 lifted gate solely for testing in disposable containers. It is unapproved
 for deployment (docs/reference.md, Built-in profile library). The `just e2e` gate runs candidate negatives
 and the real Cargo reclaim, busy-lock, rebuild and dry-run CLI cases on Nix
@@ -3584,7 +3611,11 @@ and Debian images through their candidate under-test runners, and
 exit 0, writes its snapshot and no record, and deletes nothing (TASK-289).
 The Nix GC stage (`_e2e-nix-gc`) runs the candidate's `nix-garbage` dry
 run and bounded GC (`release_candidate_nix_garbage_dry_run_then_bounded_gc`,
-TASK-335) on the Nix GC image.
+TASK-335) on the Nix GC image. The project-tree scenarios through the
+candidate (`release_candidate_pytest_cache_*`, `*_python_pycache_*`,
+`*_mypy_cache_*`, `*_node_compile_cache_*`, `*_python_venv_*`, TASK-359:
+Admission evidence) run on the Nix image only, in the fast suite and the
+Nix release runner.
 
 Every check, container and VM test runs the **unstamped tested build** of
 each package (flake.nix, `mkDiskgc`): the same source, features and

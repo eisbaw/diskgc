@@ -663,51 +663,12 @@ const BOUNDED_NEED_KIB: u64 = 1024;
 /// writes the store's tmpfs in between.
 const NEED_SLACK: u64 = 4096;
 
-/// The release-candidate package with `nix-garbage` in its catalog: a
-/// narrowed catalog (every built-in it lists is in a release catalog), as
-/// only a `release-catalog` build has, that lists `nix-garbage`. Run before
-/// the store moves, under an oracle with nothing eligible.
-fn release_candidate_with_nix_garbage(ctx: &Ctx) -> Result<PathBuf, String> {
-    let binary = crate::release_suite::binary_path(ctx, "diskgc-release");
-    let list = crate::release_suite::run_binary(
-        ctx,
-        "diskgc-release",
-        &["profiles", "list", "--json"],
-        0,
-    )?;
-    let listed: Value = serde_json::from_str(&list.stdout)
-        .map_err(|e| format!("parse profiles list: {e}: {}", list.stdout))?;
-    let profiles = listed["profiles"]
-        .as_array()
-        .ok_or_else(|| format!("profiles list has no profiles: {listed}"))?;
-    let unreleased: Vec<&Value> = profiles
-        .iter()
-        .filter(|p| p["releases"].as_array().is_none_or(Vec::is_empty))
-        .map(|p| &p["name"])
-        .collect();
-    ensure!(
-        !profiles.is_empty() && unreleased.is_empty(),
-        "{} is not a release-catalog build: it lists {unreleased:?} outside every release catalog",
-        binary.display()
-    );
-    let names = crate::release_suite::profile_names(&list.stdout)?;
-    ensure!(
-        names.contains("nix-garbage"),
-        "the release candidate's catalog lacks nix-garbage: {names:?}"
-    );
-    crate::release_suite::run_binary(
-        ctx,
-        "diskgc-release",
-        &["profiles", "show", "nix-garbage", "--json"],
-        0,
-    )?;
-    Ok(binary)
-}
-
 fn keeps_every_kind_of_root(ctx: &Ctx, trusted: bool, build_kind: Build) -> TestResult {
     let binary = match build_kind {
         Build::Development => ctx.diskgc(),
-        Build::ReleaseCandidate => release_candidate_with_nix_garbage(ctx)?,
+        Build::ReleaseCandidate => {
+            crate::release_suite::release_candidate_with(ctx, "nix-garbage")?
+        }
     };
     own_store(1024)?;
     if trusted {

@@ -96,6 +96,10 @@
   liveness_class: delegated
   releases: ["0.1", "0.2"]
 
+# TASK-350's project-tree family: pytest-cache, python-pycache, mypy-cache,
+# python-venv and node-compile-cache are in the 0.2 catalog, not 0.1 (Mark,
+# 2026-11-05, TASK-359: "admit all", their residuals accepted as named in
+# docs/reference.md, Liveness contracts); node-modules is not (TASK-357).
 - name: pytest-cache
   category: test
   description: pytest cache directories up to three levels below a supplied root
@@ -109,6 +113,7 @@
     no_match: [/home/mark/src/app/.pytest_cache/v]
   verified_with: pytest 9.0.3 (cacheprovider source) and pytest 9.1.1 in the container tests (TASK-350)
   liveness_class: tolerant
+  releases: ["0.2"]
 
 - name: nix-user-cache
   category: nix
@@ -246,6 +251,7 @@
     no_match: [/home/mark/src/app/__pycache__/nested, /home/mark/src/app/a/b/c/d/__pycache__]
   verified_with: CPython 3.13.15 and observed CPython 3.12 .pyc layout in a project tree, 2026-10-20; CPython 3.14.7 and pytest 9.1.1 in the container tests (TASK-350)
   liveness_class: tolerant
+  releases: ["0.2"]
 
 - name: mypy-cache
   category: python / js
@@ -262,6 +268,7 @@
     no_match: [/home/mark/src/app/.mypy_cache/3.13, /home/mark/src/app/a/b/c/d/.mypy_cache]
   verified_with: mypy 1.11.2 (version_id in an observed cache metadata file), tagged project cache layout 2026-10-20; mypy 2.1.0 (SQLite cache shards) in the container tests (TASK-350)
   liveness_class: verified-heuristic
+  releases: ["0.2"]
 
 # Project dependency directories (TASK-79): judged by their whole
 # project's activity, not their own (a reader changes neither mtime nor
@@ -271,7 +278,8 @@
 # editable install can put a real checkout under .venv/src). Nothing below a
 # hidden directory under the root is a candidate (`exclude`): those are
 # tool-managed installs (~/.npm/_npx, editor extensions, ~/.cache), not the
-# user's projects, which a root of ~ would otherwise reach.
+# user's projects, which a root of ~ would otherwise reach. python-venv is
+# in the 0.2 catalog (TASK-359); node-modules in none yet (TASK-357).
 - name: node-modules
   category: python / js
   description: Node project dependency directories (node_modules beside a package.json) through depth five below a supplied project or workspace root, outside hidden directories, once their project shows no change, read or visible use for 30 days
@@ -307,6 +315,7 @@
     no_match: [/home/mark/src/app/.venv/lib, /home/mark/src/app/venv, /home/mark/src/app/.venv-3a9f, /home/mark/src/a/b/c/d/e/.venv, /home/mark/src/.local/share/tool/.venv]
   verified_with: CPython 3.13.15 venv layout (pyvenv.cfg) on the development host (read-only dry runs 2026-11-02 and 2026-11-05), the ModelHost vectors, and CPython 3.14.7 venv and uv 0.13.0 in the container tests (TASK-350)
   liveness_class: verified-heuristic
+  releases: ["0.2"]
 
 # A narrower source-anchored recognizer for build output of any directory
 # name. It requires the cache's recorded source to be an ancestor outside
@@ -566,6 +575,7 @@
     no_match: [/tmp/node-compile-cache/v22, /tmp/x/node-compile-cache]
   verified_with: Node.js 24.21.0 (host layout 2026-10-20; read-only survey 2026-10-18; read-only dry run 2026-11-05) and the container tests (TASK-350)
   liveness_class: tolerant
+  releases: ["0.2"]
 
 # Admitted under the Owner PID contract (docs/safety.md, Producer liveness;
 # docs/reference.md, Liveness contracts): the pid in the name is the shell's,

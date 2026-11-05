@@ -1,6 +1,6 @@
-# A configuration whose later group selects a development-only built-in
-# (pytest-cache) loads under the development catalog but not under the
-# 0.1 catalog: exit 2 at load, so the first group's eligible
+# A configuration whose later group selects a built-in outside the 0.1
+# catalog (pytest-cache; in 0.2's since TASK-359) loads under the
+# development catalog but not under the 0.1 catalog: exit 2 at load, so the first group's eligible
 # Cargo target is untouched (no tier runs before the whole configuration
 # is held to the catalog).
 profile_vector: 1

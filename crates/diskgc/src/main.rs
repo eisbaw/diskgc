@@ -1676,7 +1676,8 @@ mod tests {
     /// version's row of the release descriptor, and this
     /// list is the second key a widening of the catalog must turn (with
     /// TASK-65's sign-off for `/tmp`, Mark's admission of `nix-garbage` for
-    /// 0.2, TASK-335), not a stale copy to derive away.
+    /// 0.2, TASK-335, and of five project-tree sources, TASK-359), not a
+    /// stale copy to derive away.
     #[test]
     fn release_catalog_keeps_only_its_admitted_built_ins_on_every_listing_surface() {
         let row = release::release_of_version(env!("CARGO_PKG_VERSION")).expect("this release");
@@ -1698,26 +1699,30 @@ mod tests {
                 "idle-30d",
                 "idle-3d",
                 "idle-7d",
+                "mypy-cache",
                 "nix-garbage",
                 "nix-shell-rc",
-                "pytest-tmp"
+                "node-compile-cache",
+                "pytest-cache",
+                "pytest-tmp",
+                "python-pycache",
+                "python-venv"
             ]
         );
         for surface in [
             describe::list_text(&library),
             describe::help_section(&library),
         ] {
-            assert!(surface.contains("cargo-target"));
-            assert!(surface.contains("nix-garbage"));
-            assert!(surface.contains("nix-shell-rc"));
-            assert!(surface.contains("pytest-tmp"));
+            for admitted in names.iter().filter(|name| !name.starts_with("idle-")) {
+                assert!(surface.contains(admitted), "{admitted}");
+            }
             assert!(!surface.contains("docker-build-cache"));
             assert!(!surface.contains("pip-cache"));
-            assert!(!surface.contains("pytest-cache"));
+            assert!(!surface.contains("node-modules"));
         }
         assert!(library.get("docker-build-cache").is_none());
         assert!(library.get("pip-cache").is_none());
-        assert!(library.get("pytest-cache").is_none());
+        assert!(library.get("node-modules").is_none());
     }
 
     #[test]
@@ -1754,14 +1759,25 @@ mod tests {
             .expect(name);
         }
         Tier::select("profile:nix-garbage", &library, None, 1000).expect("nix-garbage");
+        for name in [
+            "pytest-cache",
+            "python-pycache",
+            "mypy-cache",
+            "python-venv",
+        ] {
+            Tier::select(&format!("profile:{name}"), &library, Some(&roots), 1000).expect(name);
+        }
+        Tier::select("profile:node-compile-cache", &library, None, 1000)
+            .expect("node-compile-cache");
     }
 
     #[cfg(feature = "release-catalog")]
     #[test]
     fn opt_in_binary_uses_the_narrowed_library_for_help_and_select() {
         let library = builtin_library().expect("binary catalog");
-        assert_eq!(library.profiles().count(), 11);
+        assert_eq!(library.profiles().count(), 16);
         assert!(library.get("nix-garbage").is_some());
+        assert!(library.get("python-venv").is_some());
         assert!(library.get("docker-build-cache").is_none());
         let error = Tier::select("profile:docker-build-cache", &library, None, 1000)
             .expect_err("excluded source");

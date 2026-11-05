@@ -269,6 +269,61 @@ fn the_0_2_catalog_takes_a_nix_garbage_tier() {
     );
 }
 
+/// TASK-359: tiers of the five project-tree sources admitted to 0.2 load
+/// under its catalog and each is refused by 0.1's; `checkouts: allow` on
+/// one of them is refused under 0.2 (none of them allows checkouts), and
+/// `node-modules`, not admitted, stays refused.
+#[test]
+fn the_0_2_catalog_takes_the_project_tree_tiers() {
+    const ADMITTED: [(&str, &str); 5] = [
+        ("pytest-cache", "        roots: [/home/mark/src]\n"),
+        ("python-pycache", "        roots: [/home/mark/src]\n"),
+        ("mypy-cache", "        roots: [/home/mark/src]\n"),
+        ("python-venv", "        roots: [/home/mark/src]\n"),
+        ("node-compile-cache", ""),
+    ];
+    let path = Path::new("/tmp/policy.yaml");
+    let release_02 = Catalog::from(crate::release::release("0.2").expect("0.2"));
+    let mut tiers = String::new();
+    for (name, roots) in ADMITTED {
+        tiers.push_str(&format!(
+            "      - name: {name}\n        select: profile:{name} && filter:idle-7d\n{roots}"
+        ));
+    }
+    let source = format!("version: 1\ngroups:\n  - name: projects\n    tiers:\n{tiers}");
+    let config = release_02
+        .config(path, source.as_bytes(), ConfigUse::Run)
+        .unwrap_or_else(|e| panic!("0.2 refused the project-tree tiers: {e}"));
+    assert_eq!(config.groups[0].tiers.len(), ADMITTED.len());
+    let error = release_01()
+        .config(path, source.as_bytes(), ConfigUse::Run)
+        .expect_err("0.1 ships none of them");
+    for (name, _) in ADMITTED {
+        assert!(
+            error.contains(&format!(
+                "`{name}` is a built-in that diskgc 0.1 does not ship"
+            )),
+            "{name}: {error}"
+        );
+    }
+    let allow = "version: 1\nprofile_policies:\n  - profile: python-venv\n    checkouts: allow\n";
+    let error = release_02
+        .config(path, allow.as_bytes(), ConfigUse::Run)
+        .expect_err("python-venv does not allow checkouts");
+    assert!(
+        error.contains("python-venv") && error.contains("may only narrow"),
+        "{error}"
+    );
+    let node = "version: 1\ngroups:\n  - name: g\n    tiers:\n      - name: t\n        select: profile:node-modules\n        roots: [/home/mark/src]\n";
+    let error = release_02
+        .config(path, node.as_bytes(), ConfigUse::Run)
+        .expect_err("node-modules is not in 0.2");
+    assert!(
+        error.contains("`node-modules` is a built-in that diskgc 0.2 does not ship"),
+        "{error}"
+    );
+}
+
 /// docs/reference.md, Built-in profile library: under 0.2, `checkouts:
 /// refuse` on `nix-garbage` loads and changes nothing (a GC has no file
 /// candidates); `allow` is refused.

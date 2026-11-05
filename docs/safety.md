@@ -1685,16 +1685,20 @@ contract class, recorded in the
   in a build directory, under the anchored build profiles, Source-anchored
   CMake output; mark-emulator for Mark 2026-10-24, for `nix-user-cache` and
   `go-mod-cache` only, a cached copy that its upstream no longer serves,
-  admitted with that residual named in their rows); every known counterexample has a checked-in
+  admitted with that residual named in their rows; Mark 2026-11-05, for
+  `python-venv` only, packages installed by hand into a `.venv` without
+  being recorded in its project's manifest, admitted with that residual
+  named in its row, TASK-359); every known counterexample has a checked-in
   ModelHost vector and, where the kernel's view matters, a container test
   with the real pinned producer; and Mark's decision to admit it is recorded
   in the task and in the table. A decision made on his delegation is
   recorded as "admitted by mark-emulator for Mark, DATE", and Mark may veto
   it (TASK-122). Two points are open, not decided here: whether such an
   admission needs Mark's own ratification before its source enters a
-  `releases:` catalog (none of the twelve admitted on 2026-10-24 is in
-  one), and the container tests of those twelve, each row's "Container
-  test: pending (TASK-137)".
+  `releases:` catalog (of the twelve admitted on 2026-10-24 only
+  `mypy-cache` is in one, 0.2, ratified by Mark on 2026-11-05, TASK-359),
+  and the container tests of those twelve, each row's "Container
+  test: pending (TASK-137)" unless it names its tests.
 - **tolerant** and **delegated**: as in the table above, verified per tool.
 - **none**: no contract. The profile is not admissible as a built-in, and
   its row in the liveness table records the counterexample. A user profile
@@ -2339,9 +2343,10 @@ longest):
    entry moves them, so diskgc's own deletion of one dependency directory
    would otherwise keep every other one of the project for `T` (TASK-79
    review, mped). Failure: `not_idle`, detail naming the newest path.
-2. *No read* (narrowed scope PENDING Mark's confirmation; the
-   orchestrator's implementation of mped's recommendation, TASK-79
-   review). The newest atime of a regular file in the project's
+2. *No read* (narrowed scope: the orchestrator's implementation of
+   mped's recommendation, TASK-79 review; accepted by Mark for
+   `python-project` with `python-venv`'s admission to 0.2, 2026-11-05,
+   TASK-359; for `node-project` PENDING his confirmation, TASK-357). The newest atime of a regular file in the project's
    dependency directories of the candidate's name (every `node_modules`,
    or every `.venv`, the candidate included: a workspace's root and
    members share this evidence) is older than `T`. Under the default
@@ -2428,12 +2433,19 @@ this class of loss on 2026-10-23):
   namespace's paths (strings are compared as bytes). Its next lazy import
   or resource read fails. A cooperative lock (below) is the only sound
   remedy (Codex, TASK-79 review);
-- under the narrowed rule 2 (pending Mark): a project whose own code was
+- under the narrowed rule 2 (accepted for `python-venv`, pending for
+  `node-modules`): a project whose own code was
   read in the last `T` while none of its dependency directories was;
 - the `relatime` boundary: the last read can be up to a day older than
   the newest atime shows; with a 30-day floor this moves the boundary by
   at most a day;
 - hand-edited dependency files, under the dated exception above;
+- packages installed by hand into a dependency directory without being
+  recorded in the manifest (`pip install` into a `.venv`): a reinstall
+  from the manifest does not bring them back, so the loss is the user's
+  to repeat by hand, not this list's reinstall. A dated exception for
+  `python-venv` (Mark, 2026-11-05, TASK-359; admission rule above); for
+  `node-modules` (`npm install --no-save`) undecided (TASK-357);
 - a project whose only change in `T` was removing entries (a directory's
   mtime and ctime do not count, rule 1), or a change only in VCS
   metadata;

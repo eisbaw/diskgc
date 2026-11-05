@@ -300,25 +300,29 @@ fn project_python_caches_have_frozen_depth_and_marker_rules() {
 /// TASK-79: the project dependency built-ins' frozen definitions: depth
 /// one through five below a required root, exactly their directory name
 /// (no `.venv-*`, no `node_modules.old`), their contract, the 30-day
-/// floor, checkouts refused, plain delete, no other predicate, and no
-/// release catalog (Mark's TASK-276/138 call).
+/// floor, checkouts refused, plain delete, no other predicate, and their
+/// release catalogs: `python-venv` in 0.2 only (Mark, 2026-11-05,
+/// TASK-359), `node-modules` in none (TASK-357).
 #[test]
 fn project_dependency_profiles_have_frozen_depth_contract_and_floor() {
     let library = Library::builtin().expect("built-ins");
     let root = Path::new("/home/mark/src");
-    for (name, suffix, contract) in [
+    for (name, suffix, contract, releases) in [
         (
             "node-modules",
             "node_modules",
             LivenessContract::NodeProject,
+            &[][..],
         ),
-        ("python-venv", ".venv", LivenessContract::PythonProject),
+        (
+            "python-venv",
+            ".venv",
+            LivenessContract::PythonProject,
+            &[Release::V0_2][..],
+        ),
     ] {
         let profile = library.get(name).expect("project dependency built-in");
-        assert!(
-            profile.releases.is_empty(),
-            "{name} is in no release catalog"
-        );
+        assert_eq!(profile.releases, releases, "{name}'s release catalogs");
         let Body::Source(source) = &profile.body else {
             panic!("{name} is a source")
         };

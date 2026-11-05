@@ -1121,7 +1121,8 @@ under `profile`:
   `delegated`, `none`; [Liveness contracts](#liveness-contracts)), `null`
   for a filter and for every user profile. `releases` lists the release
   catalogs that include a built-in (`["0.1", "0.2"]` for one in both,
-  `["0.2"]` for `nix-garbage`), and is empty otherwise.
+  `["0.2"]` for one only 0.2 ships, such as `nix-garbage`), and is empty
+  otherwise.
 - `find.roots` is always a list: the fixed roots, or empty when
   `find.roots_required` is `true` (`roots: required`: a tier or `--roots`
   supplies them) or when `find.backend` names where the kind's storage
@@ -1751,7 +1752,8 @@ file serves `watch` on a laptop and `ensure` on a runner.
 
 A configuration for diskgc 0.1 uses only the 0.1 built-ins
 (`cargo-target`, `nix-shell-rc`, `pytest-tmp` and the idle filters); 0.2's
-catalog adds `nix-garbage` (see
+catalog adds `nix-garbage`, `pytest-cache`, `python-pycache`,
+`mypy-cache`, `python-venv` and `node-compile-cache` (see
 [Release notes](#release-notes-next-release-draft)).
 It extends `docs/example.yaml` (the example the package installs) with a
 laptop's roots, a protected project and a pressure group:
@@ -1778,15 +1780,15 @@ groups:
 ```
 
 **Development build only.** The example below shows the whole schema
-`version: 1`; diskgc 0.1 refuses it, naming in one run each part it does
-not ship: user `profiles:` (including overrides), `profile_policies` for
-built-ins outside 0.1 (`npm-cache`), `protect` of a user profile, and tiers
-that select a user profile or a built-in outside 0.1 (`node-compile-cache`,
-`docker-build-cache`, `docker-dangling`). Every key keeps its meaning in a
-later release.
+`version: 1`; diskgc 0.1 and 0.2 refuse it, naming in one
+run each part they do not ship: user `profiles:` (including overrides),
+`profile_policies` for built-ins outside their catalogs (`npm-cache`),
+`protect` of a user profile, and tiers that select a user profile or a
+built-in outside their catalogs (`docker-build-cache`,
+`docker-dangling`). Every key keeps its meaning in a later release.
 
 ```yaml
-# Development build only: diskgc 0.1 refuses this configuration.
+# Development build only: diskgc 0.1 and 0.2 refuse this configuration.
 version: 1
 ipc: block-any                    # block-any (default) | live-only
 
@@ -2194,7 +2196,8 @@ The report always names the measure used.
 Status: every contract is implemented and judged. `nix-shell` and
 `pytest` (TASK-112 step 5) are used by the `nix-shell-rc` and
 `pytest-tmp` built-ins; `node-project` and `python-project` (TASK-79) by
-`node-modules` and `python-venv`, in the development library only. What
+`node-modules` (development library only) and `python-venv` (in the 0.2
+catalog). What
 each contract shows,
 and when it cannot decide, is in
 [safety.md](safety.md#producer-liveness); which built-in uses which
@@ -2546,10 +2549,13 @@ refusal test, the module checks' reclaiming case). The development build
 keeps a
 reclaiming `watch`, behind the sandbox gate. The 0.2 row's catalog is
 builtin.yaml's label `0.2` (`catalog: "0.2"`): 0.1's built-ins, which
-list both labels, plus `nix-garbage` (Mark, 2026-11-04, TASK-335). So the
+list both labels, plus `nix-garbage` (Mark, 2026-11-04, TASK-335) and five
+project-tree sources, `pytest-cache`, `python-pycache`, `mypy-cache`,
+`python-venv` and `node-compile-cache` (Mark, 2026-11-05, TASK-359;
+`node-modules` stays out, TASK-357). So the
 candidate keeps `cargo-target`, the two `/tmp` built-ins with a liveness
 contract (`nix-shell-rc`, `pytest-tmp`; TASK-65, Mark 2026-10-24),
-`nix-garbage` and the seven idle filters, and rejects every
+`nix-garbage`, those five and the seven idle filters, and rejects every
 operator-authored profile, including
 overrides. It also refuses configured tiers and `--select` expressions that
 refer to excluded built-ins, even during a dry run. `profiles list`,
@@ -2557,8 +2563,8 @@ refer to excluded built-ins, even during a dry run. `profiles list`,
 `profile_policies` for the admitted sources works only to narrow: `checkouts:
 refuse` on any of them (on `nix-garbage` it changes nothing: a GC has no
 file candidates), `allow` only where the built-in already allows
-(`cargo-target`, `pytest-tmp`); `allow` on `nix-shell-rc` or `nix-garbage`
-is refused, as are
+(`cargo-target`, `pytest-tmp`); `allow` on `nix-shell-rc`, `nix-garbage`
+or one of the five project-tree sources is refused, as are
 policies for excluded sources, including `npm-cache` and `uv-cache`, at load
 time. The other `/tmp` proposals stay out: `nix-shell-tmpdir`, `mktemp-dir`
 and `tmp-entry` have no owner evidence ([Liveness
@@ -2568,7 +2574,7 @@ remain a release decision under TASK-67.
 | Category | Profile | Finds | Action |
 |---|---|---|---|
 | test | `pytest-tmp` | pytest session directories `pytest-of-*/pytest-*`, one candidate per session (Mark, 2026-10-23), under `/tmp`'s temp-prefix v1 preset; `liveness_contract: pytest`, `min_idle_for: 1h` ([Liveness contracts](#liveness-contracts)); `checkouts: allow`: tests create Git repositories as fixtures in their temp directories, which are the run's own output | `delete` |
-| test | `pytest-cache` | `.pytest_cache` (roots required) | `delete` |
+| test | `pytest-cache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359): `.pytest_cache` (roots required) | `delete` |
 | nix | `nix-user-cache` | `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
 | nix | `nix-shell-rc` | rc directories `nix-shell-*-*` and `nix-develop-*-*` directly in `/tmp` (not below shell temp directories); `liveness_contract: nix-shell`, `min_idle_for: 1h` ([Liveness contracts](#liveness-contracts)) | `delete` |
 | nix | `nix-shell-tmpdir` | planned: `nix-shell.*` directories under `/tmp`'s temp-prefix v1 preset, including below `/tmp/claude-{uid}`; dormant shells can use them without an observable descriptor or initial environment path | no safe action yet |
@@ -2594,11 +2600,11 @@ remain a release decision under TASK-67.
 | python / js | `node-gyp-headers`, `electron-download-cache` | development library only, pending Mark's admission (TASK-40): node-gyp's header versions `.cache/node-gyp/*` holding a regular `installVersion`, and @electron/get's download directories `.cache/electron/*` (one per URL hash), below a supplied home root; `min_idle_for: 1h` | `delete` |
 | python / js | `uv-cache`, `pnpm-store`, `yarn-cache` | the tool's cache dir (roots required) | `command` (`uv cache clean`, `pnpm store prune`, `yarn cache clean`) |
 | python / js | `bun-cache` | `.bun/install/cache` or `.cache/.bun/install/cache` below a supplied home root | `delete` |
-| python / js | `python-pycache` | `__pycache__` directories at relative depths 1 through 5 below each supplied project root | `delete` |
-| python / js | `mypy-cache` | `.mypy_cache` directories at relative depths 1 through 5 below each supplied project root, with a regular `CACHEDIR.TAG` file | `delete` |
-| python / js | `node-modules`, `python-venv` | `node_modules` directories beside a regular `package.json`, and `.venv` directories holding `pyvenv.cfg` beside a Python project manifest, at relative depths 1 through 5 below a supplied project or workspace root, with no hidden directory between the root and them (`find.exclude`: tool-managed installs such as `~/.npm/_npx`, editor extensions and `~/.cache` are not the user's projects), and inside no other dependency directory; `liveness_contract: node-project` or `python-project`, `min_idle_for: 30d`, judged by their project's activity ([Liveness contracts](#liveness-contracts)); `checkouts: refuse`. Development library only (no release catalog names them) | `delete` |
+| python / js | `python-pycache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359): `__pycache__` directories at relative depths 1 through 5 below each supplied project root | `delete` |
+| python / js | `mypy-cache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359): `.mypy_cache` directories at relative depths 1 through 5 below each supplied project root, with a regular `CACHEDIR.TAG` file | `delete` |
+| python / js | `node-modules`, `python-venv` | `node_modules` directories beside a regular `package.json`, and `.venv` directories holding `pyvenv.cfg` beside a Python project manifest, at relative depths 1 through 5 below a supplied project or workspace root, with no hidden directory between the root and them (`find.exclude`: tool-managed installs such as `~/.npm/_npx`, editor extensions and `~/.cache` are not the user's projects), and inside no other dependency directory; `liveness_contract: node-project` or `python-project`, `min_idle_for: 30d`, judged by their project's activity ([Liveness contracts](#liveness-contracts)); `checkouts: refuse`. `python-venv` is in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359); `node-modules` is in the development library only (TASK-357) | `delete` |
 | python / js | `jest-cache` | Jest's default `jest_*` cache under `/tmp` or `/var/tmp`, including the temp-prefix v1 preset below | `jest --config '{}' --cacheDirectory '{path}' --clearCache` from the checked parent; Jest removes the measured directory itself |
-| python / js | `node-compile-cache` | `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
+| python / js | `node-compile-cache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359): `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
 | c / c++ | `cmake-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `CMakeCache.txt`, a direct `CMakeFiles/` directory, no `CMakeLists.txt` entry, and a surviving recorded CMake source ancestor; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | c / c++ | `meson-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `build.ninja`, a direct `meson-private/` directory containing regular `coredata.dat`, generated `meson-info/meson-info.json` recording this exact build directory and a surviving Meson source ancestor, and no `meson.build` entry; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | c / c++ | `autotools-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with regular `config.status`, `config.log`, and `Makefile`, status script recording this exact build directory and a surviving `configure.ac` source ancestor, and no `configure.ac` entry in the output; minimum 3-day idle age and `checkouts: refuse` | `delete` |
@@ -2829,8 +2835,12 @@ built-in (excluded, withdrawn, planned, governed elsewhere). The
 (source read, probe, host observation); TASK-122's probe commands are in
 its task notes. A row naming
 `candidate_catalog_project_tree_family_matches_the_development_build` was
-also run through the release build's catalog path with the profile in a
-test-only candidate catalog ([testing.md](testing.md#admission-evidence)).
+also run through the release build's catalog path (gated, with the
+sandbox clock offset), the profile in its catalog, through a test-only
+candidate list when not yet admitted
+([testing.md](testing.md#admission-evidence)); a row naming a
+`release_candidate_*` test ran through the gate-lifted release-candidate
+package itself.
 
 | Profile | Producer (verified) | Contract (evidence) | Class | Residuals | Verdict |
 |---|---|---|---|---|---|
@@ -2850,10 +2860,10 @@ test-only candidate catalog ([testing.md](testing.md#admission-evidence)).
 | `go-build-cache` | Go 1.26.8 in the Nix container (TASK-351): builds fill `XX/HASH-a` and `-d` entries; a build in flight had an entry mapped in the `go` command; `go clean -cache` removes every entry | the tool's own cleaner on the measured directory (Built-in profile library); in use, `checkouts: refuse`. Go takes no cache lock: its clean during a build in flight (kept `in_use` by diskgc through the mapping) made the build fail ("could not import ... no such file or directory") | delegated | One failed, retryable build when the clean lands while the `go` command holds no entry open or mapped (seen held at the compile of package main; not shown for every phase of a build). Test results cached there run again. | Shipped; not in 0.1 or 0.2: command actions are outside their scope, and the release catalog code path refuses it (`the_release_catalog_refuses_every_delegated_cache_built_in`, TASK-351); release catalog: Mark's decision. Container tests: `go_build_cache_real_go_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept`, `delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path`. |
 | `platformio-cache` | PlatformIO Core 6.1.19 in the Nix container (TASK-351): `pio pkg install` downloads into `.cache/downloads`, holding a `tmp*` file and a `.lock` open while it downloads; `pio system prune --cache` removes `.cache` and keeps installed packages; with telemetry on (its default, in diskgc's environment too) it writes `.cache/telemetry.json` again (probed) | the tool's own cleaner on the measured directory (Built-in profile library); in use, `checkouts: refuse`. The prune ignores PlatformIO's download lock: run during an install in flight (kept `in_use` by diskgc), it made the install fail (`FileNotFoundError`) | delegated | One failed, retryable install when the prune lands while the install holds no file in the cache (after its download, while it unpacks). The registry API cache was not exercised offline. Rebuilding needs the network. | Shipped; not in 0.1 or 0.2: command actions are outside their scope, and the release catalog code path refuses it (`the_release_catalog_refuses_every_delegated_cache_built_in`, TASK-351); release catalog: Mark's decision. Container tests: `platformio_cache_real_pio_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept`, `delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path`. |
 | `jest-cache` | Jest npm package 30.2.0 (`jest --version` prints 30.1.3) in the Nix container (TASK-351): runs fill `jest_<uid in base 36>` directly in `TMPDIR` (`/tmp` or a `nix-shell.*` one); a run holds no file there; `--clearCache` removes the measured directory | the tool's own cleaner on the measured directory (Built-in profile library); in use, `checkouts: refuse`. Jest needs no lock: a clear during a run in flight left it to pass and write its cache again | delegated | Transformation again (time). A cache at a custom `cacheDirectory` is not found. | Shipped; not in 0.1 or 0.2: command actions are outside their scope, and the release catalog code path refuses it (`the_release_catalog_refuses_every_delegated_cache_built_in`, TASK-351); release catalog: Mark's decision. Container tests: `jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes`, `delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path`. |
-| `pytest-cache` | pytest 9.0.3 (cacheprovider source read, TASK-122); pytest 9.1.1 in the container (TASK-350: a session in flight whose cache is reclaimed ends with exit 0 and writes it again) | consumer tolerance: `Cache.get` returns the caller's default for a missing or unreadable key, `Cache.set` creates the directory and only warns when it cannot write | tolerant | The next `--lf`, `--ff` or `--sw` run has no record of earlier failures and runs every test (container test). | Shipped: development library only, in no release catalog (release catalog: Mark's decision, TASK-350). Container tests: `pytest_cache_real_pytest_reclaim_then_a_live_session_rewrites_it`, `candidate_catalog_project_tree_family_matches_the_development_build`. |
-| `python-pycache` | CPython 3.13.15 (importlib); CPython 3.14.7 and pytest 9.1.1's assertion rewriting in the container (TASK-350: a Python whose bytecode is reclaimed while it runs imports another module and caches it again) | consumer tolerance: a missing or stale `.pyc` is recompiled from its source, a failed bytecode write is ignored, and a `.pyc` in `__pycache__` is never imported without its source (PEP 3147), so the directory never holds code Python would import | tolerant | Recompilation on the next import; a read-only tree stays uncached (time only). A `__pycache__` whose `.pyc` files are tracked in Git (seen on the development host, 2026-11-05, some with no source beside them) is deleted too: `git status` then shows them deleted, recoverable from Git; an untracked `.pyc` whose source is gone would be the only copy of that compiled code. | Shipped: development library only, in no release catalog (release catalog: Mark's decision, TASK-350, with the tracked-bytecode residual). Container tests: `python_pycache_real_imports_reclaim_then_a_live_importer_recompiles`, `candidate_catalog_project_tree_family_matches_the_development_build`. |
-| `mypy-cache` | mypy 1.11.2 (cache layout); write paths read in mypy 1.9.0's source (TASK-122), not re-read for 1.11.2; mypy 2.1.0 in the container (TASK-350): its default cache is SQLite shards `<python version>/cache.N.db` behind `CACHEDIR.TAG`, every one of which a run was seen holding open while it parses a module | in use; consumer tolerance between runs: a module whose cache entry is missing is checked again; `CACHEDIR.TAG` required | verified heuristic | The next run is a full check (time). A run whose cache directory disappears while it writes stops with mypy's blocking "Error writing plugins snapshot" or fine-grained dependency error (read for 1.x's JSON cache; 2.1.0 with `sqlite_cache = false` not tested): one failed, retryable run (the in-use scan sees the run only while it holds a file there). With mypy 2.1.0's default SQLite cache a run was seen holding every shard open while it parses (container test), so the in-use scan sees it then; whether it holds them through its whole write phase was not tested. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: tolerant between runs, not for a run in flight. Vector: `mypy-cache-run-in-flight-residual`. Container tests: `mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept`, `candidate_catalog_project_tree_family_matches_the_development_build`. Development library only, in no release catalog (release catalog: Mark's decision, TASK-350). |
-| `node-compile-cache` | Node.js 24.21.0 (probe, TASK-122: a cold cache, a warm cache with hits, the directory renamed away mid-run and a path below a regular file all exit 0; the mid-run write fails with "no such file or directory" and is ignored); the same Node in the container (TASK-350: caches of `module.enableCompileCache()` under `/tmp` and a `nix-shell.*` `TMPDIR`; a Node whose cache is reclaimed while it runs loads another module and exits 0) | consumer tolerance: entries are keyed by Node version and content hash, and every read or write failure is a miss | tolerant | Recompilation on the next start (time only). | Shipped: development library only, in no release catalog (release catalog: Mark's decision, TASK-350). Container tests: `node_compile_cache_real_node_reclaim_then_a_live_process_recompiles`, `candidate_catalog_project_tree_family_matches_the_development_build`. |
+| `pytest-cache` | pytest 9.0.3 (cacheprovider source read, TASK-122); pytest 9.1.1 in the container (TASK-350: a session in flight whose cache is reclaimed ends with exit 0 and writes it again) | consumer tolerance: `Cache.get` returns the caller's default for a missing or unreadable key, `Cache.set` creates the directory and only warns when it cannot write | tolerant | The next `--lf`, `--ff` or `--sw` run has no record of earlier failures and runs every test (container test). | Shipped; in the 0.2 catalog, not 0.1's (admitted by Mark, 2026-11-05, TASK-359). Container tests: `pytest_cache_real_pytest_reclaim_then_a_live_session_rewrites_it` and, the same scenario through the gate-lifted package, `release_candidate_pytest_cache_reclaim_then_a_live_session_rewrites_it`; `candidate_catalog_project_tree_family_matches_the_development_build`. |
+| `python-pycache` | CPython 3.13.15 (importlib); CPython 3.14.7 and pytest 9.1.1's assertion rewriting in the container (TASK-350: a Python whose bytecode is reclaimed while it runs imports another module and caches it again) | consumer tolerance: a missing or stale `.pyc` is recompiled from its source, a failed bytecode write is ignored, and a `.pyc` in `__pycache__` is never imported without its source (PEP 3147), so the directory never holds code Python would import | tolerant | Recompilation on the next import; a read-only tree stays uncached (time only). A `__pycache__` whose `.pyc` files are tracked in Git (seen on the development host, 2026-11-05, some with no source beside them) is deleted too: `git status` then shows them deleted, recoverable from Git; an untracked `.pyc` whose source is gone would be the only copy of that compiled code. | Shipped; in the 0.2 catalog, not 0.1's (admitted by Mark, 2026-11-05, TASK-359, with the tracked-bytecode residual; a narrower successor is TASK-358's). Container tests: `python_pycache_real_imports_reclaim_then_a_live_importer_recompiles` and, through the gate-lifted package, `release_candidate_python_pycache_reclaim_then_a_live_importer_recompiles`; `candidate_catalog_project_tree_family_matches_the_development_build`. |
+| `mypy-cache` | mypy 1.11.2 (cache layout); write paths read in mypy 1.9.0's source (TASK-122), not re-read for 1.11.2; mypy 2.1.0 in the container (TASK-350): its default cache is SQLite shards `<python version>/cache.N.db` behind `CACHEDIR.TAG`, every one of which a run was seen holding open while it parses a module | in use; consumer tolerance between runs: a module whose cache entry is missing is checked again; `CACHEDIR.TAG` required | verified heuristic | The next run is a full check (time). A run whose cache directory disappears while it writes stops with mypy's blocking "Error writing plugins snapshot" or fine-grained dependency error (read for 1.x's JSON cache; 2.1.0 with `sqlite_cache = false` not tested): one failed, retryable run (the in-use scan sees the run only while it holds a file there). With mypy 2.1.0's default SQLite cache a run was seen holding every shard open while it parses (container test), so the in-use scan sees it then; whether it holds them through its whole write phase was not tested. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), ratified by Mark, 2026-11-05 (TASK-359), with the residuals named here: tolerant between runs, not for a run in flight. In the 0.2 catalog, not 0.1's (admitted by Mark, 2026-11-05, TASK-359). Vector: `mypy-cache-run-in-flight-residual`. Container tests: `mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept` and, through the gate-lifted package, `release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept`; `candidate_catalog_project_tree_family_matches_the_development_build`. |
+| `node-compile-cache` | Node.js 24.21.0 (probe, TASK-122: a cold cache, a warm cache with hits, the directory renamed away mid-run and a path below a regular file all exit 0; the mid-run write fails with "no such file or directory" and is ignored); the same Node in the container (TASK-350: caches of `module.enableCompileCache()` under `/tmp` and a `nix-shell.*` `TMPDIR`; a Node whose cache is reclaimed while it runs loads another module and exits 0) | consumer tolerance: entries are keyed by Node version and content hash, and every read or write failure is a miss | tolerant | Recompilation on the next start (time only). | Shipped; in the 0.2 catalog, not 0.1's (admitted by Mark, 2026-11-05, TASK-359). Container tests: `node_compile_cache_real_node_reclaim_then_a_live_process_recompiles` and, through the gate-lifted package, `release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles`; `candidate_catalog_project_tree_family_matches_the_development_build`. |
 | `nix-user-cache` | Nix 2.34.8 (probe, TASK-122, private `XDG_CACHE_HOME`: `tarball-cache-v2` moved away while `fetcher-cache-v4.sqlite` stayed; `fetchTarball` over HTTP downloaded again and returned the same store path, exit 0). `gitv3` and `eval-cache-v*` not probed | in use (a reading process maps the Git cache's pack files); consumer tolerance between runs: Nix refetches or re-evaluates what its cache lacks | verified heuristic | A process between two reads of a Git cache can fail once (retryable). Refetching needs the network, so an offline build fails until the cache is repopulated. Not rebuildable: a source whose upstream is gone and whose store path was collected is lost with its cache copy. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: the lost-upstream residual is a dated exception (safety.md, Producer liveness). Vector: `nix-user-cache-mapped-pack-in-use-and-run-between-reads-residual`. Container test: pending (TASK-137). |
 | `go-mod-cache` | Go 1.26.7 (`go env GOMODCACHE`; Go's own `go clean -modcache` removes the same whole directory) | in use; consumer tolerance between runs: a missing module is downloaded again and checked against `go.sum` | verified heuristic | A build reading module sources while they are deleted can fail once (retryable). Needs the network: `GOPROXY=off` or offline builds fail until re-download. Not rebuildable: a module version neither the proxy nor its origin still serves. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: the unserved-module residual is a dated exception (safety.md, Producer liveness). Vector: `go-mod-cache-build-in-flight-residual`. Container test: pending (TASK-137). |
 | `bun-cache` | Bun 1.3.3 (`bun pm cache`; Bun's own `bun pm cache rm` removes the same whole directory); install backends from Bun's documentation, not probed | in use; consumer tolerance between runs: an install hardlinks or copies from the cache (Linux default), so installed `node_modules` keep their data; a missing package is downloaded again | verified heuristic | An install in flight can fail once (retryable). Needs the network. Projects installed with the non-default `--backend=symlink` point into the cache and break until reinstalled. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: the backend claim is unprobed. Vector: `bun-cache-symlink-backend-and-install-in-flight-residual`. Container test: pending (TASK-137). |
@@ -2874,7 +2884,7 @@ test-only candidate catalog ([testing.md](testing.md#admission-evidence)).
 | `renode-tmp` | Renode 1.17.0 TemporaryFilesManager (source read, renode-infrastructure `f3d5d7b7d`): one `renode-<pid>` per process; `GetTemporaryFile` creates each file and closes it; at start and exit Renode removes `renode-<pid>` directories of pids that are not alive, never `*-crash` (its crash reports) and nothing under `--keep-temporary-files` | in use only; no floor | none | Not a built-in. Was: A live Renode's directory holds no descriptor between uses, so a running emulation loses the files it created; crash reports (`renode-<pid>-crash`, 29 on the host) and directories kept on request are deleted. Counterexample vector (user probe `renode-tmp-probe`) `renode-tmp-live-emulation-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). Re-admission: a new name over `renode-<pid>` only, without `-crash`, under an Owner PID contract (Renode's own rule). |
 | `xdg-cache-entry-v2` | any application under `$XDG_CACHE_HOME` (XDG Base Directory Specification 0.8 calls it non-essential data; the profile's own exclusion list records applications that keep sessions, credentials, models and backups there) | in use, `min_idle_for: 30d`, `checkouts: refuse`, exact-name exclusions | none | Not a built-in. Was: Not all can be named: any unknown application's state, or a cache that is the only copy; a dormant application that reads its cache only when it starts. Counterexample vector (user probe `xdg-cache-entry-v2-probe`) `xdg-cache-entry-v2-unknown-app-state-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). |
 | `node-modules` | npm 11.19.0 with Node.js 24.21.0 (the development host's install layout, read-only dry runs 2026-11-02 and 2026-11-05; in the container, TASK-350: real installs of a project and a workspace, restored by `npm ci`); TASK-79's container probe: reading `node_modules` changed neither mtime nor ctime. pnpm (its store links: vector `node-project-pnpm-layout-eligible`), Yarn and Bun: not verified; consumers are `node` and editors | `liveness_contract: node-project`, `min_idle_for: 30d`, `checkouts: refuse`: no change in the project, no read in its `node_modules` directories (project-wide when one links out; this narrowing is PENDING Mark's confirmation), no visible use (identity, held paths, environment, command line); kept while an outer `node_modules` exists | verified heuristic: project activity | Those named in safety.md, Project dependency directories (Residuals), among them a cached consumer launched through a path outside the project, a removal-only change, and under the pending narrowing a project whose own code but no dependency was read; plus safety.md, A process's paths (a mapping is matched by identity only). The loss in a residual is a reinstall, except hand-edited dependency files, a dated exception to the admission rule (Mark, 2026-10-23; remedy `.diskgc-keep` or `protect`). | Shipped, admitted by Mark, 2026-10-23 (TASK-79): development library only, in no release catalog; rule 2's narrowed scope is the orchestrator's, PENDING Mark's confirmation. Nested dependency directories, and one an outer `node_modules` would replace, are never candidates, so a removal cannot silently switch Node to a hoisted copy. Vectors: `node-project-*` in crates/diskgc-model/tests/vectors/liveness, `node-modules` in vectors/builtins. Container tests: `node_modules_real_npm_projects_reclaim_only_idle_projects_then_npm_ci_restores`, `node_modules_live_node_processes_keep_their_projects`, `node_modules_home_level_install_filters_every_project_below_it`, `candidate_catalog_project_tree_family_matches_the_development_build`. A home-level install (`~/package.json` and `~/node_modules`, as on the development host) keeps every project below it `filtered`, so the profile reclaims nothing there. Release catalog: Mark's decision (TASK-350). |
-| `python-venv` | CPython 3.13.15 `venv` (the development host's layout, read-only dry runs 2026-11-02 and 2026-11-05); CPython 3.14.7 `venv` and uv 0.13.0 `uv venv` in the container (TASK-350); TASK-79's container probe: reading `.venv` changed neither mtime nor ctime. virtualenv: not verified; consumers are `python` and editors | `liveness_contract: python-project`, `min_idle_for: 30d`, `checkouts: refuse`: no change in the project, no read in its `.venv` directories (project-wide with an editable install or a link out; this narrowing is PENDING Mark's confirmation), no visible use (identity, held paths, environment, command line) | verified heuristic: project activity | Those named in safety.md, Project dependency directories (Residuals), among them a cached consumer launched through a path outside the project, a removal-only change, and under the pending narrowing a project whose own code but no dependency was read; plus safety.md, A process's paths (a mapping is matched by identity only). The loss in a residual is a reinstall, except hand-edited dependency files, a dated exception to the admission rule (Mark, 2026-10-23; remedy `.diskgc-keep` or `protect`). | Shipped, admitted by Mark, 2026-10-23 (TASK-79): development library only, in no release catalog; rule 2's narrowed scope is the orchestrator's, PENDING Mark's confirmation. A `.venv` inside another dependency directory, or without `pyvenv.cfg` or a manifest beside it, is never a candidate; an editable install's checkout keeps it (`contains_checkout`). Vectors: `python-project-*` in crates/diskgc-model/tests/vectors/liveness, `python-venv` in vectors/builtins. Container tests: `python_venv_real_venv_and_uv_projects_reclaim_only_idle_projects_then_recreate`, `python_venv_live_interpreter_and_activated_shell_keep_their_projects`, `python_venv_activated_shell_that_left_its_project_is_a_named_residual` (the residual of a consumer that names nothing in the project: an activated shell that left it), `candidate_catalog_project_tree_family_matches_the_development_build`. Release catalog: Mark's decision (TASK-350). |
+| `python-venv` | CPython 3.13.15 `venv` (the development host's layout, read-only dry runs 2026-11-02 and 2026-11-05); CPython 3.14.7 `venv` and uv 0.13.0 `uv venv` in the container (TASK-350); TASK-79's container probe: reading `.venv` changed neither mtime nor ctime. virtualenv: not verified; consumers are `python` and editors | `liveness_contract: python-project`, `min_idle_for: 30d`, `checkouts: refuse`: no change in the project, no read in its `.venv` directories (project-wide with an editable install or a link out; this narrowing accepted for `python-venv` with its admission, Mark 2026-11-05), no visible use (identity, held paths, environment, command line) | verified heuristic: project activity | Those named in safety.md, Project dependency directories (Residuals), among them a cached consumer launched through a path outside the project, a removal-only change, and under the narrowing a project whose own code but no dependency was read; plus safety.md, A process's paths (a mapping is matched by identity only). A shell that sourced `activate` and then left the project names nothing in it (`VIRTUAL_ENV` is exported after `exec`), so its environment can be reclaimed while it runs and its next `python` is not found (container test). The loss in a residual is a reinstall, except two dated exceptions to the admission rule: hand-edited dependency files (Mark, 2026-10-23) and packages installed by hand into the environment without being recorded in the manifest, which a reinstall from it does not bring back (Mark, 2026-11-05); remedy for both `.diskgc-keep` or `protect`. | Shipped, admitted by Mark, 2026-10-23 (TASK-79); in the 0.2 catalog, not 0.1's (admitted by Mark, 2026-11-05, TASK-359, with rule 2's narrowed scope and the residuals named here). A `.venv` inside another dependency directory, or without `pyvenv.cfg` or a manifest beside it, is never a candidate; an editable install's checkout keeps it (`contains_checkout`). Vectors: `python-project-*` in crates/diskgc-model/tests/vectors/liveness, `python-venv` in vectors/builtins. Container tests: `python_venv_real_venv_and_uv_projects_reclaim_only_idle_projects_then_recreate`, `python_venv_live_interpreter_and_activated_shell_keep_their_projects`, `python_venv_activated_shell_that_left_its_project_is_a_named_residual` (the residual of a consumer that names nothing in the project: an activated shell that left it), `candidate_catalog_project_tree_family_matches_the_development_build` (the release build's catalog path with the clock offset, so past the floor). Through the gate-lifted package, which has no clock offset, only the keep side of the floor: `release_candidate_python_venv_keeps_projects_inside_the_30_day_floor`. |
 | `nix-shell-tmpdir` | `nix develop`'s rc runs `mktemp -d -t nix-shell.XXXXXX` and exports it after `exec`; no exit cleanup (left after a normal exit, Nix 2.34.8) | none: the name records no owner; a dormant shell shows no use | none | Not a built-in. | Excluded. Counterexample: the dormant-temp-users container test. The class is fixed at the producer, upstream (TASK-123). |
 | `mktemp-dir` | any program | none | none | Not a built-in. | Excluded. Counterexample: a shell that exports `TMPDIR=$(mktemp -d)` after `exec`. |
 | `tmp-entry` | any program | none | none | Not a built-in. | Excluded for good: there is no one producer, and every counterexample above applies. |
@@ -3067,6 +3077,10 @@ line says it was reproduced.
 - TASK-335: the catalog adds `nix-garbage`, a garbage collection of the
   system Nix store (What it does; its limits under Known limits). 0.1.0:
   not affected; it shipped no Nix kind.
+- TASK-359: the catalog adds five project-tree sources, `pytest-cache`,
+  `python-pycache`, `mypy-cache`, `python-venv` and `node-compile-cache`
+  (What it does; their limits under Known limits). 0.1.0: not affected;
+  it shipped none of them.
 - TASK-291: a command line that is not understood (a mistyped flag) is
   exit 2 naming it before anything on the machine is read, as TASK-272
   made a bad configuration. 0.1.0: yes; it ran the host's startup first,
@@ -3104,22 +3118,38 @@ warm, two read-only ones explain it:
   and never deletes ([Tally only](#tally-only); Install, item 5).
 - `diskgc check` validates a configuration without touching the machine;
   `diskgc profiles list|show|test` shows the built-in catalog.
-- The catalog is four sources and the seven idle filters (`idle-1h` to
+- The catalog is nine sources and the seven idle filters (`idle-1h` to
   `idle-30d`): `cargo-target` (Cargo `target/` directories under supplied
   roots, reclaimed by Cargo's lock protocol), `nix-shell-rc` (rc
   directories of ended `nix-shell` and `nix develop` shells directly in
   `/tmp`; Owner PID), `pytest-tmp` (pytest sessions the pytest
-  contract permits) and `nix-garbage` (new in 0.2: the dead paths of a
+  contract permits), `nix-garbage` (new in 0.2: the dead paths of a
   multi-user `/nix/store`, collected by one `nix-store --gc --max-freed
   NEED` through the system Nix daemon as your user, where NEED is what
   is still missing; Nix decides what is dead, and GC roots, profiles and
-  generations are never removed). Both `/tmp` sources keep anything
-  changed in the last hour (`min_idle_for: 1h`); the limits of each
-  source are its row in [Liveness contracts](#liveness-contracts), and
-  `nix-garbage`'s also under Known limits. Select it on its own
-  (`--select profile:nix-garbage /nix/store`, or a tier of its own): it
-  takes no filter and needs no `--roots`. A configuration may use
-  `profile_policies` only to narrow a built-in's checkout guard; user
+  generations are never removed) and five project-tree sources, also new
+  in 0.2: `pytest-cache` (`.pytest_cache` up to three levels below a
+  supplied root), `python-pycache` (`__pycache__` through five levels
+  below a supplied root), `mypy-cache` (`.mypy_cache` through five
+  levels, only with mypy's `CACHEDIR.TAG` in it), `python-venv` (a
+  `.venv` holding `pyvenv.cfg` beside a Python project manifest, through
+  five levels and outside hidden directories, once its whole project
+  shows no change, no read in its environments and no visible use for
+  30 days) and `node-compile-cache` (Node's compile cache in `/tmp` and
+  in the shell temp directories below it). Those five are deleted only
+  after diskgc's own checks: never while a process it can see holds a
+  file in them, and never with a version-control checkout inside.
+  `nix-shell-rc` and
+  `pytest-tmp` keep anything changed in the last hour (`min_idle_for:
+  1h`); the limits of each source are its row in
+  [Liveness contracts](#liveness-contracts), and those of `nix-garbage`
+  and the project-tree sources also under Known limits. Select
+  `nix-garbage` on its own (`--select profile:nix-garbage /nix/store`, or
+  a tier of its own): it takes no filter and needs no `--roots`. The
+  project-tree sources but `node-compile-cache` need the directories to
+  look in, as `--roots` or a tier's `roots:` (your projects' parent, such
+  as `--select profile:python-venv --roots ~/src ~`). A configuration may
+  use `profile_policies` only to narrow a built-in's checkout guard; user
   profiles and overrides are refused.
 
 **Install.** The package holds:
@@ -3270,6 +3300,50 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   stale `gcroots/auto` registrations whose out-link is gone. A GC can
   take minutes under the host lock, and with `auto-optimise-store` the
   space appears only at its end.
+- **`pytest-cache`.** A cache is deleted even while a pytest session
+  runs in its project: pytest holds no file in it and writes it again
+  when the session ends. The next `--lf`, `--ff` or `--sw` run has no
+  record of earlier failures and runs every test.
+- **`python-pycache`.** Python compiles a module again on its next
+  import (time only), and a read-only tree stays uncached. A
+  `__pycache__` whose `.pyc` files are tracked in Git is deleted too:
+  `git status` then shows them deleted, and Git restores them. A `.pyc`
+  whose source file is gone may be the only copy of that code: if you
+  keep such files, put a `.diskgc-keep` file in the directory, or keep
+  that tree out of the supplied roots.
+- **`mypy-cache`.** The next run is a full check (time). diskgc sees a
+  mypy run only while it holds a file in its cache: a run whose cache is
+  deleted while it writes can stop with an error ("Error writing plugins
+  snapshot" or a fine-grained dependency error) and has to be run again.
+  mypy 2.1's default SQLite cache was seen held open while a run parses;
+  that it stays held through the whole write phase, and mypy's JSON cache
+  (`sqlite_cache = false`), were not tested.
+- **`python-venv`.** An environment is kept while its project (the
+  nearest enclosing repository, else the directory holding the `.venv`)
+  shows a change, a read in its environments or a process using it
+  within 30 days. A repository above the supplied root (a dotfiles
+  `~/.git` with `--roots ~/src`) keeps every environment below it
+  without one of its own (`producer_unknown`). What diskgc cannot
+  see, it can delete: a project used without any change, without a read
+  in its environment and without a process at that moment (a tool run
+  from a timer, a project you return to after a month), or used only
+  through a change that removed files; a program started through a path
+  outside the project (a symlink such as `~/bin/tool` to
+  `.venv/bin/tool`), or a shell that ran `source .venv/bin/activate` and
+  then left the project with `cd`, whose next `python` then runs another
+  interpreter on `PATH` (or is not found) and whose late imports fail; a project whose own code was read but none of its
+  environment's files (reads elsewhere in the project count only with an
+  editable install or a link out of the environment); and every read on
+  a filesystem mounted `noatime`. The loss is a reinstall from the
+  project's manifest, which can resolve other versions where no lockfile
+  pins them. Packages you installed by hand without recording them in
+  the manifest, and files you edited inside `.venv`, do not come back:
+  keep such an environment with a `.diskgc-keep` file in it or a
+  `protect` entry.
+- **`node-compile-cache`.** Node compiles again on its next start (time
+  only); a running Node's writes to a deleted cache fail silently. A
+  cache at a `NODE_COMPILE_CACHE` path outside `/tmp` and the shell temp
+  directories below it is not found.
 - **Deadlines are cooperative.** `--timeout` is checked between
   operations; one filesystem operation blocked in the kernel (a dead
   network mount, a slow disk) overruns it, and the overrun is reported
@@ -3327,10 +3401,11 @@ Evidence for the candidate package, and what it does not cover:
 |---|---|
 | Package contents | The actual `release-candidate` derivation passes the static ELF and installed-file check (the binary is byte-identical to its compile; the file list is exactly its release row's, each copy byte for byte; the notes' header and `--help`'s `watch` lines follow the row); its tmpfiles rule and example config are exercised in disposable Nix and Debian containers, and its `watch --tally-only` starts, writes its snapshot, stops on SIGTERM with exit 0 and deletes nothing there. Its unit templates are checked by `systemd-analyze verify` only as the development package's (byte-identical sources) and in the module's drop-in verification; no live `systemd` runs them from this package. |
 | Cargo operator journey | Those containers run the packaged, gate-lifted binary against real Cargo targets: dry run, busy-lock preservation, eligible deletion judged by the filesystem oracle, and a successful rebuild. Default and explicit `checkouts: allow`, and explicit `checkouts: refuse`, are checked on vendored checkout content. |
-| Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp`, `nix-garbage` and the seven idle filters. Excluded built-ins and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
+| Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp`, `nix-garbage`, `pytest-cache`, `python-pycache`, `mypy-cache`, `python-venv`, `node-compile-cache` and the seven idle filters. Excluded built-ins and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
 | Nix GC journey | In the Nix GC image (a container's own CppNix 2.34.8 store and daemon), the packaged binary plans `nix-garbage` in a dry run that deletes nothing, then runs one GC bounded by the asked need: a direct root, an out-link, system and per-user generations, a running build's input and a store file a process holds open all survive, and the dead paths go, judged by the deletion oracle. Every other Nix GC scenario (refusals, signals, the pinned socket) runs the e2e harness's development build, which shares the kind's code. |
+| Project-tree caches | In disposable Nix containers sharing the host's PID namespace, with the pinned real tools (pytest 9.1.1, CPython 3.14.7, mypy 2.1.0, Node.js 24.21.0, uv 0.13.0), the packaged binary runs the development build's scenarios for `pytest-cache`, `python-pycache`, `mypy-cache` and `node-compile-cache`: the tool makes the caches, a dry run plans exactly them and no lookalike, and a reclaim under the deletion oracle deletes exactly those it may while a pytest session, an importing Python and a Node keep running (each finishes and writes its cache again), and keeps a paused mypy run's cache `in_use`; the tools then rebuild. For `python-venv` it shows only the keep side of the 30-day floor: environments made by `python -m venv` and `uv venv` are kept `not_idle` and nothing is deleted. Their reclaim after the floor, the live-use and residual scenarios ran the development build, and the release build's catalog path only gated with a test clock offset; the gate-lifted binary has no clock offset, and no guest with a held-back clock has run it. |
 | Host and filesystem deployment | The candidate has no approval for an operator host or its filesystem, mount, permissions and running-work mix. Container results establish behavior only in those disposable fixtures. |
-| Race and temporary paths | Cargo race protocol tests use a separate development test driver, so they do not establish packaged-binary race behavior. The `/tmp` contracts' container tests run the development binary; the packaged binary's `/tmp` evidence is the release vectors (ModelHost) and a recorded walk in a disposable container (TASK-65), not a container suite, because `min_idle_for: 1h` meets the kernel's ctime and the gate-lifted binary has no test clock offset. |
+| Race and temporary paths | Cargo race protocol tests use a separate development test driver, so they do not establish packaged-binary race behavior. The `nix-shell-rc` and `pytest-tmp` contracts' container tests run the development binary; their packaged binary's `/tmp` evidence is the release vectors (ModelHost) and a recorded walk in a disposable container (TASK-65), not a container suite, because `min_idle_for: 1h` meets the kernel's ctime and the gate-lifted binary has no test clock offset. |
 | Operator policy and rollout | Operator-authored `fs`/delete and command actions are excluded; the final policy contract, installation environment and rollout evidence are unresolved. Do not deploy the candidate built from master. |
 
 ### User profiles

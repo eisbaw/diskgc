@@ -235,6 +235,26 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
         "candidate_catalog_project_tree_family_matches_the_development_build",
         "needs every project-tree tool and the pinned mypy from the Nix store",
     ),
+    (
+        "release_candidate_pytest_cache_reclaim_then_a_live_session_rewrites_it",
+        "needs the pinned pytest in the Nix image",
+    ),
+    (
+        "release_candidate_python_pycache_reclaim_then_a_live_importer_recompiles",
+        "needs the pinned CPython and pytest in the Nix image",
+    ),
+    (
+        "release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept",
+        "needs the pinned mypy from the Nix store",
+    ),
+    (
+        "release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles",
+        "needs the pinned Node in the Nix image",
+    ),
+    (
+        "release_candidate_python_venv_keeps_projects_inside_the_30_day_floor",
+        "needs the pinned CPython and uv in the Nix image",
+    ),
     ("pip_cache_cleaner", "needs the pinned pip in the Nix image"),
     ("uv_cache_cleaner", "needs the pinned uv in the Nix image"),
     (
@@ -454,6 +474,12 @@ pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
     // TASK-350: the candidate-catalog build, like the release candidate,
     // plans only in the host's PID namespace.
     "candidate_catalog_project_tree_family_matches_the_development_build",
+    // TASK-359: the project-tree scenarios through the release candidate.
+    "release_candidate_pytest_cache_reclaim_then_a_live_session_rewrites_it",
+    "release_candidate_python_pycache_reclaim_then_a_live_importer_recompiles",
+    "release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept",
+    "release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles",
+    "release_candidate_python_venv_keeps_projects_inside_the_30_day_floor",
 ];
 
 /// The one test whose container receives the pinned Buildah closure.
@@ -466,11 +492,13 @@ pub const AUTOTOOLS_ANCHOR_TEST: &str = "autotools_generated_output_uses_survivi
 pub const WEST_REAL_BUILD_TEST: &str = "west_generated_output_uses_surviving_source_anchor";
 /// The release package's tmpfiles drop-in and example config in a container.
 pub const PACKAGING_TEST: &str = "shipped_tmpfiles_and_example_work_in_container";
-/// TASK-350's tests that run the pinned mypy, which only the under-test
-/// bundle links (its closure is the host store's, mounted read-only).
+/// TASK-350's and TASK-359's tests that run the pinned mypy, which only the
+/// under-test bundle links (its closure is the host store's, mounted
+/// read-only).
 pub static MYPY_TESTS: &[&str] = &[
     "mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept",
     "candidate_catalog_project_tree_family_matches_the_development_build",
+    "release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept",
 ];
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
@@ -1234,6 +1262,36 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: project_tree_suite::candidate_catalog_project_tree_family_matches_the_development_build,
+    },
+    Test {
+        name: "release_candidate_pytest_cache_reclaim_then_a_live_session_rewrites_it",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::release_candidate_pytest_cache_reclaim_then_a_live_session_rewrites_it,
+    },
+    Test {
+        name: "release_candidate_python_pycache_reclaim_then_a_live_importer_recompiles",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::release_candidate_python_pycache_reclaim_then_a_live_importer_recompiles,
+    },
+    Test {
+        name: "release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept,
+    },
+    Test {
+        name: "release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles,
+    },
+    Test {
+        name: "release_candidate_python_venv_keeps_projects_inside_the_30_day_floor",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::release_candidate_python_venv_keeps_projects_inside_the_30_day_floor,
     },
     Test {
         name: "pip_cache_cleaner",

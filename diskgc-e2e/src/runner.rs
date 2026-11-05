@@ -1238,8 +1238,15 @@ mod tests {
                 "release_candidate_catalog_refuses_every_excluded_builtin",
                 "release_candidate_checkout_policy_accepts_only_admitted_builtin",
                 "release_candidate_files_work_in_container",
+                // TASK-359: on the Nix image only.
+                "release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept",
                 // TASK-335: on the Nix GC image only.
                 "release_candidate_nix_garbage_dry_run_then_bounded_gc",
+                // TASK-359: on the Nix image only.
+                "release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles",
+                "release_candidate_pytest_cache_reclaim_then_a_live_session_rewrites_it",
+                "release_candidate_python_pycache_reclaim_then_a_live_importer_recompiles",
+                "release_candidate_python_venv_keeps_projects_inside_the_30_day_floor",
                 "release_candidate_refuses_a_reclaiming_watch",
                 "release_candidate_refuses_in_its_own_pid_namespace",
                 "release_candidate_rejects_docker_command_and_arbitrary_delete_policy",

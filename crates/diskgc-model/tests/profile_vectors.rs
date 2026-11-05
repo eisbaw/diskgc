@@ -254,8 +254,11 @@ fn wrong_python_matcher_is_rejected_by_the_checked_in_vector() {
         .find(|spec| spec.name == "python-pycache")
         .expect("python-pycache source");
     source.r#override = Some(true);
+    // The built-in-only fields a user profile may not carry (python-pycache
+    // is in the 0.2 catalog since TASK-359).
     source.verified_with = None;
     source.liveness_class = None;
+    source.releases.clear();
     let find = source.find.as_mut().expect("find");
     for pattern in find.paths.as_mut().expect("paths") {
         *pattern = pattern.replace("__pycache__", "__wrong_cache__");

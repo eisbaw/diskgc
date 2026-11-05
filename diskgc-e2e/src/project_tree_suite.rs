@@ -19,6 +19,12 @@
 //! ([`PAST_THE_FLOOR`]) and make "recent" activity by setting a file's
 //! mtime or atime to an hour before that clock's now (a kernel ctime
 //! cannot be set back).
+//!
+//! TASK-359 admitted five of the six to the 0.2 catalog: the
+//! `release_candidate_*` tests run the `pytest-cache`, `python-pycache`,
+//! `mypy-cache` and `node-compile-cache` scenarios through the gate-lifted
+//! release-candidate package, and `python-venv` only on the keep side of
+//! its floor (that build reads no clock offset).
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -1295,6 +1301,64 @@ pub fn python_venv_activated_shell_that_left_its_project_is_a_named_residual(
     Ok(())
 }
 
+/// TASK-359 (docs/testing.md, Admission evidence): `python-venv` through
+/// the gate-lifted release-candidate package, whose 0.2 catalog holds it.
+/// That build has no sandbox clock offset, so the reclaim side of the
+/// 30-day floor cannot run in a container; this shows the keep side on
+/// the real clock. Two environments made now by the real tools (`python
+/// -m venv`, `uv venv`) are what the development package (gated, so it
+/// reads the offset; not the e2e `diskgc`, which the release runner
+/// replaces with the release candidate), its clock advanced past the
+/// floor, plans to reclaim: the positive control, nothing but the floor
+/// keeps them. With the same offset installed, which the release build
+/// does not read, the release candidate keeps both `not_idle`, and its
+/// reclaim deletes nothing.
+pub fn release_candidate_python_venv_keeps_projects_inside_the_30_day_floor(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "python-venv")?;
+    versions(ctx, &["python", "uv"])?;
+    for name in ["pyapp", "uvapp"] {
+        pyproject(ctx, name)?;
+    }
+    std_venv(ctx, &home("src/pyapp"), true)?;
+    uv_venv(ctx, &home("src/uvapp"))?;
+    let venvs = [home("src/pyapp/.venv"), home("src/uvapp/.venv")];
+    let _clock = SandboxClockOffset::install(PAST_THE_FLOOR.as_secs())?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let development_package = crate::release_suite::binary_path(ctx, "diskgc-development");
+    let development = run_ensure(
+        ctx,
+        &development_package,
+        true,
+        SELECT_VENV,
+        Some(SRC),
+        HOME,
+    )?;
+    oracle.judge(&development)?.assert_clean()?;
+    development.expect_code(0)?;
+    let past_the_floor: Expected = venvs.iter().map(|v| (v.clone(), None)).collect();
+    ensure!(
+        plan_of(&report(&development)?)? == sorted(&past_the_floor),
+        "positive control: the development build past the floor planned {:?}, expected {:?}",
+        plan_of(&report(&development)?)?,
+        sorted(&past_the_floor)
+    );
+    let inside_the_floor: Expected = venvs
+        .iter()
+        .map(|v| (v.clone(), Some("not_idle")))
+        .collect();
+    dry_run_then_reclaim(
+        ctx,
+        &binary,
+        SELECT_VENV,
+        Some(SRC),
+        HOME,
+        &inside_the_floor,
+    )?;
+    Ok(())
+}
+
 // ---- python-pycache --------------------------------------------------------
 
 /// docs/testing.md, Admission evidence (`python-pycache`): bytecode the
@@ -1307,6 +1371,20 @@ pub fn python_venv_activated_shell_that_left_its_project_is_a_named_residual(
 pub fn python_pycache_real_imports_reclaim_then_a_live_importer_recompiles(
     ctx: &Ctx,
 ) -> TestResult {
+    pycache_scenario(ctx, &ctx.diskgc())
+}
+
+/// TASK-359: [`python_pycache_real_imports_reclaim_then_a_live_importer_recompiles`]
+/// through the gate-lifted release-candidate package, whose 0.2 catalog
+/// holds `python-pycache`.
+pub fn release_candidate_python_pycache_reclaim_then_a_live_importer_recompiles(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "python-pycache")?;
+    pycache_scenario(ctx, &binary)
+}
+
+fn pycache_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     versions(ctx, &["python", "pytest"])?;
     control_dir(ctx)?;
     let expected = pycache_projects(ctx)?;
@@ -1326,14 +1404,7 @@ pub fn python_pycache_real_imports_reclaim_then_a_live_importer_recompiles(
         &["-c", &script],
     )?;
     wait_ready(&mut importer, &home("ctl/importer.ready"))?;
-    dry_run_then_reclaim(
-        ctx,
-        &ctx.diskgc(),
-        SELECT_PYCACHE,
-        Some(SRC),
-        HOME,
-        &expected,
-    )?;
+    dry_run_then_reclaim(ctx, binary, SELECT_PYCACHE, Some(SRC), HOME, &expected)?;
     ensure!(
         exists(&home("src/pyproj/a/b/c/d/e/__pycache__/deep.pyc"))
             && exists(&home("src/pyproj/pkg/__pycache__.old/x.pyc")),
@@ -1423,6 +1494,18 @@ fn cache_shards(cache: &Path) -> Result<Vec<PathBuf>, String> {
 pub fn mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept(
     ctx: &Ctx,
 ) -> TestResult {
+    mypy_scenario(ctx, &ctx.diskgc())
+}
+
+/// TASK-359: [`mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept`]
+/// through the gate-lifted release-candidate package, whose 0.2 catalog
+/// holds `mypy-cache`.
+pub fn release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept(ctx: &Ctx) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "mypy-cache")?;
+    mypy_scenario(ctx, &binary)
+}
+
+fn mypy_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     versions(ctx, &["mypy"])?;
     control_dir(ctx)?;
     mypy_project(ctx, "typed", false)?;
@@ -1459,8 +1542,7 @@ pub fn mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept(
     info!("the paused mypy holds every cache shard: {held:?}");
     let typed = home("src/typed/.mypy_cache");
     let expected: Expected = vec![(typed.clone(), None), (cache.clone(), Some("in_use"))];
-    let reclaimed =
-        dry_run_then_reclaim(ctx, &ctx.diskgc(), SELECT_MYPY, Some(SRC), HOME, &expected)?;
+    let reclaimed = dry_run_then_reclaim(ctx, binary, SELECT_MYPY, Some(SRC), HOME, &expected)?;
     expect_blocker(&reclaimed, &cache, pid, "fd", "")?;
     go(ctx, "inflight")?;
     wait_success(&mut run, "the mypy run in flight")?;
@@ -1483,6 +1565,20 @@ pub fn mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept(
 /// Lookalikes: a hand-made `.pytest_cache` at relative depth five and a
 /// `.pytest_cache.bak`, which `find` never reaches.
 pub fn pytest_cache_real_pytest_reclaim_then_a_live_session_rewrites_it(ctx: &Ctx) -> TestResult {
+    pytest_cache_scenario(ctx, &ctx.diskgc())
+}
+
+/// TASK-359: [`pytest_cache_real_pytest_reclaim_then_a_live_session_rewrites_it`]
+/// through the gate-lifted release-candidate package, whose 0.2 catalog
+/// holds `pytest-cache`.
+pub fn release_candidate_pytest_cache_reclaim_then_a_live_session_rewrites_it(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "pytest-cache")?;
+    pytest_cache_scenario(ctx, &binary)
+}
+
+fn pytest_cache_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     versions(ctx, &["pytest"])?;
     control_dir(ctx)?;
     pytest_project(ctx, "tested")?;
@@ -1526,14 +1622,7 @@ pub fn pytest_cache_real_pytest_reclaim_then_a_live_session_rewrites_it(ctx: &Ct
         (home("src/tested/.pytest_cache"), None),
         (home("src/live/.pytest_cache"), None),
     ];
-    dry_run_then_reclaim(
-        ctx,
-        &ctx.diskgc(),
-        SELECT_PYTEST,
-        Some(SRC),
-        HOME,
-        &expected,
-    )?;
+    dry_run_then_reclaim(ctx, binary, SELECT_PYTEST, Some(SRC), HOME, &expected)?;
     go(ctx, "live")?;
     wait_success(&mut session, "the pytest session in flight")?;
     ensure!(
@@ -1570,6 +1659,20 @@ fn lastfailed(project: &Path) -> Result<String, String> {
 pub fn node_compile_cache_real_node_reclaim_then_a_live_process_recompiles(
     ctx: &Ctx,
 ) -> TestResult {
+    node_compile_cache_scenario(ctx, &ctx.diskgc())
+}
+
+/// TASK-359: [`node_compile_cache_real_node_reclaim_then_a_live_process_recompiles`]
+/// through the gate-lifted release-candidate package, whose 0.2 catalog
+/// holds `node-compile-cache`.
+pub fn release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "node-compile-cache")?;
+    node_compile_cache_scenario(ctx, &binary)
+}
+
+fn node_compile_cache_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     versions(ctx, &["node"])?;
     control_dir(ctx)?;
     let expected = node_compile_caches(ctx)?;
@@ -1581,14 +1684,7 @@ pub fn node_compile_cache_real_node_reclaim_then_a_live_process_recompiles(
         &["live.js"],
     )?;
     wait_ready(&mut live, &home("ctl/ncc-live.ready"))?;
-    dry_run_then_reclaim(
-        ctx,
-        &ctx.diskgc(),
-        SELECT_NODE_COMPILE,
-        None,
-        "/tmp",
-        &expected,
-    )?;
+    dry_run_then_reclaim(ctx, binary, SELECT_NODE_COMPILE, None, "/tmp", &expected)?;
     ensure!(
         exists(Path::new("/tmp/x/node-compile-cache"))
             && exists(Path::new("/tmp/node-compile-cache-old/v0")),
@@ -1629,7 +1725,8 @@ fn candidate_list(ctx: &Ctx) -> Result<BTreeSet<String>, String> {
         .collect())
 }
 
-/// The family this suite builds fixtures for.
+/// The family this suite builds fixtures for: TASK-350's six, five of them
+/// in the 0.2 catalog since TASK-359, `node-modules` on the candidate list.
 const FAMILY: &[&str] = &[
     "node-modules",
     "python-venv",
@@ -1640,9 +1737,11 @@ const FAMILY: &[&str] = &[
 ];
 
 /// docs/testing.md, Admission evidence (candidate catalog): the release
-/// build's catalog code path with the family admitted to a test-only
-/// candidate catalog. Its catalog is exactly the release candidate's plus
-/// the candidate list, which is exactly this family. Over one fixture of
+/// build's catalog code path with the family in its catalog, the members
+/// not yet admitted through a test-only candidate list. Its catalog is
+/// exactly the release candidate's plus the candidate list, the list is
+/// part of this family and disjoint from the release catalog, and every
+/// member is in one of the two. Over one fixture of
 /// every family member (real tools), its dry run plans exactly what the
 /// development build's does, a live Node keeps its project with the same
 /// verdict, and its reclaims delete exactly the reclaimable set; the
@@ -1658,12 +1757,15 @@ pub fn candidate_catalog_project_tree_family_matches_the_development_build(
     let admitted = candidate_list(ctx)?;
     let family: BTreeSet<String> = FAMILY.iter().map(|s| (*s).to_owned()).collect();
     ensure!(
-        family.is_subset(&admitted),
-        "the candidate list {admitted:?} lacks part of this suite's family {family:?}"
+        admitted.is_subset(&family) && released.is_disjoint(&admitted),
+        "the candidate list {admitted:?} is not a part of this suite's family {family:?} \
+         outside the release candidate's catalog {released:?}"
     );
+    let covered: BTreeSet<String> = released.union(&admitted).cloned().collect();
     ensure!(
-        released.is_disjoint(&family),
-        "a family member is already in the release candidate's catalog: {released:?}"
+        family.is_subset(&covered),
+        "family members in neither the release catalog nor the candidate list: {:?}",
+        family.difference(&covered).collect::<Vec<_>>()
     );
     let want: BTreeSet<String> = released.union(&admitted).cloned().collect();
     ensure!(
