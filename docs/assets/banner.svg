@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-labelledby="t d">
+  <title id="t">diskgc: free space for unattended builds</title>
+  <desc id="d">When free space runs short, profiles find candidates; each candidate is checked live just before acting; one nothing uses is deleted, one in use is kept, and diskgc moves to the next until the goal is met.</desc>
+  <!-- Motif only; the accurate figures are model.svg and states.svg. -->
+  <style>
+    text { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .name { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 120px; font-weight: 700; fill: #e6edf3; }
+    .tag { font-size: 30px; font-weight: 600; fill: #9ecbff; }
+    .sub { font-size: 18px; fill: #8b9bb0; }
+    .node { fill: #16243a; stroke: #4a6a94; stroke-width: 2; }
+    .nlabel { font-size: 20px; font-weight: 600; fill: #e6edf3; text-anchor: middle; }
+    .nnote { font-size: 14px; fill: #a9b8c9; text-anchor: middle; }
+    .edge { stroke: #8b9bb0; stroke-width: 2; fill: none; }
+    .elabel { font-size: 14px; fill: #a9b8c9; text-anchor: middle; font-style: italic; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8b9bb0"/>
+    </marker>
+  </defs>
+
+  <rect x="2" y="2" width="1196" height="296" rx="24" fill="#0f1a2b" stroke="#2b3b55" stroke-width="2"/>
+
+  <!-- Name and tagline -->
+  <text class="name" x="56" y="150">diskgc</text>
+  <text class="tag" x="60" y="200">Free space for unattended builds</text>
+  <text class="sub" x="60" y="236">Deletes rebuildable cache when the disk runs short,</text>
+  <text class="sub" x="60" y="260">checking just before each delete that nothing it can see uses it.</text>
+
+  <!-- Motif: space short -> candidate -> deleted | kept, next until the goal -->
+  <rect class="node" x="556" y="100" width="150" height="58" rx="12"/>
+  <text class="nlabel" x="631" y="136">space short</text>
+
+  <path class="edge" d="M706,129 L786,129" marker-end="url(#arrow)"/>
+  <text class="elabel" x="746" y="118">profiles find</text>
+
+  <rect class="node" x="792" y="92" width="150" height="74" rx="12"/>
+  <text class="nlabel" x="867" y="124">candidate</text>
+  <text class="nnote" x="867" y="148">checked live</text>
+
+  <path class="edge" d="M942,114 C970,114 970,68 1004,68" marker-end="url(#arrow)"/>
+  <path class="edge" d="M942,144 C970,144 970,190 1004,190" marker-end="url(#arrow)"/>
+
+  <rect x="1010" y="46" width="164" height="44" rx="22" fill="#3a2a0a" stroke="#d29922" stroke-width="2"/>
+  <text class="nlabel" x="1092" y="75" style="fill:#f2cc60">kept: in use</text>
+
+  <rect x="1010" y="168" width="164" height="44" rx="22" fill="#15301f" stroke="#57ab5a" stroke-width="2"/>
+  <text class="nlabel" x="1092" y="197" style="fill:#a8e0a9">deleted</text>
+
+  <!-- Loop: next candidate until the goal -->
+  <path class="edge" d="M1092,212 C1092,256 867,256 867,172" marker-end="url(#arrow)" stroke-dasharray="5 4"/>
+  <text class="elabel" x="980" y="272">next, until the goal is met</text>
+</svg>

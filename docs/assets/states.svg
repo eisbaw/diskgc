@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 400" width="1280" height="400" role="img" aria-labelledby="t d">
+  <title id="t">Kept or reclaimed, and how a run ends</title>
+  <desc id="d">Each candidate is checked live just before acting: if every check passes it is reclaimed, otherwise it is kept with one reason such as in_use, not_idle or protected, and the next run judges it again. ensure ends with met (exit 0) when available space is at least --min-free, exhausted (1) when nothing more could be reclaimed, deadline (124) when --timeout passed first, or error (3) when an operation failed; a usage, configuration or safety refusal exits 2 and deletes nothing; a finished dry run exits 0; 75, 130 and 143 are in docs/reference.md.</desc>
+  <!-- Drawn from crates/diskgc-core/src/engine/mod.rs (Reason) and src/report/mod.rs (Status::exit_code), docs/reference.md (Output, Exit codes). Update it when those change. -->
+  <style>
+    text { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; fill: #e6edf3; }
+    .title { font-size: 22px; font-weight: 700; }
+    .h { font-size: 18px; font-weight: 700; }
+    .cmd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; fill: #9ecbff; }
+    .note { font-size: 14px; fill: #a9b8c9; }
+    .rule { font-size: 14px; fill: #c9d4e0; }
+    .pl { font-size: 16px; font-weight: 600; text-anchor: middle; }
+    .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 15px; font-weight: 700; text-anchor: middle; }
+    .panel { fill: #122036; stroke: #2b3b55; stroke-width: 1.5; }
+    .edge { stroke: #8b9bb0; stroke-width: 2; fill: none; }
+    .elabel { font-size: 13px; fill: #c9d4e0; text-anchor: middle; }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8b9bb0"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="1278" height="398" rx="20" fill="#0f1a2b" stroke="#2b3b55" stroke-width="2"/>
+  <text class="title" x="40" y="46">Kept or reclaimed, and how a run ends</text>
+
+  <!-- A candidate -->
+  <rect class="panel" x="40" y="72" width="580" height="296" rx="14"/>
+  <text class="h" x="60" y="104">A candidate</text>
+  <text class="note" x="196" y="104">checked live, just before acting</text>
+
+  <rect x="60" y="186" width="130" height="40" rx="20" fill="#16243a" stroke="#4a6a94" stroke-width="2"/>
+  <text class="pl" x="125" y="212">found</text>
+
+  <path class="edge" d="M190,198 C250,198 250,150 378,150" marker-end="url(#a)"/>
+  <text class="elabel" x="300" y="140">every check passes</text>
+  <rect x="380" y="130" width="170" height="40" rx="20" fill="#15301f" stroke="#57ab5a" stroke-width="2"/>
+  <text class="pl" x="465" y="156" style="fill:#a8e0a9">reclaimed</text>
+
+  <path class="edge" d="M190,214 C250,214 250,262 378,262" marker-end="url(#a)"/>
+  <text class="elabel" x="300" y="284">one fails</text>
+  <rect x="380" y="242" width="170" height="40" rx="20" fill="#3a2a0a" stroke="#d29922" stroke-width="2"/>
+  <text class="pl" x="465" y="268" style="fill:#f2cc60">kept</text>
+
+  <text class="rule" x="596" y="312" text-anchor="end">with one reason: <tspan class="cmd">in_use</tspan>, <tspan class="cmd">not_idle</tspan>, …</text>
+  <text class="note" x="60" y="346">The next run judges a kept candidate again. A dry run deletes nothing.</text>
+
+  <!-- How ensure ends -->
+  <rect class="panel" x="660" y="72" width="580" height="296" rx="14"/>
+  <text class="h" x="680" y="104">How <tspan class="cmd" style="font-size:17px">ensure</tspan> ends</text>
+  <text class="note" x="862" y="104">JSON <tspan class="cmd">status</tspan> and exit code</text>
+
+  <rect x="680" y="126" width="150" height="34" rx="17" fill="#15301f" stroke="#57ab5a" stroke-width="2"/>
+  <text class="code" x="755" y="148" style="fill:#a8e0a9">0  met</text>
+  <text class="rule" x="850" y="148">available ≥ --min-free</text>
+
+  <rect x="680" y="172" width="150" height="34" rx="17" fill="#33240f" stroke="#e0823d" stroke-width="2"/>
+  <text class="code" x="755" y="194" style="fill:#f5b97a">1  exhausted</text>
+  <text class="rule" x="850" y="194">nothing more to take, below --min-free</text>
+
+  <rect x="680" y="218" width="150" height="34" rx="17" fill="#3a2a0a" stroke="#d29922" stroke-width="2"/>
+  <text class="code" x="755" y="240" style="fill:#f2cc60">124  deadline</text>
+  <text class="rule" x="850" y="240">--timeout passed, below --min-free</text>
+
+  <rect x="680" y="264" width="150" height="34" rx="17" fill="#3b1a1d" stroke="#f47067" stroke-width="2"/>
+  <text class="code" x="755" y="286" style="fill:#ffb4ad">3  error</text>
+  <text class="rule" x="850" y="286">an operation failed; the report says what</text>
+
+  <text class="note" x="680" y="330">A finished dry run exits 0. 2: refused (usage, config,</text>
+  <text class="note" x="680" y="352">safety), nothing deleted. 75, 130, 143: see the reference.</text>
+</svg>

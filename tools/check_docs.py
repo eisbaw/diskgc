@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Check local Markdown links and heading fragments in contract documents.
+"""Check local Markdown links, images and heading fragments in documents.
 
+Every inline destination counts: links, images (`![alt](path)`), the target
+of a linked badge (`[![alt](image)](target)`) and HTML `<img src="path">`.
 External URLs are outside this offline check. Rust tests separately check the
 reference tables and safety examples against product behavior.
 """
@@ -12,7 +14,10 @@ import re
 from urllib.parse import unquote, urlsplit
 
 
-LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)\s]+)\)")
+# The destination after any `](`: a link's, an image's, and the outer target
+# of a linked image, whose text holds a whole image and so no plain `[...]`.
+LINK = re.compile(r"\]\(([^)\s]+)\)")
+IMG_SRC = re.compile(r"<img\s[^>]*?\bsrc=\"([^\"]+)\"")
 HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$")
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 
@@ -55,8 +60,10 @@ def check_document(path, text, read_file):
     errors = []
     cache = {path: anchors(text)}
     for number, line in prose_lines(text):
-        for match in LINK.finditer(line):
-            raw = html.unescape(match.group(1))
+        destinations = [m.group(1) for m in LINK.finditer(line)]
+        destinations += [m.group(1) for m in IMG_SRC.finditer(line)]
+        for destination_text in destinations:
+            raw = html.unescape(destination_text)
             url = urlsplit(raw)
             if url.scheme or url.netloc:
                 continue

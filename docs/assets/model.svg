@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 770" width="1280" height="770" role="img" aria-labelledby="t d">
+  <title id="t">How diskgc decides what to delete</title>
+  <desc id="d">A tier selects source and filter profiles. A source profile's find names candidates in its roots; a filter profile's where narrows them. The index orders each tier's queue but decides nothing. Each candidate is checked live just before acting: the eligibility walk, the in-use scan, the liveness contract, protect and negated profiles, no symlink or mount crossing; backend kinds bind their daemon or store first. A candidate that fails one check is kept with a reason. One that passes gets its source profile's action: delete, the Cargo lock protocol, a Nix GC through the daemon, a Docker or Podman prune, or a command. After each action diskgc samples available space and stops at the goal, or takes the next candidate of the tier, then the next tier.</desc>
+  <!-- Drawn from docs/reference.md (Profiles, Selection grammar, Actions, Tier fields), docs/safety.md (Filesystem candidates, In use, Producer liveness, Backend kinds) and docs/architecture.md (The reclaim walk). Update it when those change. -->
+  <style>
+    text { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; fill: #e6edf3; }
+    .title { font-size: 22px; font-weight: 700; }
+    .box { fill: #16243a; stroke: #4a6a94; stroke-width: 2; }
+    .cache { fill: #16243a; stroke: #5c6f88; stroke-width: 2; stroke-dasharray: 6 4; }
+    .head { font-size: 17px; font-weight: 700; }
+    .note { font-size: 13.5px; fill: #a9b8c9; }
+    .item { font-size: 13.5px; fill: #c9d4e0; }
+    .edge { stroke: #8b9bb0; stroke-width: 2; fill: none; }
+    .elabel { font-size: 13px; fill: #c9d4e0; }
+    .rel { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; fill: #9ecbff; }
+    .legend { font-size: 14px; fill: #a9b8c9; }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8b9bb0"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="1278" height="768" rx="20" fill="#0f1a2b" stroke="#2b3b55" stroke-width="2"/>
+  <text class="title" x="40" y="46">How diskgc decides what to delete</text>
+
+  <!-- Profiles: the library -->
+  <rect x="40" y="70" width="600" height="176" rx="16" fill="#122036" stroke="#4a6a94" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text class="note" x="56" y="91">profiles: built-in YAML data, or your own; <tspan class="rel">diskgc profiles list</tspan></text>
+
+  <rect class="box" x="60" y="104" width="270" height="124" rx="12"/>
+  <text class="head" x="76" y="132">Source profile</text>
+  <text class="item" x="76" y="154"><tspan class="rel">find</tspan>: roots and path patterns</text>
+  <text class="item" x="76" y="174">a kind: fs, cargo-target, a backend</text>
+  <text class="item" x="76" y="194"><tspan class="rel">action</tspan>: how to remove</text>
+  <text class="rel" x="76" y="216">profile:pytest-tmp</text>
+
+  <rect class="box" x="350" y="104" width="270" height="124" rx="12"/>
+  <text class="head" x="366" y="132">Filter profile</text>
+  <text class="item" x="366" y="154"><tspan class="rel">where</tspan>: predicates only</text>
+  <text class="item" x="366" y="174">narrows; never finds anything</text>
+  <text class="rel" x="366" y="216">filter:idle-1d</text>
+
+  <!-- Tier -->
+  <rect class="box" x="760" y="104" width="480" height="124" rx="12"/>
+  <text class="head" x="776" y="132">Tier</text>
+  <text class="rel" x="820" y="132">select: profile:pytest-tmp &amp;&amp; filter:idle-1d</text>
+  <text class="item" x="776" y="156"><tspan class="rel">roots</tspan>, <tspan class="rel">order</tspan> (oldest | best-fit), <tspan class="rel">timeout</tspan></text>
+  <text class="item" x="776" y="178">config: groups of tiers, run in written order;</text>
+  <text class="item" x="776" y="200">or <tspan class="rel">--select EXPR [--roots DIR]</tspan> as one tier</text>
+  <path class="edge" d="M760,166 L642,166" marker-end="url(#a)"/>
+  <text class="rel" x="701" y="156" text-anchor="middle">select</text>
+
+  <!-- Candidate -->
+  <rect class="box" x="40" y="318" width="600" height="92" rx="12"/>
+  <text class="head" x="56" y="346">Candidate</text>
+  <text class="item" x="56" y="370">a path a source found (fs, a Cargo target), on PATH's filesystem;</text>
+  <text class="item" x="56" y="392">or the store a backend binds (Docker, Podman, the Nix daemon)</text>
+  <path class="edge" d="M150,228 L150,316" marker-end="url(#a)"/>
+  <text class="elabel" x="162" y="268"><tspan class="rel">find</tspan>, in fixed roots</text>
+  <text class="elabel" x="162" y="288">or the tier's roots</text>
+  <path class="edge" d="M485,228 L485,316" marker-end="url(#a)"/>
+  <text class="elabel" x="497" y="278"><tspan class="rel">where</tspan> narrows</text>
+
+  <!-- Index -->
+  <rect class="cache" x="760" y="318" width="480" height="92" rx="12"/>
+  <text class="head" x="776" y="346">Index (tally)</text>
+  <text class="item" x="776" y="370">sizes and ages; orders each tier's queue</text>
+  <text class="item" x="776" y="392">a cache, never an authority: it decides no deletion</text>
+  <path class="edge" d="M760,364 L642,364" marker-end="url(#a)"/>
+  <text class="elabel" x="701" y="354" text-anchor="middle">orders</text>
+
+  <!-- Checks -->
+  <rect class="box" x="40" y="478" width="620" height="200" rx="12"/>
+  <text class="head" x="56" y="506">Checks, live, just before each act</text>
+  <text class="item" x="56" y="532"><tspan font-weight="700">eligibility walk:</tspan> every entry the user's own; idle for <tspan class="rel">idle_for</tspan>;</text>
+  <text class="item" x="56" y="552">no <tspan class="rel">.diskgc-keep</tspan>, mount, socket, container storage, or checkout inside</text>
+  <text class="item" x="56" y="572">(a profile may allow checkouts); not <tspan class="rel">protect</tspan>ed, no <tspan class="rel">!profile:</tspan> overlap</text>
+  <text class="item" x="56" y="596"><tspan font-weight="700">in use:</tspan> a visible process's open file, cwd, mapping or initial environment;</text>
+  <text class="item" x="56" y="616">a <tspan class="rel">flock</tspan> by someone else; a loop device's backing file</text>
+  <text class="item" x="56" y="640"><tspan font-weight="700">liveness contract:</tspan> only what the producer's contract permits</text>
+  <text class="item" x="56" y="664"><tspan font-weight="700">backends:</tspan> bind the daemon or store; it decides what is live</text>
+  <path class="edge" d="M300,410 L300,476" marker-end="url(#a)"/>
+  <text class="elabel" x="288" y="448" text-anchor="end">each, in the tier's order</text>
+
+  <!-- Action -->
+  <rect class="box" x="760" y="478" width="480" height="156" rx="12"/>
+  <text class="head" x="776" y="506">Action: the source profile's</text>
+  <text class="item" x="776" y="530"><tspan class="rel">delete</tspan>: diskgc's own, no symlink followed, no mount crossed</text>
+  <text class="item" x="776" y="552">the Cargo lock protocol (<tspan class="rel">cargo-target</tspan>)</text>
+  <text class="item" x="776" y="574"><tspan class="rel">nix-store --gc --max-freed NEED</tspan> through the daemon</text>
+  <text class="item" x="776" y="596"><tspan class="rel">docker-builder-prune</tspan>, <tspan class="rel">docker-image-prune</tspan>, <tspan class="rel">podman-…</tspan></text>
+  <text class="item" x="776" y="618"><tspan class="rel">command</tspan>: the tool's own cleaner</text>
+  <path class="edge" d="M660,540 L758,540" marker-end="url(#a)"/>
+  <text class="elabel" x="709" y="530" text-anchor="middle">all pass</text>
+
+  <!-- Kept -->
+  <path class="edge" d="M660,654 L758,698" marker-end="url(#a)"/>
+  <text class="elabel" x="676" y="704">one fails</text>
+  <rect x="760" y="680" width="230" height="36" rx="18" fill="#3a2a0a" stroke="#d29922" stroke-width="2"/>
+  <text x="875" y="704" text-anchor="middle" style="font-size:15px;font-weight:700;fill:#f2cc60">kept, with a reason</text>
+
+  <!-- Goal -->
+  <rect x="1010" y="680" width="230" height="36" rx="18" fill="#15301f" stroke="#57ab5a" stroke-width="2"/>
+  <text x="1125" y="704" text-anchor="middle" style="font-size:15px;font-weight:700;fill:#a8e0a9">goal met: stop</text>
+  <path class="edge" d="M1125,634 L1125,678" marker-end="url(#a)"/>
+  <text class="elabel" x="1113" y="662" text-anchor="end">sample: avail ≥ <tspan class="rel">--target-free</tspan></text>
+
+  <!-- Loop back to the queue -->
+  <path class="edge" d="M1000,478 L1000,444 L304,444" marker-end="url(#a)" stroke-dasharray="5 4"/>
+  <text class="elabel" x="652" y="436" text-anchor="middle">below it: the next candidate, then the next tier</text>
+
+  <!-- Legend -->
+  <text class="legend" x="40" y="748">A release ships a subset of the library and actions. NEED is the goal minus available space.</text>
+</svg>
