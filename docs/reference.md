@@ -1907,7 +1907,13 @@ candidate for the first term whose own evidence admits it. A refusal
 there (`in_use`; `in_use_unknown`, including a process scan that never
 settled; a live socket's `contains_ipc`) is never handed to a later term to
 admit, in the plan as in the reclaim, so a busy host cannot move a
-candidate to another profile (TASK-337). A command union invokes its
+candidate to another profile (TASK-337). A term that may still supply the
+action is checked on its own walk against the scan current then, never on
+an earlier term's clearance. The live half of a `protect_toolchains` guard
+(a running manager, a pin in a process's environment or above its working
+directory) judges the scan after the in-use check, and like a liveness
+contract it vetoes the candidate for every term that found it, in the plan
+as in the reclaim. A command union invokes its
 shared argv at most once per inode, with `DISKGC_PROFILE` and the
 output prefix of the source selected by that locked recheck. If the final
 policy scan excludes that source before the command starts, the union judges

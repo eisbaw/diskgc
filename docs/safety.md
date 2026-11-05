@@ -2753,7 +2753,10 @@ and names the first):
    rule. A process whose root is not diskgc's has working-directory text
    of another view: it is not looked up. A pin file above a working
    directory that cannot be read safely (one on a network or FUSE mount
-   included) is uncertainty.
+   included) is uncertainty. In a union, this live half vetoes the
+   candidate for every term that found it
+   ([reference.md](reference.md#configuration-file), the filesystem
+   union rules).
 6. *Links*: the link guard's `protect_link_dirs` (`toolchains/` itself,
    and for rustup `.kani/*`, every symlink directly in each Kani
    installation, such as `.kani/kani-0.67.0/toolchain`).

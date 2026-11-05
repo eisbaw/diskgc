@@ -1412,10 +1412,6 @@ pub(super) fn plan_fs_union<H: Host>(
         let mut selected_record = None;
         let mut admitted = Vec::new();
         let mut checkout_marker = None;
-        // The in-use check judges the candidate, not the term: for the
-        // first term whose own judgement admits it, as the reclaim checks
-        // it for the term it selected (TASK-337).
-        let mut in_use_cleared = false;
         for (index, found) in &candidate.found_by {
             let source = &sources[*index];
             let excluded = match judge_negated(
@@ -1462,7 +1458,10 @@ pub(super) fn plan_fs_union<H: Host>(
                 found,
                 &mut checker,
                 deadline,
-                &mut in_use_cleared,
+                // In-use is checked for each term that may still be
+                // selected, on its own walk and the current scan; the
+                // reclaim checks it for the term it selected (TASK-337).
+                selected.is_none(),
             ) {
                 Ok(TermVerdict::Admitted(tally, record)) => {
                     admitted.push(*index);
@@ -1493,7 +1492,8 @@ pub(super) fn plan_fs_union<H: Host>(
             }
         }
         if let Some((index, path, _)) = &selected {
-            // Liveness contracts veto across the union, as in the reclaim.
+            // Liveness contracts and toolchain guards veto across the union,
+            // as in the reclaim.
             // The sources that found it by their own evidence (`found_by`;
             // guard-only matches are `guard_by`), whatever each term's own
             // judgement said: the reclaim's admitted alternatives.
