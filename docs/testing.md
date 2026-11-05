@@ -138,6 +138,13 @@ implements it. A bullet without a test is a gap, filed as a task.
   no file reference: without that read, the 5.8.16 guest saw no late
   release in about 1.7 million attempts and the test failed. A held-lock
   assertion needs no wait: a lagging release only keeps a lock longer.
+  A test that needs a socket nobody listens on binds one that never
+  listens, never a closed listener: a child another test forked and has
+  not yet exec'd keeps a closed listener listening, so a connect gets end
+  of file instead of `ECONNREFUSED`. This was TASK-345's intermittent
+  `refused: Eof` in `the_daemon_probe_classifies_what_the_socket_does`
+  (5 and 15 in 3,000 probes under concurrent spawns); pinned by
+  `a_closed_listener_keeps_listening_while_a_forked_child_holds_it`.
 
 ### Definition of Done (every task)
 

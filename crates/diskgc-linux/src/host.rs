@@ -5021,7 +5021,10 @@ mod tests {
     /// closes an fd and then asserts its release must hold this guard from
     /// before the fd is opened to after the assertion. Both sides must take
     /// it: it excludes nothing for a test that does not. (The holder's own
-    /// `unshare` happens in its process.)
+    /// `unshare` happens in its process.) A closed listening socket keeps
+    /// listening through such a copy; a test that needs a socket nobody
+    /// listens on uses [`unlistened_socket`], which needs no guard
+    /// (TASK-345).
     ///
     /// The guard does not make a release synchronous with `close`: any
     /// reader of `/proc/<pid>/fd` or `fdinfo` (an in-use scan in this or
@@ -5462,10 +5465,122 @@ mod tests {
         );
         assert!(started.elapsed() >= Duration::from_millis(300));
         drop(silent);
-        // The socket inode remains, nobody listens: refused.
+        // The socket inode remains, nobody listens: refused. Not the closed
+        // `silent`, which a concurrently forked child may still hold
+        // listening (TASK-345).
+        let _ = std::fs::remove_file(&path);
+        unlistened_socket(&path);
         let refused =
             probe_nix_daemon(&pin(&path), Duration::from_secs(1), &|| false).expect_err("refused");
         assert!(refused.is(Errno::ECONNREFUSED), "{refused}");
+    }
+
+    /// A child forked (by a thread here) and held between its fork and its
+    /// exec for `hold`: it has a copy of every fd of this process, the
+    /// close-on-exec ones too, until it execs. Returns once the child is
+    /// in that window; the thread ends when it has gone (its exec of a
+    /// path that does not exist fails and it exits). The caller holds the
+    /// fd-table guard.
+    fn fork_holding_fds(hold: Duration) -> std::thread::JoinHandle<()> {
+        let (read_end, write_end) = std::os::unix::net::UnixStream::pair().expect("signal pair");
+        let raw = write_end.as_raw_fd();
+        let thread = std::thread::spawn(move || {
+            let mut command = Command::new("/nonexistent/diskgc-task-345");
+            // SAFETY: between fork and exec, only `write` and `nanosleep`.
+            unsafe {
+                command.pre_exec(move || {
+                    let fd = BorrowedFd::borrow_raw(raw);
+                    rustix::io::write(fd, b"f").map_err(std::io::Error::from)?;
+                    std::thread::sleep(hold);
+                    Ok(())
+                });
+            }
+            let spawned = command.spawn();
+            drop(write_end);
+            let error = spawned.expect_err("a path that does not exist");
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+        });
+        let mut forked = [0_u8; 1];
+        assert_eq!(rustix::io::read(&read_end, &mut forked).expect("read"), 1);
+        thread
+    }
+
+    /// TASK-345, the fact behind the flake (plain fork semantics, so a host
+    /// test, not a `_kernel_fact` the VMs rerun): a listening socket that
+    /// this process closes keeps listening while a forked child, not yet
+    /// exec'd, holds a copy of its fd. A probe connects, and gets end of
+    /// file when the child's exec drops the last copy, never refused.
+    #[test]
+    fn a_closed_listener_keeps_listening_while_a_forked_child_holds_it() {
+        use std::os::unix::net::UnixListener;
+        let _fd_table = fd_table_guard();
+        let dir = TempDir::new();
+        let path = dir.0.join("s");
+        let listener = UnixListener::bind(&path).expect("listen");
+        let pinned = LinuxFd {
+            fd: rustix::fs::open(
+                &path,
+                OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("pin socket"),
+            shown: path.clone(),
+        };
+        let child = fork_holding_fds(Duration::from_secs(1));
+        drop(listener);
+        let probed = probe_nix_daemon(&pinned, Duration::from_secs(10), &|| false);
+        child.join().expect("forking thread");
+        assert_eq!(probed, Ok(DaemonProbe::Eof));
+    }
+
+    /// TASK-345: the probe test's dead socket (bound, never listening) is
+    /// refused even while a forked child holds a copy of its fd.
+    #[test]
+    fn a_socket_that_never_listened_is_refused_while_a_forked_child_holds_it() {
+        let _fd_table = fd_table_guard();
+        let dir = TempDir::new();
+        let path = dir.0.join("s");
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+        let socket = rustix::net::socket_with(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .expect("socket");
+        rustix::net::bind(&socket, &SocketAddrUnix::new(&path).expect("address")).expect("bind");
+        let pinned = LinuxFd {
+            fd: rustix::fs::open(
+                &path,
+                OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("pin socket"),
+            shown: path.clone(),
+        };
+        let child = fork_holding_fds(Duration::from_secs(1));
+        drop(socket);
+        let probed = probe_nix_daemon(&pinned, Duration::from_secs(10), &|| false);
+        child.join().expect("forking thread");
+        let refused = probed.expect_err("refused");
+        assert!(refused.is(Errno::ECONNREFUSED), "{refused}");
+    }
+
+    /// A Unix socket inode nobody listens on, as a dead daemon leaves it:
+    /// bound, never listening, closed (TASK-345). Never listening, it is
+    /// refused even while a child that a concurrent test forked, and has
+    /// not yet exec'd, still holds a copy of its fd; a closed listener
+    /// would still listen through that copy.
+    fn unlistened_socket(path: &Path) {
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+        let socket = rustix::net::socket_with(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .expect("socket");
+        rustix::net::bind(&socket, &SocketAddrUnix::new(path).expect("address")).expect("bind");
     }
 
     #[test]
