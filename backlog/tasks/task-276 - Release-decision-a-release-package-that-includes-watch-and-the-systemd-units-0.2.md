@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-31T04:49:00Z'
-updated_date: '2026-11-02T14:35:00Z'
+updated_date: '2026-11-05T20:58:00Z'
 labels:
   - release
 dependencies: []
@@ -35,4 +35,6 @@ Everything else a 0.2 release needs (RC QA: e2e-full, release runners, docs-vs-b
 2026-11-01 (TASK-289): the release descriptor's 0.2 row (releases.json) is PROVISIONAL: commands ensure, watch --tally-only, check, profiles; catalog label 0.1 (same three sources); ships both watch unit templates; the draft notes document tally-only instances. A reclaiming watch stays refused; flipping it is a one-row code change plus the prose that names TASK-276. Mark decides: is 0.2 = this row, with or without reclaiming watch? Also: the draft 'Changes since 0.1.0' now lists per fix whether 0.1.0 is exposed (static reading of v0.1.0): nearly every safety fix since 0.1.0 applies to it (protect/negation cache fixes, container storage (none in 0.1.0), bind places, incomplete process list, loop devices) - input to the 0.1.x vs supersede decision.
 
 2026-11-02 (TASK-315): the 0.2 release criteria are one checked list in docs/architecture.md (Release procedure, '0.2 release criteria'); this task's two decisions (scope; 0.1.0 exposure) are its first boxes. The PRD's Scope now names 0.2 as open, pending this decision.
+
+Mark 2026-11-05 (answers): 0.2 may run the package managers' own clean subcommands for the lock-safe five only: pip-cache, ccache, jest-cache, uv-cache, pnpm-store. npm, go-build, yarn, platformio wait (no lock vs their own cleaner).
 <!-- SECTION:NOTES:END -->
