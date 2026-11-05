@@ -3,10 +3,10 @@ id: TASK-337
 title: >-
   read_ahead_plan intermittent under load: union candidate a-0 attributed to
   gen-ab with read-ahead, gen-a without (seeds 1, 6)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-04T17:18:00Z'
-updated_date: '2026-11-05T01:24:00Z'
+updated_date: '2026-11-05T04:10:00Z'
 labels:
   - flaky
   - read-ahead
@@ -28,4 +28,6 @@ Seen 2026-11-04 by the t38 implementer in nix develop -c just check (branch t38-
 Merged 1da02f16 (2026-11-05). Codex review after merge: REGRESSION in judge_term: in_use_cleared survives a term's later liveness/toolchain refusal and a replacement scan -> a union dry run can report eligible what was refused before (pinned_toolchain, or in_use_unknown on the newer scan); plus contract_veto's early return skips protect_toolchains-only guards (pre-existing). Sent back to the implementer. Other parity gaps -> separate task.
 
 2026-11-05: regression fix in tmp/worktrees/t337b (branch t337b-union-strict).
+
+Regression fixed and merged 45d29f4004c1586e026cfa0f35cf4bd730c8f0a1 (2026-11-05). Review follow-ups (not fixed): plan union veto may take a newer scan than the clearing one without an in-use check (multi-event, pre-existing); plan vetoes over every finding term vs reclaim over admitted terms (plan stricter); contract_veto name misleading; guard-only matching source gets no live-half veto; plan/reclaim profile names differ in the expiry case (TASK-346).
 <!-- SECTION:NOTES:END -->
