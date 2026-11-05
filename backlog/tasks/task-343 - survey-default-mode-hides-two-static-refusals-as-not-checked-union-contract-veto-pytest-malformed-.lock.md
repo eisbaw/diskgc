@@ -3,10 +3,10 @@ id: TASK-343
 title: >-
   survey default mode hides two static refusals as 'not checked' (union contract
   veto; pytest malformed .lock)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-04T21:37:00Z'
-updated_date: '2026-11-05T04:10:00Z'
+updated_date: '2026-11-05T05:38:00Z'
 labels:
   - survey
 dependencies: []
@@ -23,4 +23,6 @@ Codex review of the survey --in-use delta (2026-11-04), reproduced by Codex with
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-05 orchestrator: implementer in tmp/worktrees/t343 (branch t343-survey-static, from master 8c8f9351).
+
+Merged f8879ec3757311bbe456ba5f205aee8d3900966e (2026-11-05). Follow-ups: default-mode tests for failed listing of P and unreachable temp root; Owner PID local-filesystem rule statically?; fold check/veto into check_on/veto_on after TASK-340.
 <!-- SECTION:NOTES:END -->
