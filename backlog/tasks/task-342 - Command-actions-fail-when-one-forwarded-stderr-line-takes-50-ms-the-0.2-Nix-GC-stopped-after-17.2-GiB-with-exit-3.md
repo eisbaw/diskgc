@@ -3,10 +3,10 @@ id: TASK-342
 title: >-
   Command actions fail when one forwarded stderr line takes >50 ms: the 0.2 Nix
   GC stopped after 17.2 GiB with exit 3
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-04T19:03:00Z'
-updated_date: '2026-11-04T21:32:00Z'
+updated_date: '2026-11-05T02:39:00Z'
 labels:
   - release-blocker
   - nix
@@ -31,4 +31,6 @@ Do: decide the policy so that a slow or blocked stderr never fails or hangs an a
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-04 orchestrator: implementer in tmp/worktrees/t342 (branch t342-stderr, from master 426ee8b8).
+
+Merged db9d3a57 (2026-11-05).
 <!-- SECTION:NOTES:END -->
