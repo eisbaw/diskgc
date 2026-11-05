@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The retro table: one row per commit whose verification note carries the
-phase3.1 retro lines (.claude/skills/phase3.1-shipping/SKILL.md, "Retro
-lines"). Notes without a `task:` line are not tasks and are left out; a
+phase3.1 retro lines (the phase3.1-shipping skill, "Retro lines"; it lives
+in the user's home skills, not in this repository). Notes without a `task:` line are not tasks and are left out; a
 missing key prints as `-`. Cycle time is merged - started when both parse."""
 
 import subprocess
