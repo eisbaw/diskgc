@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-31T04:49:00Z'
-updated_date: '2026-11-05T20:58:00Z'
+updated_date: '2026-11-05T21:04:00Z'
 labels:
   - release
 dependencies: []
@@ -37,4 +37,6 @@ Everything else a 0.2 release needs (RC QA: e2e-full, release runners, docs-vs-b
 2026-11-02 (TASK-315): the 0.2 release criteria are one checked list in docs/architecture.md (Release procedure, '0.2 release criteria'); this task's two decisions (scope; 0.1.0 exposure) are its first boxes. The PRD's Scope now names 0.2 as open, pending this decision.
 
 Mark 2026-11-05 (answers): 0.2 may run the package managers' own clean subcommands for the lock-safe five only: pip-cache, ccache, jest-cache, uv-cache, pnpm-store. npm, go-build, yarn, platformio wait (no lock vs their own cleaner).
+
+Mark 2026-11-05 (answers): 0.2 ships a RECLAIMING watch (not only --tally-only); 0.2 supersedes 0.1.0 (no 0.1.x): 0.2's release notes carry a notice listing which 0.1.0 flaws it fixes and tell 0.1.0 users to upgrade.
 <!-- SECTION:NOTES:END -->
