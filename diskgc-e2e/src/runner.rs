@@ -691,6 +691,7 @@ fn test_mounts(name: &str, host_pid_namespace: bool) -> Vec<String> {
         || name == crate::suite::AUTOTOOLS_ANCHOR_TEST
         || name == crate::suite::WEST_REAL_BUILD_TEST
         || name == crate::suite::PACKAGING_TEST
+        || crate::suite::MYPY_TESTS.contains(&name)
     {
         extra.extend(["--volume".to_owned(), "/nix/store:/nix/store:ro".to_owned()]);
     }

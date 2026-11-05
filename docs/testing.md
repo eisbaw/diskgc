@@ -2757,6 +2757,113 @@ dead (a `statx` of it gets no answer for 2 s).
 Container tests cannot run inside the Nix build sandbox, so they run from
 `just e2e`, not as `nix flake check` checks.
 
+### Admission evidence
+
+The evidence a development-library built-in needs before Mark decides to
+put it in a release catalog (Mark, 2026-11-05: test the in-development
+profiles for 0.2; the bar is in the admission tasks, one per family). The
+verdicts these scenarios support are in the profiles' rows of
+[reference.md](reference.md#liveness-contracts); admission stays Mark's
+decision. Per profile: the pinned real tool makes the artifact in the
+container; a dry run plans exactly the expected set and none of the
+lookalikes; a reclaim under the deletion oracle deletes exactly the
+reclaimable part; the tool makes the artifact again; and a live
+counterexample runs the tool in or against the artifact during the
+reclaim.
+
+**Project-tree family** (TASK-350; diskgc-e2e `project_tree_suite.rs`,
+Nix image only). Tools: Node.js 24.21.0 with npm 11.19.0, CPython 3.14.7
+(`venv`, its imports), uv 0.13.0, pytest 9.1.1 (the image's), and mypy
+2.1.0, which only the under-test bundle links: the tests in `MYPY_TESTS`
+(`suite.rs`) get the host's `/nix/store` read-only for its closure. The
+containers have no network, so npm installs a local package that the real
+npm packed. `node-modules` and `python-venv` keep a project for 30 days
+after its last change, read or visible use; their scenarios advance the
+gated binary's clock 31 days (the sandbox clock offset) and make "recent"
+activity by setting a file's mtime or atime to an hour before that
+clock's now. Roots `/home/tester/src` (the development machine's
+`~/topics`), `--min-free 100%`.
+
+- `node_modules_real_npm_projects_reclaim_only_idle_projects_then_npm_ci_restores`:
+  `npm install` in a project and in a workspace (member linked, package
+  hoisted) is reclaimed; a project with a source changed (rule 1) or a
+  dependency file read (rule 2) an hour ago is `not_idle`; a hand-made
+  `node_modules` without a `package.json` beside it is `filtered`; a
+  nested one inside a candidate is never a candidate of its own; an
+  install below a hidden directory is never found. `npm ci` restores both,
+  and Node loads the dependency.
+- `node_modules_live_node_processes_keep_their_projects`: a Node with its
+  working directory in an idle project (`in_use`, evidence `cwd`, the
+  contract's detail), one started from `/` naming the project's script
+  (`command_line`), one holding a `node_modules` file open (`fd`, In use
+  itself); once they end, the same reclaim deletes all three.
+- `node_modules_home_level_install_filters_every_project_below_it`: a real
+  `npm install` in the home (`~/package.json`, `~/node_modules`, as on the
+  development machine) keeps every project's `node_modules` below it
+  `filtered`, naming `~/node_modules`.
+- `python_venv_real_venv_and_uv_projects_reclaim_only_idle_projects_then_recreate`:
+  environments from `python -m venv` (with pip), `uv venv` and beside a
+  `requirements.txt` are reclaimed; a changed source (rule 1) and an
+  editable install's `.pth` with a project source read an hour ago (rule
+  2, project-wide) are `not_idle`; an environment without a manifest and
+  a hand-made `.venv` without `pyvenv.cfg` are `filtered`. `venv` and
+  `uv venv` make them again and they run.
+- `python_venv_live_interpreter_and_activated_shell_keep_their_projects`:
+  the environment's `bin/python` started from `/` (`command_line`) and a
+  shell (`sh -s`) that sourced `activate` and stays in the project
+  (`cwd`) keep their environments; the shell's `python` then runs.
+- `python_venv_activated_shell_that_left_its_project_is_a_named_residual`:
+  the same shell after `cd /` names nothing in the project (`VIRTUAL_ENV`
+  is exported after `exec`), so the idle environment is reclaimed, the
+  residual named in [safety.md](safety.md#producer-liveness) (Project
+  dependency directories); its next `python` exits 127, not found.
+- `python_pycache_real_imports_reclaim_then_a_live_importer_recompiles`:
+  the bytecode an import and pytest's assertion rewriting wrote is
+  reclaimed while the importing Python still runs in the project; it then
+  imports another module, which is compiled and cached again.
+- `mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept`:
+  mypy 2.1.0's default cache is SQLite shards (`3.14/cache.N.db`) behind
+  `CACHEDIR.TAG`. One project's cache is reclaimed while a second mypy
+  run, paused by a plugin while it parses a new module, holds every shard
+  of its own cache open (checked before the reclaim): that cache is
+  `in_use` (`fd`), and the run then succeeds. An untagged `.mypy_cache` and `.mypy_cache.bak` are never
+  found; the next run rebuilds the cache.
+- `pytest_cache_real_pytest_reclaim_then_a_live_session_rewrites_it`:
+  `.pytest_cache` of a run with a recorded failure and of a session in
+  flight are reclaimed; the session ends with exit 0 and writes its cache
+  again; `pytest --lf` without the record runs every test.
+- `node_compile_cache_real_node_reclaim_then_a_live_process_recompiles`:
+  the caches `module.enableCompileCache()` makes under `TMPDIR=/tmp` and a
+  `nix-shell.*` `TMPDIR` are reclaimed while a Node that enabled one runs;
+  it then loads another module and exits 0. A cache at a
+  `NODE_COMPILE_CACHE` outside the temp-prefix preset is never found.
+- `candidate_catalog_project_tree_family_matches_the_development_build`
+  (host PID namespace): the release path, below.
+
+**The candidate catalog** (`diskgc-candidate-catalog` in the under-test
+bundle). The release-candidate package carries the real catalog only, and
+the PRD lets no other build lift the sandbox gate, so a profile awaiting
+admission cannot run through the gate-lifted package. Instead the flake
+builds the release build's catalog code path (`release-catalog`: this
+version's release row, its commands, the user-profile refusal, the
+catalog's scope checks and narrowing) from a source copy whose
+builtin.yaml also lists `diskgc-e2e/candidate-catalog`'s profiles in this
+release's catalog (`tools/candidate_catalog.py`); it keeps the gate (and
+so the sandbox clock offset) and, like the release candidate, has no
+PID-namespace exception. The scenario checks that its catalog is exactly
+the release candidate's plus that list, and that the list is the family
+it tests; then, over one fixture with every member and a live Node, its
+dry run plans exactly what the development build's does, and its
+reclaims delete exactly the reclaimable set. What it does not show: the
+gate-lifted package itself with these profiles (that build carries only
+admitted ones), and, for the 30-day floor without the clock offset, a
+guest whose clock was held back as `vm-release-tmp-reclaim` does; both
+follow an admission.
+
+Not exercised: pnpm, Yarn and Bun layouts; `virtualenv`; an editable
+install made by a real build backend (none is available offline); mypy's
+JSON cache (`sqlite_cache = false`); Python bytecode in a read-only tree.
+
 ### Deployment units
 
 With the units and the module

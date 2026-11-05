@@ -1,0 +1,11 @@
+# The test-only candidate catalog (docs/testing.md, Admission evidence):
+# built-ins awaiting Mark's admission, one name per line (`#` and blank
+# lines ignored). Not a release decision.
+#
+# TASK-350, project-tree cruft:
+node-modules
+python-venv
+python-pycache
+mypy-cache
+pytest-cache
+node-compile-cache

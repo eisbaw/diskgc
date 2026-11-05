@@ -43,8 +43,9 @@ use crate::{
     docker_suite, docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
     fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey,
     lifecycle_suite, meson_suite, nix_gc_suite, owner_pid_suite, packaging_suite,
-    profile_vector_suite, project_cache_suite, pytest_contract_suite, release_suite, scale_suite,
-    signal_suite, stdout_suite, survey_suite, temp_safety_suite, watch_suite,
+    profile_vector_suite, project_cache_suite, project_tree_suite, pytest_contract_suite,
+    release_suite, scale_suite, signal_suite, stdout_suite, survey_suite, temp_safety_suite,
+    watch_suite,
 };
 
 /// Which gate runs a test.
@@ -189,6 +190,50 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
     (
         BUILDAH_SPOOL_TEST,
         "needs pinned Buildah and UID mapping tools from the Nix store",
+    ),
+    (
+        "node_modules_real_npm_projects_reclaim_only_idle_projects_then_npm_ci_restores",
+        "needs the pinned npm and Node in the Nix image",
+    ),
+    (
+        "node_modules_live_node_processes_keep_their_projects",
+        "needs the pinned npm and Node in the Nix image",
+    ),
+    (
+        "node_modules_home_level_install_filters_every_project_below_it",
+        "needs the pinned npm and Node in the Nix image",
+    ),
+    (
+        "python_venv_real_venv_and_uv_projects_reclaim_only_idle_projects_then_recreate",
+        "needs the pinned CPython and uv in the Nix image",
+    ),
+    (
+        "python_venv_live_interpreter_and_activated_shell_keep_their_projects",
+        "needs the pinned CPython in the Nix image",
+    ),
+    (
+        "python_venv_activated_shell_that_left_its_project_is_a_named_residual",
+        "needs the pinned CPython in the Nix image",
+    ),
+    (
+        "python_pycache_real_imports_reclaim_then_a_live_importer_recompiles",
+        "needs the pinned CPython and pytest in the Nix image",
+    ),
+    (
+        "mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept",
+        "needs the pinned mypy from the Nix store",
+    ),
+    (
+        "pytest_cache_real_pytest_reclaim_then_a_live_session_rewrites_it",
+        "needs the pinned pytest in the Nix image",
+    ),
+    (
+        "node_compile_cache_real_node_reclaim_then_a_live_process_recompiles",
+        "needs the pinned Node in the Nix image",
+    ),
+    (
+        "candidate_catalog_project_tree_family_matches_the_development_build",
+        "needs every project-tree tool and the pinned mypy from the Nix store",
     ),
     ("pip_cache_cleaner", "needs the pinned pip in the Nix image"),
     ("uv_cache_cleaner", "needs the pinned uv in the Nix image"),
@@ -369,6 +414,9 @@ pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
     "pytest_live_policy_none_session_in_shell_root_is_kept",
     "pytest_live_basetemp_session_is_kept",
     "pytest_orphan_xdist_worker_keeps_session",
+    // TASK-350: the candidate-catalog build, like the release candidate,
+    // plans only in the host's PID namespace.
+    "candidate_catalog_project_tree_family_matches_the_development_build",
 ];
 
 /// The one test whose container receives the pinned Buildah closure.
@@ -381,6 +429,12 @@ pub const AUTOTOOLS_ANCHOR_TEST: &str = "autotools_generated_output_uses_survivi
 pub const WEST_REAL_BUILD_TEST: &str = "west_generated_output_uses_surviving_source_anchor";
 /// The release package's tmpfiles drop-in and example config in a container.
 pub const PACKAGING_TEST: &str = "shipped_tmpfiles_and_example_work_in_container";
+/// TASK-350's tests that run the pinned mypy, which only the under-test
+/// bundle links (its closure is the host store's, mounted read-only).
+pub static MYPY_TESTS: &[&str] = &[
+    "mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept",
+    "candidate_catalog_project_tree_family_matches_the_development_build",
+];
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
@@ -1076,6 +1130,73 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: project_cache_suite::mypy_cache_requires_regular_tag_and_preserves_project,
+    },
+    // TASK-350: admission evidence for the project-tree built-ins.
+    Test {
+        name: "node_modules_real_npm_projects_reclaim_only_idle_projects_then_npm_ci_restores",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::node_modules_real_npm_projects_reclaim_only_idle_projects_then_npm_ci_restores,
+    },
+    Test {
+        name: "node_modules_live_node_processes_keep_their_projects",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::node_modules_live_node_processes_keep_their_projects,
+    },
+    Test {
+        name: "node_modules_home_level_install_filters_every_project_below_it",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::node_modules_home_level_install_filters_every_project_below_it,
+    },
+    Test {
+        name: "python_venv_real_venv_and_uv_projects_reclaim_only_idle_projects_then_recreate",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::python_venv_real_venv_and_uv_projects_reclaim_only_idle_projects_then_recreate,
+    },
+    Test {
+        name: "python_venv_live_interpreter_and_activated_shell_keep_their_projects",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::python_venv_live_interpreter_and_activated_shell_keep_their_projects,
+    },
+    Test {
+        name: "python_venv_activated_shell_that_left_its_project_is_a_named_residual",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::python_venv_activated_shell_that_left_its_project_is_a_named_residual,
+    },
+    Test {
+        name: "python_pycache_real_imports_reclaim_then_a_live_importer_recompiles",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::python_pycache_real_imports_reclaim_then_a_live_importer_recompiles,
+    },
+    Test {
+        name: "mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept,
+    },
+    Test {
+        name: "pytest_cache_real_pytest_reclaim_then_a_live_session_rewrites_it",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::pytest_cache_real_pytest_reclaim_then_a_live_session_rewrites_it,
+    },
+    Test {
+        name: "node_compile_cache_real_node_reclaim_then_a_live_process_recompiles",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::node_compile_cache_real_node_reclaim_then_a_live_process_recompiles,
+    },
+    Test {
+        name: "candidate_catalog_project_tree_family_matches_the_development_build",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: project_tree_suite::candidate_catalog_project_tree_family_matches_the_development_build,
     },
     Test {
         name: "pip_cache_cleaner",

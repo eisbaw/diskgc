@@ -107,7 +107,7 @@
   examples:
     match: [/home/mark/src/app/.pytest_cache, /home/mark/src/a/b/c/.pytest_cache]
     no_match: [/home/mark/src/app/.pytest_cache/v]
-  verified_with: pytest 9.0.3
+  verified_with: pytest 9.0.3 (cacheprovider source) and pytest 9.1.1 in the container tests (TASK-350)
   liveness_class: tolerant
 
 - name: nix-user-cache
@@ -244,7 +244,7 @@
     root: /home/mark/src
     match: [/home/mark/src/app/__pycache__, /home/mark/src/app/pkg/sub/__pycache__]
     no_match: [/home/mark/src/app/__pycache__/nested, /home/mark/src/app/a/b/c/d/__pycache__]
-  verified_with: CPython 3.13.15 and observed CPython 3.12 .pyc layout in a project tree, 2026-10-20
+  verified_with: CPython 3.13.15 and observed CPython 3.12 .pyc layout in a project tree, 2026-10-20; CPython 3.14.7 and pytest 9.1.1 in the container tests (TASK-350)
   liveness_class: tolerant
 
 - name: mypy-cache
@@ -260,7 +260,7 @@
     root: /home/mark/src
     match: [/home/mark/src/app/.mypy_cache, /home/mark/src/app/pkg/.mypy_cache]
     no_match: [/home/mark/src/app/.mypy_cache/3.13, /home/mark/src/app/a/b/c/d/.mypy_cache]
-  verified_with: mypy 1.11.2 (version_id in an observed cache metadata file), tagged project cache layout 2026-10-20
+  verified_with: mypy 1.11.2 (version_id in an observed cache metadata file), tagged project cache layout 2026-10-20; mypy 2.1.0 (SQLite cache shards) in the container tests (TASK-350)
   liveness_class: verified-heuristic
 
 # Project dependency directories (TASK-79): judged by their whole
@@ -287,7 +287,7 @@
     root: /home/mark/src
     match: [/home/mark/src/node_modules, /home/mark/src/app/node_modules, /home/mark/src/mono/packages/a/node_modules]
     no_match: [/home/mark/src/app/node_modules/left-pad, /home/mark/src/a/b/c/d/e/node_modules, /home/mark/src/app/node_modules.old, /home/mark/other/app/node_modules, /home/mark/src/.npm/_npx/f00d/node_modules, /home/mark/src/app/.cache/tool/node_modules]
-  verified_with: npm 11.19.0 and Node.js 24.21.0 install layout on the development host (read-only dry run 2026-11-02) and the ModelHost vectors; container tests pending (TASK-79)
+  verified_with: npm 11.19.0 and Node.js 24.21.0 install layout on the development host (read-only dry runs 2026-11-02 and 2026-11-05), the ModelHost vectors and the container tests (TASK-350)
   liveness_class: verified-heuristic
 
 - name: python-venv
@@ -305,7 +305,7 @@
     root: /home/mark/src
     match: [/home/mark/src/.venv, /home/mark/src/app/.venv, /home/mark/src/mono/tools/x/.venv]
     no_match: [/home/mark/src/app/.venv/lib, /home/mark/src/app/venv, /home/mark/src/app/.venv-3a9f, /home/mark/src/a/b/c/d/e/.venv, /home/mark/src/.local/share/tool/.venv]
-  verified_with: CPython 3.13.15 venv layout (pyvenv.cfg) on the development host (read-only dry run 2026-11-02) and the ModelHost vectors; container tests pending (TASK-79)
+  verified_with: CPython 3.13.15 venv layout (pyvenv.cfg) on the development host (read-only dry runs 2026-11-02 and 2026-11-05), the ModelHost vectors, and CPython 3.14.7 venv and uv 0.13.0 in the container tests (TASK-350)
   liveness_class: verified-heuristic
 
 # A narrower source-anchored recognizer for build output of any directory
@@ -564,7 +564,7 @@
   examples:
     match: [/tmp/node-compile-cache, /tmp/nix-shell.AbC/node-compile-cache, /tmp/claude-1000/nix-shell.Ab1/node-compile-cache]
     no_match: [/tmp/node-compile-cache/v22, /tmp/x/node-compile-cache]
-  verified_with: Node.js 24.21.0 (host layout 2026-10-20; read-only survey 2026-10-18)
+  verified_with: Node.js 24.21.0 (host layout 2026-10-20; read-only survey 2026-10-18; read-only dry run 2026-11-05) and the container tests (TASK-350)
   liveness_class: tolerant
 
 # Admitted under the Owner PID contract (docs/safety.md, Producer liveness;

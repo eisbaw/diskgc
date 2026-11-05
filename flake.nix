@@ -489,6 +489,28 @@
         }
       );
 
+      # TASK-350: the test-only candidate catalog (why and what it shows:
+      # docs/testing.md, Admission evidence). The release build's catalog
+      # code path (`release-catalog`), gated and without the e2e
+      # PID-namespace feature, with diskgc-e2e/candidate-catalog's profiles
+      # patched into this release's catalog in the build's own copy of
+      # builtin.yaml. Never a package output: only the e2e bundle has it.
+      diskgcCandidateCatalog = craneLib.buildPackage (
+        workspaceArgs
+        // {
+          pname = "diskgc-candidate-catalog";
+          cargoArtifacts = workspaceDeps;
+          cargoExtraArgs = "--locked --package diskgc --features release-catalog";
+          doCheck = false;
+          nativeBuildInputs = [ pkgs.python3 ];
+          postPatch = ''
+            python3 ${./tools/candidate_catalog.py} \
+              crates/diskgc-core/src/profile/builtin.yaml ${releaseName} \
+              ${./diskgc-e2e/candidate-catalog}
+          '';
+        }
+      );
+
       # diskgc-e2e is a separate Cargo project (own Cargo.lock) inside the
       # source tree; crane builds it from its directory (crane FAQ:
       # workspace-not-at-source-root).
@@ -565,6 +587,9 @@
         cp ${lib.getExe diskgcTested} $out/bin/diskgc-development
         cp ${diskgcReleaseCatalogGated}/bin/diskgc $out/bin/diskgc-release-catalog
         cp ${lib.getExe diskgcReleaseTested} $out/bin/diskgc-release
+        # TASK-350: the candidate-catalog build and its list (above).
+        cp ${diskgcCandidateCatalog}/bin/diskgc $out/bin/diskgc-candidate-catalog
+        cp ${./diskgc-e2e/candidate-catalog} $out/bin/diskgc-candidate-catalog.list
         cp ${e2eBins}/bin/diskgc-e2e ${e2eBins}/bin/diskgc-e2e-canary \
           ${e2eBins}/bin/diskgc-e2e-driver $out/bin/
         # These copies fail the build if the Nix package omits either
@@ -593,6 +618,9 @@
         # The Nix image already contains this interpreter through pytest;
         # keep the agent hook independent of West's larger Python environment.
         ln -s ${pkgs.python3}/bin/python3 $out/bin/agent-python3
+        # TASK-350's project-tree scenarios run the pinned mypy, reached
+        # through the store closure their containers mount read-only.
+        ln -s ${pkgs.mypy}/bin/mypy $out/bin/mypy
         ln -s ${pkgs.cmake}/bin/cmake $out/bin/cmake
         ln -s ${pkgs.dtc}/bin/dtc $out/bin/dtc
         ln -s ${pkgs.gperf}/bin/gperf $out/bin/gperf
