@@ -3,10 +3,10 @@ id: TASK-340
 title: >-
   Busy host: three stale scans in a row keep the whole rest of a tier and the
   run reports exhausted (146,467 nix-shell-rc dirs after 2.6 min of a 30 h run)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-04T18:54:00Z'
-updated_date: '2026-11-05T01:08:00Z'
+updated_date: '2026-11-05T06:07:00Z'
 labels:
   - dogfood
   - freshness
@@ -26,4 +26,6 @@ Safe (nothing deleted on a stale scan), but: (1) with 30 h of deadline left the 
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-05 orchestrator: implementer in tmp/worktrees/t340 (branch t340-busy-host, from master 6c67eccb).
+
+Merged ec367fca9ecafabed501bea557dbffae37c4c379 (2026-11-05). Open: real-kernel check of the back-off (dogfood nix-shell-rc rerun, dry run first). Follow-ups: human summary counts unreadable_process under 'host too busy' (report/human.rs busy()); configured tier default 10m timeout turns a long storm into exit 3; live-run not_judged count needs design; mixed-cause sequences untested; per-candidate retry pauses still slice-sleep; deadline hint says 'larger --timeout' for a busy host.
 <!-- SECTION:NOTES:END -->
