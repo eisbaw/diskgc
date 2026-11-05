@@ -26,4 +26,6 @@ Seen 2026-11-04 by the t38 implementer in nix develop -c just check (branch t38-
 2026-11-04 orchestrator: implementer in tmp/worktrees/t337 (branch t337-read-ahead-flake). Input, not merged: branch t337-retry-candidate (c4de7f76, t38 implementer) retries read_ahead_plan only for busy-host differences; cause it captured: under load 10-35 one plan's in-use scan never settled ('process list still growing after 16 listings') -> in_use_unknown -> union attribution moved. A retry is a mitigation; root cause wanted.
 
 Merged 1da02f16 (2026-11-05). Codex review after merge: REGRESSION in judge_term: in_use_cleared survives a term's later liveness/toolchain refusal and a replacement scan -> a union dry run can report eligible what was refused before (pinned_toolchain, or in_use_unknown on the newer scan); plus contract_veto's early return skips protect_toolchains-only guards (pre-existing). Sent back to the implementer. Other parity gaps -> separate task.
+
+2026-11-05: regression fix in tmp/worktrees/t337b (branch t337b-union-strict).
 <!-- SECTION:NOTES:END -->
