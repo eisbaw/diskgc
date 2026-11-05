@@ -81,6 +81,7 @@ pub mod nix_gc_suite;
 pub mod oracle;
 pub mod owner_pid_suite;
 pub mod packaging_suite;
+pub mod pkg_cache_suite;
 pub mod probe;
 pub mod proc_locks;
 pub mod profile_vector_suite;

@@ -42,7 +42,7 @@ use crate::{
     cargo_reclaim_suite, cargo_suite, cli_contract_suite, cli_runtime_suite, differential_suite,
     docker_suite, docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
     fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey,
-    lifecycle_suite, meson_suite, nix_gc_suite, owner_pid_suite, packaging_suite,
+    lifecycle_suite, meson_suite, nix_gc_suite, owner_pid_suite, packaging_suite, pkg_cache_suite,
     profile_vector_suite, project_cache_suite, project_tree_suite, pytest_contract_suite,
     release_suite, scale_suite, signal_suite, stdout_suite, survey_suite, temp_safety_suite,
     watch_suite,
@@ -263,6 +263,43 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
     (
         "platformio_cache_cleaner",
         "needs the pinned PlatformIO in the Nix image",
+    ),
+    // TASK-351: admission evidence for the package-manager cache built-ins.
+    (
+        "pip_cache_real_pip_installs_reclaim_then_refetch_and_an_install_in_flight_completes",
+        "needs the pinned pip and CPython in the Nix image",
+    ),
+    (
+        "uv_cache_real_uv_cache_is_a_checkout_until_allowed_and_an_install_in_flight_is_kept",
+        "needs the pinned uv and CPython in the Nix image",
+    ),
+    (
+        "npm_cache_real_npm_installs_reclaim_then_refetch_and_a_running_npm_keeps_it",
+        "needs the pinned npm and Node in the Nix image",
+    ),
+    (
+        "pnpm_store_real_pnpm_prune_keeps_referenced_packages_and_an_install_in_flight",
+        "needs the pinned pnpm, npm and Node in the Nix image",
+    ),
+    (
+        "yarn_cache_real_yarn_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+        "needs the pinned Yarn Classic, npm and Node in the Nix image",
+    ),
+    (
+        "ccache_real_compiles_reclaim_then_recompile_and_a_compile_in_flight_completes",
+        "needs the pinned ccache and C compiler in the Nix image",
+    ),
+    (
+        "go_build_cache_real_go_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept",
+        "needs the pinned Go in the Nix image",
+    ),
+    (
+        "platformio_cache_real_pio_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+        "needs the pinned PlatformIO and Node in the Nix image",
+    ),
+    (
+        "jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes",
+        "needs the pinned Jest in the Nix image",
     ),
     (
         "cargo_race_6_a_mixed_layout_target_killed_at_seeded_positions",
@@ -1311,6 +1348,67 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: cache_suite::platformio_cache_cleaner,
+    },
+    // TASK-351: admission evidence for the package-manager cache built-ins.
+    Test {
+        name: "pip_cache_real_pip_installs_reclaim_then_refetch_and_an_install_in_flight_completes",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::pip_cache_real_pip_installs_reclaim_then_refetch_and_an_install_in_flight_completes,
+    },
+    Test {
+        name: "uv_cache_real_uv_cache_is_a_checkout_until_allowed_and_an_install_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::uv_cache_real_uv_cache_is_a_checkout_until_allowed_and_an_install_in_flight_is_kept,
+    },
+    Test {
+        name: "npm_cache_real_npm_installs_reclaim_then_refetch_and_a_running_npm_keeps_it",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::npm_cache_real_npm_installs_reclaim_then_refetch_and_a_running_npm_keeps_it,
+    },
+    Test {
+        name: "pnpm_store_real_pnpm_prune_keeps_referenced_packages_and_an_install_in_flight",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::pnpm_store_real_pnpm_prune_keeps_referenced_packages_and_an_install_in_flight,
+    },
+    Test {
+        name: "yarn_cache_real_yarn_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::yarn_cache_real_yarn_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept,
+    },
+    Test {
+        name: "ccache_real_compiles_reclaim_then_recompile_and_a_compile_in_flight_completes",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::ccache_real_compiles_reclaim_then_recompile_and_a_compile_in_flight_completes,
+    },
+    Test {
+        name: "go_build_cache_real_go_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::go_build_cache_real_go_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept,
+    },
+    Test {
+        name: "platformio_cache_real_pio_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::platformio_cache_real_pio_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept,
+    },
+    Test {
+        name: "jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes,
+    },
+    Test {
+        name: "delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path,
     },
     Test {
         name: "anchored_west_build_keeps_unrebuildable_outputs",

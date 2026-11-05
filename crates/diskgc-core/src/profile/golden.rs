@@ -1419,6 +1419,66 @@ fn the_release_catalog_refuses_an_out_of_scope_source() {
     assert!(error.contains("has no source"), "{error}");
 }
 
+/// TASK-351 (docs/testing.md, Admission evidence): the delegated cache
+/// built-ins cannot go through the candidate-catalog build the way TASK-350's
+/// family did. Each one, given `releases: ["0.2"]` in a copy of the real
+/// builtin.yaml exactly as tools/candidate_catalog.py patches it, is refused
+/// by the release catalog code path: a command action is not an `fs`
+/// source's own action (`Library::release_built_ins`), so a 0.2 package
+/// with it would not start. Admitting one needs a release scope decision
+/// (TASK-276) before any catalog change.
+#[test]
+fn the_release_catalog_refuses_every_delegated_cache_built_in() {
+    const DELEGATED: [&str; 9] = [
+        "pip-cache",
+        "uv-cache",
+        "npm-cache",
+        "pnpm-store",
+        "yarn-cache",
+        "ccache",
+        "go-build-cache",
+        "platformio-cache",
+        "jest-cache",
+    ];
+    for name in DELEGATED {
+        let yaml_text = super::BUILTIN_YAML;
+        let start = yaml_text
+            .find(&format!("\n- name: {name}\n"))
+            .unwrap_or_else(|| panic!("{name} is a top-level built-in"))
+            + 1;
+        let body = &yaml_text[start..];
+        let end = body[2..]
+            .find("\n- ")
+            .map_or(yaml_text.len(), |at| start + 2 + at + 1);
+        let class_line = "\n  liveness_class: delegated\n";
+        let class = start
+            + body
+                .find(class_line)
+                .unwrap_or_else(|| panic!("{name} is of class delegated"))
+            + class_line.len();
+        assert!(
+            class <= end,
+            "{name}'s liveness_class lies in its own entry"
+        );
+        let yaml = format!(
+            "{}  releases: [\"0.2\"]\n{}",
+            &yaml_text[..class],
+            &yaml_text[class..]
+        );
+        let library = Library::load(&yaml, &[]).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let error = library
+            .release_catalog("0.2", Release::V0_2)
+            .expect_err(name);
+        assert!(
+            error.contains(&format!(
+                "diskgc 0.2's catalog (0.2) built-in `{name}` is outside the release scope: its \
+                 action is not kind fs's own"
+            )),
+            "{name}: {error}"
+        );
+    }
+}
+
 /// The sync rule bites each way it can drift, on edits of the real table
 /// and library, each with its own message (a manual edit of either file
 /// shows the same).

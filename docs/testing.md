@@ -2840,6 +2840,94 @@ clock's now. Roots `/home/tester/src` (the development machine's
 - `candidate_catalog_project_tree_family_matches_the_development_build`
   (host PID namespace): the release path, below.
 
+**Package-manager cache family** (TASK-351; diskgc-e2e `pkg_cache_suite.rs`,
+Nix image only, except the last). Class *delegated*: the tool's own cleaner
+acts, so what a run in flight survives is the tool's locking, recorded per
+profile in [reference.md](reference.md#liveness-contracts). The containers
+have no network: each test serves its own registry on `127.0.0.1`
+(Node's `http`: npm packuments and tarballs the real npm packed, a PEP 503
+index of wheels, PlatformIO archives). A request whose path holds the
+test's gate text waits for a go file, which holds the requesting tool in
+flight; the log of served paths proves a fetch after the reclaim. Every scenario
+also has a real cache under the tool's own variable or option
+(`PIP_CACHE_DIR`, `UV_CACHE_DIR`, `npm_config_cache`, `--store-dir`,
+`YARN_CACHE_FOLDER`, `CCACHE_DIR`, `GOCACHE`, `PLATFORMIO_CACHE_DIR`,
+`--cacheDirectory`) and a hand-made lookalike at a wrong path; neither is
+planned, and both are unchanged after the reclaim (for the profiles with a
+fixed path below the root this guards only its anchoring; Jest's decoys
+exercise its `jest_*` pattern and depth). Each dry run plans the
+expected candidates with the profile's command (`operation`); a reclaim
+under the deletion oracle then runs it, with diskgc's `HOME` another
+directory, so a cleaner that ignored the path it is given and fell back to
+its default would miss the measured cache. Where diskgc keeps a cache in flight
+`in_use`, the blockers must be processes of that run (`fd` or `map`) and
+the run must hold the named file there (read from `/proc` independently of
+the report, which names no path); the test then runs the tool's own cleaner
+directly to show what the tool does, reading uv's and pnpm's lock waits
+from `/proc/locks`. Each test first requires the tool version
+`verified_with` names. Roots `/home/tester` (jest: `/tmp`), `--min-free 100%`.
+
+- `pip_cache_real_pip_installs_reclaim_then_refetch_and_an_install_in_flight_completes`:
+  pip 26.1.2 caches only through `--trusted-host` on plain HTTP; `pip
+  cache purge` empties `http-v2`; an install waiting on its next wheel holds
+  nothing in the cache, is purged under and completes.
+- `uv_cache_real_uv_cache_is_a_checkout_until_allowed_and_an_install_in_flight_is_kept`:
+  uv 0.13.0's cache holds `sdists-v10/.git`, so the profile alone keeps it
+  `contains_checkout` (dry run and reclaim); with `profile_policies`
+  `checkouts: allow`, `uv cache clean` removes it and an environment
+  installed from it still imports; an install in flight holds `.lock`
+  (`in_use`), and `uv cache clean` run directly waits for it.
+- `npm_cache_real_npm_installs_reclaim_then_refetch_and_a_running_npm_keeps_it`:
+  `_cacache` goes, `_logs` stays; an install in flight holds its debug log
+  (`in_use`); `npm cache clean --force` run directly then removes
+  `_cacache`, and the install completes.
+- `pnpm_store_real_pnpm_prune_keeps_referenced_packages_and_an_install_in_flight`:
+  after `pnpm remove`, the prune removes only the unreferenced package
+  (adding it back fetches it again; the other project still loads); an
+  install in flight holds `index.db` (`in_use`), and `pnpm store prune` run
+  directly waits for pnpm's store-operation lock.
+- `yarn_cache_real_yarn_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept`:
+  an install in flight holds the tarball it downloads (`in_use`); `yarn
+  cache clean` run directly then makes it fail (`ENOENT`), Yarn Classic's
+  missing lock; a retry installs.
+- `ccache_real_compiles_reclaim_then_recompile_and_a_compile_in_flight_completes`:
+  both `~/.cache/ccache` and `~/.ccache` are reclaimed; a compile in
+  flight (a gated compiler) holds its inode cache (`in_use`) while the
+  other cache is cleared; `ccache --clear` run directly leaves it to
+  complete, and the program runs.
+- `go_build_cache_real_go_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept`:
+  a build in flight (the compile of package main gated by `-toolexec`) has
+  an entry mapped (`in_use`, `map`); `go clean -cache` run directly then
+  makes it fail; the next build succeeds.
+- `platformio_cache_real_pio_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept`:
+  the prune keeps installed packages; an install in flight holds its
+  download and lock (`in_use`); `pio system prune --cache` run directly
+  then makes it fail (`FileNotFoundError`); a retry installs.
+- `jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes`:
+  Jest's default caches in `/tmp` and in a `nix-shell.*` `TMPDIR` are
+  reclaimed (`/var/tmp`, another filesystem here, is its `other_fs` row);
+  a run in flight (a gated test) holds nothing there, is cleared under,
+  passes and writes its cache again.
+- `delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path`
+  (Nix and Debian images): with only `env` on `PATH` each profile's tier
+  is `missing` and nothing changes; with stand-ins that would report
+  version `0.0.1-stand-in`, each is run once, never asked its version, with
+  the profile's argv, working directory and environment. diskgc has no
+  cleaner version allowlist: any program of the name first on `PATH` runs
+  (safety.md, Command actions).
+
+None of these profiles can go through the candidate catalog below: its
+release code path refuses a command action in any catalog
+(`the_release_catalog_refuses_every_delegated_cache_built_in`, a
+diskgc-core unit test that patches each into 0.2 as
+`tools/candidate_catalog.py` does), so admitting one needs a release scope
+decision first. Not exercised for this family: pip's wheel cache (sdist
+builds), uv's non-default link modes, pnpm's `copy` import method, Yarn
+Berry, ccache's remote storage, PlatformIO's registry API cache, Jest with
+watchman, and the residual windows the liveness rows name (a clean landing
+where the run holds nothing in the cache); none is reproduced
+deterministically.
+
 **The candidate catalog** (`diskgc-candidate-catalog` in the under-test
 bundle). The release-candidate package carries the real catalog only, and
 the PRD lets no other build lift the sandbox gate, so a profile awaiting

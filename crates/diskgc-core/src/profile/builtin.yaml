@@ -438,7 +438,7 @@
   examples:
     match: [/home/mark/.cache/pip]
     no_match: [/home/mark/.cache/pip/http-v2, /home/mark/.cache/uv]
-  verified_with: pip 26.1.2, host dry-run and Nix container cleaner 2026-10-20
+  verified_with: pip 26.1.2, real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
 
 - name: uv-cache
@@ -449,7 +449,7 @@
   examples:
     match: [/home/mark/.cache/uv]
     no_match: [/home/mark/.cache/uv/archive-v0, /home/mark/.cache/pip]
-  verified_with: uv 0.13.0, host dry-run and Nix container cleaner 2026-10-20
+  verified_with: uv 0.13.0, real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
 
 - name: go-build-cache
@@ -460,7 +460,7 @@
   examples:
     match: [/home/mark/.cache/go-build]
     no_match: [/home/mark/.cache/go-build/00, /home/mark/go/pkg/mod]
-  verified_with: Go 1.26.8, host dry-run and Nix container cleaner 2026-10-20
+  verified_with: Go 1.26.8, real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
 
 - name: npm-cache
@@ -471,7 +471,7 @@
   examples:
     match: [/home/mark/.npm]
     no_match: [/home/mark/.npm/_cacache, /home/mark/.cache/npm]
-  verified_with: npm 11.19.0 (Node.js 24.21.0), host dry-run and Nix container cleaner 2026-10-20
+  verified_with: npm 11.19.0 (Node.js 24.21.0), real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
 
 - name: pnpm-store
@@ -482,7 +482,7 @@
   examples:
     match: [/home/mark/.local/share/pnpm/store]
     no_match: [/home/mark/.local/share/pnpm/store/v10, /home/mark/.local/share/pnpm]
-  verified_with: pnpm 12.9.0, host dry-run and Nix container cleaner 2026-10-20
+  verified_with: pnpm 12.9.0, real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
 
 - name: yarn-cache
@@ -493,7 +493,7 @@
   examples:
     match: [/home/mark/.cache/yarn]
     no_match: [/home/mark/.cache/yarn/v6, /home/mark/.yarn]
-  verified_with: Yarn Classic 1.22.22, host dry-run and Nix container cleaner 2026-10-20
+  verified_with: Yarn Classic 1.22.22, real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
 
 - name: ccache
@@ -504,7 +504,7 @@
   examples:
     match: [/home/mark/.cache/ccache, /home/mark/.ccache]
     no_match: [/home/mark/.cache/ccache/tmp, /home/mark/.cache/sccache]
-  verified_with: ccache 4.14.1, host dry-run and Nix container cleaner 2026-10-20
+  verified_with: ccache 4.14.1, real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
 
 - name: jest-cache
@@ -517,7 +517,7 @@
   examples:
     match: [/tmp/jest_rs, /var/tmp/jest_project_abc, /tmp/nix-shell.Ab1/jest_app_hash]
     no_match: [/tmp/jest, /tmp/subdir/jest_app_hash, /tmp/jest_app_hash/file]
-  verified_with: Jest npm package 30.2.0 (pinned lockfile and Nix container cleaner, 2026-10-20)
+  verified_with: Jest npm package 30.2.0 (pinned lockfile), real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
 
 - name: west-build-anchored
@@ -552,7 +552,7 @@
     root: /home/mark
     match: [/home/mark/.platformio/.cache]
     no_match: [/home/mark/.platformio/packages, /home/mark/.platformio/cache, /home/mark/project/.pio/build]
-  verified_with: PlatformIO Core 6.1.19 (isolated Nix-pinned prune probe, 2026-10-20)
+  verified_with: PlatformIO Core 6.1.19, real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
 # Each fs source below removes only its own matched entries. The selecting
 # tier sets idle policy unless the source declares a mandatory minimum.

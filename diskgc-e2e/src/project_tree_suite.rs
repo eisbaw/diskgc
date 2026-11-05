@@ -92,7 +92,7 @@ type Expected = Vec<(PathBuf, Option<&'static str>)>;
 /// `agent-python3` link resolved once, so that `-m venv` links the
 /// environment's interpreter under the names a user's `python3 -m venv`
 /// gives it (a venv also links the name it was invoked by).
-fn python(ctx: &Ctx) -> Result<PathBuf, String> {
+pub(crate) fn python(ctx: &Ctx) -> Result<PathBuf, String> {
     let link = ctx.bin_dir.join("agent-python3");
     let target =
         std::fs::read_link(&link).map_err(|e| format!("read the link {}: {e}", link.display()))?;
@@ -109,12 +109,12 @@ fn mypy(ctx: &Ctx) -> PathBuf {
     ctx.bin_dir.join("mypy")
 }
 
-fn home(rel: &str) -> PathBuf {
+pub(crate) fn home(rel: &str) -> PathBuf {
     Path::new(HOME).join(rel)
 }
 
 /// Writes the fixture file `rel` below tester's home, creating its parents.
-fn write(ctx: &Ctx, rel: &str, content: &[u8]) -> TestResult {
+pub(crate) fn write(ctx: &Ctx, rel: &str, content: &[u8]) -> TestResult {
     if let Some((parent, _)) = rel.rsplit_once('/') {
         ctx.home.mkdirs(parent, 0o755, TESTER)?;
     }
@@ -124,7 +124,7 @@ fn write(ctx: &Ctx, rel: &str, content: &[u8]) -> TestResult {
 
 /// `program args` as tester in `cwd`, with only `PATH`, `HOME`, `LANG` and
 /// `env` in its environment.
-fn tester_command(
+pub(crate) fn tester_command(
     ctx: &Ctx,
     cwd: &Path,
     env: &[(&str, &str)],
@@ -147,7 +147,7 @@ fn tester_command(
 
 /// Runs a real tool to its end and returns its stdout; fails with its
 /// output unless it exits 0.
-fn tool(
+pub(crate) fn tool(
     ctx: &Ctx,
     cwd: &Path,
     env: &[(&str, &str)],
@@ -241,7 +241,7 @@ fn versions(ctx: &Ctx, names: &[&str]) -> TestResult {
 }
 
 /// The control directory, made before any oracle is armed.
-fn control_dir(ctx: &Ctx) -> TestResult {
+pub(crate) fn control_dir(ctx: &Ctx) -> TestResult {
     ctx.home.mkdirs(CTL, 0o777, TESTER)?;
     Ok(())
 }
@@ -269,7 +269,7 @@ fn recent(path: &Path, change: bool) -> TestResult {
         .map_err(|e| format!("set the times of {}: {e}", path.display()))
 }
 
-fn exists(path: &Path) -> bool {
+pub(crate) fn exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
@@ -321,7 +321,7 @@ fn run_ensure(
 }
 
 /// The `(candidate, reason)` pairs of a report's plan, sorted.
-fn plan_of(report: &Value) -> Result<Vec<(String, Option<String>)>, String> {
+pub(crate) fn plan_of(report: &Value) -> Result<Vec<(String, Option<String>)>, String> {
     let mut got: Vec<(String, Option<String>)> = report["plan"]
         .as_array()
         .ok_or_else(|| format!("no plan array: {report}"))?
@@ -427,7 +427,7 @@ fn dry_run_then_reclaim(
 }
 
 /// The reclaim report's skipped entry for `candidate`.
-fn skipped<'a>(report: &'a Value, candidate: &Path) -> Result<&'a Value, String> {
+pub(crate) fn skipped<'a>(report: &'a Value, candidate: &Path) -> Result<&'a Value, String> {
     report["skipped"]
         .as_array()
         .and_then(|entries| {
@@ -1375,7 +1375,7 @@ fn cached(dir: &Path, stem: &str) -> Result<bool, String> {
 // ---- mypy-cache ------------------------------------------------------------
 
 /// The `.mypy_cache` files `pid` holds open (from `/proc/PID/fd`).
-fn held_in(pid: u32, dir: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn held_in(pid: u32, dir: &Path) -> Result<Vec<PathBuf>, String> {
     let fds = format!("/proc/{pid}/fd");
     let mut held = Vec::new();
     for entry in std::fs::read_dir(&fds).map_err(|e| format!("list {fds}: {e}"))? {
