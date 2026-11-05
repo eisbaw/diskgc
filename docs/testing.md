@@ -1134,6 +1134,26 @@ per-user lock, Nix root or GC call, no state read or written):
   project contract still keeps a venv whose project changed yesterday
   `not_idle` without `--in-use` (its file-based rule), and leaves the
   idle project's not checked.
+- `a_unions_contract_file_rules_veto_without_the_flag`: the same busy
+  venv in a union of python-venv and a venv profile without a contract,
+  in both orders, is kept `not_idle` under python-venv with and without
+  `--in-use`: the union's contract veto judges the rules on files without
+  a scan. The idle project's venv is not checked. Fails when the veto
+  returns early without a scan (TASK-343).
+- `pytests_file_rules_stand_without_the_flag`: old pytest sessions whose
+  `.lock` is no pid marker (row 3), and one in a `pytest-of` directory of
+  another uid (a check before the table), are `producer_unknown` with and
+  without `--in-use`, alone and vetoed in a union whose other term was
+  selected; a session whose `.lock` holds a pid (Owner PID, processes) is
+  `in_use` with `--in-use` and not checked without. Fails when pytest's
+  contract is judged only with a scan (TASK-343).
+- `a_unions_toolchain_place_rule_vetoes_without_the_flag`: a custom
+  toolchain (no name rustup installs again) in a union of a
+  `protect_toolchains` term and a guard-free term, in both orders, is
+  kept `pinned_toolchain` with and without `--in-use` (the guard's static
+  half is a retention guard the union applies without a scan); a
+  reinstallable one nothing pins is not checked without `--in-use`. It
+  passed before TASK-343 too: it pins the documented split of the guard.
 - `ensure_dry_run_always_checks_in_use`: on the same fixture `ensure
   --dry-run` scans, keeps the live session `in_use`, and its JSON has no
   survey field. That no `ensure`, dry run or reclaim can plan without the

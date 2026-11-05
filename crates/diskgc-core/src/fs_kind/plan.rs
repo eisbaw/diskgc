@@ -274,13 +274,27 @@ pub fn judge_term<H: Host>(
         deadline,
     )?;
     // A default survey's plan (crate::inuse::PlanScan::NotChecked) stops
-    // here: a refusal of those static rules stands; otherwise no scan, no
-    // contract rule on processes, and the candidate is "not checked".
-    // In a union the candidate stays with this term, the first that admits
-    // it: with no scan there is no in-use verdict to hand on (TASK-337).
-    if !checker.checks_in_use() {
-        if let super::liveness::Prepared::Refused(skip) = &prepared {
-            return Ok(TermVerdict::Refused(skip.clone().measured(walked.bytes())));
+    // here: no scan, no in-use check. Its liveness contract is judged by
+    // its rules on files alone (TASK-343: a project's rules 1 and 2,
+    // pytest's rows 1 to 3 and the steps before them), whose refusal
+    // stands; a candidate they permit is "not checked". In a union the
+    // candidate stays with this term, the first that admits it: with no
+    // scan there is no in-use verdict to hand on (TASK-337).
+    if let Some(survey) = checker.in_use_not_checked() {
+        let seen = super::liveness::Seen::Files {
+            owners: judge.rules.owners,
+            _survey: survey,
+        };
+        if let Err(skip) = super::liveness::check_on(
+            host,
+            seen,
+            judge.find,
+            found,
+            candidate.parent(),
+            &walked.record,
+            &prepared,
+        )? {
+            return Ok(TermVerdict::Refused(skip.measured(walked.bytes())));
         }
         return Ok(TermVerdict::Admitted(
             walked.tally(),
@@ -318,7 +332,9 @@ pub fn judge_term<H: Host>(
 /// recognises it, or whose toolchain guard keeps it, must permit it (the
 /// refusing source's index in `sources` comes back), judged from
 /// the plan's scan ([`super::liveness::veto`]; the reclaim applies the
-/// same rule on its last scan). The candidate's parent is reached again
+/// same rule on its last scan). A default survey's plan has no scan: the
+/// contracts' rules on files veto alone ([`super::liveness::Seen::Files`];
+/// TASK-343). The candidate's parent is reached again
 /// safely; one that cannot be is `unsafe_path`. `record` is the walk of
 /// the candidate by the term that admitted it: every term found the same
 /// path, so its tree is theirs.
@@ -329,15 +345,11 @@ pub fn contract_veto<'a, H: Host>(
     deadline: Option<MonoTime>,
     record: &WalkRecord,
 ) -> Result<Result<(), (usize, Skip)>, Stop> {
-    let Some((_, first)) = sources.iter().find(|(judge, _)| {
+    let Some((first_judge, first)) = sources.iter().find(|(judge, _)| {
         judge.find.liveness_contract.is_some() || judge.find.protect_toolchains.is_some()
     }) else {
         return Ok(Ok(()));
     };
-    // A default survey judges no liveness contract (judge_term).
-    if !checker.checks_in_use() {
-        return Ok(Ok(()));
-    }
     check_deadline(host, deadline, &first.path)?;
     let mounts = mountinfo(host)?;
     let Some(parent) = first.path.parent() else {
@@ -370,12 +382,22 @@ pub fn contract_veto<'a, H: Host>(
             super::liveness::prepare(host, judge, found, &parent.fd, record, deadline)
         })
         .collect::<Result<Vec<_>, Stop>>()?;
-    let scan = checker
-        .current(host, deadline)
-        .map_err(|e| e.at(&first.path))?;
-    super::liveness::veto(
+    // The union's terms share the plan's rules, so one term's owners are
+    // every term's (and the users a scan would read, Options::from_rules).
+    let seen = match checker.in_use_not_checked() {
+        Some(survey) => super::liveness::Seen::Files {
+            owners: first_judge.rules.owners,
+            _survey: survey,
+        },
+        None => super::liveness::Seen::Scan(
+            checker
+                .current(host, deadline)
+                .map_err(|e| e.at(&first.path))?,
+        ),
+    };
+    super::liveness::veto_on(
         host,
-        scan,
+        seen,
         sources
             .iter()
             .zip(&prepared)

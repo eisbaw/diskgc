@@ -762,17 +762,29 @@ toward a size, except that the in-use check is opt-in (Mark, TASK-116,
   no `/proc/PID` entry, no process scan, no bound sockets or loop
   devices, no Cargo process heuristics, and no refusal for `hidepid` or a
   PID namespace (it runs in a container too; diskgc still reads its own
-  `/proc/self` entries and the kernel version). The rules of a
-  [liveness contract](#liveness-contracts) judged on processes are
-  skipped: pytest-tmp's "no pytest run seen", nix-shell-rc's "shell
-  ended", Owner PID, and the project contracts' visible-use rule. Every
-  other check runs as in a dry run: discovery, the source's `where` (an
-  `app_not_running` lock file included), keep markers, checkouts,
-  container storage, ownership, special files, the eligibility walk with
-  its sizes, the idle filters by age, `future_time`, version rules,
-  `protect`, and a liveness contract's file-based rules (its instance
-  recognition, `filtered`; a project's location, `producer_unknown`; and
-  a project contract's "no change or read for 30 days", `not_idle`). A candidate
+  `/proc/self` entries and the kernel version). Skipped are the in-use
+  check and every rule judged on processes: Owner PID (its
+  local-filesystem rule included, so nix-shell-rc's "shell ended" and a
+  pytest `.lock` holding a pid), pytest-tmp's rows 4 to 11 ("no pytest
+  run seen"), the project contracts' visible-use rule, and the live half
+  of a `protect_toolchains` guard (a running manager, a pin a process
+  selects). Every other check runs as in a dry run, with the same
+  verdict: discovery, the source's `where` (an `app_not_running` lock
+  file included), keep markers, checkouts, container storage, ownership,
+  special files, the eligibility walk with its sizes, the idle filters
+  by age, `future_time`, version rules, `protect`, the retention guards
+  (a `protect_toolchains` guard's names, recent reads and the host's
+  pins among them), and a [liveness contract](#liveness-contracts)'s
+  rules on files, in its order: its instance recognition (`filtered`);
+  for pytest-tmp, the checks before its table
+  ([safety.md](safety.md#producer-liveness), pytest sessions: the
+  `pytest-of` directory's owner and the temp root, `producer_unknown`;
+  the session reached again, `changed` or `unreadable`) and rows 2 and 3 (a
+  listing that failed, `unreadable`; a `.lock` that is no pid marker,
+  `producer_unknown`); for a project contract, its location
+  (`producer_unknown`) and "no change or read for 30 days" (`not_idle`).
+  In a union, every term that found the candidate vetoes by those
+  contract rules, as with `--in-use` (TASK-343). A candidate
   that passes all of them is **not checked**, never eligible: the human
   result says `N matched (in use not checked)`, `--list` says `not
   checked`, and the JSON has `in_use: "not_checked"`, the count under

@@ -1048,10 +1048,10 @@ pub struct Checker<'a> {
     options: Options<'a>,
     reuse_limit: Duration,
     latest: Option<Scan>,
-    /// `false` only for a plan made with [`PlanScan::NotChecked`] (a
-    /// `survey` without `--in-use`): it never scans, and the judges stop
-    /// before their in-use step ([`Checker::checks_in_use`]).
-    scans: bool,
+    /// Set only for a plan made with [`PlanScan::NotChecked`] (a `survey`
+    /// without `--in-use`): it never scans, and the judges stop before
+    /// their in-use step ([`Checker::checks_in_use`]).
+    not_checked: Option<crate::survey::InUseNotChecked>,
 }
 
 /// Whether a plan's checker scans processes. [`PlanScan::NotChecked`]
@@ -1085,7 +1085,7 @@ impl<'a> Checker<'a> {
             options,
             reuse_limit: reuse_limit.min(FRESHNESS),
             latest: None,
-            scans: true,
+            not_checked: None,
         }
     }
 
@@ -1097,7 +1097,10 @@ impl<'a> Checker<'a> {
             options: Options::from_rules(rules),
             reuse_limit: PLAN_REUSE_LIMIT,
             latest: None,
-            scans: scan == PlanScan::Processes,
+            not_checked: match scan {
+                PlanScan::Processes => None,
+                PlanScan::NotChecked(token) => Some(token),
+            },
         }
     }
 
@@ -1105,7 +1108,16 @@ impl<'a> Checker<'a> {
     /// `false` only for [`PlanScan::NotChecked`], where a judge stops
     /// before its in-use step and must not ask for a scan.
     pub fn checks_in_use(&self) -> bool {
-        self.scans
+        self.not_checked.is_none()
+    }
+
+    /// The survey's permission this checker was made with
+    /// ([`PlanScan::NotChecked`]), `None` for every other plan: what a
+    /// judgement without process evidence requires (a liveness
+    /// contract's file rules alone, `fs_kind::liveness`), so no
+    /// `ensure`, dry run or reclaim can reach one.
+    pub fn in_use_not_checked(&self) -> Option<crate::survey::InUseNotChecked> {
+        self.not_checked
     }
 
     /// This checker, its scans also reading what Owner PID needs when
@@ -1293,7 +1305,7 @@ impl<'a> Checker<'a> {
         // Every scan starts here: a checker that does not check (a
         // default survey's) reaching it is a bug, never a silent scan.
         assert!(
-            self.scans,
+            self.checks_in_use(),
             "a checker made with PlanScan::NotChecked was asked for a process scan"
         );
         self.latest = None;

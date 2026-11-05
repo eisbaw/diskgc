@@ -1020,3 +1020,265 @@ profiles:
         ]
     );
 }
+
+/// The kept reason and profile of each row of `value`'s first path
+/// whose candidate starts with `prefix`, by candidate.
+fn verdicts(value: &Value, prefix: &str) -> Vec<(String, String, Value)> {
+    let mut rows: Vec<_> = value["paths"][0]["candidates"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter(|r| {
+            r["candidate"]
+                .as_str()
+                .is_some_and(|c| c.starts_with(prefix))
+        })
+        .map(|r| {
+            (
+                r["candidate"].as_str().expect("a path").to_owned(),
+                r["profile"].as_str().expect("a profile").to_owned(),
+                r["reason"].clone(),
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+/// TASK-343 (1): a union's liveness contract vetoes by its file rules in
+/// survey's default mode too. `python-venv || any-venv` (and the other
+/// order): a 60-day-old `.venv` in a project whose `pyproject.toml`
+/// changed yesterday is kept `not_idle` by python-venv's contract with
+/// `--in-use`, whichever term the union selected, and so it must be
+/// without it: the veto's project walk and its rules 1 and 2 read files,
+/// no process. The venv of an idle project stays not checked.
+#[test]
+fn a_unions_contract_file_rules_veto_without_the_flag() {
+    let venv = |name: &str, source: &str| {
+        format!(
+            "  /home/tester/src/{name}:\n    .: {{mtime: 2026-08-16T03:00:00Z}}\n    \
+             pyproject.toml: {{mtime: {source}}}\n    \".venv\":\n      .: {{mtime: \
+             2026-08-16T03:00:00Z}}\n      pyvenv.cfg: {{mtime: 2026-08-16T03:00:00Z}}\n      \
+             lib: {{.: {{mtime: 2026-08-16T03:00:00Z}}, x.py: {{size: 4K, mtime: \
+             2026-08-16T03:00:00Z}}}}\n"
+        )
+    };
+    let extra = venv("busy", "2026-10-14T03:00:00Z") + &venv("idle", "2026-08-16T03:00:00Z");
+    let config = r#"version: 1
+profiles:
+  - name: any-venv
+    find:
+      roots: required
+      paths: [.venv, "*/.venv", "*/*/.venv"]
+      type: dir
+    action: delete
+    examples: {root: /home/x, match: [/home/x/a/.venv]}
+"#;
+    let survey_rows = |select: &str, in_use: bool| {
+        let host = host(&laptop_tmp(&extra));
+        let options = SurveyOptions {
+            in_use,
+            ..options(&["/home/tester/src"], Some(select))
+        };
+        let survey = run(&host, &options, Some(config));
+        assert_eq!(survey.status, Status::DryRun, "{survey:?}");
+        if !in_use {
+            assert_eq!(process_reads(&host), [], "no process is read");
+        }
+        assert_read_only(&host);
+        verdicts(&json(&survey), "/home/tester/src/")
+    };
+    for (select, idle_profile) in [
+        ("profile:python-venv || profile:any-venv", "python-venv"),
+        ("profile:any-venv || profile:python-venv", "any-venv"),
+    ] {
+        let busy = (
+            "/home/tester/src/busy/.venv".to_owned(),
+            "python-venv".to_owned(),
+            Value::from("not_idle"),
+        );
+        let checked = survey_rows(select, true);
+        assert_eq!(checked[0], busy, "`{select}` --in-use: {checked:?}");
+        let unchecked = survey_rows(select, false);
+        assert_eq!(
+            unchecked,
+            [
+                busy,
+                (
+                    "/home/tester/src/idle/.venv".to_owned(),
+                    idle_profile.to_owned(),
+                    Value::Null
+                ),
+            ],
+            "`{select}` without --in-use"
+        );
+    }
+}
+
+/// TASK-343 (2): pytest's file rules stand in survey's default mode. Old
+/// sessions whose `.lock` is no pid marker (empty, a leading zero, two
+/// numbers, too long, not digits, a directory, a symlink: the decision
+/// table's row 3) are `producer_unknown` with `--in-use`, and so without
+/// it, alone and in a union whose other term the union selects (the
+/// contract vetoes); so is a session in a `pytest-of` directory of a uid
+/// diskgc does not judge for (a check before the table). A session whose
+/// `.lock` holds a pid needs Owner PID (rows 4 and 5, processes): kept
+/// `in_use` with `--in-use` (a process could use the temp root), not
+/// checked without.
+#[test]
+fn pytests_file_rules_stand_without_the_flag() {
+    let session = |n: usize, lock: &str| {
+        format!(
+            "  /tmp/pytest-of-tester/pytest-{n}: {{.: {{mtime: 2026-10-05T03:00:00Z}}, .lock: \
+             {lock}}}\n"
+        )
+    };
+    let old = "mtime: 2026-10-05T03:00:00Z";
+    let malformed = [
+        format!("{{content: \"\", {old}}}"),
+        format!("{{content: \"0042\", {old}}}"),
+        format!("{{content: \"42 43\", {old}}}"),
+        format!("{{content: \"12345678901234567\", {old}}}"),
+        format!("{{content: \"abc\", {old}}}"),
+        format!("{{.: {{{old}}}}}"),
+        format!("{{symlink: /tmp/x, {old}}}"),
+    ];
+    let mut extra = String::from("  /tmp/pytest-of-tester: {.: {mtime: 2026-10-05T03:00:00Z}}\n");
+    for (n, lock) in malformed.iter().enumerate() {
+        extra += &session(n, lock);
+    }
+    extra += &session(7, &format!("{{content: \"4321\", {old}}}"));
+    // Before the table: P belongs to a uid diskgc does not judge for. The
+    // session has no .lock and shares its temp root with the others, so
+    // without --in-use only that owner rule can keep it.
+    extra += "  /tmp/pytest-of-other: {.: {uid: 1001, mtime: 2026-10-05T03:00:00Z}}\n  \
+              /tmp/pytest-of-other/pytest-0: {.: {mtime: 2026-10-05T03:00:00Z}}\n";
+    let config = r#"version: 1
+profiles:
+  - name: any-session
+    find: {roots: [/tmp], paths: ["pytest-of-*/pytest-*"], type: dir}
+    checkouts: allow
+    action: delete
+    examples: {match: [/tmp/pytest-of-x/pytest-1]}
+"#;
+    let survey_rows = |select: &str, in_use: bool| {
+        let host = host(&laptop_tmp(&extra));
+        let options = SurveyOptions {
+            in_use,
+            ..options(&["/tmp"], Some(select))
+        };
+        let survey = run(&host, &options, Some(config));
+        assert_eq!(survey.status, Status::DryRun, "{survey:?}");
+        if !in_use {
+            assert_eq!(process_reads(&host), [], "no process is read");
+        }
+        assert_read_only(&host);
+        let value = json(&survey);
+        verdicts(&value, "/tmp/pytest-of-")
+    };
+    let row =
+        |path: &str, profile: &str, reason: Value| (path.to_owned(), profile.to_owned(), reason);
+    let unknown = Value::from("producer_unknown");
+    for (select, pid_lock_profile) in [
+        ("profile:pytest-tmp", "pytest-tmp"),
+        ("profile:any-session || profile:pytest-tmp", "any-session"),
+    ] {
+        let expected = |pid_lock: (&str, Value)| {
+            let mut rows = vec![row(
+                "/tmp/pytest-of-other/pytest-0",
+                "pytest-tmp",
+                unknown.clone(),
+            )];
+            rows.extend((0..7).map(|n| {
+                row(
+                    &format!("/tmp/pytest-of-tester/pytest-{n}"),
+                    "pytest-tmp",
+                    unknown.clone(),
+                )
+            }));
+            rows.push(row(
+                "/tmp/pytest-of-tester/pytest-7",
+                pid_lock.0,
+                pid_lock.1,
+            ));
+            rows
+        };
+        assert_eq!(
+            survey_rows(select, true),
+            expected(("pytest-tmp", Value::from("in_use"))),
+            "`{select}` --in-use"
+        );
+        assert_eq!(
+            survey_rows(select, false),
+            expected((pid_lock_profile, Value::Null)),
+            "`{select}` without --in-use"
+        );
+    }
+}
+
+/// TASK-343, the toolchain guard's static half: a custom toolchain (a
+/// name rustup cannot install again) is kept `pinned_toolchain` by the
+/// guarded term's place rule in a union with a guard-free term, in both
+/// orders, with and without `--in-use`: the rule is a retention guard
+/// the union applies without a scan. A reinstallable toolchain nothing
+/// pins is not checked without `--in-use` (the live half needs one).
+#[test]
+fn a_unions_toolchain_place_rule_vetoes_without_the_flag() {
+    let extra = "  /home/tester/.rustup/settings.toml: {content: \"version = \\\"12\\\"\\n\"}\n  \
+                 /home/tester/.rustup/toolchains:\n    my-custom: {.: {mtime: \
+                 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: \
+                 8K, mode: \"0755\", mtime: 2026-09-01T00:00:00Z, atime: \
+                 2026-09-01T00:00:00Z}}}\n    1.89.0-x86_64-unknown-linux-gnu: {.: {mtime: \
+                 2026-09-01T00:00:00Z}, bin: {.: {mtime: 2026-09-01T00:00:00Z}, rustc: {size: \
+                 8K, mode: \"0755\", mtime: 2026-09-01T00:00:00Z, atime: \
+                 2026-09-01T00:00:00Z}}}\n";
+    let config = r#"version: 1
+profiles:
+  - name: toolchains
+    find: {roots: required, paths: [.rustup/toolchains/*], type: dir}
+    where: {protect_toolchains: rustup}
+    action: delete
+    examples: {root: /home/x, match: [/home/x/.rustup/toolchains/1.90.0-x86_64-unknown-linux-gnu]}
+  - name: generic
+    find: {roots: required, paths: [.rustup/toolchains/*], type: dir}
+    action: delete
+    examples: {root: /home/x, match: [/home/x/.rustup/toolchains/1.90.0-x86_64-unknown-linux-gnu]}
+"#;
+    let survey_rows = |select: &str, in_use: bool| {
+        let host = host(&laptop_tmp(extra));
+        let options = SurveyOptions {
+            in_use,
+            ..options(&["/home/tester"], Some(select))
+        };
+        let survey = run(&host, &options, Some(config));
+        assert_eq!(survey.status, Status::DryRun, "{survey:?}");
+        if !in_use {
+            assert_eq!(process_reads(&host), [], "no process is read");
+        }
+        verdicts(&json(&survey), "/home/tester/.rustup/toolchains/")
+    };
+    let custom = (
+        "/home/tester/.rustup/toolchains/my-custom".to_owned(),
+        "toolchains".to_owned(),
+        Value::from("pinned_toolchain"),
+    );
+    for (select, free_profile) in [
+        ("profile:toolchains || profile:generic", "toolchains"),
+        ("profile:generic || profile:toolchains", "generic"),
+    ] {
+        let checked = survey_rows(select, true);
+        assert_eq!(checked[1], custom, "`{select}` --in-use: {checked:?}");
+        assert_eq!(
+            survey_rows(select, false),
+            [
+                (
+                    "/home/tester/.rustup/toolchains/1.89.0-x86_64-unknown-linux-gnu".to_owned(),
+                    free_profile.to_owned(),
+                    Value::Null
+                ),
+                custom.clone(),
+            ],
+            "`{select}` without --in-use"
+        );
+    }
+}

@@ -653,40 +653,59 @@ fn root_use_undecidable(process: &ProcessFacts) -> Option<Evidence> {
     (unresolved || !process.fallback_unresolved.is_empty()).then_some(Evidence::UnresolvedPath)
 }
 
-/// The pytest contract's ordered decision table (docs/safety.md, pytest
-/// sessions): the first row that applies decides. Pure.
-pub fn verdict(facts: &Facts<'_>) -> Verdict {
+/// Rows 1 to 3 of the decision table, the rows judged on files alone
+/// (`S`'s name, the listing of `P`, `S`'s `.lock`; no process fact): the
+/// verdict when one of them decides, otherwise `N` and `M` for the rows
+/// after them. A survey without `--in-use` judges these rows only
+/// (docs/reference.md, `survey`). Pure.
+pub fn file_rows(
+    session_name: &OsStr,
+    listing: &Result<&[OsString], String>,
+    lock: Option<&Lock>,
+) -> Result<(u64, Option<u64>), Verdict> {
     // Row 1: the name.
-    let Some(n) = session_number(facts.session_name.as_bytes()) else {
-        return Verdict::new(
+    let Some(n) = session_number(session_name.as_bytes()) else {
+        return Err(Verdict::new(
             Row::NotSession,
             Outcome::Filtered,
             "not a session name (pytest-<N>, N without a leading zero, fitting 64 bits)",
-        );
+        ));
     };
     // Row 2: the listing of P.
-    let names = match facts.listing {
+    let names = match listing {
         Ok(names) => names,
-        Err(ref why) => {
-            return Verdict::new(
+        Err(why) => {
+            return Err(Verdict::new(
                 Row::ListingFailed,
                 Outcome::Unreadable,
                 format!("the pytest-of directory could not be listed: {why}"),
-            );
+            ));
         }
     };
-    let m = largest(names);
-    // Rows 3 to 5: only with a lock; an ended owner continues at row 6.
+    // Row 3: a lock that is no pid marker.
+    if let Some(Lock::Malformed(why)) = lock {
+        return Err(Verdict::new(
+            Row::LockMalformed,
+            Outcome::ProducerUnknown(Vec::new()),
+            format!("its .lock is no pid marker: {why}"),
+        ));
+    }
+    Ok((n, largest(names)))
+}
+
+/// The pytest contract's ordered decision table (docs/safety.md, pytest
+/// sessions): the first row that applies decides. Pure.
+pub fn verdict(facts: &Facts<'_>) -> Verdict {
+    // Rows 1 to 3.
+    let (n, m) = match file_rows(facts.session_name, &facts.listing, facts.lock.as_ref()) {
+        Ok(rows) => rows,
+        Err(verdict) => return verdict,
+    };
+    // Rows 4 and 5: only with a lock; an ended owner continues at row 6.
     let mut lock_old = true;
     match &facts.lock {
         None => {}
-        Some(Lock::Malformed(why)) => {
-            return Verdict::new(
-                Row::LockMalformed,
-                Outcome::ProducerUnknown(Vec::new()),
-                format!("its .lock is no pid marker: {why}"),
-            );
-        }
+        Some(Lock::Malformed(_)) => unreachable!("row 3 decides a lock that is no pid marker"),
         Some(Lock::Pid { pid, mtime }) => {
             match facts
                 .lock_owner

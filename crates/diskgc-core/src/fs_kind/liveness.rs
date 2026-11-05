@@ -22,6 +22,13 @@
 //! judged on the scan). The name rule alone ([`name_filter`]) also runs
 //! before the walk, beside `app_not_running`, so a name that is no
 //! instance is `filtered` cheaply.
+//!
+//! A survey without `--in-use` has no scan ([`Seen::Files`]): there a
+//! contract is judged by its rules on files alone, in the same order
+//! (pytest's steps before its table and rows 1 to 3; a project's
+//! instance check and rules 1 and 2), and a rule on processes (Owner
+//! PID, pytest's rows 4 to 11, a project's visible use, the toolchain
+//! guard's live half) is not judged: the candidate is "not checked".
 
 use std::collections::HashSet;
 use std::os::unix::ffi::OsStrExt;
@@ -154,6 +161,25 @@ pub(crate) enum Prepared {
     Project(super::project::Tree),
 }
 
+/// What a contract, and a toolchain guard's live half, is judged from
+/// ([`check_on`], [`veto_on`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Seen<'a> {
+    /// The in-use check's process scan: every rule is judged.
+    Scan(&'a Scan),
+    /// No process scan: a survey without `--in-use`, whose permission it
+    /// carries (so no `ensure`, dry run or reclaim can judge this way).
+    /// Only the rules on files are judged; a rule on processes is not, and
+    /// a candidate those permit is "not checked", never eligible (the
+    /// plan says so). `owners` are the walk's owners: the users whose
+    /// processes a scan would have read (pytest's owner rule).
+    Files {
+        owners: &'a [u32],
+        /// The witness, never read: only the survey can make one.
+        _survey: crate::survey::InUseNotChecked,
+    },
+}
+
 /// Gathers what `judge`'s contract needs before the scan (see
 /// [`Prepared`]) for the candidate `found`, in `parent`, walked as
 /// `record`; the term's idle bound is `judge.idle`'s.
@@ -202,6 +228,18 @@ pub(crate) fn veto<'a, H: Host>(
     parent: &H::Fd,
     record: &WalkRecord,
 ) -> Result<Result<(), (usize, Skip)>, Stop> {
+    veto_on(host, Seen::Scan(scan), sources, parent, record)
+}
+
+/// [`veto`] judged from what `seen` gives: a scan, or (a survey without
+/// `--in-use`) the contracts' rules on files alone ([`check_on`]).
+pub(crate) fn veto_on<'a, H: Host>(
+    host: &H,
+    seen: Seen<'_>,
+    sources: impl IntoIterator<Item = (&'a Find, &'a Found, &'a Prepared)>,
+    parent: &H::Fd,
+    record: &WalkRecord,
+) -> Result<Result<(), (usize, Skip)>, Stop> {
     for (index, (find, found, prepared)) in sources.into_iter().enumerate() {
         // The toolchain guard judges every candidate of its source, an
         // instance by name or not (TASK-94).
@@ -217,7 +255,7 @@ pub(crate) fn veto<'a, H: Host>(
                 Ok(Instance::Unjudged) | Err(_) => continue,
             }
         }
-        if let Err(skip) = check(host, scan, find, found, parent, record, prepared)? {
+        if let Err(skip) = check_on(host, seen, find, found, parent, record, prepared)? {
             return Ok(Err((index, skip)));
         }
     }
@@ -258,9 +296,37 @@ pub(crate) fn check<H: Host>(
     record: &WalkRecord,
     prepared: &Prepared,
 ) -> Judged<()> {
+    check_on(
+        host,
+        Seen::Scan(scan),
+        find,
+        found,
+        parent,
+        record,
+        prepared,
+    )
+}
+
+/// [`check`] judged from what `seen` gives. With [`Seen::Files`] every
+/// rule on files runs as with a scan, in the same order, and each rule on
+/// processes is not judged (see the module docs): a refusal it returns is
+/// the one a scan's judgement would return whenever that refusal needs no
+/// process.
+pub(crate) fn check_on<H: Host>(
+    host: &H,
+    seen: Seen<'_>,
+    find: &Find,
+    found: &Found,
+    parent: &H::Fd,
+    record: &WalkRecord,
+    prepared: &Prepared,
+) -> Judged<()> {
     // The toolchain guard's live half (docs/safety.md, Toolchain pins) is
-    // judged from the same scan as a contract.
-    judged!(super::toolchain::live(host, scan, find, found));
+    // judged from the same scan as a contract. Its other half is a
+    // retention guard (`Judge::contents`), judged without a scan too.
+    if let Seen::Scan(scan) = seen {
+        judged!(super::toolchain::live(host, scan, find, found));
+    }
     let Some(contract) = find.liveness_contract else {
         return Ok(Ok(()));
     };
@@ -272,33 +338,48 @@ pub(crate) fn check<H: Host>(
         if let Err(skip) = instance(find, &found.path) {
             return Ok(Err(skip));
         }
-        return match prepared {
-            Prepared::Refused(skip) => Ok(Err(skip.clone())),
-            Prepared::Project(tree) => {
+        return match (prepared, seen) {
+            (Prepared::Refused(skip), _) => Ok(Err(skip.clone())),
+            (Prepared::Project(tree), Seen::Scan(scan)) => {
                 let mounts = super::judge::mountinfo(host)?;
                 super::project::visible_use(scan, tree, &found.path, &mounts, contract.name())
                     .map_err(bug)
             }
-            Prepared::Nothing => Err(bug(format!(
+            // Rule 3, visible use, is judged on processes.
+            (Prepared::Project(_), Seen::Files { .. }) => Ok(Ok(())),
+            (Prepared::Nothing, _) => Err(bug(format!(
                 "`{}` was judged without its project gathered first (prepare)",
                 contract.name()
             ))),
         };
     }
-    let Some(table) = scan.pid_table() else {
-        return Err(bug(
-            "the process scan was made without the PID lookup its contract needs".to_owned(),
-        ));
-    };
-    // Owner PID's ordering (inuse::scan::pid_table): an owner alive when
-    // the candidate was found is in every later listing.
-    if scan.started() < found.found_at {
-        return Err(bug(format!(
-            "the process scan started at {:?}, before the candidate was found at {:?}",
-            scan.started(),
-            found.found_at
-        )));
+    // What Owner PID and pytest's rows on processes read (the scan and its
+    // PID table), or without a scan the users a scan would read for.
+    enum Basis<'s> {
+        Scan(&'s Scan, &'s PidTable),
+        Files(&'s [u32]),
     }
+    let basis = match seen {
+        Seen::Scan(scan) => {
+            let Some(table) = scan.pid_table() else {
+                return Err(bug(
+                    "the process scan was made without the PID lookup its contract needs"
+                        .to_owned(),
+                ));
+            };
+            // Owner PID's ordering (inuse::scan::pid_table): an owner alive
+            // when the candidate was found is in every later listing.
+            if scan.started() < found.found_at {
+                return Err(bug(format!(
+                    "the process scan started at {:?}, before the candidate was found at {:?}",
+                    scan.started(),
+                    found.found_at
+                )));
+            }
+            Basis::Scan(scan, table)
+        }
+        Seen::Files { owners, .. } => Basis::Files(owners),
+    };
     let instance = match instance(find, &found.path) {
         Ok(instance) => instance,
         Err(skip) => return Ok(Err(skip)),
@@ -320,15 +401,21 @@ pub(crate) fn check<H: Host>(
     }
     let magic = || host.fs_magic(parent).map_err(|e| e.to_string());
     let probe = |pid: Pid| host.pid_alive(pid);
-    match instance {
-        Instance::Unjudged | Instance::Project => unreachable!("judged above, or no contract"),
-        Instance::RcPid(number) => Ok(nix_shell(
+    match (instance, basis) {
+        (Instance::Unjudged | Instance::Project, _) => {
+            unreachable!("judged above, or no contract")
+        }
+        (Instance::RcPid(number), Basis::Scan(scan, table)) => Ok(nix_shell(
             scan,
             found,
             number,
             owner_pid(table, magic(), number, probe).map_err(failed)?,
         )),
-        Instance::Session => {
+        // nix-shell has no rule on files past its name: Owner PID (its
+        // filesystem rule included, a precondition of the lookup) reads
+        // processes.
+        (Instance::RcPid(_), Basis::Files(_)) => Ok(Ok(())),
+        (Instance::Session, Basis::Scan(scan, table)) => {
             let Some((users, processes)) = scan.pytest_facts() else {
                 return Err(bug(
                     "the process scan was made without the process facts the pytest \
@@ -336,20 +423,34 @@ pub(crate) fn check<H: Host>(
                         .to_owned(),
                 ));
             };
+            let scanned = PytestScan {
+                scan,
+                table,
+                processes,
+            };
             pytest_session(
                 host,
-                scan,
+                Some(scanned),
+                users,
                 found,
                 parent,
                 &parent_stat,
                 record,
-                table,
-                users,
-                processes,
                 magic,
                 probe,
             )
         }
+        (Instance::Session, Basis::Files(owners)) => pytest_session(
+            host,
+            None,
+            owners,
+            found,
+            parent,
+            &parent_stat,
+            record,
+            magic,
+            probe,
+        ),
     }
 }
 
@@ -394,22 +495,31 @@ fn nix_shell(scan: &Scan, found: &Found, number: u32, answer: OwnerPid) -> Resul
     }
 }
 
+/// What the pytest contract's rows on processes read from the scan.
+struct PytestScan<'a> {
+    scan: &'a Scan,
+    table: &'a PidTable,
+    processes: &'a pytest::Processes,
+}
+
 /// The pytest contract (docs/safety.md, pytest sessions): gathers the
 /// facts of the decision table that are not in the scan (the listing of
 /// `P`, `S`'s `.lock` and Owner PID's answer on it, `U`, `R`'s identity)
 /// and maps [`pytest::verdict`] to a skip. Every detail names the row that
 /// decided, so a test can assert the rule and not only the outcome.
+/// `users` are the users whose processes the scan read. Without a scan
+/// (`scanned` `None`: a survey without `--in-use`) the same steps run up
+/// to the table, Owner PID aside, and only its rows on files decide
+/// ([`pytest::file_rows`]).
 #[allow(clippy::too_many_arguments)]
 fn pytest_session<H: Host>(
     host: &H,
-    scan: &Scan,
+    scanned: Option<PytestScan<'_>>,
+    users: &[u32],
     found: &Found,
     parent: &H::Fd,
     parent_stat: &crate::host::Stat,
     record: &WalkRecord,
-    table: &PidTable,
-    users: &[u32],
-    processes: &pytest::Processes,
     magic: impl Fn() -> Result<u64, String>,
     probe: impl Fn(Pid) -> crate::liveness::Probe,
 ) -> Judged<()> {
@@ -494,9 +604,9 @@ fn pytest_session<H: Host>(
         }
         Err(error) => return Err(failed(error)),
     };
-    let lock_owner = match &lock {
-        Some(Lock::Pid { pid, .. }) => {
-            Some(owner_pid(table, magic(), *pid, probe).map_err(failed)?)
+    let lock_owner = match (&lock, &scanned) {
+        (Some(Lock::Pid { pid, .. }), Some(scanned)) => {
+            Some(owner_pid(scanned.table, magic(), *pid, probe).map_err(failed)?)
         }
         _ => None,
     };
@@ -510,7 +620,6 @@ fn pytest_session<H: Host>(
         Err(e) if e.is_out_of_descriptors() => return Err(failed(e)),
         Err(e) => Err(e.to_string()),
     };
-    let process_list = table.process_list_complete();
     // R, the temp root: P's parent, reached again from the root.
     let root_path = found
         .path
@@ -548,23 +657,32 @@ fn pytest_session<H: Host>(
             ),
         );
     };
-    let session_tree: HashSet<_> = record.objects().collect();
-    let facts = Facts {
-        session_name: name,
-        listing: listing.as_deref().map_err(Clone::clone),
-        lock,
-        lock_owner,
-        now: host.wall_clock(),
-        newest_change: record.newest_change(),
-        process_list,
-        owner,
-        session_path: &found.path,
-        session_tree: &session_tree,
-        root_path,
-        root_id,
-        processes,
+    let listing = listing.as_deref().map_err(Clone::clone);
+    let verdict = match &scanned {
+        None => match pytest::file_rows(name, &listing, lock.as_ref()) {
+            // Rows 4 to 11 are judged on processes.
+            Ok(_) => return Ok(Ok(())),
+            Err(verdict) => verdict,
+        },
+        Some(scanned) => {
+            let session_tree: HashSet<_> = record.objects().collect();
+            pytest::verdict(&Facts {
+                session_name: name,
+                listing,
+                lock,
+                lock_owner,
+                now: host.wall_clock(),
+                newest_change: record.newest_change(),
+                process_list: scanned.table.process_list_complete(),
+                owner,
+                session_path: &found.path,
+                session_tree: &session_tree,
+                root_path,
+                root_id,
+                processes: scanned.processes,
+            })
+        }
     };
-    let verdict = pytest::verdict(&facts);
     let detail = format!(
         "liveness_contract pytest row {} ({}): {}",
         verdict.row.number(),
@@ -576,7 +694,7 @@ fn pytest_session<H: Host>(
             .into_iter()
             .map(|(pid, evidence)| ProcessBlocker {
                 pid: pid.0,
-                command: scan.command_option(pid),
+                command: scanned.as_ref().and_then(|s| s.scan.command_option(pid)),
                 evidence: match evidence {
                     Evidence::OwnerPid => ProcessEvidence::OwnerPid,
                     Evidence::CommandLine => ProcessEvidence::CommandLine,
