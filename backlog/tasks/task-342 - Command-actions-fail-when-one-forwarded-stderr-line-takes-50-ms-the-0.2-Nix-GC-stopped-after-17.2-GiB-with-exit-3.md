@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-11-04T19:03:00Z'
-updated_date: '2026-11-05T02:39:00Z'
+updated_date: '2026-11-05T02:46:00Z'
 labels:
   - release-blocker
   - nix
@@ -33,4 +33,6 @@ Do: decide the policy so that a slow or blocked stderr never fails or hangs an a
 2026-11-04 orchestrator: implementer in tmp/worktrees/t342 (branch t342-stderr, from master 426ee8b8).
 
 Merged db9d3a57 (2026-11-05).
+
+Real-world check 2026-11-05: release-candidate 351557b, ensure --json --timeout 2h --min-free 200G --select profile:nix-garbage /nix/store, stderr to a file on the same ext4/LUKS fs: exit 1 exhausted (goal unreachable by design), no errors, 320 s; nix-store: 12897 paths deleted, 20.9 GiB freed; observed +19.6 GiB. Evidence tmp/walks/2026-11-04-dogfood/a1b-rel-real.{json,err}.
 <!-- SECTION:NOTES:END -->
