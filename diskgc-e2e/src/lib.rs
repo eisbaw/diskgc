@@ -39,6 +39,7 @@
 //!
 //! Exit codes shared by both sides are in [`exit`].
 
+pub mod admission;
 pub mod agent_journey;
 pub mod autotools_suite;
 pub mod browser_suite;

@@ -32,11 +32,15 @@
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Command, Stdio};
+use std::process::{ChildStdin, Stdio};
 use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
+use crate::admission::{
+    CTL, Expected, HOME, NODE, NPM, UV, actions, control_dir, exists, held_in, home, plan_of,
+    python, skipped, sorted, tester_command, tool, write,
+};
 use crate::differential_suite::SandboxClockOffset;
 use crate::ensure_suite::report;
 use crate::oracle::{Fixture, Oracle};
@@ -45,19 +49,8 @@ use crate::suite::{Ctx, TestResult};
 use crate::under_test::Run;
 use crate::{TESTER, ensure, info};
 
-/// Tester's home, the measured filesystem of the project scenarios.
-const HOME: &str = "/home/tester";
 /// The supplied project root (on the development machine: `~/topics`).
 const SRC: &str = "/home/tester/src";
-/// Where fixture processes and the harness exchange ready and go files:
-/// in the home, outside the project root.
-const CTL: &str = "ctl";
-
-/// The pinned tools of the Nix image (flake.nix: `cacheTools`, the
-/// pytest link) and of the under-test bundle (`agent-python3`, `mypy`).
-const NODE: &str = "/bin/node";
-const NPM: &str = "/bin/npm";
-const UV: &str = "/bin/uv";
 const PYTEST: &str = "/opt/pytest-under-test";
 
 /// npm without a registry: the containers have no network.
@@ -90,100 +83,10 @@ const SELECT_MYPY: &str = "profile:mypy-cache";
 const SELECT_PYTEST: &str = "profile:pytest-cache";
 const SELECT_NODE_COMPILE: &str = "profile:node-compile-cache";
 
-/// The verdicts a scenario expects of its found candidates: `None`
-/// reclaimable, `Some(reason)` kept for that reason. A lookalike that the
-/// profile's `find` does not reach is not listed: it must not be planned.
-type Expected = Vec<(PathBuf, Option<&'static str>)>;
-
 // ---- the harness -----------------------------------------------------------
-
-/// The pinned CPython, as its own `bin/python3`: the bundle's
-/// `agent-python3` link resolved once, so that `-m venv` links the
-/// environment's interpreter under the names a user's `python3 -m venv`
-/// gives it (a venv also links the name it was invoked by).
-pub(crate) fn python(ctx: &Ctx) -> Result<PathBuf, String> {
-    let link = ctx.bin_dir.join("agent-python3");
-    let target =
-        std::fs::read_link(&link).map_err(|e| format!("read the link {}: {e}", link.display()))?;
-    ensure!(
-        target.file_name().is_some_and(|n| n == "python3") && target.is_absolute(),
-        "{} links to {}, not an interpreter's absolute bin/python3",
-        link.display(),
-        target.display()
-    );
-    Ok(target)
-}
 
 fn mypy(ctx: &Ctx) -> PathBuf {
     ctx.bin_dir.join("mypy")
-}
-
-pub(crate) fn home(rel: &str) -> PathBuf {
-    Path::new(HOME).join(rel)
-}
-
-/// Writes the fixture file `rel` below tester's home, creating its parents.
-pub(crate) fn write(ctx: &Ctx, rel: &str, content: &[u8]) -> TestResult {
-    if let Some((parent, _)) = rel.rsplit_once('/') {
-        ctx.home.mkdirs(parent, 0o755, TESTER)?;
-    }
-    ctx.home.write_file(rel, content, 0o644, TESTER)?;
-    Ok(())
-}
-
-/// `program args` as tester in `cwd`, with only `PATH`, `HOME`, `LANG` and
-/// `env` in its environment.
-pub(crate) fn tester_command(
-    ctx: &Ctx,
-    cwd: &Path,
-    env: &[(&str, &str)],
-    program: &Path,
-    args: &[&str],
-) -> Command {
-    let mut command = Command::new(&ctx.self_exe);
-    command
-        .args(["as-tester", "--"])
-        .arg(program)
-        .args(args)
-        .env_clear()
-        .env("PATH", "/bin")
-        .env("HOME", HOME)
-        .env("LANG", "C.UTF-8")
-        .envs(env.iter().copied())
-        .current_dir(cwd);
-    command
-}
-
-/// Runs a real tool to its end and returns its stdout; fails with its
-/// output unless it exits 0.
-pub(crate) fn tool(
-    ctx: &Ctx,
-    cwd: &Path,
-    env: &[(&str, &str)],
-    program: impl AsRef<Path>,
-    args: &[&str],
-) -> Result<String, String> {
-    let program = program.as_ref();
-    let output = tester_command(ctx, cwd, env, program, args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("start {}: {e}", program.display()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    info!(
-        "{} {args:?} in {}: {}",
-        program.display(),
-        cwd.display(),
-        output.status
-    );
-    ensure!(
-        output.status.success(),
-        "{} {args:?} in {} failed: {}\n--- stdout\n{stdout}--- stderr\n{stderr}",
-        program.display(),
-        cwd.display(),
-        output.status
-    );
-    Ok(stdout)
 }
 
 /// A long-running fixture process started as tester. Killed when dropped.
@@ -249,12 +152,6 @@ fn versions(ctx: &Ctx, names: &[&str]) -> TestResult {
     Ok(())
 }
 
-/// The control directory, made before any oracle is armed.
-pub(crate) fn control_dir(ctx: &Ctx) -> TestResult {
-    ctx.home.mkdirs(CTL, 0o777, TESTER)?;
-    Ok(())
-}
-
 /// Lets a fixture process blocked on its go file carry on. Written only
 /// after the oracle judged the reclaim: it is not part of the run.
 fn go(ctx: &Ctx, name: &str) -> TestResult {
@@ -276,10 +173,6 @@ fn recent(path: &Path, change: bool) -> TestResult {
     std::fs::File::open(path)
         .and_then(|file| file.set_times(times))
         .map_err(|e| format!("set the times of {}: {e}", path.display()))
-}
-
-pub(crate) fn exists(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok()
 }
 
 fn ensure_args<'a>(
@@ -329,32 +222,6 @@ fn run_ensure(
     Ok(run)
 }
 
-/// The `(candidate, reason)` pairs of a report's plan, sorted.
-pub(crate) fn plan_of(report: &Value) -> Result<Vec<(String, Option<String>)>, String> {
-    let mut got: Vec<(String, Option<String>)> = report["plan"]
-        .as_array()
-        .ok_or_else(|| format!("no plan array: {report}"))?
-        .iter()
-        .map(|entry| {
-            (
-                entry["candidate"].as_str().unwrap_or_default().to_owned(),
-                entry["reason"].as_str().map(str::to_owned),
-            )
-        })
-        .collect();
-    got.sort();
-    Ok(got)
-}
-
-fn sorted(expected: &Expected) -> Vec<(String, Option<String>)> {
-    let mut want: Vec<(String, Option<String>)> = expected
-        .iter()
-        .map(|(path, reason)| (path.display().to_string(), reason.map(str::to_owned)))
-        .collect();
-    want.sort();
-    want
-}
-
 fn reclaimable(expected: &Expected) -> BTreeSet<String> {
     expected
         .iter()
@@ -397,12 +264,7 @@ fn dry_run_then_reclaim(
         sorted(expected)
     );
     let reclaimed = report(&run)?;
-    let actions: BTreeSet<String> = reclaimed["actions"]
-        .as_array()
-        .ok_or_else(|| format!("no actions array: {reclaimed}"))?
-        .iter()
-        .filter_map(|a| a["candidate"].as_str().map(str::to_owned))
-        .collect();
+    let actions = actions(&reclaimed)?;
     ensure!(
         actions == reclaimable(expected),
         "{select}: the reclaim acted on {actions:?}, expected {:?}: {reclaimed}",
@@ -433,18 +295,6 @@ fn dry_run_then_reclaim(
     }
     verdict.assert_clean()?;
     Ok(reclaimed)
-}
-
-/// The reclaim report's skipped entry for `candidate`.
-pub(crate) fn skipped<'a>(report: &'a Value, candidate: &Path) -> Result<&'a Value, String> {
-    report["skipped"]
-        .as_array()
-        .and_then(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry["candidate"].as_str() == candidate.to_str())
-        })
-        .ok_or_else(|| format!("{} not skipped: {report}", candidate.display()))
 }
 
 /// The skipped entry names exactly one process blocker, `pid` with
@@ -1539,21 +1389,6 @@ fn cached(dir: &Path, stem: &str) -> Result<bool, String> {
 }
 
 // ---- mypy-cache ------------------------------------------------------------
-
-/// The `.mypy_cache` files `pid` holds open (from `/proc/PID/fd`).
-pub(crate) fn held_in(pid: u32, dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let fds = format!("/proc/{pid}/fd");
-    let mut held = Vec::new();
-    for entry in std::fs::read_dir(&fds).map_err(|e| format!("list {fds}: {e}"))? {
-        let link = entry.map_err(|e| e.to_string())?.path();
-        if let Ok(target) = std::fs::read_link(&link)
-            && target.starts_with(dir)
-        {
-            held.push(target);
-        }
-    }
-    Ok(held)
-}
 
 /// The SQLite shards `<python version>/cache.N.db` of a mypy cache.
 fn cache_shards(cache: &Path) -> Result<Vec<PathBuf>, String> {
