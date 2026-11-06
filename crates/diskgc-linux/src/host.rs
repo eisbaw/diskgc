@@ -5346,6 +5346,18 @@ mod tests {
         reaped: bool,
     }
 
+    /// How long [`GuardedChild::wait`] waits for its child: it turns a
+    /// slow exit into a failure that names where the child was stuck, not
+    /// a property any test asserts. Every child exits on its own in well
+    /// under a second (`--help`, or a namespace helper; TASK-317 measured
+    /// the overlay helper under host load). The drop still kills and
+    /// reaps, so a child stuck in the kernel (`D` state, which `SIGKILL`
+    /// does not interrupt) holds the test until the kernel lets it go.
+    /// Exit work that scales with the rest of the machine, such as an
+    /// overlay unmount syncing the host's filesystem, does not belong in
+    /// a child; remove it rather than raise this.
+    const CHILD_EXIT_BOUND: Duration = Duration::from_secs(10);
+
     impl GuardedChild {
         fn spawn(command: &mut Command, fd_table: &std::sync::MutexGuard<'_, ()>) -> Self {
             Self::try_spawn(command, fd_table).expect("spawn test child")
@@ -5361,17 +5373,35 @@ mod tests {
             })
         }
 
+        /// Reaps the child, or fails after [`CHILD_EXIT_BOUND`] naming the
+        /// child's scheduler state and kernel wait channel, so a timeout
+        /// says where the child was stuck (TASK-317 was found that way).
         fn wait(&mut self) -> std::io::Result<ExitStatus> {
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + CHILD_EXIT_BOUND;
             loop {
                 if let Some(status) = self.child.try_wait()? {
                     self.reaped = true;
                     return Ok(status);
                 }
                 if Instant::now() >= deadline {
+                    let pid = self.child.id();
+                    let read = |file: &str| {
+                        std::fs::read_to_string(format!("/proc/{pid}/{file}"))
+                            .unwrap_or_else(|e| format!("unreadable ({e})"))
+                    };
+                    let stat = read("stat");
+                    // The state is the first field after the command's `)`.
+                    let state = stat
+                        .rsplit_once(')')
+                        .and_then(|(_, rest)| rest.split_whitespace().next())
+                        .unwrap_or(stat.trim());
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
-                        format!("test child {} did not exit in 10 seconds", self.child.id()),
+                        format!(
+                            "test child {pid} did not exit in {CHILD_EXIT_BOUND:?} \
+                             (state {state}, kernel wait channel {})",
+                            read("wchan").trim()
+                        ),
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(5));
@@ -5391,7 +5421,8 @@ mod tests {
         }
     }
 
-    /// A fresh directory under the system temp dir, removed on drop. Keep
+    /// A fresh directory under the system temp dir, removed on drop (a
+    /// removal failure fails the test). Keep
     /// its basename short: tests bind Unix sockets inside it, and repo-local
     /// worktrees make `TMPDIR` long enough to reach Linux's sun_path limit.
     struct TempDir(PathBuf);
@@ -5407,8 +5438,15 @@ mod tests {
     }
 
     impl Drop for TempDir {
+        /// Fails the test if the directory cannot be removed (TASK-317: a
+        /// mode-0 directory the kernel made was left behind unnoticed),
+        /// unless the test is failing already.
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            if let Err(e) = std::fs::remove_dir_all(&self.0)
+                && !std::thread::panicking()
+            {
+                panic!("remove the test dir {}: {e}", self.0.display());
+            }
         }
     }
 
@@ -5959,6 +5997,44 @@ mod tests {
         );
     }
 
+    /// Lets [`TempDir`]'s cleanup into the overlay work directory below
+    /// its path: overlayfs leaves `work/work`, and a volatile mount's
+    /// `incompat/volatile` marker in it, mode 0. Runs on a failing test
+    /// too (the helper may fail after mounting). A directory the mount
+    /// never made is skipped.
+    struct OpenOverlayWork<'a>(&'a Path);
+
+    impl OpenOverlayWork<'_> {
+        fn open(&self) -> Result<(), String> {
+            for sub in [
+                "work/work",
+                "work/work/incompat",
+                "work/work/incompat/volatile",
+            ] {
+                match std::fs::set_permissions(
+                    self.0.join(sub),
+                    std::fs::Permissions::from_mode(0o700),
+                ) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(format!("let the cleanup into {sub}: {e}"));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for OpenOverlayWork<'_> {
+        fn drop(&mut self) {
+            if let Err(e) = self.open()
+                && !std::thread::panicking()
+            {
+                panic!("{e}");
+            }
+        }
+    }
+
     /// TASK-288 review (Codex 1) on the real kernel: on overlayfs a
     /// writable open of a lower file copies it up (a write). The two lock
     /// files are reopened read-only there, nothing is copied up, and each
@@ -5988,24 +6064,29 @@ mod tests {
                 .expect("chmod");
         }
         let cstring = |text: String| std::ffi::CString::new(text).expect("no NUL");
+        // `volatile` (Linux 5.10; unprivileged overlays need 5.11 anyway):
+        // the helper's mount namespace dies with it, and unmounting a
+        // non-volatile overlay syncs its upper layer's whole filesystem
+        // (fs/overlayfs/super.c `ovl_sync_fs`), the host's, before the
+        // helper can be reaped. With other builds' dirty data that took
+        // over the helper's exit bound (TASK-317: the helper in `D` state
+        // in `wb_wait_for_completion` and `jbd2_log_wait_commit` long
+        // after it printed). Copy-up, what this test checks, is the same.
         let overlay = (
             cstring(base.join("merged").display().to_string()),
             cstring(format!(
-                "lowerdir={},upperdir={},workdir={}",
+                "lowerdir={},upperdir={},workdir={},volatile",
                 base.join("lower").display(),
                 base.join("upper").display(),
                 base.join("work").display()
             )),
         );
+        // Dropped before `dir`, on every path out of this test.
+        let open_work = OpenOverlayWork(base);
         let said = in_user_namespace(
             "overlay-lock",
             &[(HOLDER_DIR, base.as_path())],
             Some(overlay),
-        );
-        // overlayfs leaves its work directory mode 0; let the cleanup in.
-        let _ = std::fs::set_permissions(
-            dir.0.join("work/work"),
-            std::fs::Permissions::from_mode(0o700),
         );
         assert!(
             said.contains("state lock: read-only, held true, copied up false"),
@@ -6014,6 +6095,14 @@ mod tests {
         assert!(
             said.contains("per-user lock: read-only, held true, copied up false"),
             "{said}"
+        );
+        // The marker a volatile mount leaves. Without `volatile` the checks
+        // above still pass on an idle host, and the helper's exit times out
+        // on a loaded one (TASK-317).
+        open_work.open().expect("open the overlay work directory");
+        assert!(
+            base.join("work/work/incompat/volatile").is_dir(),
+            "the overlay was not mounted volatile: its unmount syncs the host's filesystem"
         );
     }
 
@@ -7783,9 +7872,13 @@ mod tests {
                 panic!("start a process in a new user namespace: {e}; {USERNS_NEEDED}")
             })
         };
-        let status = child
-            .wait()
-            .unwrap_or_else(|e| panic!("wait for the namespace helper: {e}"));
+        // What it printed tells a helper stuck in its work from one stuck
+        // in its exit, after its work is done.
+        let status = child.wait().unwrap_or_else(|e| {
+            let said = std::fs::read_to_string(&stdout_path)
+                .unwrap_or_else(|read| format!("unreadable ({read})"));
+            panic!("wait for the namespace helper: {e}. It printed: {said}")
+        });
         let said = std::fs::read_to_string(&stdout_path).expect("read helper stdout");
         assert!(
             status.success(),

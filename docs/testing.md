@@ -145,6 +145,16 @@ implements it. A bullet without a test is a gap, filed as a task.
   `refused: Eof` in `the_daemon_probe_classifies_what_the_socket_does`
   (5 and 15 in 3,000 probes under concurrent spawns); pinned by
   `a_closed_listener_keeps_listening_while_a_forked_child_holds_it`.
+- **A test child's exit does no work that scales with the machine.** The
+  wait for a child (`CHILD_EXIT_BOUND` in the `diskgc-linux` host tests)
+  turns a slow exit into a failure naming the child's state and kernel
+  wait channel; it is not a speed target. Unmounting a non-volatile
+  overlay syncs its upper layer's whole filesystem, the host's, so a
+  namespace helper's private overlay is mounted `volatile`. This was
+  TASK-317's intermittent timeout of
+  `a_lock_file_on_an_overlay_is_not_copied_up` on a loaded host: the
+  helper had printed its result and waited in `wb_wait_for_completion`
+  while the host's dirty data was written back.
 
 ### Definition of Done (every task)
 
