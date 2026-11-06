@@ -954,11 +954,13 @@ reclaim on any desktop):
   Limit: a privileged process that switches all its uids to another user
   while keeping the user's files open is then not seen;
 - a process whose reads did not settle (any user's: only a refusal is
-  excused, above; each of its reads
-  ran out of rounds only because the process changed under them: every
-  task exiting, its task listing changing or miscounted, a task changing
-  identity or the leader's entry vanishing; Threads, below; its last
-  read in the scan decides, as for any unreadable process) makes every
+  excused, above; its latest read in the scan ran out of rounds only
+  because the process changed under it: every task exiting, its task
+  listing changing or miscounted, a task changing identity or the
+  leader's entry vanishing, Threads, below; and no earlier read of it in
+  the scan was refused or failed otherwise without a successful read
+  since: such a refusal or failure can last, and decides as in the next
+  item, since a read that did not settle cannot show it ended) makes every
   candidate `in_use_unknown` as a busy host does (`unknown_cause: busy`;
   the skip's detail names it, `process_blockers` is `null` as for an
   unsettled scan), counted toward the three in a row like an unsettled
@@ -973,10 +975,13 @@ reclaim on any desktop):
   rest naming it, without a back-off (Freshness), since it can stay so
   for as long as it runs: one refused although it is dumpable,
   unprivileged and the user's (a shell started with `newgrp` or `sg`: the
-  kernel also compares groups), one whose status cannot be read, one
-  with a live task that showed nothing in some round (an empty fd table
-  or environment), and one whose reads fail for any other reason (also
-  another user's: a failed read says nothing about who may read it). When
+  kernel also compares groups), one refused whose status cannot be read,
+  one with a live task that showed nothing in some round of a reader that
+  decides the process (an empty fd table, memory map or set of links; an
+  environment that fails while every other reader worked does not block,
+  it is noted, above), and one whose reads fail for any other reason
+  (also another user's: a failed read says nothing about who may read
+  it). When
   a scan finds both kinds, such a process decides: it keeps every
   candidate whether or not the other settles.
 

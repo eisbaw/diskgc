@@ -615,7 +615,11 @@ Model scenarios required by [safety.md](safety.md) and
   not settle (TASK-348, the model's `proc: unsettled`: a linker exiting
   during a busy build) is a busy host's: three in a row make the tier back
   off, and once it has exited the rest is reclaimed; one that never
-  settles holds the tier to its deadline (`busy_host.rs`). Which read
+  settles holds the tier to its deadline (`busy_host.rs`). A refusal seen
+  earlier in the scan still decides when its later rereads only do not
+  settle, and no status (another user's, setuid, more capable,
+  non-dumpable) ever excuses a read that did not settle (`busy_host.rs`;
+  diskgc-core `inuse::scan` unit tests). Which read
   failures count as not settling is pinned on the readers' scripted
   rounds (diskgc-linux `tasks.rs`,
   `a_live_task_that_showed_nothing_once_is_failed_not_unsettled` and the

@@ -764,3 +764,69 @@ fn a_refused_process_decides_over_one_whose_reads_do_not_settle() {
     );
     assert!(back_offs(&host).is_empty(), "{:?}", pauses(&host));
 }
+
+/// Codex review of TASK-348: a lasting refusal is not hidden by later
+/// rereads that do not settle. The `newgrp` shell's first read in the scan
+/// is refused; from then on its task list churns, so every reread of the
+/// scan ends unsettled before it reaches the refusal. The refusal was
+/// seen and nothing since showed it ended (no successful read, no exit or
+/// replacement), so the lasting cause decides: the candidates stay, three
+/// skip the rest naming it (`unreadable_process`), without a back-off.
+#[test]
+fn a_refusal_then_rereads_that_do_not_settle_keeps_the_lasting_cause() {
+    let host = model_with_processes(
+        5,
+        0,
+        "",
+        NEWGRP_SHELL,
+        "  - {at: {op: proc_fds, path: /proc/12/fd, when: after}, access: {pid: 12, proc: \
+         unsettled}}\n",
+    );
+    let (report, _) = ensure(&host, &request("profile:probe", "100%", None));
+    assert!(acted(&report).is_empty(), "{report:#?}");
+    for i in 1..=5 {
+        assert!(exists(&host, &candidate(i)));
+    }
+    let rows = unknown_rows(&report);
+    assert_eq!(
+        rows,
+        (1..=5)
+            .map(|i| (
+                candidate(i),
+                Some(UnknownCause::UnreadableProcess),
+                i <= 3,
+                Some(12)
+            ))
+            .collect::<Vec<_>>(),
+        "{report:#?}"
+    );
+    assert!(back_offs(&host).is_empty(), "{:?}", pauses(&host));
+}
+
+/// Codex review of TASK-348: a process whose reads do not settle is never
+/// excused by what its status shows (another user's, setuid, more capable,
+/// non-dumpable): only a refusal can be explained by a privilege boundary.
+/// It blocks every candidate as a busy host's.
+#[test]
+fn a_process_whose_reads_do_not_settle_is_never_excused_by_its_status() {
+    for status in [
+        "uid: 2000",
+        "euid: 0",
+        "privileged: true",
+        "non_dumpable: true",
+    ] {
+        let procs = format!(
+            "  - {{pid: 11, exe: /usr/bin/rust-lld, maps: [/usr/bin/rust-lld], {status}, proc: \
+             unsettled}}\n"
+        );
+        let host = model_with_processes(1, 0, LINKER_TREE, &procs, "");
+        let (report, _) = ensure(&host, &request("profile:probe", "100%", None));
+        assert!(acted(&report).is_empty(), "{status}: {report:#?}");
+        assert!(exists(&host, &candidate(1)), "{status}");
+        assert_eq!(
+            unknown_rows(&report),
+            [(candidate(1), Some(UnknownCause::Busy), true, None)],
+            "{status}: {report:#?}"
+        );
+    }
+}

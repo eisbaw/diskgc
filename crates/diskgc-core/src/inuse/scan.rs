@@ -300,6 +300,13 @@ struct Entry {
     environ_read: bool,
     /// What the latest read said (`None`: not read yet).
     latest: Option<Latest>,
+    /// The latest refused or failed read (`Denied`, `Failed`) of this
+    /// incarnation since its last successful one: evidence that can last,
+    /// which a later read that did not settle ([`ProcError::Unsettled`])
+    /// does not show to have ended, so it decides the process's error
+    /// ([`Entry::error`], TASK-348). A successful read clears it; a
+    /// replacement starts a new entry, and an exit makes the process gone.
+    lasting: Option<ProcError>,
     /// The status read with the latest failed read.
     status: Option<Result<ProcStatus, ProcError>>,
     /// The excuse each status read gave, in order (`None`: none, or the
@@ -322,6 +329,13 @@ impl Entry {
     /// Adds what one read found.
     fn merge(&mut self, outcome: Outcome) {
         self.attempts += 1;
+        match &outcome {
+            Outcome::Read(_) => self.lasting = None,
+            Outcome::Unreadable(e @ (ProcError::Denied(_) | ProcError::Failed(_))) => {
+                self.lasting = Some(e.clone());
+            }
+            Outcome::Unreadable(_) | Outcome::Gone => {}
+        }
         self.latest = Some(match outcome {
             Outcome::Read(read) => {
                 if read.environ_failed.is_none() && !read.facts_failed {
@@ -333,6 +347,16 @@ impl Entry {
             Outcome::Gone => Latest::Gone,
             Outcome::Unreadable(e) => Latest::Unreadable(e),
         });
+    }
+
+    /// The error a process that stayed unreadable is judged by: its latest
+    /// read's, unless that one only did not settle after a refusal or
+    /// failure that can last ([`Entry::lasting`]).
+    fn error(&self, latest: &ProcError) -> ProcError {
+        match (latest, &self.lasting) {
+            (ProcError::Unsettled(_), Some(lasting)) => lasting.clone(),
+            _ => latest.clone(),
+        }
     }
 }
 
@@ -705,7 +729,7 @@ pub(crate) fn gather<H: Host>(
                     pid,
                     name: status.as_ref().map(|s| s.name.clone()),
                     excuse: consistent(&entry.excuses),
-                    error: error.clone(),
+                    error: entry.error(error),
                     status,
                 });
             }
@@ -1512,6 +1536,55 @@ mod tests {
                 "case {i}: {st:?}"
             );
         }
+        // TASK-348 (Codex review): a read that did not settle is no refusal,
+        // so no privilege boundary explains it, whatever the status shows:
+        // each status a refusal is excused by (another user's, setuid, more
+        // capable, non-dumpable) leaves it unexcused.
+        let unsettled = ProcError::Unsettled(HostError::invalid("read", "x", "exiting"));
+        for (st, as_refused) in [
+            (status(1001, 1001, 0, INIT, Some(1001)), Excuse::OtherUser),
+            (status(1000, 0, 0, INIT, Some(0)), Excuse::SetUid),
+            (
+                status(1000, 1000, 1 << 35, INIT, Some(1000)),
+                Excuse::Privileged,
+            ),
+            (status(1000, 1000, 0, INIT, Some(0)), Excuse::NonDumpable),
+        ] {
+            assert_eq!(
+                excuse(&denied(), &st, &me, Some(&own), false),
+                Some(as_refused),
+                "{st:?}"
+            );
+            assert_eq!(
+                excuse(&unsettled, &st, &me, Some(&own), false),
+                None,
+                "{st:?}"
+            );
+        }
+    }
+
+    /// TASK-348 (Codex review): a refusal or failure seen in a scan decides
+    /// the process's error when later rereads only did not settle; a
+    /// successful read in between clears it.
+    #[test]
+    fn a_lasting_failure_is_not_hidden_by_rereads_that_do_not_settle() {
+        let unsettled = || ProcError::Unsettled(HostError::invalid("read", "x", "exiting"));
+        let mut entry = Entry::default();
+        entry.merge(Outcome::Unreadable(denied()));
+        entry.merge(Outcome::Unreadable(unsettled()));
+        assert_eq!(entry.error(&unsettled()), denied());
+        let mut read_between = Entry::default();
+        read_between.merge(Outcome::Unreadable(denied()));
+        read_between.merge(Outcome::Read(Box::default()));
+        read_between.merge(Outcome::Unreadable(unsettled()));
+        assert_eq!(read_between.error(&unsettled()), unsettled());
+        let mut only_unsettled = Entry::default();
+        only_unsettled.merge(Outcome::Unreadable(unsettled()));
+        assert_eq!(only_unsettled.error(&unsettled()), unsettled());
+        // A later lasting failure is its own answer.
+        let failed = ProcError::Failed(HostError::invalid("read", "x", "empty"));
+        entry.merge(Outcome::Unreadable(failed.clone()));
+        assert_eq!(entry.error(&failed), failed);
     }
 
     /// Codex review of c8a0945: facts that two reads disagree on (or that a
