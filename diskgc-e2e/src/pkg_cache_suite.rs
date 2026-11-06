@@ -449,10 +449,29 @@ fn wait_file(run: &mut InFlight, path: &Path) -> TestResult {
 
 // ---- diskgc runs -----------------------------------------------------------
 
-/// `diskgc ensure` as tester (traced), `--min-free 100%` so a reclaim takes
-/// every eligible candidate, with `env` added to its environment.
+/// Whether a scenario also runs the tool's own cleaner directly against a
+/// run in flight and reads its lock wait from `/proc/locks` (uv, pnpm).
+/// That part tests the tool, not diskgc's binary, and needs one consistent
+/// read of `/proc/locks` ([`crate::proc_locks::sample`]): in the container's
+/// own PID namespace it lists the container's locks only, but the release
+/// variants run in the host's (the release candidate refuses its own),
+/// where it lists every host lock, more than one read returns on a busy
+/// host. So the development variant runs it and the release variants stop
+/// after diskgc's own verdict on the run in flight (TASK-360).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolCleaner {
+    RunDirectly,
+    LeftToTheDevelopmentVariant,
+}
+
+/// `diskgc ensure` of `binary` (the development build, or the gate-lifted
+/// release-candidate package) as tester (traced), `--min-free 100%` so a
+/// reclaim takes every eligible candidate, with `env` added to its
+/// environment.
+#[allow(clippy::too_many_arguments)]
 fn ensure_with(
     ctx: &Ctx,
+    binary: &Path,
     env: &[(String, String)],
     dry_run: bool,
     select: &str,
@@ -460,7 +479,6 @@ fn ensure_with(
     path: &str,
     config: Option<&str>,
 ) -> Result<Run, String> {
-    let binary = ctx.diskgc();
     let mut args = vec!["ensure"];
     if dry_run {
         args.push("--dry-run");
@@ -487,7 +505,7 @@ fn ensure_with(
         &ctx.records,
         Path::new("/"),
         env,
-        &binary,
+        binary,
         &args,
     )?;
     info!(
@@ -509,6 +527,7 @@ const OTHER_HOME: &str = "/home/tester/other-home";
 /// [`ensure_with`] with `HOME` set to [`OTHER_HOME`].
 fn ensure(
     ctx: &Ctx,
+    binary: &Path,
     dry_run: bool,
     select: &str,
     roots: Option<&str>,
@@ -517,7 +536,7 @@ fn ensure(
 ) -> Result<Run, String> {
     ctx.home.mkdirs("other-home", 0o755, TESTER)?;
     let env = [("HOME".to_owned(), OTHER_HOME.to_owned())];
-    ensure_with(ctx, &env, dry_run, select, roots, path, config)
+    ensure_with(ctx, binary, &env, dry_run, select, roots, path, config)
 }
 
 fn sorted(expected: &Expected) -> Vec<(String, Option<String>)> {
@@ -538,9 +557,11 @@ fn actions(report: &Value) -> Result<BTreeSet<String>, String> {
         .collect())
 }
 
-/// One scenario's selection: the profile, its roots and measured path, an
-/// optional configuration, and its command as the plan prints it.
+/// One scenario's selection: the binary under test, the profile, its roots
+/// and measured path, an optional configuration, and its command as the
+/// plan prints it.
 struct Selection<'a> {
+    binary: &'a Path,
     profile: &'a str,
     roots: Option<&'a str>,
     path: &'a str,
@@ -570,8 +591,12 @@ fn plan_then_reclaim(ctx: &Ctx, sel: &Selection, expected: &Expected) -> Result<
         });
     let select = sel.select();
     let oracle = Oracle::arm(fixture)?;
-    let dry = ensure(ctx, true, &select, sel.roots, sel.path, sel.config)?;
-    let run = ensure(ctx, false, &select, sel.roots, sel.path, sel.config)?;
+    let dry = ensure(
+        ctx, sel.binary, true, &select, sel.roots, sel.path, sel.config,
+    )?;
+    let run = ensure(
+        ctx, sel.binary, false, &select, sel.roots, sel.path, sel.config,
+    )?;
     let verdict = oracle.judge_runs(&[&dry, &run])?;
     dry.expect_code(0)?;
     run.expect_code(1)?;
@@ -623,7 +648,15 @@ fn reclaim_in_flight(ctx: &Ctx, sel: &Selection, eligible: &[&Path]) -> Result<V
         .iter()
         .fold(Fixture::new(), |f, path| f.eligible(*path));
     let oracle = Oracle::arm(fixture)?;
-    let run = ensure(ctx, false, &sel.select(), sel.roots, sel.path, sel.config)?;
+    let run = ensure(
+        ctx,
+        sel.binary,
+        false,
+        &sel.select(),
+        sel.roots,
+        sel.path,
+        sel.config,
+    )?;
     oracle.judge(&run)?.assert_clean()?;
     run.expect_code(1)?;
     report(&run)
@@ -815,6 +848,20 @@ fn pip_entries(cache: &Path) -> Result<usize, String> {
 pub fn pip_cache_real_pip_installs_reclaim_then_refetch_and_an_install_in_flight_completes(
     ctx: &Ctx,
 ) -> TestResult {
+    pip_scenario(ctx, &ctx.diskgc())
+}
+
+/// TASK-360: [`pip_cache_real_pip_installs_reclaim_then_refetch_and_an_install_in_flight_completes`] through the gate-lifted release-candidate package,
+/// whose 0.2 catalog holds `pip-cache` and whose release row lists its
+/// command.
+pub fn release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "pip-cache")?;
+    pip_scenario(ctx, &binary)
+}
+
+fn pip_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     versions(ctx, &[(PIP, &["--version"], "pip 26.1.2 ")])?;
     control_dir(ctx)?;
     wheels(ctx, &["alpha", "beta", "gamma"])?;
@@ -838,6 +885,7 @@ pub fn pip_cache_real_pip_installs_reclaim_then_refetch_and_an_install_in_flight
     ensure!(alt_entries > 0, "pip cached nothing under PIP_CACHE_DIR");
 
     let sel = Selection {
+        binary,
         profile: "pip-cache",
         roots: Some(HOME),
         path: HOME,
@@ -967,22 +1015,147 @@ fn uv_imports(ctx: &Ctx, rel: &str, names: &str) -> TestResult {
     Ok(())
 }
 
-/// `uv-cache`: a real uv cache always holds `sdists-v10/.git` (an empty
-/// file uv writes when it creates the cache), so under the profile's
-/// default `checkouts: refuse` the dry run and the reclaim keep it as
-/// `contains_checkout`: the built-in alone reclaims no real uv cache. With
-/// `profile_policies` `checkouts: allow` (development library) the cache
-/// is planned with the profile's command, and `uv cache clean` removes it
-/// whole; an environment installed from it (uv's default hardlink mode)
-/// still imports; the next install fetches again. A real cache under
-/// `UV_CACHE_DIR` and a lookalike below a project are never found. A `uv
-/// pip install` held in flight holds uv's cache lock (`.lock`, a shared
-/// `flock`) open: diskgc keeps the cache `in_use`, and uv's own `cache
-/// clean`, run directly, waits for the lock ("Cache is currently in-use"):
-/// the install completes, then the clean does.
-pub fn uv_cache_real_uv_cache_is_a_checkout_until_allowed_and_an_install_in_flight_is_kept(
+/// `uv-cache`: a real uv cache always holds `sdists-v10/.git`, an empty
+/// regular file uv writes when it creates the cache, which the profile's
+/// `empty_checkout_markers` tolerate (Mark, 2026-11-05, TASK-360): the dry
+/// run plans the cache with the profile's command and `uv cache clean`
+/// removes it whole; an environment installed from it (uv's default
+/// hardlink mode) still imports; the next install fetches again. Only that
+/// file, empty, is tolerated: dry runs with a `.git` directory or a
+/// non-empty `.git` file in its place, an empty `.git` elsewhere in the
+/// cache, or a checkout-shaped `.git` directory (HEAD, objects, refs; the
+/// image has no git) below `git-v0/checkouts` each keep the cache
+/// `contains_checkout`. A real cache under `UV_CACHE_DIR` and a lookalike
+/// below a project are never found. A `uv pip install` held in flight
+/// holds uv's cache lock (`.lock`, a shared `flock`) open: diskgc keeps
+/// the cache `in_use`, and uv's own `cache clean`, run directly, waits for
+/// the lock ("Cache is currently in-use"): the install completes, then the
+/// clean does.
+pub fn uv_cache_real_uv_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept(
     ctx: &Ctx,
 ) -> TestResult {
+    uv_scenario(ctx, &ctx.diskgc(), ToolCleaner::RunDirectly)
+}
+
+/// TASK-360: [`uv_cache_real_uv_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept`]
+/// through the gate-lifted release-candidate package, whose 0.2 catalog
+/// holds `uv-cache` and whose release row lists its command, up to
+/// diskgc's `in_use` verdict on the install in flight
+/// ([`ToolCleaner::LeftToTheDevelopmentVariant`]).
+pub fn release_candidate_uv_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "uv-cache")?;
+    uv_scenario(ctx, &binary, ToolCleaner::LeftToTheDevelopmentVariant)
+}
+
+/// A dry run of `sel` alone (nothing eligible for the oracle) that plans
+/// exactly `expected`.
+fn plan_only(ctx: &Ctx, sel: &Selection, expected: &Expected, what: &str) -> TestResult {
+    let oracle = Oracle::arm(Fixture::new())?;
+    let dry = ensure(
+        ctx,
+        sel.binary,
+        true,
+        &sel.select(),
+        sel.roots,
+        sel.path,
+        sel.config,
+    )?;
+    oracle.judge(&dry)?.assert_clean()?;
+    dry.expect_code(0)?;
+    let planned = report(&dry)?;
+    ensure!(
+        plan_of(&planned)? == sorted(expected),
+        "{what}: the dry run planned {:?}, expected {:?}: {planned}",
+        plan_of(&planned)?,
+        sorted(expected)
+    );
+    Ok(())
+}
+
+/// Each place and shape of a checkout marker the uv-cache exception does
+/// not tolerate, made in the real cache one at a time (as tester), keeps
+/// it `contains_checkout` in a dry run; the cache is restored after each
+/// (a directory added is moved out to `ctl/`, a file added is removed).
+fn uv_markers_it_does_not_tolerate(ctx: &Ctx, sel: &Selection, cache: &Path) -> TestResult {
+    let refused = vec![(cache.to_owned(), Some("contains_checkout"))];
+    let marker = ".cache/uv/sdists-v10/.git";
+    let aside = format!("{CTL}/uv-sdists-git");
+    let empty = || -> TestResult {
+        let path = home(marker);
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| format!("stat {}: {e}", path.display()))?;
+        ensure!(
+            meta.file_type().is_file() && meta.len() == 0,
+            "{} is not the empty regular file uv writes: {meta:?}",
+            path.display()
+        );
+        Ok(())
+    };
+    empty()?;
+
+    // A `.git` directory in its place.
+    ctx.home.rename(marker, &aside)?;
+    ctx.home
+        .mkdirs(&format!("{marker}/objects"), 0o755, TESTER)?;
+    write(ctx, &format!("{marker}/HEAD"), b"ref: refs/heads/main\n")?;
+    plan_only(ctx, sel, &refused, "a .git directory at sdists-v10/.git")?;
+    ctx.home.rename(marker, &format!("{CTL}/uv-git-dir"))?;
+    ctx.home.rename(&aside, marker)?;
+    empty()?;
+
+    // A `.git` file with content in its place (a worktree's pointer).
+    ctx.home.rename(marker, &aside)?;
+    write(
+        ctx,
+        marker,
+        b"gitdir: /home/tester/src/proj/.git/worktrees/x\n",
+    )?;
+    plan_only(
+        ctx,
+        sel,
+        &refused,
+        "a non-empty .git file at sdists-v10/.git",
+    )?;
+    ctx.home.remove_file(marker)?;
+    ctx.home.rename(&aside, marker)?;
+    empty()?;
+
+    // An empty `.git` file elsewhere in the cache.
+    let elsewhere = ".cache/uv/archive-v0/.git";
+    ensure!(!exists(&home(elsewhere)), "uv wrote {elsewhere}");
+    write(ctx, elsewhere, b"")?;
+    plan_only(ctx, sel, &refused, "an empty .git at archive-v0/.git")?;
+    ctx.home.remove_file(elsewhere)?;
+
+    // A git dependency's checkout below `git-v0` (uv's git cache bucket).
+    let git = ".cache/uv/git-v0";
+    ensure!(
+        !exists(&home(git)),
+        "uv wrote {git} without a git dependency"
+    );
+    let checkout = format!("{git}/checkouts/4f0a/0123abcd");
+    ctx.home
+        .mkdirs(&format!("{checkout}/.git/objects/pack"), 0o755, TESTER)?;
+    ctx.home
+        .mkdirs(&format!("{checkout}/.git/refs/heads"), 0o755, TESTER)?;
+    write(
+        ctx,
+        &format!("{checkout}/.git/HEAD"),
+        b"ref: refs/heads/main\n",
+    )?;
+    write(
+        ctx,
+        &format!("{checkout}/pyproject.toml"),
+        b"[project]\nname = \"dep\"\n",
+    )?;
+    plan_only(ctx, sel, &refused, "a checkout below git-v0/checkouts")?;
+    ctx.home.rename(git, &format!("{CTL}/uv-git-v0"))?;
+    Ok(())
+}
+
+fn uv_scenario(ctx: &Ctx, binary: &Path, tool_cleaner: ToolCleaner) -> TestResult {
     versions(ctx, &[(UV, &["--version"], "uv 0.13.0 ")])?;
     control_dir(ctx)?;
     wheels(ctx, &["alpha", "beta", "gamma"])?;
@@ -999,7 +1172,7 @@ pub fn uv_cache_real_uv_cache_is_a_checkout_until_allowed_and_an_install_in_flig
     let marker = cache.join("sdists-v10/.git");
     ensure!(
         marker.is_file(),
-        "uv no longer writes {} (the checkout guard's reason here)",
+        "uv no longer writes {} (the tolerated marker)",
         marker.display()
     );
     let alt = home("alt/uv");
@@ -1010,23 +1183,15 @@ pub fn uv_cache_real_uv_cache_is_a_checkout_until_allowed_and_an_install_in_flig
         alt.display()
     );
 
-    let mut sel = Selection {
+    let sel = Selection {
+        binary,
         profile: "uv-cache",
         roots: Some(HOME),
         path: HOME,
         config: None,
         operation: UV_OP,
     };
-    plan_then_reclaim(ctx, &sel, &vec![(cache.clone(), Some("contains_checkout"))])?;
-    ensure!(marker.is_file(), "the refused uv cache changed");
-
-    let config = "/home/tester/diskgc-uv-allow.yaml";
-    write(
-        ctx,
-        "diskgc-uv-allow.yaml",
-        b"version: 1\nprofile_policies:\n  - profile: uv-cache\n    checkouts: allow\n",
-    )?;
-    sel.config = Some(config);
+    uv_markers_it_does_not_tolerate(ctx, &sel, &cache)?;
     plan_then_reclaim(ctx, &sel, &vec![(cache.clone(), None)])?;
     ensure!(!exists(&cache), "uv cache clean left {}", cache.display());
     ensure!(
@@ -1067,6 +1232,13 @@ pub fn uv_cache_real_uv_cache_is_a_checkout_until_allowed_and_an_install_in_flig
     expect_in_use_by(&reclaimed, &cache, &install, &["fd"], "uv lock", &|p| {
         p == lock
     })?;
+    if tool_cleaner == ToolCleaner::LeftToTheDevelopmentVariant {
+        release(ctx)?;
+        install.expect_success()?;
+        ensure!(exists(&cache), "the cache kept in use is gone");
+        uv_imports(ctx, "src/three/.venv", "alpha, gamma")?;
+        return Ok(());
+    }
     let watched = Watched::files(std::slice::from_ref(&lock))?;
     watched.wait_for(
         install.pid(),
@@ -1163,6 +1335,7 @@ fn node_loads(ctx: &Ctx, project: &Path, deps: &[&str]) -> TestResult {
 pub fn npm_cache_real_npm_installs_reclaim_then_refetch_and_a_running_npm_keeps_it(
     ctx: &Ctx,
 ) -> TestResult {
+    let binary = &ctx.diskgc();
     versions(
         ctx,
         &[
@@ -1195,6 +1368,7 @@ pub fn npm_cache_real_npm_installs_reclaim_then_refetch_and_a_running_npm_keeps_
     );
 
     let sel = Selection {
+        binary,
         profile: "npm-cache",
         roots: Some(HOME),
         path: HOME,
@@ -1284,6 +1458,22 @@ fn pnpm(ctx: &Ctx, project: &Path, command: &[&str], extra: &[&str]) -> TestResu
 pub fn pnpm_store_real_pnpm_prune_keeps_referenced_packages_and_an_install_in_flight(
     ctx: &Ctx,
 ) -> TestResult {
+    pnpm_scenario(ctx, &ctx.diskgc(), ToolCleaner::RunDirectly)
+}
+
+/// TASK-360: [`pnpm_store_real_pnpm_prune_keeps_referenced_packages_and_an_install_in_flight`]
+/// through the gate-lifted release-candidate package, whose 0.2 catalog
+/// holds `pnpm-store` and whose release row lists its command, up to
+/// diskgc's `in_use` verdict on the install in flight
+/// ([`ToolCleaner::LeftToTheDevelopmentVariant`]).
+pub fn release_candidate_pnpm_store_prune_keeps_referenced_packages_and_an_install_in_flight(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "pnpm-store")?;
+    pnpm_scenario(ctx, &binary, ToolCleaner::LeftToTheDevelopmentVariant)
+}
+
+fn pnpm_scenario(ctx: &Ctx, binary: &Path, tool_cleaner: ToolCleaner) -> TestResult {
     versions(ctx, &[(PNPM, &["--version"], "12.9.0")])?;
     control_dir(ctx)?;
     npm_packages(ctx, &["alpha", "beta", "gamma", "delta"])?;
@@ -1316,6 +1506,7 @@ pub fn pnpm_store_real_pnpm_prune_keeps_referenced_packages_and_an_install_in_fl
     );
 
     let sel = Selection {
+        binary,
         profile: "pnpm-store",
         roots: Some(HOME),
         path: HOME,
@@ -1365,6 +1556,13 @@ pub fn pnpm_store_real_pnpm_prune_keeps_referenced_packages_and_an_install_in_fl
     expect_in_use_by(&reclaimed, &store, &install, &["fd"], "store index", &|p| {
         p == index
     })?;
+    if tool_cleaner == ToolCleaner::LeftToTheDevelopmentVariant {
+        release(ctx)?;
+        install.expect_success()?;
+        node_loads(ctx, &three, &["alpha", "delta"])?;
+        node_loads(ctx, &app, &["alpha", "beta"])?;
+        return Ok(());
+    }
     let lock = PathBuf::from("/tmp/pnpm-store-operation-locks-1000/all-stores.lock");
     let watched = Watched::files(std::slice::from_ref(&lock))?;
     watched.wait_for(
@@ -1438,6 +1636,7 @@ fn yarn_entries(cache: &Path) -> Result<usize, String> {
 pub fn yarn_cache_real_yarn_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept(
     ctx: &Ctx,
 ) -> TestResult {
+    let binary = &ctx.diskgc();
     versions(ctx, &[(YARN, &["--version"], "1.22.22")])?;
     control_dir(ctx)?;
     npm_packages(ctx, &["alpha", "beta", "gamma"])?;
@@ -1467,6 +1666,7 @@ pub fn yarn_cache_real_yarn_installs_reclaim_then_refetch_and_an_install_in_flig
     );
 
     let sel = Selection {
+        binary,
         profile: "yarn-cache",
         roots: Some(HOME),
         path: HOME,
@@ -1590,6 +1790,20 @@ fn c_project(ctx: &Ctx) -> TestResult {
 pub fn ccache_real_compiles_reclaim_then_recompile_and_a_compile_in_flight_completes(
     ctx: &Ctx,
 ) -> TestResult {
+    ccache_scenario(ctx, &ctx.diskgc())
+}
+
+/// TASK-360: [`ccache_real_compiles_reclaim_then_recompile_and_a_compile_in_flight_completes`] through the gate-lifted release-candidate package,
+/// whose 0.2 catalog holds `ccache` and whose release row lists its
+/// command.
+pub fn release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "ccache")?;
+    ccache_scenario(ctx, &binary)
+}
+
+fn ccache_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     versions(ctx, &[(CCACHE, &["--version"], "ccache version 4.14.1\n")])?;
     control_dir(ctx)?;
     c_project(ctx)?;
@@ -1614,6 +1828,7 @@ pub fn ccache_real_compiles_reclaim_then_recompile_and_a_compile_in_flight_compl
     );
 
     let sel = Selection {
+        binary,
         profile: "ccache",
         roots: Some(HOME),
         path: HOME,
@@ -1777,6 +1992,7 @@ fn go_build(ctx: &Ctx, env: &[(&str, &str)], output: &str) -> TestResult {
 pub fn go_build_cache_real_go_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept(
     ctx: &Ctx,
 ) -> TestResult {
+    let binary = &ctx.diskgc();
     versions(ctx, &[(GO, &["version"], "go1.26.8 ")])?;
     control_dir(ctx)?;
     go_project(ctx)?;
@@ -1794,6 +2010,7 @@ pub fn go_build_cache_real_go_builds_reclaim_then_rebuild_and_a_build_in_flight_
     );
 
     let sel = Selection {
+        binary,
         profile: "go-build-cache",
         roots: Some(HOME),
         path: HOME,
@@ -1921,6 +2138,7 @@ fn pio_install(ctx: &Ctx, env: &[(&str, &str)], file: &str) -> TestResult {
 pub fn platformio_cache_real_pio_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept(
     ctx: &Ctx,
 ) -> TestResult {
+    let binary = &ctx.diskgc();
     versions(
         ctx,
         &[(PIO, &["--version"], "PlatformIO Core, version 6.1.19")],
@@ -1954,6 +2172,7 @@ pub fn platformio_cache_real_pio_installs_reclaim_then_refetch_and_an_install_in
     );
 
     let sel = Selection {
+        binary,
         profile: "platformio-cache",
         roots: Some(HOME),
         path: HOME,
@@ -2105,6 +2324,20 @@ fn jest_run(ctx: &Ctx, env: &[(&str, &str)], extra: &[&str]) -> TestResult {
 pub fn jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes(
     ctx: &Ctx,
 ) -> TestResult {
+    jest_scenario(ctx, &ctx.diskgc())
+}
+
+/// TASK-360: [`jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes`] through the gate-lifted release-candidate package,
+/// whose 0.2 catalog holds `jest-cache` and whose release row lists its
+/// command.
+pub fn release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "jest-cache")?;
+    jest_scenario(ctx, &binary)
+}
+
+fn jest_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     // The Jest 30.2.0 package prints 30.1.3 (its lockfile pins jest,
     // jest-cli and @jest/core at 30.2.0).
     versions(ctx, &[(JEST, &["--version"], "30.1.3")])?;
@@ -2142,6 +2375,7 @@ pub fn jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_complete
     }
 
     let sel = Selection {
+        binary,
         profile: "jest-cache",
         roots: None,
         path: "/tmp",
@@ -2390,7 +2624,16 @@ pub fn delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path(ctx: &
     for d in DELEGATED {
         let select = format!("profile:{}", d.profile);
         let oracle = Oracle::arm(Fixture::new())?;
-        let missing = ensure_with(ctx, &env_only, false, &select, d.roots, d.path, None)?;
+        let missing = ensure_with(
+            ctx,
+            &ctx.diskgc(),
+            &env_only,
+            false,
+            &select,
+            d.roots,
+            d.path,
+            None,
+        )?;
         oracle.judge(&missing)?.assert_clean()?;
         missing.expect_code(1)?;
         let missing_report = report(&missing)?;
@@ -2413,7 +2656,16 @@ pub fn delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path(ctx: &
         );
 
         let oracle = Oracle::arm(Fixture::new())?;
-        let ran = ensure_with(ctx, &stand_ins, false, &select, d.roots, d.path, None)?;
+        let ran = ensure_with(
+            ctx,
+            &ctx.diskgc(),
+            &stand_ins,
+            false,
+            &select,
+            d.roots,
+            d.path,
+            None,
+        )?;
         oracle.judge(&ran)?.assert_clean()?;
         ran.expect_code(1)?;
         expect_actions(&report(&ran)?, &[Path::new(d.cache)])?;

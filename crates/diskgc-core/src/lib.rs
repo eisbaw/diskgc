@@ -54,6 +54,7 @@ pub mod kind;
 pub mod liveness;
 pub mod nix_backend;
 pub mod outcome;
+pub mod pattern;
 pub mod places;
 pub mod podman_backend;
 pub mod profile;

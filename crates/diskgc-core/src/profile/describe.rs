@@ -380,6 +380,15 @@ pub fn profile_json(p: &Profile) -> Json {
                 Json::str(s.checkouts.as_str())
             }),
         ),
+        // A built-in kind fs source's tolerated empty markers (empty for
+        // the others of kind fs); `null` for every other kind and filters.
+        (
+            "empty_checkout_markers",
+            Json::opt(
+                source.filter(|s| matches!(s.finds, Finds::Paths { .. })),
+                |s| strings(&s.empty_checkout_markers),
+            ),
+        ),
         (
             "examples",
             Json::opt(
@@ -626,6 +635,12 @@ pub fn show_yaml(profile: &Profile, config: Option<&Path>) -> String {
             // candidates); every other source spells out its setting.
             if !matches!(source.finds, Finds::NixStore) {
                 out.push_str(&format!("  checkouts: {}\n", source.checkouts.as_str()));
+            }
+            if !source.empty_checkout_markers.is_empty() {
+                out.push_str(&format!(
+                    "  empty_checkout_markers: {}\n",
+                    yaml_list(&source.empty_checkout_markers)
+                ));
             }
             if matches!(source.finds, Finds::Paths { .. }) {
                 out.push_str("  examples:\n");

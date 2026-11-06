@@ -159,6 +159,8 @@ fn schema_form(json: &Value) -> Value {
     for (key, value) in json.as_object().expect("an object") {
         let value = match (key.as_str(), value) {
             ("origin" | "role" | "override", _) | (_, Value::Null) => continue,
+            // Absent in the schema when empty (an empty list is refused).
+            ("empty_checkout_markers", Value::Array(markers)) if markers.is_empty() => continue,
             ("find", Value::Object(fields)) => {
                 let required = fields["roots_required"].as_bool().expect("a boolean");
                 let backend = fields["backend"].as_str();

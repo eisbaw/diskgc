@@ -401,6 +401,33 @@ Immediately before acting, diskgc walks the candidate's whole tree
     Inferred, not measured: Cargo's git checkouts
     (`~/.cargo/git/checkouts/`, clones with a `.git` directory); temporary
     clones of pip and npm building a VCS dependency.
+  - **A tolerated empty marker, by the profile's definition** (Mark,
+    2026-11-05, TASK-360: "Profile allows that exact file"). A built-in
+    kind `fs` source that refuses checkouts may list places below its
+    candidate (`empty_checkout_markers`, `find.paths` syntax, each ending
+    exactly in `.git`) where an entry of that name does not refuse
+    the candidate if the walk's `statx` shows it is a regular file of size
+    0. An empty `.git` file is no checkout (Git reads a `.git` file as a
+    `gitdir:` pointer, and an empty one points nowhere); `.hg` and `.svn`
+    endings are refused, as nothing argues for them. Only `uv-cache` has
+    one: every uv cache holds
+    an empty `sdists-vN/.git` (uv 0.13.0 in the container: `sdists-v10`;
+    the development host, 2026-11-05: `sdists-v9`), so without it the
+    built-in reclaimed no real uv cache (TASK-351). Anything else still
+    refuses: a directory, a symlink or a file with content of that name at
+    a listed place, a marker anywhere else (a git dependency's checkout in
+    uv's `git-v0`), the candidate itself, and the path rule above is
+    unchanged. It is data, not code: no profile is special-cased, the
+    loader refuses it on a user profile, a filter, another kind, `type`
+    other than `dir` or with `checkouts: allow`, and `profile_policies`
+    cannot change it. For a union, the walk records every marker it
+    admits (its path below the candidate and whether it was an empty
+    regular file), and each admitted source that refuses checkouts judges
+    them with its own list. The window between the walk and the cleaner is
+    the one every check has: content written into the empty marker after
+    its `statx`, or a checkout created anywhere in the cache after the
+    walk, is not seen (the tool's own clean then removes the cache with
+    it).
   - **Not recognised (limits):** bare repositories (no entry of those
     names: a `foo.git/` holding `HEAD`, `objects/` and `refs/`), so Go's
     module cache (`pkg/mod/cache/vcs/<hash>/`, bare repositories, seen on
@@ -1705,6 +1732,13 @@ contract class, recorded in the
   and the container tests of those twelve, each row's "Container
   test: pending (TASK-137)" unless it names its tests.
 - **tolerant** and **delegated**: as in the table above, verified per tool.
+  A delegated cleaner enters a release only with its exact command listed
+  in that release's row ([Command actions](#command-actions), In a
+  release); 0.2 lists five, by Mark's decision ("only the lock-safe five",
+  2026-11-05, TASK-360): in the container tests a run of each tool in
+  flight survived its cleaner (uv and pnpm by their lock). The other four
+  delegated cleaners' reasons are their rows in
+  [reference.md](reference.md#liveness-contracts).
 - **none**: no contract. The profile is not admissible as a built-in, and
   its row in the liveness table records the counterexample. A user profile
   may still select such paths; its author owns that risk.
@@ -4431,6 +4465,19 @@ development machine):
   reclaim; a run whose goal is already met looks nothing up.
 - Runs in its own process group; killed after the tier's `timeout`;
   inherits the host lock (below).
+- **In a release** (TASK-360). A release runs a built-in's command action
+  only when the release's row of the release descriptor
+  (`crates/diskgc-core/src/releases.json`, `command_actions`) lists that
+  built-in with exactly that argv and `cwd`. Building the catalog
+  (`Library::release_catalog`) refuses a member whose command action the
+  row does not list or lists differently, and a listed one the catalog
+  does not hold with that command, so admitting a cleaner, or changing an
+  admitted cleaner's argv, needs both its `releases:` label and the row.
+  0.2 lists `pip-cache`, `uv-cache`, `pnpm-store`, `ccache` and
+  `jest-cache` (Mark, 2026-11-05: "only the lock-safe five"); 0.1 lists
+  none. User profiles stay refused in every release, so no
+  operator-written command runs there. The program is still looked up on
+  `PATH` at run time, and no version is checked (above).
 
 The deleting child-start port takes the already checked working-directory fd,
 an absolute executable from preflight, argument and environment arrays, and

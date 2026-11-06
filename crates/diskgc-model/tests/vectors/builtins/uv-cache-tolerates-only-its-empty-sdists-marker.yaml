@@ -1,0 +1,44 @@
+# TASK-360 (Mark, 2026-11-05: "Profile allows that exact file"): every
+# real uv cache holds `sdists-vN/.git`, an empty regular file, which
+# uv-cache's `empty_checkout_markers` tolerates under its default
+# `checkouts: refuse`. Only that: a `.git` directory or a non-empty `.git`
+# file at that place, an empty `.git` elsewhere in the cache, and a git
+# dependency's real checkout inside it each keep the cache
+# `contains_checkout`, and only the first cache's cleaner runs.
+profile_vector: 1
+select: "profile:uv-cache"
+roots: ["/home/a", "/home/b", "/home/c", "/home/d", "/home/e"]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/uv: {mode: "0755"}
+    "/home/a/.cache/uv": {"archive-v0": {"payload": {"size": "8K"}}, "sdists-v10": {".git": {}}}
+    "/home/b/.cache/uv": {"archive-v0": {"payload": {"size": "8K"}}, "sdists-v10": {".git": {"HEAD": {}}}}
+    "/home/c/.cache/uv": {"archive-v0": {"payload": {"size": "8K"}}, "sdists-v10": {".git": {"size": 30}}}
+    "/home/d/.cache/uv": {"archive-v0": {"payload": {"size": "8K"}, ".git": {}}, "sdists-v10": {".git": {}}}
+    "/home/e/.cache/uv": {"git-v0": {"checkouts": {"abc": {"0123": {".git": {"HEAD": {}}}}}}, "sdists-v10": {".git": {}}}
+expect:
+  plan:
+    - {candidate: "/home/a/.cache/uv"}
+    - {candidate: "/home/b/.cache/uv", reason: contains_checkout}
+    - {candidate: "/home/c/.cache/uv", reason: contains_checkout}
+    - {candidate: "/home/d/.cache/uv", reason: contains_checkout}
+    - {candidate: "/home/e/.cache/uv", reason: contains_checkout}
+  reclaim_exit: 1
+  actions: ["/home/a/.cache/uv"]
+  removed: []
+  skipped:
+    - {candidate: "/home/b/.cache/uv", reason: contains_checkout}
+    - {candidate: "/home/c/.cache/uv", reason: contains_checkout}
+    - {candidate: "/home/d/.cache/uv", reason: contains_checkout}
+    - {candidate: "/home/e/.cache/uv", reason: contains_checkout}
+  preserved: ["/home/a/.cache/uv/sdists-v10/.git", "/home/b/.cache/uv/sdists-v10/.git/HEAD", "/home/c/.cache/uv/sdists-v10/.git", "/home/d/.cache/uv/archive-v0/.git", "/home/e/.cache/uv/git-v0/checkouts/abc/0123/.git/HEAD"]
+  commands:
+    - {"cwd": "/home/a/.cache", "argv": ["/usr/bin/uv", "cache", "clean", "--cache-dir", "/home/a/.cache/uv"]}

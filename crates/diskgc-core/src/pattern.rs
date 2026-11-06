@@ -1,5 +1,8 @@
-//! `find.paths` patterns (docs/reference.md, Profiles: `find.paths`):
-//! relative to a root, one directory level per `/`-separated segment, no
+//! `find.paths` patterns (docs/reference.md, Profiles: `find.paths`), and
+//! the same syntax below a candidate for a built-in's
+//! `empty_checkout_markers` (the eligibility walk's checkout guard,
+//! [`crate::engine::Rules`]): relative to a root, one directory level per
+//! `/`-separated segment, no
 //! `**`. Within a segment, `*` matches any run of bytes (none included,
 //! a leading `.` included); every other byte matches itself. `?`, `[`,
 //! `]` and `\` are reserved: the loader refuses them, so giving them a

@@ -289,16 +289,16 @@ names every failing file:
   `config` (protect, groups, owners and `--allow-root`, static errors),
   `exit` (exit codes and tier order), `races` (events between checks and
   deletion), `backend` (Docker bindings and prunes), `builtins` (each
-  built-in source in each role below) and `release` (the 0.1 catalog:
-  what it admits and what it refuses).
+  built-in source in each role below) and `release` (the 0.1 and 0.2
+  catalogs: what each admits and what it refuses).
 
 The invocation keys: `profile` (shorthand for `select: profile:NAME`) or
 `select` (`--select`; neither: the configured groups run), `config` (the
 configuration file's text; absent: none was found), `catalog` (the
-build's built-in catalog: `development`, the default, or `release-0.1`,
-release 0.1's row of the release descriptor, which a
-`release-catalog` build of a 0.1 version selects; refusals name `diskgc
-0.1`), `user_profiles`
+build's built-in catalog: `development`, the default, `release-0.1` or
+`release-0.2`, that release's row of the release descriptor, which a
+`release-catalog` build of that version selects; refusals name `diskgc
+0.1` or `diskgc 0.2`), `user_profiles`
 (without a `config`: added to the built-ins), `roots` (`--roots`), `path`
 (PATH), `min_free`, `target_free`, `timeout` (default 600s, `0` none),
 `tally_budget`, `allow_root`, `seed` (`DISKGC_SEED`) and `entry_budget`
@@ -2899,12 +2899,16 @@ from `/proc/locks`. Each test first requires the tool version
   pip 26.1.2 caches only through `--trusted-host` on plain HTTP; `pip
   cache purge` empties `http-v2`; an install waiting on its next wheel holds
   nothing in the cache, is purged under and completes.
-- `uv_cache_real_uv_cache_is_a_checkout_until_allowed_and_an_install_in_flight_is_kept`:
-  uv 0.13.0's cache holds `sdists-v10/.git`, so the profile alone keeps it
-  `contains_checkout` (dry run and reclaim); with `profile_policies`
-  `checkouts: allow`, `uv cache clean` removes it and an environment
-  installed from it still imports; an install in flight holds `.lock`
-  (`in_use`), and `uv cache clean` run directly waits for it.
+- `uv_cache_real_uv_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept`:
+  uv 0.13.0's cache holds `sdists-v10/.git`, an empty regular file, which
+  the profile's `empty_checkout_markers` tolerate (TASK-360): `uv cache
+  clean` removes the cache and an environment installed from it still
+  imports. Before that, dry runs with, one at a time, a `.git` directory
+  or a `.git` file with content in that place, an empty `.git` in
+  `archive-v0`, and a checkout-shaped `.git` directory (HEAD, objects,
+  refs; the image has no git) below `git-v0/checkouts` keep the cache
+  `contains_checkout`. An install in flight holds `.lock` (`in_use`), and
+  `uv cache clean` run directly waits for it.
 - `npm_cache_real_npm_installs_reclaim_then_refetch_and_a_running_npm_keeps_it`:
   `_cacache` goes, `_logs` stays; an install in flight holds its debug log
   (`in_use`); `npm cache clean --force` run directly then removes
@@ -2944,12 +2948,34 @@ from `/proc/locks`. Each test first requires the tool version
   cleaner version allowlist: any program of the name first on `PATH` runs
   (safety.md, Command actions).
 
-None of these profiles can go through the candidate catalog below: its
-release code path refuses a command action in any catalog
-(`the_release_catalog_refuses_every_delegated_cache_built_in`, a
-diskgc-core unit test that patches each into 0.2 as
-`tools/candidate_catalog.py` does), so admitting one needs a release scope
-decision first. Not exercised for this family: pip's wheel cache (sdist
+Through the gate-lifted package (TASK-360, after Mark admitted the five
+lock-safe cleaners to 0.2 on 2026-11-05; host PID namespace, Nix image, in
+the fast suite and in the Nix release runner's `--suite release`): each
+first requires the `release-candidate` package's narrowed catalog to list
+the profile (`profiles list`, `profiles show`), then runs the same
+scenario with that binary instead of the development build, live
+counterexample included. For uv and pnpm it stops after diskgc's `in_use`
+verdict on the install in flight (the install then completes): the
+directly run cleaner's lock wait is read from `/proc/locks`, which in the
+host's PID namespace lists every lock on the host, more than the harness's
+one consistent read takes on a busy host (seen: 105 locks), and it tests
+the tool, not diskgc's binary, so only the development variant runs it:
+`release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes`,
+`release_candidate_uv_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept`
+(the refused marker shapes too),
+`release_candidate_pnpm_store_prune_keeps_referenced_packages_and_an_install_in_flight`,
+`release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes`
+and `release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes`.
+`delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path` runs
+the development build only. The other four (`npm-cache`,
+`go-build-cache`, `yarn-cache`, `platformio-cache`) stay out of 0.2: the
+release catalog code path refuses each patched into 0.2 as
+`tools/candidate_catalog.py` would
+(`the_release_catalog_refuses_the_four_excluded_cleaners_and_takes_the_five`,
+diskgc-core), because 0.2's release row lists no command action for it
+(`command_actions`, releases.json), and the vector
+`release/npm-cache-cleaner-refused-under-the-0.2-catalog` shows the
+refusal before anything is read. Not exercised for this family: pip's wheel cache (sdist
 builds), uv's non-default link modes, pnpm's `copy` import method, Yarn
 Berry, ccache's remote storage, PlatformIO's registry API cache, Jest with
 watchman, and the residual windows the liveness rows name (a clean landing

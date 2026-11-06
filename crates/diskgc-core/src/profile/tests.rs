@@ -948,6 +948,114 @@ fn user_fs_profiles_need_examples_with_a_match() {
     );
 }
 
+/// TASK-360: `empty_checkout_markers` is a built-in kind fs source's,
+/// on directories under `checkouts: refuse`, each a `find.paths` pattern
+/// ending exactly in `.git` with no marker name before it. A
+/// user profile (an override too) cannot say it, nor a filter; every
+/// other break is a load error naming the field.
+#[test]
+fn empty_checkout_markers_are_a_built_in_directory_sources_only() {
+    let built_in = |extra: &str, kind: &str| {
+        format!(
+            "- name: x\n  category: c\n  description: d\n{kind}  verified_with: v\n  \
+             liveness_class: delegated\n{extra}"
+        )
+    };
+    let fs = "  find: {roots: required, paths: [.cache/x], type: dir}\n  action: delete\n  \
+              examples: {match: [/home/m/.cache/x]}\n";
+    let good = built_in(
+        "  empty_checkout_markers: [\"sdists-v*/.git\", a/.git]\n",
+        fs,
+    );
+    let library = Library::load(&good, &[]).unwrap_or_else(|e| panic!("{e}"));
+    let Body::Source(source) = &library.get("x").expect("x").body else {
+        panic!("a source")
+    };
+    assert_eq!(source.empty_checkout_markers, ["sdists-v*/.git", "a/.git"]);
+    assert_eq!(source.checkouts, Checkouts::Refuse);
+    for (yaml, needle) in [
+        (
+            built_in("  empty_checkout_markers: []\n", fs),
+            "`empty_checkout_markers` is empty",
+        ),
+        (
+            built_in("  empty_checkout_markers: ~\n", fs),
+            "expected a non-null list of places of empty checkout markers",
+        ),
+        (
+            built_in("  empty_checkout_markers: [a/.gitx]\n", fs),
+            "must end in `.git` exactly",
+        ),
+        (
+            built_in("  empty_checkout_markers: [a/.hg, b/.svn]\n", fs),
+            "`a/.hg` must end in `.git` exactly",
+        ),
+        (
+            built_in("  empty_checkout_markers: [\"a/.g*\"]\n", fs),
+            "must end in `.git` exactly",
+        ),
+        (
+            built_in("  empty_checkout_markers: [.git/x/.git]\n", fs),
+            "has a checkout marker's name before its last segment",
+        ),
+        (
+            built_in("  empty_checkout_markers: [/a/.git]\n", fs),
+            "is absolute",
+        ),
+        (
+            built_in("  empty_checkout_markers: [\"**/.git\"]\n", fs),
+            "uses `**`",
+        ),
+        (
+            built_in("  empty_checkout_markers: [a/.git, a/.git]\n", fs),
+            "names `a/.git` twice",
+        ),
+        (
+            built_in(
+                "  checkouts: allow\n  empty_checkout_markers: [a/.git]\n",
+                fs,
+            ),
+            "has no effect with `checkouts: allow`",
+        ),
+        (
+            built_in(
+                "  empty_checkout_markers: [a/.git]\n",
+                "  find: {roots: required, paths: [x], type: any}\n  action: delete\n  \
+                 examples: {match: [/home/m/x]}\n",
+            ),
+            "needs `find.type: dir`",
+        ),
+        (
+            built_in(
+                "  empty_checkout_markers: [a/.git]\n",
+                "  kind: cargo-target\n  find: {roots: required}\n",
+            ),
+            "is for kind fs sources, not kind cargo-target",
+        ),
+    ] {
+        let errors = Library::load(&yaml, &[]).expect_err(&yaml).to_string();
+        assert!(
+            errors.contains(needle),
+            "{errors}\nwanted: {needle}\n{yaml}"
+        );
+    }
+    assert_has(
+        &user_errors(&fs_source(
+            "  examples: {match: [/tmp/x-1]}\n  empty_checkout_markers: [a/.git]\n",
+        )),
+        "`empty_checkout_markers` is for built-in profiles only",
+    );
+    let filter = "- name: f\n  category: c\n  description: d\n  where: {idle_for: 1d}\n  \
+                  empty_checkout_markers: [a/.git]\n";
+    let errors = Library::load(filter, &[])
+        .expect_err("a filter")
+        .to_string();
+    assert!(
+        errors.contains("a filter profile has no `empty_checkout_markers`"),
+        "{errors}"
+    );
+}
+
 /// task-80: `checkouts` is a source's setting. Absent, it is `refuse`
 /// (fail closed); `allow` and `refuse` are the only values, on any kind of
 /// source; a filter has none.

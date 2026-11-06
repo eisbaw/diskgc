@@ -37,6 +37,7 @@ use std::fmt;
 
 use crate::engine::Checkouts;
 use crate::kind::{Kind, PredicateName};
+use crate::release::{CommandAction, CommandActions};
 use crate::select::{Catalog, Entry, Term};
 
 pub use idle::{IdleFor, IdleMeasure, IdleWindow, Idleness, Unknown, age_secs, future_secs};
@@ -124,6 +125,12 @@ pub struct Source {
     /// walk and the path rule of every candidate it finds, whatever its
     /// kind and action (docs/safety.md, No source checkout).
     pub checkouts: Checkouts,
+    /// Built-in kind `fs` sources only (`empty_checkout_markers:`; empty
+    /// when absent): the places below a candidate where an empty regular
+    /// file with a checkout marker's name is tolerated under
+    /// [`Checkouts::Refuse`] (docs/safety.md, No source checkout). Part of
+    /// the definition: `profile_policies` cannot change it.
+    pub empty_checkout_markers: Vec<String>,
     pub examples: Examples,
     /// Built-in profiles only: the tool version it was checked against.
     pub verified_with: Option<String>,
@@ -397,15 +404,24 @@ impl Library {
     /// action or an arbitrary filesystem delete under `cargo-target`.
     ///
     /// The release scope (PRD.md, Scope; 0.2's `nix-store`: TASK-335) is
-    /// checked against the data rather than trusted: a released source is of a kind its catalog
-    /// admits ([`Release::kinds`]) with that kind's own action (`fs` with
-    /// `delete`, `cargo-target` with its lock protocol, `nix-store` with
-    /// its bounded GC; never a command action), and of an admissible class
-    /// (the loader already refuses `releases` on class none). A violation
-    /// is a bug in builtin.yaml, which the tests load.
-    pub fn release_catalog(self, release: &str, catalog: Release) -> Result<Self, String> {
+    /// checked against the data rather than trusted: a released source is
+    /// of a kind its catalog admits ([`Release::kinds`]) with that kind's
+    /// own action (`fs` with `delete`, `cargo-target` with its lock
+    /// protocol, `nix-store` with its bounded GC), or of kind `fs` with a
+    /// command action that the release row lists for it exactly
+    /// (`command_actions`: [`crate::release::CommandAction`]; 0.2's five
+    /// cleaners, TASK-360), and of an admissible class (the loader already
+    /// refuses `releases` on class none). Every listed command action must
+    /// be a catalog member's, with that command. A violation is a bug in
+    /// builtin.yaml or releases.json, which the tests load.
+    pub fn release_catalog(
+        self,
+        release: &str,
+        catalog: Release,
+        command_actions: &CommandActions,
+    ) -> Result<Self, String> {
         let user = self.user_profile_names();
-        let library = self.release_built_ins(release, catalog)?;
+        let library = self.release_built_ins(release, catalog, command_actions)?;
         if !user.is_empty() {
             // Overrides too: a name-only allowlist would admit a command
             // action or an arbitrary delete under `cargo-target`.
@@ -435,7 +451,12 @@ impl Library {
     /// dropped. For a caller that reports the user profiles itself,
     /// together with the other parts the release refuses (TASK-164),
     /// instead of one refusal per run.
-    pub fn release_built_ins(mut self, release: &str, catalog: Release) -> Result<Self, String> {
+    pub fn release_built_ins(
+        mut self,
+        release: &str,
+        catalog: Release,
+        command_actions: &CommandActions,
+    ) -> Result<Self, String> {
         let mut withheld = BTreeSet::new();
         self.profiles.retain(|name, profile| {
             let built_in = profile.origin == Origin::BuiltIn;
@@ -450,31 +471,67 @@ impl Library {
                 continue;
             };
             let kind = source.kind();
+            let listed = command_actions.get(&profile.name);
             let own_action = match kind {
                 Kind::Fs => matches!(source.action, Action::Delete { .. }),
                 Kind::CargoTarget => source.action == Action::CargoLockProtocol,
                 Kind::NixStore => source.action == Action::NixStoreGc,
                 _ => false,
             };
-            let why = if !catalog.kinds().contains(&kind) {
+            // The action first (a command only exactly as the row lists
+            // it), then the class, which every action needs.
+            let action = if !catalog.kinds().contains(&kind) {
                 let kinds: Vec<&str> = catalog.kinds().iter().map(|k| k.name()).collect();
                 Some(format!(
                     "kind {kind} is not one of its kinds ({})",
                     kinds.join(", ")
                 ))
+            } else if kind == Kind::Fs && matches!(source.action, Action::Command { .. }) {
+                match listed {
+                    None => Some(
+                        "its action is a command, and the release row's `command_actions` \
+                         does not list it"
+                            .to_owned(),
+                    ),
+                    Some(listed) if !listed_command(listed, &source.action) => Some(format!(
+                        "its action ({}) is not the command the release row's \
+                         `command_actions` lists for it ({:?}, cwd: {})",
+                        source.action,
+                        listed.command,
+                        listed.cwd.name()
+                    )),
+                    Some(_) => None,
+                }
             } else if !own_action {
                 Some(format!("its action is not kind {kind}'s own"))
-            } else if !source.liveness_class.is_some_and(LivenessClass::admissible) {
-                Some("its liveness class is not admissible".to_owned())
             } else {
                 None
             };
+            let why = action.or_else(|| {
+                (!source.liveness_class.is_some_and(LivenessClass::admissible))
+                    .then(|| "its liveness class is not admissible".to_owned())
+            });
             if let Some(why) = why {
                 return Err(format!(
                     "diskgc {release}'s catalog ({}) built-in `{}` is outside the release scope: \
                      {why}",
                     catalog.name(),
                     profile.name
+                ));
+            }
+        }
+        // The other direction: a listed command action is a member's, so
+        // a label removed or an argv changed in builtin.yaml cannot leave
+        // the row naming what the release does not run.
+        for (name, listed) in command_actions {
+            let held = self.source(name).map(|source| &source.action);
+            if !held.is_some_and(|action| listed_command(listed, action)) {
+                return Err(format!(
+                    "diskgc {release}'s release row lists the command action {:?} (cwd: {}) \
+                     for `{name}`, which its catalog ({}) does not hold with that action",
+                    listed.command,
+                    listed.cwd.name(),
+                    catalog.name()
                 ));
             }
         }
@@ -598,6 +655,12 @@ impl Library {
     pub fn idle_for(&self, term: &Term) -> Result<Option<IdleFor>, String> {
         idle::longest(self, term)
     }
+}
+
+/// Whether `action` is exactly the command action `listed`: the same argv
+/// and the same working directory (as the loader resolved it).
+fn listed_command(listed: &CommandAction, action: &Action) -> bool {
+    matches!(action, Action::Command { argv, cwd } if *argv == listed.command && *cwd == Some(listed.cwd))
 }
 
 impl Catalog for Library {

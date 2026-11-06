@@ -79,6 +79,10 @@ pub struct Judge<'r> {
 pub struct Walked {
     pub record: WalkRecord,
     pub newest_change: Option<Timestamp>,
+    /// Whether the record holds a checkout marker the judged source does
+    /// not tolerate ([`WalkRecord::contains_checkout`] with its `find`'s
+    /// `empty_checkout_markers`): what a union's refusing term refuses.
+    pub contains_checkout: bool,
     /// The build source checked under this judgement, if required.
     pub source_evidence: Option<SourceEvidence>,
 }
@@ -114,7 +118,7 @@ impl Walked {
             newest_change: self.newest_change,
             entries: self.record.entries(),
             bytes: self.bytes(),
-            contains_checkout: self.record.contains_checkout(),
+            contains_checkout: self.contains_checkout,
             source_evidence: self.source_evidence.clone(),
         }
     }
@@ -545,7 +549,11 @@ impl Judge<'_> {
         idle: bool,
         deadline: Option<MonoTime>,
     ) -> Judged<Walked> {
-        let record = match engine::walk(host, candidate, self.rules, deadline) {
+        let rules = Rules {
+            empty_checkout_markers: &self.find.empty_checkout_markers,
+            ..*self.rules
+        };
+        let record = match engine::walk(host, candidate, &rules, deadline) {
             Ok(record) => record,
             Err(WalkStop::Skipped(skip)) => return Ok(Err(skip)),
             Err(WalkStop::DeadlinePassed { path }) => return Err(Stop::DeadlinePassed { path }),
@@ -556,6 +564,7 @@ impl Judge<'_> {
         }
         let walked = Walked {
             newest_change: record.newest_change(),
+            contains_checkout: record.contains_checkout(&self.find.empty_checkout_markers),
             record,
             source_evidence: None,
         };

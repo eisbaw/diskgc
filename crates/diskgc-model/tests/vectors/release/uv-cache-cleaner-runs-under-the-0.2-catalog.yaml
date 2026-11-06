@@ -1,0 +1,34 @@
+# TASK-360: the 0.2 catalog holds uv-cache, and its release row lists
+# its command action exactly (`command_actions`), so a 0.2 build plans the
+# real uv cache (its empty `sdists-v10/.git` tolerated) and runs `uv
+# cache clean` on it from the parent directory; a cache with a git
+# dependency's checkout inside stays `contains_checkout`.
+profile_vector: 1
+catalog: release-0.2
+profile: uv-cache
+roots: [/home/a, /home/b]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/uv: {mode: "0755"}
+    "/home/a/.cache/uv": {"archive-v0": {"payload": {"size": "8K"}}, "sdists-v10": {".git": {}}}
+    "/home/b/.cache/uv": {"git-v0": {"checkouts": {"abc": {"0123": {".git": {"HEAD": {}}}}}}, "sdists-v10": {".git": {}}}
+expect:
+  plan:
+    - {candidate: "/home/a/.cache/uv"}
+    - {candidate: "/home/b/.cache/uv", reason: contains_checkout}
+  reclaim_exit: 1
+  actions: ["/home/a/.cache/uv"]
+  removed: []
+  skipped:
+    - {candidate: "/home/b/.cache/uv", reason: contains_checkout}
+  preserved: ["/home/a/.cache/uv/archive-v0/payload", "/home/b/.cache/uv/git-v0/checkouts/abc/0123/.git/HEAD"]
+  commands:
+    - {"cwd": "/home/a/.cache", "argv": ["/usr/bin/uv", "cache", "clean", "--cache-dir", "/home/a/.cache/uv"]}

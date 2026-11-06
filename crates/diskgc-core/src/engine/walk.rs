@@ -24,7 +24,9 @@
 //! 7. unless [`Rules::checkouts`] is [`Checkouts::Allow`] (a profile
 //!    that says `checkouts: allow`), it does not have a VCS checkout
 //!    marker's name ([`CHECKOUT_MARKERS`], whatever its type, anywhere, the
-//!    candidate itself included) (`contains_checkout`).
+//!    candidate itself included) (`contains_checkout`), unless it is an
+//!    empty regular file at a place its source tolerates
+//!    ([`Rules::empty_checkout_markers`], [`tolerated_marker`]).
 //!
 //! Before those, each directory's complete listing, the candidate's own
 //! first, is judged as a whole: a container storage root
@@ -44,6 +46,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::host::{Base, DirListing, Errno, FileType, Host, HostError, MonoTime, Stat, Timestamp};
+use crate::pattern::Pattern;
 use crate::resolve::{ResolveError, Unsafe};
 
 use super::frames::{OpenFailed, OpenFailure, Stack};
@@ -130,6 +133,40 @@ pub const CHECKOUT_MARKERS: &[&str] = &[".git", ".hg", ".svn"];
 /// full: `.gitignore` is not).
 pub fn is_checkout_marker(name: &OsStr) -> bool {
     CHECKOUT_MARKERS.iter().any(|marker| name == *marker)
+}
+
+/// A checkout marker the walk met in a candidate (an entry whose name is
+/// one of [`CHECKOUT_MARKERS`]) and admitted: under [`Checkouts::Allow`],
+/// or as a [`tolerated_marker`]. What [`super::WalkRecord::contains_checkout`]
+/// judges again for each source of a union.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutMarker {
+    /// Its names below the candidate (empty: the candidate itself).
+    pub below: PathBuf,
+    /// A regular file of size 0, as its `statx` showed it.
+    pub empty_file: bool,
+}
+
+/// Whether a checkout marker at `below` (its path below the candidate) is
+/// tolerated by a source's `empty_checkout_markers` (docs/safety.md, No
+/// source checkout: a tolerated empty marker): an empty regular file
+/// (`empty_file`) whose path matches one of `patterns` exactly, segment by
+/// segment as `find.paths` does. A directory, a symlink, a file with any
+/// content, the candidate itself (`below` empty) or another place is never
+/// tolerated. An empty file is no checkout: Git reads a `.git` file as a
+/// `gitdir:` pointer, and an empty one points nowhere.
+pub fn tolerated_marker(patterns: &[Pattern], below: &Path, empty_file: bool) -> bool {
+    if !empty_file {
+        return false;
+    }
+    let mut names = Vec::new();
+    for component in below.components() {
+        match component {
+            std::path::Component::Normal(name) => names.push(name),
+            _ => return false,
+        }
+    }
+    !names.is_empty() && patterns.iter().any(|p| p.matches_names(&names))
 }
 
 /// Whether a candidate may hold a version-control checkout: a profile's
@@ -249,6 +286,12 @@ pub struct Rules<'a> {
     /// setting. [`Rules::new`] (and so anything built from it without
     /// saying otherwise) refuses.
     pub checkouts: Checkouts,
+    /// Under [`Checkouts::Refuse`], the places below the candidate where a
+    /// checkout marker that is an empty regular file does not refuse it
+    /// ([`tolerated_marker`]): the source's `empty_checkout_markers` (a
+    /// built-in's definition, docs/reference.md, Profiles). Empty from
+    /// [`Rules::new`]: every marker refuses.
+    pub empty_checkout_markers: &'a [Pattern],
 }
 
 impl<'a> Rules<'a> {
@@ -262,6 +305,7 @@ impl<'a> Rules<'a> {
             block_ipc: true,
             max_entries: super::DEFAULT_MAX_ENTRIES,
             checkouts: Checkouts::default(),
+            empty_checkout_markers: &[],
         }
     }
 }
@@ -373,6 +417,7 @@ pub fn walk<H: Host>(
         deadline,
         mount_points,
         listings: Vec::new(),
+        markers: Vec::new(),
         entries: 0,
         bytes: 0,
         newest_change: None,
@@ -417,6 +462,7 @@ pub fn walk<H: Host>(
         origin: candidate.path().to_path_buf(),
         mount_id: candidate.mount_id(),
         listings: walker.listings,
+        markers: walker.markers,
         entries: walker.entries,
         bytes: walker.bytes,
         newest_change: if walker.times_unknown {
@@ -492,6 +538,8 @@ struct Walker<'w, H: Host> {
     mount_points: Vec<PathBuf>,
     /// The record's listings so far (complete for every listed directory).
     listings: Vec<Vec<Entry>>,
+    /// The checkout markers admitted so far ([`CheckoutMarker`]).
+    markers: Vec<CheckoutMarker>,
     entries: usize,
     bytes: u64,
     /// The newest mtime or ctime so far.
@@ -767,16 +815,38 @@ impl<H: Host> Walker<'_, H> {
                     .to_owned(),
             ));
         }
-        if self.rules.checkouts == Checkouts::Refuse && is_checkout_marker(&name) {
-            return Err(skip(
-                Reason::ContainsCheckout,
-                format!(
-                    "a version-control checkout's metadata ({:?}, never followed): it may hold \
-                     uncommitted work, and the profile refuses checkouts (`checkouts: refuse`, \
-                     the default)",
-                    identity.file_type
-                ),
-            ));
+        if is_checkout_marker(&name) {
+            let at = path();
+            let marker = CheckoutMarker {
+                below: at
+                    .strip_prefix(self.candidate.path)
+                    .map_or_else(|_| at.clone(), Path::to_path_buf),
+                empty_file: identity.file_type == FileType::Regular && stat.size == Some(0),
+            };
+            if self.rules.checkouts == Checkouts::Refuse
+                && !tolerated_marker(
+                    self.rules.empty_checkout_markers,
+                    &marker.below,
+                    marker.empty_file,
+                )
+            {
+                return Err(skip(
+                    Reason::ContainsCheckout,
+                    format!(
+                        "a version-control checkout's metadata ({:?}, never followed): it may \
+                         hold uncommitted work, and the profile refuses checkouts (`checkouts: \
+                         refuse`, the default){}",
+                        identity.file_type,
+                        if self.rules.empty_checkout_markers.is_empty() {
+                            ""
+                        } else {
+                            "; only an empty regular file at a place its \
+                             `empty_checkout_markers` names is tolerated"
+                        }
+                    ),
+                ));
+            }
+            self.markers.push(marker);
         }
         let listing = (identity.file_type == FileType::Directory).then(|| {
             self.listings.push(Vec::new());

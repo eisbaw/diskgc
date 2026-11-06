@@ -1,0 +1,31 @@
+# TASK-360: the union path keeps `uv-cache`'s tolerated empty marker. Both
+# terms of the union are `uv-cache` (with different idle filters), so each
+# admitted term judges the walk's recorded `sdists-v10/.git` with uv-cache's
+# own `empty_checkout_markers` and the cleaner runs once. With another
+# source that refuses the marker in the union, refuse wins
+# (union-judges-a-tolerated-checkout-marker-per-term.yaml).
+profile_vector: 1
+select: (profile:uv-cache && filter:idle-1h) || (profile:uv-cache && filter:idle-1d)
+roots: [/home/a]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/uv: {mode: "0755"}
+    "/home/a/.cache/uv": {".": {mtime: 2026-10-10T00:00:00Z}, "archive-v0": {".": {mtime: 2026-10-10T00:00:00Z}, "payload": {"size": "8K", mtime: 2026-10-10T00:00:00Z}}, "sdists-v10": {".": {mtime: 2026-10-10T00:00:00Z}, ".git": {mtime: 2026-10-10T00:00:00Z}}}
+expect:
+  plan:
+    - {candidate: "/home/a/.cache/uv"}
+  reclaim_exit: 1
+  actions: ["/home/a/.cache/uv"]
+  removed: []
+  skipped: []
+  preserved: ["/home/a/.cache/uv/archive-v0/payload", "/home/a/.cache/uv/sdists-v10/.git"]
+  commands:
+    - {"cwd": "/home/a/.cache", "argv": ["/usr/bin/uv", "cache", "clean", "--cache-dir", "/home/a/.cache/uv"]}

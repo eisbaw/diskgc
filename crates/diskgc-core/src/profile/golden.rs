@@ -12,6 +12,7 @@ use super::{
 };
 use crate::engine::Checkouts;
 use crate::fs_kind::{Find, path_matches};
+use crate::release::CommandActions;
 use std::collections::BTreeSet;
 
 const TEMP_PROFILE_NAMES: &[&str] = &[
@@ -1342,7 +1343,13 @@ fn the_release_catalog_is_the_release_data() {
     for label in Release::ALL {
         let catalog = library
             .clone()
-            .release_catalog(label.name(), label)
+            .release_catalog(
+                label.name(),
+                label,
+                &crate::release::release(label.name())
+                    .expect("a row per label")
+                    .command_actions,
+            )
             .unwrap_or_else(|e| panic!("{} catalog: {e}", label.name()));
         let derived: Vec<&str> = catalog.profiles().map(|p| p.name.as_str()).collect();
         let labelled: Vec<&str> = library
@@ -1377,7 +1384,7 @@ fn a_catalog_admits_only_its_own_kinds() {
     let library = Library::load(nix, &[]).unwrap_or_else(|e| panic!("{e}"));
     let error = library
         .clone()
-        .release_catalog("0.1", Release::V0_1)
+        .release_catalog("0.1", Release::V0_1, &CommandActions::new())
         .expect_err("nix-store is outside 0.1's scope");
     assert!(
         error.contains(
@@ -1387,7 +1394,7 @@ fn a_catalog_admits_only_its_own_kinds() {
         "{error}"
     );
     let catalog = library
-        .release_catalog("0.2", Release::V0_2)
+        .release_catalog("0.2", Release::V0_2, &CommandActions::new())
         .unwrap_or_else(|e| panic!("0.2 takes nix-store: {e}"));
     assert_eq!(
         catalog
@@ -1398,88 +1405,207 @@ fn a_catalog_admits_only_its_own_kinds() {
     );
 }
 
-/// A `releases:` label on a source outside the release scope (a command action, a
-/// Docker kind) is refused when the catalog is built, not trusted.
+/// A `releases:` label on a source outside the release scope (a command
+/// action its release row does not list, a Docker kind) is refused when
+/// the catalog is built, not trusted.
 #[test]
 fn the_release_catalog_refuses_an_out_of_scope_source() {
     let yaml = "- name: c\n  category: c\n  description: d\n  find: {roots: required, paths: [.cache/c], type: dir}\n  action: {command: [tool, clean, \"{path}\"]}\n  examples: {match: [/home/m/.cache/c]}\n  verified_with: v\n  liveness_class: delegated\n  releases: [\"0.1\"]\n";
     let library = Library::load(yaml, &[]).unwrap_or_else(|e| panic!("{e}"));
     let error = library
-        .release_catalog("0.1", Release::V0_1)
+        .release_catalog("0.1", Release::V0_1, &CommandActions::new())
         .expect_err("a command action");
     assert!(
         error.contains(
             "diskgc 0.1's catalog (0.1) built-in `c` is outside the release scope: its action \
-             is not kind fs's own"
+             is a command, and the release row's `command_actions` does not list it"
         ),
         "{error}"
     );
     let filters_only = "- name: idle-9d\n  category: c\n  description: d\n  where: {idle_for: 9d}\n  releases: [\"0.1\"]\n";
     let library = Library::load(filters_only, &[]).unwrap_or_else(|e| panic!("{e}"));
     let error = library
-        .release_catalog("0.1", Release::V0_1)
+        .release_catalog("0.1", Release::V0_1, &CommandActions::new())
         .expect_err("no source");
     assert!(error.contains("has no source"), "{error}");
 }
 
-/// TASK-351 (docs/testing.md, Admission evidence): the delegated cache
-/// built-ins cannot go through the candidate-catalog build the way TASK-350's
-/// family did. Each one, given `releases: ["0.2"]` in a copy of the real
-/// builtin.yaml exactly as tools/candidate_catalog.py patches it, is refused
-/// by the release catalog code path: a command action is not an `fs`
-/// source's own action (`Library::release_built_ins`), so a 0.2 package
-/// with it would not start. Admitting one needs a release scope decision
-/// (TASK-276) before any catalog change.
+/// The real builtin.yaml with `edit` applied to built-in `name`'s own
+/// entry (its text from `- name: NAME` to the next top-level entry).
+fn edited_builtin(name: &str, edit: &dyn Fn(&str) -> String) -> String {
+    let yaml_text = super::BUILTIN_YAML;
+    let start = yaml_text
+        .find(&format!("\n- name: {name}\n"))
+        .unwrap_or_else(|| panic!("{name} is a top-level built-in"))
+        + 1;
+    let end = yaml_text[start + 2..]
+        .find("\n- ")
+        .map_or(yaml_text.len(), |at| start + 2 + at + 1);
+    let entry = edit(&yaml_text[start..end]);
+    format!("{}{entry}{}", &yaml_text[..start], &yaml_text[end..])
+}
+
+/// The 0.2 release row's catalog of `yaml` (a built-in library).
+fn catalog_0_2(yaml: &str) -> Result<Library, String> {
+    let row = crate::release::release("0.2").expect("0.2");
+    Library::load(yaml, &[])
+        .unwrap_or_else(|e| panic!("{e}"))
+        .release_catalog("0.2", Release::V0_2, &row.command_actions)
+}
+
+/// TASK-360 (Mark, 2026-11-05: "Only the lock-safe five"): 0.2 runs the
+/// command actions of `pip-cache`, `uv-cache`, `pnpm-store`, `ccache`
+/// and `jest-cache`, each exactly as its 0.2 release row lists it, and
+/// no other. The other four delegated cleaners (TASK-351's evidence:
+/// no lock against their own cleaner, or a named residual) stay out:
+/// given `releases: ["0.2"]` in a copy of the real builtin.yaml, each is
+/// refused by the release catalog code path, so a 0.2 package with it
+/// would not start; so is one of the five whose argv changed, and a row
+/// that lists a cleaner the catalog lost. Of every built-in only uv-cache
+/// tolerates a checkout marker, exactly its empty `sdists-v*/.git`.
 #[test]
-fn the_release_catalog_refuses_every_delegated_cache_built_in() {
-    const DELEGATED: [&str; 9] = [
+fn the_release_catalog_refuses_the_four_excluded_cleaners_and_takes_the_five() {
+    const ADMITTED: [&str; 5] = [
         "pip-cache",
         "uv-cache",
-        "npm-cache",
         "pnpm-store",
-        "yarn-cache",
         "ccache",
-        "go-build-cache",
-        "platformio-cache",
         "jest-cache",
     ];
-    for name in DELEGATED {
-        let yaml_text = super::BUILTIN_YAML;
-        let start = yaml_text
-            .find(&format!("\n- name: {name}\n"))
-            .unwrap_or_else(|| panic!("{name} is a top-level built-in"))
-            + 1;
-        let body = &yaml_text[start..];
-        let end = body[2..]
-            .find("\n- ")
-            .map_or(yaml_text.len(), |at| start + 2 + at + 1);
-        let class_line = "\n  liveness_class: delegated\n";
-        let class = start
-            + body
-                .find(class_line)
-                .unwrap_or_else(|| panic!("{name} is of class delegated"))
-            + class_line.len();
+    const EXCLUDED: [&str; 4] = [
+        "npm-cache",
+        "go-build-cache",
+        "yarn-cache",
+        "platformio-cache",
+    ];
+    let row = crate::release::release("0.2").expect("0.2");
+    let listed: Vec<&str> = row.command_actions.keys().map(String::as_str).collect();
+    let mut admitted = ADMITTED.to_vec();
+    admitted.sort_unstable();
+    assert_eq!(listed, admitted, "the 0.2 row's command actions");
+    let catalog = catalog_0_2(super::BUILTIN_YAML).unwrap_or_else(|e| panic!("{e}"));
+    for name in ADMITTED {
+        let profile = catalog
+            .get(name)
+            .unwrap_or_else(|| panic!("0.2's catalog holds {name}"));
+        let Body::Source(source) = &profile.body else {
+            panic!("{name} is a source")
+        };
+        assert_eq!(
+            source.liveness_class,
+            Some(LivenessClass::Delegated),
+            "{name}"
+        );
+        let want = &row.command_actions[name];
+        assert_eq!(
+            source.action,
+            Action::Command {
+                argv: want.command.clone(),
+                cwd: Some(want.cwd),
+            },
+            "{name} runs exactly its listed command"
+        );
+    }
+    // Mark, 2026-11-05: uv-cache tolerates exactly its own empty
+    // `sdists-v*/.git`; no other built-in tolerates any marker.
+    let library = Library::builtin().expect("built-ins");
+    for profile in library.profiles() {
+        if let Body::Source(source) = &profile.body {
+            let want: &[&str] = if profile.name == "uv-cache" {
+                &["sdists-v*/.git"]
+            } else {
+                &[]
+            };
+            assert_eq!(source.empty_checkout_markers, want, "{}", profile.name);
+            if profile.name == "uv-cache" {
+                assert_eq!(source.checkouts, Checkouts::Refuse);
+            }
+        }
+    }
+    let class_line = "\n  liveness_class: delegated\n";
+    for name in EXCLUDED {
         assert!(
-            class <= end,
-            "{name}'s liveness_class lies in its own entry"
+            catalog.get(name).is_none(),
+            "0.2's catalog leaves out {name}"
         );
-        let yaml = format!(
-            "{}  releases: [\"0.2\"]\n{}",
-            &yaml_text[..class],
-            &yaml_text[class..]
-        );
-        let library = Library::load(&yaml, &[]).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let error = library
-            .release_catalog("0.2", Release::V0_2)
-            .expect_err(name);
+        let yaml = edited_builtin(name, &|entry| {
+            assert!(entry.contains(class_line), "{name} is of class delegated");
+            assert!(!entry.contains("releases:"), "{name} has no release label");
+            entry.replacen(
+                class_line,
+                &format!("{class_line}  releases: [\"0.2\"]\n"),
+                1,
+            )
+        });
+        let error = catalog_0_2(&yaml).expect_err(name);
         assert!(
             error.contains(&format!(
                 "diskgc 0.2's catalog (0.2) built-in `{name}` is outside the release scope: its \
-                 action is not kind fs's own"
+                 action is a command, and the release row's `command_actions` does not list it"
             )),
             "{name}: {error}"
         );
     }
+    // An admitted cleaner whose argv changed under its name.
+    let yaml = edited_builtin("pip-cache", &|entry| {
+        entry.replacen("cache, purge]", "cache, purge, --verbose]", 1)
+    });
+    let error = catalog_0_2(&yaml).expect_err("a changed argv");
+    assert!(
+        error.contains(
+            "built-in `pip-cache` is outside the release scope: its action (command [\"pip\", \
+             \"--cache-dir\", \"{path}\", \"cache\", \"purge\", \"--verbose\"], cwd: candidate) \
+             is not the command the release row's `command_actions` lists for it"
+        ),
+        "{error}"
+    );
+    // Its working directory too.
+    let yaml = edited_builtin("uv-cache", &|entry| {
+        entry.replacen(", cwd: parent}", "}", 1)
+    });
+    let error = catalog_0_2(&yaml).expect_err("a changed cwd");
+    assert!(
+        error.contains("built-in `uv-cache` is outside the release scope: its action"),
+        "{error}"
+    );
+    // The row names a cleaner the catalog no longer holds.
+    let yaml = edited_builtin("jest-cache", &|entry| {
+        entry.replacen("  releases: [\"0.2\"]\n", "", 1)
+    });
+    let error = catalog_0_2(&yaml).expect_err("a label removed");
+    assert!(
+        error.contains(
+            "diskgc 0.2's release row lists the command action [\"jest\", \"--config\", \"{}\", \
+             \"--cacheDirectory\", \"{path}\", \"--clearCache\"] (cwd: parent) for \
+             `jest-cache`, which its catalog (0.2) does not hold with that action"
+        ),
+        "{error}"
+    );
+    // A listed command action still needs an admissible class (the loader
+    // refuses `releases` on class none, so this is set in the library).
+    let mut library = Library::load(super::BUILTIN_YAML, &[]).unwrap_or_else(|e| panic!("{e}"));
+    let Some(Body::Source(source)) = library.profiles.get_mut("pip-cache").map(|p| &mut p.body)
+    else {
+        panic!("pip-cache is a source")
+    };
+    source.liveness_class = Some(LivenessClass::NoContract);
+    let error = library
+        .release_catalog("0.2", Release::V0_2, &row.command_actions)
+        .expect_err("class none");
+    assert!(
+        error.contains(
+            "built-in `pip-cache` is outside the release scope: its liveness class is not \
+             admissible"
+        ),
+        "{error}"
+    );
+    // 0.1 is tagged and runs no command action: its row lists none.
+    assert!(
+        crate::release::release("0.1")
+            .expect("0.1")
+            .command_actions
+            .is_empty()
+    );
 }
 
 /// The sync rule bites each way it can drift, on edits of the real table

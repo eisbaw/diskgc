@@ -442,6 +442,8 @@
 # Each command receives the exact candidate diskgc measured. Keep each
 # program's own cache protocol: deleting a whole store can destroy metadata
 # or package state that its cleaner intentionally preserves.
+# A release runs a command action only when its row in releases.json lists
+# the profile with exactly this command (`command_actions`, TASK-360).
 - name: pip-cache
   category: caches
   description: pip's HTTP and wheel cache below a supplied home root
@@ -452,17 +454,25 @@
     no_match: [/home/mark/.cache/pip/http-v2, /home/mark/.cache/uv]
   verified_with: pip 26.1.2, real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
+  releases: ["0.2"]
 
 - name: uv-cache
   category: python / js
   description: uv's package and archive cache below a supplied home root
   find: {roots: required, paths: [.cache/uv], type: dir}
   action: {command: [uv, cache, clean, --cache-dir, "{path}"], cwd: parent}
+  # Every cache uv creates holds an empty regular file `sdists-vN/.git`
+  # (uv 0.13.0: sdists-v10, container; sdists-v9 on the development host,
+  # TASK-351). Only that file, empty, is tolerated; a `.git` directory or a
+  # non-empty `.git` there, or any marker elsewhere (a git dependency's
+  # checkout), still keeps the cache (Mark, 2026-11-05, TASK-360).
+  empty_checkout_markers: ["sdists-v*/.git"]
   examples:
     match: [/home/mark/.cache/uv]
     no_match: [/home/mark/.cache/uv/archive-v0, /home/mark/.cache/pip]
   verified_with: uv 0.13.0, real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
+  releases: ["0.2"]
 
 - name: go-build-cache
   category: caches
@@ -496,6 +506,7 @@
     no_match: [/home/mark/.local/share/pnpm/store/v10, /home/mark/.local/share/pnpm]
   verified_with: pnpm 12.9.0, real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
+  releases: ["0.2"]
 
 - name: yarn-cache
   category: python / js
@@ -518,6 +529,7 @@
     no_match: [/home/mark/.cache/ccache/tmp, /home/mark/.cache/sccache]
   verified_with: ccache 4.14.1, real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
+  releases: ["0.2"]
 
 - name: jest-cache
   category: python / js
@@ -531,6 +543,7 @@
     no_match: [/tmp/jest, /tmp/subdir/jest_app_hash, /tmp/jest_app_hash/file]
   verified_with: Jest npm package 30.2.0 (pinned lockfile), real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
+  releases: ["0.2"]
 
 - name: west-build-anchored
   category: embedded

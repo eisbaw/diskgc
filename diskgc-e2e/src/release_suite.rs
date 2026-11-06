@@ -18,7 +18,8 @@ use crate::{TESTER, ensure};
 // The release candidate's (0.2) catalog: 0.1's, signed off by TASK-65
 // (Mark, 2026-10-24: Cargo, the two /tmp built-ins with a liveness
 // contract, and the idle filters), plus nix-garbage (Mark, 2026-11-04,
-// TASK-335) and six project-tree sources (Mark, 2026-11-05, TASK-359).
+// TASK-335), six project-tree sources (Mark, 2026-11-05, TASK-359) and the
+// five lock-safe package-manager cleaners (Mark, 2026-11-05, TASK-360).
 const ADMITTED: &[&str] = &[
     "cargo-target",
     "nix-garbage",
@@ -30,6 +31,11 @@ const ADMITTED: &[&str] = &[
     "python-venv",
     "node-compile-cache",
     "node-modules",
+    "pip-cache",
+    "uv-cache",
+    "pnpm-store",
+    "ccache",
+    "jest-cache",
     "idle-1h",
     "idle-1d",
     "idle-2d",
@@ -54,14 +60,11 @@ const EXCLUDED: &[&str] = &[
     "cmake-build-anchored",
     "meson-build-anchored",
     "autotools-build-anchored",
-    "pip-cache",
-    "uv-cache",
+    // TASK-360: the delegated cleaners Mark left out of 0.2 (no lock
+    // against their own cleaner, or a named residual; TASK-351).
     "go-build-cache",
     "npm-cache",
-    "pnpm-store",
     "yarn-cache",
-    "ccache",
-    "jest-cache",
     "west-build-anchored",
     "platformio-cache",
     "brave-browser-cache",
@@ -582,7 +585,8 @@ pub fn candidate_checkout_policy_accepts_only_admitted_builtin(ctx: &Ctx) -> Tes
         ("pytest-tmp", 0),
         ("nix-shell-rc", 0),
         ("npm-cache", 2),
-        ("uv-cache", 2),
+        ("uv-cache", 0),
+        ("yarn-cache", 2),
         ("docker-build-cache", 2),
     ] {
         let file = format!("release-checkouts-{name}.yaml");
@@ -606,27 +610,26 @@ pub fn candidate_checkout_policy_accepts_only_admitted_builtin(ctx: &Ctx) -> Tes
         TESTER,
     )?;
     run(ctx, &["check", "--config", explicit_allow], 0)?;
-    // A 0.1 checkout policy may only narrow: allowing checkouts for
-    // nix-shell-rc, whose built-in refuses them, is refused.
-    ctx.home.write_file(
-        "release-checkouts-nix-shell-rc-allow.yaml",
-        b"version: 1\nprofile_policies:\n  - profile: nix-shell-rc\n    checkouts: allow\n",
-        0o600,
-        TESTER,
-    )?;
-    let widened = run(
-        ctx,
-        &[
-            "check",
-            "--config",
-            "/home/tester/release-checkouts-nix-shell-rc-allow.yaml",
-        ],
-        2,
-    )?;
-    ensure!(
-        widened.stderr.contains("may only narrow") || widened.stdout.contains("may only narrow"),
-        "widening checkout policy was not refused as such: {widened:?}"
-    );
+    // A release checkout policy may only narrow: allowing checkouts for
+    // nix-shell-rc or uv-cache (whose built-in tolerates only its own
+    // empty `sdists-v*/.git`, TASK-360), whose built-ins refuse them, is
+    // refused.
+    for name in ["nix-shell-rc", "uv-cache"] {
+        let file = format!("release-checkouts-{name}-allow.yaml");
+        let yaml =
+            format!("version: 1\nprofile_policies:\n  - profile: {name}\n    checkouts: allow\n");
+        ctx.home.write_file(&file, yaml.as_bytes(), 0o600, TESTER)?;
+        let widened = run(
+            ctx,
+            &["check", "--config", &format!("/home/tester/{file}")],
+            2,
+        )?;
+        ensure!(
+            widened.stderr.contains("may only narrow")
+                || widened.stdout.contains("may only narrow"),
+            "{name}: widening checkout policy was not refused as such: {widened:?}"
+        );
+    }
     // The built-in allows vendored checkout content; an operator may narrow
     // it without replacing its matcher, kind or action.
     let built_in = run(ctx, &["profiles", "show", "cargo-target", "--json"], 0)?;

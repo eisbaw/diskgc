@@ -1,0 +1,32 @@
+# TASK-360 (Mark, 2026-11-05: "Only the lock-safe five"): npm-cache is
+# not in the 0.2 catalog (Mark's decision; its reason is its liveness row
+# in docs/reference.md), so a 0.2 build refuses `--select profile:npm-cache` (exit 2)
+# before anything is read, as a built-in it does not ship, and runs no
+# command. go-build-cache, yarn-cache and platformio-cache are left out
+# the same way (profile::golden).
+profile_vector: 1
+catalog: release-0.2
+profile: npm-cache
+roots: [/home/a]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/npm: {mode: "0755"}
+    "/home/a/.npm": {"_cacache": {"payload": {"size": "8K"}}}
+expect:
+  plan: []
+  dry_run_exit: 2
+  dry_run_errors: [{cause: parse, contains: "`npm-cache` is a built-in that diskgc 0.2 does not ship"}]
+  reclaim_exit: 2
+  errors: [{cause: parse, contains: "`npm-cache` is a built-in that diskgc 0.2 does not ship"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/home/a/.npm/_cacache/payload]

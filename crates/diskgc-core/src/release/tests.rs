@@ -26,6 +26,10 @@ fn the_0_1_row_is_what_v0_1_0_shipped() {
     );
     assert_eq!(row.commands_phrase(), "ensure, check and profiles");
     assert_eq!(row.catalog, Some(Release::V0_1));
+    assert!(
+        row.command_actions.is_empty(),
+        "0.1.0 ran no command action"
+    );
     assert_eq!(
         row.ships,
         [
@@ -80,12 +84,13 @@ fn the_0_1_row_is_what_v0_1_0_shipped() {
     );
 }
 
-/// 0.2's catalog is 0.1's plus `nix-garbage` (Mark, 2026-11-04, TASK-335)
-/// and TASK-350's six project-tree sources (Mark, 2026-11-05, TASK-359),
-/// through the same narrowing the binary uses; 0.1's stays without them.
+/// 0.2's catalog is 0.1's plus `nix-garbage` (Mark, 2026-11-04, TASK-335),
+/// TASK-350's six project-tree sources (Mark, 2026-11-05, TASK-359) and
+/// five delegated cleaners (Mark, 2026-11-05, TASK-360), through the same
+/// narrowing the binary uses; 0.1's stays without them.
 #[test]
-fn the_0_2_catalog_is_0_1_plus_nix_garbage_and_the_project_tree_caches() {
-    const ADDED: [&str; 7] = [
+fn the_0_2_catalog_is_0_1_plus_nix_garbage_the_project_tree_caches_and_five_cleaners() {
+    const ADDED: [&str; 12] = [
         "nix-garbage",
         "pytest-cache",
         "python-pycache",
@@ -93,6 +98,11 @@ fn the_0_2_catalog_is_0_1_plus_nix_garbage_and_the_project_tree_caches() {
         "python-venv",
         "node-compile-cache",
         "node-modules",
+        "pip-cache",
+        "uv-cache",
+        "pnpm-store",
+        "ccache",
+        "jest-cache",
     ];
     let names = |release: &str| -> Vec<String> {
         let library = Catalog::from(super::release(release).expect(release))
@@ -110,6 +120,19 @@ fn the_0_2_catalog_is_0_1_plus_nix_garbage_and_the_project_tree_caches() {
     want.sort();
     assert_eq!(names("0.2"), want);
     assert_eq!(release("0.2").expect("0.2").catalog, Some(Release::V0_2));
+}
+
+/// Every release row builds its catalog (TASK-360): the release-catalog
+/// check runs against the row's own `command_actions`, so a row that
+/// reuses another's label must list the same command actions, and a
+/// drift fails here, not when that binary starts.
+#[test]
+fn every_release_row_builds_its_catalog() {
+    for name in descriptor().expect("descriptor").releases.keys() {
+        Catalog::from(release(name).expect(name))
+            .library(Library::builtin().expect("built-ins"))
+            .unwrap_or_else(|e| panic!("release {name}: {e}"));
+    }
 }
 
 /// Every release-catalog build has a row: the version in Cargo.toml picks
@@ -283,6 +306,27 @@ fn each_rule_refuses_its_edit() {
         (
             refused(|v| v["watch_units"] = json!(["share/doc/diskgc/RELEASE-NOTES.md"])),
             "watch unit `share/doc/diskgc/RELEASE-NOTES.md` is not a copied file",
+        ),
+        (
+            refused(|v| {
+                v["development"]["command_actions"] =
+                    json!({"pip-cache": {"command": ["pip"], "cwd": "candidate"}})
+            }),
+            "development: no `catalog` (it has every built-in), no `command_actions`",
+        ),
+        (
+            refused(|v| {
+                v["releases"]["0.2"]["command_actions"]["uv-cache"]["command"] = json!([" "])
+            }),
+            "0.2: command action of `uv-cache` has no program",
+        ),
+        (
+            refused(|v| v["releases"]["0.2"]["command_actions"]["uv-cache"]["cwd"] = json!("home")),
+            "unknown variant `home`, expected `candidate` or `parent`",
+        ),
+        (
+            refused(|v| v["releases"]["0.2"]["command_actions"]["uv-cache"]["env"] = json!([])),
+            "unknown field `env`",
         ),
     ];
     for (error, want) in cases {

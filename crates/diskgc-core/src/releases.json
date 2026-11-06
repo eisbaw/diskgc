@@ -1,5 +1,5 @@
 {
-  "about": "The release descriptor: per build, the commands it runs, the built-in catalog it narrows to, and the files its package ships. The one home of those facts; crates/diskgc-core/src/release.rs says who reads it and checks it.",
+  "about": "The release descriptor: per build, the commands it runs, the built-in catalog it narrows to, the command actions its built-ins may run, and the files its package ships. The one home of those facts; crates/diskgc-core/src/release.rs says who reads it and checks it.",
   "files": {
     "lib/tmpfiles.d/diskgc.conf": { "copy": "packaging/diskgc.conf" },
     "share/doc/diskgc/examples/example.yaml": { "copy": "docs/example.yaml" },
@@ -44,6 +44,13 @@
       "tag": null,
       "commands": ["ensure", "watch --tally-only", "check", "profiles"],
       "catalog": "0.2",
+      "command_actions": {
+        "ccache": { "command": ["env", "CCACHE_DIR={path}", "ccache", "--clear"], "cwd": "candidate" },
+        "jest-cache": { "command": ["jest", "--config", "{}", "--cacheDirectory", "{path}", "--clearCache"], "cwd": "parent" },
+        "pip-cache": { "command": ["pip", "--cache-dir", "{path}", "cache", "purge"], "cwd": "candidate" },
+        "pnpm-store": { "command": ["pnpm", "store", "prune", "--store-dir", "{path}"], "cwd": "candidate" },
+        "uv-cache": { "command": ["uv", "cache", "clean", "--cache-dir", "{path}"], "cwd": "parent" }
+      },
       "ships": [
         "lib/tmpfiles.d/diskgc.conf",
         "share/doc/diskgc/examples/example.yaml",

@@ -399,7 +399,7 @@ fn protocol<H: Delete>(
         if alternative.checkouts == Checkouts::Refuse {
             let refusal = checkout_metadata_below(Checkouts::Refuse, &found.root, &found.path)
                 .or_else(|| {
-                    walked.record.contains_checkout().then(|| {
+                    walked.contains_checkout.then(|| {
                         Skip::new(
                             Reason::ContainsCheckout,
                             found.path.clone(),

@@ -19,6 +19,7 @@ use diskgc_core::engine::{
     is_cargo_unit_lock_path, walk,
 };
 use diskgc_core::host::{Errno, FileType, Host, MonoTime};
+use diskgc_core::pattern::Pattern;
 use diskgc_core::resolve::Resolved;
 use diskgc_model::host::UPTIME_AT_START;
 use diskgc_model::spec::Op;
@@ -407,6 +408,110 @@ fn checkouts_are_refused_unless_the_rules_allow_them() {
     );
     assert_eq!(deleted(&host, &target, &record).end, End::Complete);
     assert!(!exists(&host, "/tmp/c"));
+}
+
+/// TASK-360 (Mark, 2026-11-05): a source's `empty_checkout_markers`
+/// tolerate, under `checkouts: refuse`, exactly an empty regular file with
+/// a marker's name at a matching place below the candidate (uv's
+/// `sdists-v10/.git`). Everything else with a marker's name still refuses
+/// it at that entry: a `.git` directory or symlink there, a `.git` file
+/// with content there, an empty `.git` elsewhere (directly in the
+/// candidate, deeper, in another bucket), another marker name at the
+/// place, a real checkout inside, and the candidate itself. The record
+/// keeps the tolerated marker, so a union judges it again per source.
+#[test]
+fn only_an_empty_marker_file_at_a_tolerated_place_passes_the_checkout_guard() {
+    let patterns = [Pattern::compile("sdists-v*/.git", ME)];
+    let tolerant = Rules {
+        empty_checkout_markers: &patterns,
+        ..rules()
+    };
+    let bucket = "  /tmp/c/archive-v0/x: {size: 4K}\n";
+    let uv = format!("  /tmp/c/sdists-v10/.git: {{}}\n{bucket}");
+    let host = model(&uv);
+    let target = Target::new(&host, "/tmp/c");
+    assert_eq!(
+        skipped(&host, &target, &rules()).reason,
+        Reason::ContainsCheckout,
+        "without the exception the empty marker refuses"
+    );
+    let record = walked(&host, &target, &tolerant);
+    assert!(record.entry_at(Path::new("sdists-v10/.git")).is_some());
+    assert!(!record.contains_checkout(&patterns));
+    assert!(record.contains_checkout(&[]), "a source without it refuses");
+    // Every case is judged before anything is asserted, so a broken rule
+    // names each case it lets through, not only the first.
+    let mut let_through = Vec::new();
+    let mut judge = |tree: String, at: &str| {
+        let host = model(&tree);
+        let target = Target::new(&host, "/tmp/c");
+        match walk(&host, &target.candidate(), &tolerant, None) {
+            Err(WalkStop::Skipped(skip))
+                if skip.reason == Reason::ContainsCheckout
+                    && skip.path == Path::new(at)
+                    && skip.detail.contains("empty_checkout_markers") => {}
+            other => let_through.push(format!("{at}: {other:?}")),
+        }
+        assert!(
+            unlinked(&host).is_empty(),
+            "{at}: a walk unlinked something"
+        );
+    };
+    // At the tolerated place, but not an empty regular file.
+    for (tree, at) in [
+        (
+            "  /tmp/c/sdists-v10/.git: {.: {}}\n",
+            "/tmp/c/sdists-v10/.git",
+        ),
+        (
+            "  /tmp/c/sdists-v10/.git: {HEAD: {}}\n",
+            "/tmp/c/sdists-v10/.git",
+        ),
+        (
+            "  /tmp/c/sdists-v10/.git: {size: 1}\n",
+            "/tmp/c/sdists-v10/.git",
+        ),
+        (
+            "  /tmp/c/sdists-v10/.git: {symlink: /tmp/keep}\n",
+            "/tmp/c/sdists-v10/.git",
+        ),
+    ] {
+        judge(format!("{bucket}{tree}"), at);
+    }
+    // Beside uv's own tolerated marker, a marker anywhere else.
+    for (tree, at) in [
+        ("  /tmp/c/.git: {}\n", "/tmp/c/.git"),
+        (
+            "  /tmp/c/sdists-v10/pkg/.git: {}\n",
+            "/tmp/c/sdists-v10/pkg/.git",
+        ),
+        ("  /tmp/c/archive-v0/.git: {}\n", "/tmp/c/archive-v0/.git"),
+        ("  /tmp/c/sdists-v10/.hg: {}\n", "/tmp/c/sdists-v10/.hg"),
+        (
+            "  /tmp/c/git-v0/checkouts/abc/.git: {HEAD: {}}\n",
+            "/tmp/c/git-v0/checkouts/abc/.git",
+        ),
+    ] {
+        judge(format!("{uv}{tree}"), at);
+    }
+    assert!(
+        let_through.is_empty(),
+        "not refused at the marker:\n{}",
+        let_through.join("\n")
+    );
+    // The candidate itself, named as a marker, is never tolerated.
+    let host = model("  /tmp/r/.git: {}\n");
+    let marker = Target::new(&host, "/tmp/r/.git");
+    let anywhere = [Pattern::compile("*", ME), Pattern::compile(".git", ME)];
+    let skip = skipped(
+        &host,
+        &marker,
+        &Rules {
+            empty_checkout_markers: &anywhere,
+            ..rules()
+        },
+    );
+    assert_eq!(skip.reason, Reason::ContainsCheckout, "{skip}");
 }
 
 /// An unknown `.cargo-*lock*` name refuses the candidate by its name

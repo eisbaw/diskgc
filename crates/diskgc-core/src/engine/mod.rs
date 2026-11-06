@@ -57,10 +57,10 @@ use crate::resolve::Resolved;
 pub use delete::{DeleteOptions, Deletion, End, delete_unchecked};
 pub(crate) use walk::host_failure;
 pub use walk::{
-    CACHEDIR_TAG, CARGO_LOCK_NAMES, CARGO_UNIT_LOCK_NAME, CHECKOUT_MARKERS, Checkouts, KEEP_MARKER,
-    PRIVATE_TMP_PREFIX, Rules, WalkStop, checkout_metadata_below, checkout_metadata_down_to,
-    is_cargo_lock_name, is_cargo_unit_lock_path, is_checkout_marker, is_private_tmp,
-    path_in_private_tmp, walk,
+    CACHEDIR_TAG, CARGO_LOCK_NAMES, CARGO_UNIT_LOCK_NAME, CHECKOUT_MARKERS, CheckoutMarker,
+    Checkouts, KEEP_MARKER, PRIVATE_TMP_PREFIX, Rules, WalkStop, checkout_metadata_below,
+    checkout_metadata_down_to, is_cargo_lock_name, is_cargo_unit_lock_path, is_checkout_marker,
+    is_private_tmp, path_in_private_tmp, tolerated_marker, walk,
 };
 
 /// Frames below the candidate that hold an fd at the same time (see the
@@ -445,6 +445,8 @@ pub struct WalkRecord {
     /// Every directory's entries, sorted by name; `listings[0]` is the
     /// candidate's when it is a directory.
     listings: Vec<Vec<Entry>>,
+    /// Every checkout marker the walk admitted, in the order met.
+    markers: Vec<CheckoutMarker>,
     entries: usize,
     bytes: u64,
     newest_change: Option<Timestamp>,
@@ -490,12 +492,15 @@ impl WalkRecord {
         std::iter::once(&self.root).chain(self.listings.iter().flatten())
     }
 
-    /// Whether the checked tree contains any version-control checkout
-    /// marker. Union selection uses the same names as the walk's guard when
-    /// it combines checkout policies after term predicates are known.
-    pub fn contains_checkout(&self) -> bool {
-        self.all_entries()
-            .any(|entry| is_checkout_marker(&entry.name))
+    /// Whether the checked tree holds a version-control checkout marker
+    /// that a source with these `empty_checkout_markers` does not tolerate
+    /// ([`tolerated_marker`]): the walk's own refusal, judged again per
+    /// source when a union walked with checkouts allowed and combines the
+    /// policies of the terms that admitted the candidate.
+    pub fn contains_checkout(&self, empty_checkout_markers: &[crate::pattern::Pattern]) -> bool {
+        self.markers
+            .iter()
+            .any(|m| !tolerated_marker(empty_checkout_markers, &m.below, m.empty_file))
     }
 
     /// (device, inode) of every entry, the candidate first: what the in-use
@@ -661,11 +666,31 @@ impl WalkRecord {
         }
         self.entries -= entries;
         self.bytes = self.bytes.saturating_sub(bytes);
+        // Markers move with their part, re-based to its root. A source's
+        // `empty_checkout_markers` are relative to its candidate, so a part
+        // must not be judged with them; only the Cargo kind splits, and it
+        // tolerates no marker (the loader refuses the field there).
+        let (inside, outside): (Vec<CheckoutMarker>, Vec<CheckoutMarker>) =
+            std::mem::take(&mut self.markers)
+                .into_iter()
+                .partition(|m| m.below.starts_with(rel));
+        self.markers = outside;
+        let markers = inside
+            .into_iter()
+            .map(|m| CheckoutMarker {
+                below: m
+                    .below
+                    .strip_prefix(rel)
+                    .map_or(m.below.clone(), Path::to_path_buf),
+                empty_file: m.empty_file,
+            })
+            .collect();
         Some(WalkRecord {
             root,
             origin: self.origin.join(rel),
             mount_id: self.mount_id,
             listings,
+            markers,
             entries,
             bytes,
             newest_change: self.newest_change,

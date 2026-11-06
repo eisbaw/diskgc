@@ -224,6 +224,10 @@ fn profile(spec: &ProfileSpec, origin: Origin) -> Result<Profile, Vec<String>> {
                 ("verified_with", spec.verified_with.is_some()),
                 ("liveness_class", spec.liveness_class.is_some()),
                 ("releases", !spec.releases.is_empty()),
+                (
+                    "empty_checkout_markers",
+                    spec.empty_checkout_markers.is_some(),
+                ),
             ] {
                 if present {
                     problems.push(format!("`{field}` is for built-in profiles only"));
@@ -306,6 +310,11 @@ fn filter(spec: &ProfileSpec, where_: Where, problems: &mut Vec<String>) -> Opti
         (
             "checkouts",
             spec.checkouts.is_some(),
+            "whether candidates may hold a checkout is the source's setting",
+        ),
+        (
+            "empty_checkout_markers",
+            spec.empty_checkout_markers.is_some(),
             "whether candidates may hold a checkout is the source's setting",
         ),
         (
@@ -513,6 +522,7 @@ fn source(
     if examples.root.is_some() && !matches!(roots.as_ref(), Some(Roots::Required)) {
         problems.push("`examples.root` is only for `find.roots: required`".to_owned());
     }
+    let empty_checkout_markers = empty_checkout_markers(spec, kind, problems);
     Some(Source {
         roots: roots?,
         finds,
@@ -521,10 +531,80 @@ fn source(
         action,
         // Absent: refused (fail closed).
         checkouts: spec.checkouts.map_or_else(Checkouts::default, |c| c.0),
+        empty_checkout_markers,
         examples,
         verified_with: spec.verified_with.clone(),
         liveness_class: spec.liveness_class,
     })
+}
+
+/// `empty_checkout_markers` (docs/reference.md, Profiles; docs/safety.md,
+/// No source checkout): only on a source of kind `fs` that finds
+/// directories and refuses checkouts (with `allow` it would say nothing),
+/// a non-empty list without duplicates, each in `find.paths` syntax with
+/// a last segment exactly `.git` (an empty `.git` file is no checkout; no
+/// built-in needs `.hg` or `.svn`, so they stay refused) and no marker
+/// name before it (the walk refuses a marker directory on the way
+/// whatever this says). That it is on a built-in is checked with the
+/// other built-in-only fields.
+fn empty_checkout_markers(
+    spec: &ProfileSpec,
+    kind: Kind,
+    problems: &mut Vec<String>,
+) -> Vec<String> {
+    let Some(markers) = &spec.empty_checkout_markers else {
+        return Vec::new();
+    };
+    let field = "`empty_checkout_markers`";
+    if kind != Kind::Fs {
+        problems.push(format!("{field} is for kind fs sources, not kind {kind}"));
+    }
+    if spec
+        .find
+        .as_ref()
+        .is_some_and(|find| find.r#type.is_some_and(|t| t != EntryType::Dir))
+    {
+        problems.push(format!(
+            "{field} needs `find.type: dir`: only a directory candidate holds entries"
+        ));
+    }
+    if spec.checkouts.is_some_and(|c| c.0 == Checkouts::Allow) {
+        problems.push(format!(
+            "{field} has no effect with `checkouts: allow`: remove one of them"
+        ));
+    }
+    if markers.is_empty() {
+        problems.push(format!("{field} is empty: leave the key out instead"));
+    }
+    let mut seen = Vec::new();
+    for marker in markers {
+        if seen.contains(&marker) {
+            problems.push(format!("{field} names `{marker}` twice"));
+        }
+        seen.push(marker);
+        if let Err(problem) = pattern(marker) {
+            problems.push(format!("{field}: {problem}"));
+            continue;
+        }
+        let segments: Vec<&str> = marker.split('/').collect();
+        let (last, before) = segments.split_last().expect("split yields one segment");
+        if *last != ".git" {
+            problems.push(format!(
+                "{field}: `{marker}` must end in `.git` exactly (an empty `.git` file is \
+                 not a checkout; `.hg` and `.svn` are not tolerated)"
+            ));
+        }
+        if before
+            .iter()
+            .any(|s| crate::engine::CHECKOUT_MARKERS.contains(s))
+        {
+            problems.push(format!(
+                "{field}: `{marker}` has a checkout marker's name before its last segment, \
+                 which the walk refuses whatever this says"
+            ));
+        }
+    }
+    markers.clone()
 }
 
 /// The load-time rules of `where.liveness_contract` on a kind `fs` source

@@ -54,6 +54,13 @@ pub struct ProfileSpec {
     /// default.
     #[serde(default, deserialize_with = "present_checkouts")]
     pub checkouts: Option<CheckoutsSpec>,
+    /// Built-in kind `fs` sources only, optional: places below a
+    /// candidate (`find.paths` syntax, the last segment exactly `.git`)
+    /// where an empty regular file of that name does not
+    /// refuse it under `checkouts: refuse` (docs/safety.md, No source
+    /// checkout). A present null is a parse error.
+    #[serde(default, deserialize_with = "present_empty_markers")]
+    pub empty_checkout_markers: Option<Vec<String>>,
     #[serde(default)]
     pub verified_with: Option<String>,
     /// Built-in sources only, required: the source's liveness contract
@@ -481,13 +488,30 @@ fn present_non_null_source_anchor<'de, D: Deserializer<'de>>(
 fn present_exclude<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Vec<String>>, D::Error> {
-    struct ExcludeList;
+    present_list(deserializer, "a non-null list of excluded paths")
+}
 
-    impl<'de> Visitor<'de> for ExcludeList {
+fn present_empty_markers<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error> {
+    present_list(
+        deserializer,
+        "a non-null list of places of empty checkout markers",
+    )
+}
+
+/// A list of strings that, when the key is present, is never null.
+fn present_list<'de, D: Deserializer<'de>>(
+    deserializer: D,
+    expecting: &'static str,
+) -> Result<Option<Vec<String>>, D::Error> {
+    struct List(&'static str);
+
+    impl<'de> Visitor<'de> for List {
         type Value = Vec<String>;
 
         fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("a non-null list of excluded paths")
+            f.write_str(self.0)
         }
 
         fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
@@ -499,7 +523,7 @@ fn present_exclude<'de, D: Deserializer<'de>>(
         }
     }
 
-    deserializer.deserialize_any(ExcludeList).map(Some)
+    deserializer.deserialize_any(List(expecting)).map(Some)
 }
 
 // ---- Hand-written deserialisers: a value of one of two shapes, with the

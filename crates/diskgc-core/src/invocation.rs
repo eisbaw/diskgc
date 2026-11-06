@@ -20,6 +20,7 @@ use crate::engine::Checkouts;
 use crate::executor::{self, CompiledSelection, Request, SelectionFailure, Tier};
 use crate::host::{Delete, Host, MountEntry};
 use crate::profile::{Body, Finds, Library, Release, Roots, Source};
+use crate::release::CommandActions;
 use crate::report::{ErrorCause, Report, Status};
 use crate::resolve::{MountScreenError, ResolveError, Want, resolve_in};
 use crate::select;
@@ -35,18 +36,25 @@ use crate::units::Size;
 pub enum Catalog {
     Development,
     /// `release` (`0.2`), what refusals name; `builtins`, the label its
-    /// catalog is narrowed to ([`Library::release_catalog`]).
+    /// catalog is narrowed to ([`Library::release_catalog`]);
+    /// `command_actions`, the only command actions its built-ins may have
+    /// (its row's, [`crate::release::CommandAction`]).
     Release {
         release: &'static str,
         builtins: Release,
+        command_actions: &'static CommandActions,
     },
 }
 
 impl From<crate::release::Entry> for Catalog {
     fn from(entry: crate::release::Entry) -> Self {
-        match (entry.release, entry.catalog) {
+        match (entry.release, entry.build.catalog) {
             (None, _) => Self::Development,
-            (Some(release), Some(builtins)) => Self::Release { release, builtins },
+            (Some(release), Some(builtins)) => Self::Release {
+                release,
+                builtins,
+                command_actions: &entry.build.command_actions,
+            },
             // Never the development catalog for a release: a release build
             // may be the ungated one (TASK-195). release::Descriptor::parse
             // refuses such a row, so this is a bug, and it fails closed.
@@ -73,7 +81,8 @@ impl Catalog {
             Self::Release {
                 release,
                 builtins: label,
-            } => builtins.release_catalog(release, label),
+                command_actions,
+            } => builtins.release_catalog(release, label, command_actions),
         }
     }
 
@@ -86,8 +95,14 @@ impl Catalog {
             ConfigUse::ProfileTest => config::parse_for_profile_test(path, bytes),
         }
         .map_err(|e| e.to_string())?;
-        if let Self::Release { release, builtins } = self {
-            enforce_release_config(&mut config, release, builtins).map_err(|e| e.to_string())?;
+        if let Self::Release {
+            release,
+            builtins,
+            command_actions,
+        } = self
+        {
+            enforce_release_config(&mut config, release, builtins, command_actions)
+                .map_err(|e| e.to_string())?;
         }
         Ok(config)
     }
@@ -113,6 +128,7 @@ fn enforce_release_config(
     config: &mut Config,
     release: &'static str,
     catalog: Release,
+    command_actions: &CommandActions,
 ) -> Result<(), ConfigError> {
     let builtins =
         Library::builtin().map_err(|e| ConfigError::whole_file(&config.path, e.to_string()))?;
@@ -127,7 +143,7 @@ fn enforce_release_config(
     } else {
         builtins.clone()
     }
-    .release_built_ins(release, catalog)
+    .release_built_ins(release, catalog, command_actions)
     .map_err(|why| ConfigError::whole_file(&config.path, why))?;
     let mut refused = Problems::default();
     for name in &user {

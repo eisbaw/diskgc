@@ -33,7 +33,6 @@ mod command;
 mod discover;
 mod judge;
 mod liveness;
-mod pattern;
 mod plan;
 pub(crate) mod project;
 mod reclaim;
@@ -62,6 +61,7 @@ pub use reclaim::{
 };
 pub use source_anchor::SourceEvidence;
 
+use crate::pattern;
 use crate::profile::{EntryType, Finds, Source, Where};
 
 pub use crate::engine::{PRIVATE_TMP_PREFIX, is_private_tmp, path_in_private_tmp};
@@ -105,6 +105,12 @@ pub struct Find {
     /// tier; empty: only the root a candidate was found under). The
     /// toolchain guard walks every one for pin files.
     pub bound_roots: Vec<std::path::PathBuf>,
+    /// The built-in's `empty_checkout_markers`: places below a candidate
+    /// where an empty regular file with a checkout marker's name does not
+    /// refuse it (docs/safety.md, No source checkout; the walk's
+    /// [`crate::engine::Rules::empty_checkout_markers`]). Empty for every
+    /// other source.
+    pub empty_checkout_markers: Vec<Pattern>,
 }
 
 /// One filesystem entry predicate in a selection term. `has` means a
@@ -206,13 +212,14 @@ impl Find {
                 patterns,
                 exclude,
                 entry_type,
-            } => Some(Self::with_excludes(
-                patterns,
-                exclude,
-                *entry_type,
-                &source.where_,
-                uid,
-            )),
+            } => Some(Self {
+                empty_checkout_markers: source
+                    .empty_checkout_markers
+                    .iter()
+                    .map(|p| Pattern::compile(p, uid))
+                    .collect(),
+                ..Self::with_excludes(patterns, exclude, *entry_type, &source.where_, uid)
+            }),
             Finds::CargoTargets => None,
             Finds::DockerBuildCache
             | Finds::DockerImages
@@ -259,6 +266,7 @@ impl Find {
             protect_cursor_extensions: where_.protect_cursor_extensions.clone(),
             protect_toolchains: where_.protect_toolchains,
             bound_roots: Vec::new(),
+            empty_checkout_markers: Vec::new(),
         }
     }
 }

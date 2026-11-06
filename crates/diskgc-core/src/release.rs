@@ -1,6 +1,7 @@
 //! The release descriptor, `releases.json`: for the development build and
 //! for each release, the commands it runs, the built-in catalog it narrows
-//! to, and the files its package ships. Data with one home, read by:
+//! to, the command actions its built-ins may run, and the files its package
+//! ships. Data with one home, read by:
 //!
 //! - the binary (`crates/diskgc`): which commands it runs, what its help
 //!   shows and what its refusals say ([`Entry`]), and through
@@ -20,6 +21,15 @@
 //! narrows to (`catalog`), so a release whose catalog is not decided yet
 //! reuses the previous one's.
 //!
+//! A release runs a built-in's command action (an external cleaner, trusted
+//! code: docs/safety.md, Command actions) only when its row lists that
+//! built-in with exactly that command (`command_actions`, [`CommandAction`]);
+//! the catalog is refused otherwise ([`crate::profile::Library::release_catalog`]),
+//! and so is a listed one its catalog does not hold with that command. So
+//! admitting a cleaner to a release is two reviewed edits, its label in
+//! builtin.yaml and its exact argv here, and changing an admitted cleaner's
+//! argv fails until the row says the same (0.2: TASK-360).
+//!
 //! The rules the data must keep are checked when it is read
 //! ([`Descriptor::parse`]); the embedded file is read by every test that
 //! asks for a build, so a broken row fails `just check`.
@@ -29,7 +39,7 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
-use crate::profile::Release;
+use crate::profile::{Cwd, Release};
 
 /// The descriptor as compiled in.
 const EMBEDDED: &str = include_str!("releases.json");
@@ -109,6 +119,19 @@ impl FileSource {
     }
 }
 
+/// A command action a release's built-ins may run: one built-in's exact
+/// argv and working directory, as builtin.yaml resolves them (`cwd`
+/// spelled out). Compared with the built-in's loaded action, never trusted.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandAction {
+    pub command: Vec<String>,
+    pub cwd: Cwd,
+}
+
+/// The command actions of a release row, by built-in name.
+pub type CommandActions = BTreeMap<String, CommandAction>;
+
 /// One build's row.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,6 +144,11 @@ pub struct Build {
     /// The builtin.yaml `releases:` label its catalog is narrowed to;
     /// `null`: every built-in and user profiles (development only).
     pub catalog: Option<Release>,
+    /// Releases only: the built-ins whose command action this release
+    /// runs, each with exactly that command (module docs). Absent: none,
+    /// as in 0.1.
+    #[serde(default)]
+    pub command_actions: CommandActions,
     /// Package paths, each a key of [`Descriptor::files`].
     pub ships: Vec<String>,
 }
@@ -214,9 +242,14 @@ impl Descriptor {
             problems.extend(build_problems(name, build, self));
             shipped.extend(build.ships.iter().map(String::as_str));
             if development {
-                if build.catalog.is_some() || build.tag.is_some() {
+                if build.catalog.is_some()
+                    || build.tag.is_some()
+                    || !build.command_actions.is_empty()
+                {
                     problems.push(
-                        "development: no `catalog` (it has every built-in) and no `tag`".into(),
+                        "development: no `catalog` (it has every built-in), no `command_actions` \
+                         (it runs every one) and no `tag`"
+                            .into(),
                     );
                 }
                 // flake.nix installs only copies into the development
@@ -269,6 +302,17 @@ fn build_problems(name: &str, build: &Build, descriptor: &Descriptor) -> Vec<Str
     for command in &build.commands {
         if !seen.insert(command) {
             problems.push(format!("{name}: `{}` twice", command.words()));
+        }
+    }
+    for (profile, action) in &build.command_actions {
+        if action
+            .command
+            .first()
+            .is_none_or(|program| program.trim().is_empty())
+        {
+            problems.push(format!(
+                "{name}: command action of `{profile}` has no program"
+            ));
         }
     }
     let mut seen = BTreeSet::new();

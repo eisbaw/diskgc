@@ -294,7 +294,7 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
         "needs the pinned pip and CPython in the Nix image",
     ),
     (
-        "uv_cache_real_uv_cache_is_a_checkout_until_allowed_and_an_install_in_flight_is_kept",
+        "uv_cache_real_uv_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept",
         "needs the pinned uv and CPython in the Nix image",
     ),
     (
@@ -323,6 +323,27 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
     ),
     (
         "jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes",
+        "needs the pinned Jest in the Nix image",
+    ),
+    // TASK-360: the five admitted cleaners through the release candidate.
+    (
+        "release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes",
+        "needs the pinned pip and CPython in the Nix image",
+    ),
+    (
+        "release_candidate_uv_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+        "needs the pinned uv and CPython in the Nix image",
+    ),
+    (
+        "release_candidate_pnpm_store_prune_keeps_referenced_packages_and_an_install_in_flight",
+        "needs the pinned pnpm, npm and Node in the Nix image",
+    ),
+    (
+        "release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes",
+        "needs the pinned ccache and C compiler in the Nix image",
+    ),
+    (
+        "release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes",
         "needs the pinned Jest in the Nix image",
     ),
     (
@@ -485,6 +506,12 @@ pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
     "release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles",
     "release_candidate_python_venv_keeps_projects_inside_the_30_day_floor",
     "release_candidate_node_modules_keeps_projects_inside_the_30_day_floor",
+    // TASK-360: the five admitted cleaners through the release candidate.
+    "release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes",
+    "release_candidate_uv_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+    "release_candidate_pnpm_store_prune_keeps_referenced_packages_and_an_install_in_flight",
+    "release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes",
+    "release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes",
 ];
 
 /// The one test whose container receives the pinned Buildah closure.
@@ -1426,10 +1453,10 @@ pub static TESTS: &[Test] = &[
         run: pkg_cache_suite::pip_cache_real_pip_installs_reclaim_then_refetch_and_an_install_in_flight_completes,
     },
     Test {
-        name: "uv_cache_real_uv_cache_is_a_checkout_until_allowed_and_an_install_in_flight_is_kept",
+        name: "uv_cache_real_uv_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept",
         tier: Tier::Fast,
         expect: Expect::Pass,
-        run: pkg_cache_suite::uv_cache_real_uv_cache_is_a_checkout_until_allowed_and_an_install_in_flight_is_kept,
+        run: pkg_cache_suite::uv_cache_real_uv_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept,
     },
     Test {
         name: "npm_cache_real_npm_installs_reclaim_then_refetch_and_a_running_npm_keeps_it",
@@ -1472,6 +1499,37 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: pkg_cache_suite::jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes,
+    },
+    // TASK-360: the five admitted cleaners through the release candidate.
+    Test {
+        name: "release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes,
+    },
+    Test {
+        name: "release_candidate_uv_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::release_candidate_uv_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept,
+    },
+    Test {
+        name: "release_candidate_pnpm_store_prune_keeps_referenced_packages_and_an_install_in_flight",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::release_candidate_pnpm_store_prune_keeps_referenced_packages_and_an_install_in_flight,
+    },
+    Test {
+        name: "release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes,
+    },
+    Test {
+        name: "release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes,
     },
     Test {
         name: "delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path",

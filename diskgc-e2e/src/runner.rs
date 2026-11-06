@@ -1236,8 +1236,12 @@ mod tests {
             [
                 "release_candidate_cargo_busy_then_reclaims_real_target",
                 "release_candidate_catalog_refuses_every_excluded_builtin",
+                // TASK-360: on the Nix image only.
+                "release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes",
                 "release_candidate_checkout_policy_accepts_only_admitted_builtin",
                 "release_candidate_files_work_in_container",
+                // TASK-360: on the Nix image only.
+                "release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes",
                 // TASK-359: on the Nix image only.
                 "release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept",
                 // TASK-335: on the Nix GC image only.
@@ -1245,6 +1249,9 @@ mod tests {
                 // TASK-359: on the Nix image only.
                 "release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles",
                 "release_candidate_node_modules_keeps_projects_inside_the_30_day_floor",
+                // TASK-360: on the Nix image only.
+                "release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes",
+                "release_candidate_pnpm_store_prune_keeps_referenced_packages_and_an_install_in_flight",
                 "release_candidate_pytest_cache_reclaim_then_a_live_session_rewrites_it",
                 "release_candidate_python_pycache_reclaim_then_a_live_importer_recompiles",
                 "release_candidate_python_venv_keeps_projects_inside_the_30_day_floor",
@@ -1252,6 +1259,8 @@ mod tests {
                 "release_candidate_refuses_in_its_own_pid_namespace",
                 "release_candidate_rejects_docker_command_and_arbitrary_delete_policy",
                 "release_candidate_runs_watch_tally_only",
+                // TASK-360: on the Nix image only.
+                "release_candidate_uv_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
             ],
             "the candidate suite lost or gained a probe"
         );

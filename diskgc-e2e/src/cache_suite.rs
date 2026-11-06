@@ -241,7 +241,9 @@ pub fn named_checkout_policy_cannot_expand_the_release_catalog(ctx: &Ctx) -> Tes
             Some(format!("{}.{}", parts.next()?, parts.next()?))
         })
         .ok_or_else(|| format!("--version: {:?}", version.stdout))?;
-    for excluded in ["npm-cache", "uv-cache"] {
+    // TASK-360: uv-cache is in 0.2's catalog; npm-cache and yarn-cache
+    // are not.
+    for excluded in ["npm-cache", "yarn-cache"] {
         let source = format!(
             "version: 1\nprofile_policies:\n  - profile: {excluded}\n    checkouts: allow\n"
         );
