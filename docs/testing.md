@@ -3000,11 +3000,104 @@ watchman, and the residual windows the liveness rows name (a clean landing
 where the run holds nothing in the cache); none is reproduced
 deterministically.
 
+**Language and runtime cache family** (TASK-352, folding in TASK-330's
+container tests and TASK-329's question; diskgc-e2e
+`runtime_cache_suite.rs`, Nix image only; the shared harness of the
+three families is `admission.rs`). Plain deletes below a home root, so
+these go through the candidate catalog. Tools: Go 1.26.8, Bun 1.4.2,
+node-gyp 12.4.0 (npm's own, Node.js 24.21.0), @electron/get 5.1.0 with
+extract-zip 2.0.1, huggingface_hub 1.30.0, Cargo 1.99.1 and Nix 2.34.9;
+each test first requires the version it names. The containers have no
+network: each tool is served by a local tree or server the test makes (a
+`GOPROXY=file://` module tree, the npm registry above, a Node.js headers
+dist, an Electron mirror, a Hugging Face hub endpoint answering
+`resolve` requests, a sparse Cargo registry of crates the real `cargo
+package` made, a dumb-HTTP Git repository and a tarball for Nix, whose
+store is a local one below the home). Decoys: a real cache at the tool's
+own non-default location (`GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`,
+`--devdir`, `electron_config_cache`, `HF_HUB_CACHE`, `CARGO_HOME`,
+`XDG_CACHE_HOME`) and hand-made lookalikes; both unchanged after the
+reclaim. The four profiles with a one-hour floor are reclaimed with the
+sandbox clock advanced two hours. Where the live run holds nothing in the
+cache, the reclaim deletes the cache under it and the test requires the
+failure its liveness row names, then a successful retry. Roots
+`/home/tester`, `--min-free 100%`.
+
+- `go_mod_cache_real_go_downloads_reclaim_then_redownload_and_a_build_in_flight_is_kept`:
+  the reclaim deletes Go's read-only module tree (`make_writable`); with
+  `GOPROXY=off` the next build fails, with the proxy it downloads again. A
+  build held by `-toolexec` before compiling a dependency holds no file
+  or working directory in the module cache (checked in `/proc`), but the
+  go command passes `GOMODCACHE` to every tool it runs (the toolexec
+  wrapper `exec`s the compiler with that environment): the cache is
+  `in_use` (`environment`, the entry checked in `/proc/PID/environ`) and
+  the build completes. Between its subprocesses the go command alone
+  names nothing (the row's residual, not reproduced).
+- `bun_cache_real_bun_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept`:
+  both matched paths are reclaimed (the second made through
+  `BUN_INSTALL_CACHE_DIR`); the projects' hardlinked `node_modules` still
+  load; an install held at the registry holds the cache directory open
+  (`in_use`, `fd`) and completes.
+- `node_gyp_headers_real_node_gyp_install_reclaim_then_reinstall_and_a_build_between_compiles_fails_once`:
+  the image's Node finds its own headers by its prefix, so the scenario
+  builds for another target, as electron-rebuild does. Fresh headers are
+  `not_idle`; past the floor both versions go, a hand-made version without
+  `installVersion` is never planned (the profile's `has`), and the next
+  build installs its headers
+  again. A build between two compiles holds nothing there: its second
+  compile fails (`node_api.h: No such file or directory`, residual 1) and
+  the retry installs and builds.
+- `electron_download_cache_real_electron_get_reclaim_then_redownload_and_an_extraction_in_flight_is_kept`:
+  a hand-made directory in `.cache/electron` is deleted with the downloads
+  (residual 4); an extraction paused in extract-zip's `onEntry` holds the
+  zip (`in_use`, `fd`); an install paused between its cache hit and the
+  extraction holds nothing, fails with `ENOENT` on the zip (residual 1)
+  and the retry downloads again. Like the electron package's install
+  script, the scenario passes `electron_config_cache` as @electron/get's
+  `cacheRoot` (the library reads no variable).
+- `huggingface_hub_repos_real_hub_downloads_reclaim_then_redownload_and_runs_in_flight_are_kept`:
+  a model and a dataset repository are reclaimed and their `.locks` stay;
+  `HF_HUB_OFFLINE` then fails (residual 3) and an online run downloads
+  again. A Python that mapped a snapshot file and closed its descriptor
+  (`map`, as safetensors loads; Python's own `mmap` would keep a
+  descriptor, so the scenario maps through libc) and a download held at
+  the endpoint with its `.incomplete` blob open (`fd`) keep their
+  repositories, and both complete.
+- `cargo_registry_src_real_cargo_extracts_reclaim_then_reextract_and_a_build_in_flight_fails_once`:
+  three crate sources are reclaimed, a hand-made one without `.cargo-ok`
+  is never planned, and `cargo build --offline` extracts them again from
+  `registry/cache` without a download. TASK-329's case: a build whose
+  compile of `mid` is held (its working directory is mid's source:
+  `in_use`, `cwd`) holds `.package-cache-mutate` shared in `/proc/locks`;
+  `top`, compiled after `mid`, is deleted under it and the build fails
+  with a missing file (residual 1); the offline retry succeeds.
+- `nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_flight_is_kept`:
+  `gitv3`, `tarball-cache-v2` and `eval-cache-v6` are reclaimed (no floor)
+  and filled again; `fetcher-cache-v4.sqlite` stays. A `fetchGit` held at
+  the server holds its lock file and Git's working directory in `gitv3`
+  (`in_use`; diskgc names Git's working directory) while the other two
+  go; the fetch then completes.
+- `candidate_catalog_runtime_cache_family_matches_the_development_build`
+  (host PID namespace): one fixture of all seven with a Python mapping a
+  hub snapshot; the candidate catalog plans exactly what the development
+  build does and reclaims exactly the reclaimable set, in two selections
+  (`go-mod-cache` alone: its `make_writable` delete cannot share a
+  selection with plain deletes); the tools then fill their caches again.
+
+Not exercised for this family: Go's `go mod download` and workspace
+modes, Bun's other install backends (`--backend=symlink`, the residual of
+its row), node-gyp's `--nodedir` and Windows `node.lib`, Electron's own
+install script (its packages are not available offline; the scenario
+runs the same two library calls), the hub's xet transfer and `snapshot_download`, Cargo git
+dependencies and its automatic gc, and Nix's `tarball-cache` (v1) of
+older versions (matched on the development host, not made here).
+
 **The candidate catalog** (`diskgc-candidate-catalog` in the under-test
 bundle). The release-candidate package carries the real catalog only, and
 the PRD lets no other build lift the sandbox gate, so a profile awaiting
-admission (only `node-modules` of this family, held by Mark,
-2026-11-06, TASK-365) cannot run through the gate-lifted package. Instead the flake
+admission cannot run through the gate-lifted package: the candidate list
+holds `node-modules` (held by Mark, 2026-11-06, TASK-365) and TASK-352's
+seven runtime caches. Instead the flake
 builds the release build's catalog code path (`release-catalog`: this
 version's release row, its commands, the user-profile refusal, the
 catalog's scope checks and narrowing) from a source copy whose
@@ -3013,8 +3106,9 @@ release's catalog (`tools/candidate_catalog.py`); it keeps the gate (and
 so the sandbox clock offset) and, like the release candidate, has no
 PID-namespace exception. The scenario checks that its catalog is exactly
 the release candidate's plus that list, that the list is part of the
-family it tests and disjoint from the release catalog, and that every
-member is in one of the two; then, over one fixture with every member and
+families with a candidate-catalog scenario and disjoint from the release
+catalog, and that every member of the family it tests is in one of the
+two; then, over one fixture with every member and
 a live Node, its dry run plans exactly what the development build's
 does, and its reclaims delete exactly the reclaimable set. It still
 covers the admitted five, since its catalog holds them too, and is the
