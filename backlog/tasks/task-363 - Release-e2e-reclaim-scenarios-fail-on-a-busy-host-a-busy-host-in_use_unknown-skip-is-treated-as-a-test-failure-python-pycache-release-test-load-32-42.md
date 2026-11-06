@@ -3,10 +3,10 @@ id: TASK-363
 title: >-
   Release/e2e reclaim scenarios fail on a busy host: a busy-host in_use_unknown
   skip is treated as a test failure (python-pycache release test, load 32-42)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-06T00:13:00Z'
-updated_date: '2026-11-06T05:37:00Z'
+updated_date: '2026-11-06T10:27:00Z'
 labels:
   - flaky
   - e2e
@@ -26,4 +26,6 @@ TASK-359 e2e run 2 (2026-11-06, tree of 4493790e): release_candidate_python_pyca
 2026-11-06: recurred twice in TASK-360's full e2e (release_candidate_ccache_* kept ~/.cache/ccache or ~/.ccache in_use_unknown, 'process list still growing or replacing pids after 16 listings'; release_candidate_python_venv_* kept both venvs in_use, hypothesis: another test container in the host PID namespace had a process naming the identical /home/tester/src/pyapp path -> false in_use, a test-isolation flaw). Logs tmp/evidence-t363/. Assigned to the t360 implementer (branch t360-cleaners) as separate commits before the Jest exclusion commit. Root-fix candidates: give release scenarios a deadline long enough for TASK-340's back-off to retry instead of asserting on the first unsettled scan; unique per-test project paths; deterministic busy-host test separate.
 
 2026-11-06 orchestrator decision: (1) product fix filed as TASK-364 (after TASK-348); (2) t360 implements test isolation now: run the host-PID-namespace tests after the parallel phase (self-induced churn is a test-isolation defect; does not cover other projects' load, TASK-364 does); (3) unique per-test project paths; keep the venv diagnostic.
+
+Merged abe5225cac51dbacbf7813aea4ef9828cae40fef: host-PID-namespace tests run serially after the parallel phase with their own time allowance and a bounded lock wait; unique project paths; venv positive-control diagnostic. Does not cover other projects' load: TASK-364 (product: retry an unsettled scan within the deadline). python_venv false in_use root cause still unconfirmed; the diagnostic will name it next time.
 <!-- SECTION:NOTES:END -->
