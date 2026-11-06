@@ -1,10 +1,10 @@
 ---
 id: TASK-365
 title: 'Take node-modules back out of the 0.2 catalog (Mark: hold it)'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-06T08:30:00Z'
-updated_date: '2026-11-06T10:27:00Z'
+updated_date: '2026-11-06T12:39:00Z'
 labels:
   - release
   - '0.2'
@@ -22,4 +22,6 @@ Mark 2026-11-06, answering whether 'admit current as-is' covers the npm install 
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-06 orchestrator: implementer in tmp/worktrees/t365 (branch t365-hold-node-modules, from master cfc12ecc).
+
+Merged 885db7b0abe5fa1f79c2e3e4e2c99c8355947d76 (2026-11-06). Open for Mark: the hold returns the node-project rule-2 narrowing to PENDING (his acceptance was recorded with node-modules' admission).
 <!-- SECTION:NOTES:END -->
