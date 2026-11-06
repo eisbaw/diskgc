@@ -275,8 +275,16 @@ fn execute(config: &Config, selection: &Selection) -> Result<i32, String> {
                 selected.len()
             );
             let deadline = started + *budget;
-            let results = run_parallel(config, selected, *jobs, deadline);
-            Ok(report(&image, &results, started.elapsed(), Some(*budget)))
+            let release = release_under_test(config);
+            let (results, phases) = run_parallel(
+                started,
+                selected,
+                *jobs,
+                deadline,
+                |test| shares_host_pid_namespace(release, &test.name),
+                |test, deadline| run_container(config, test, deadline, false),
+            );
+            Ok(report(&image, &results, &phases))
         }
         Selection::One { name } => {
             let Some(test) = listed.into_iter().find(|t| &t.name == name) else {
@@ -286,7 +294,12 @@ fn execute(config: &Config, selection: &Selection) -> Result<i32, String> {
             };
             let deadline = Instant::now() + ONE_TEST_LIMIT;
             let result = run_container(config, &test, deadline, true);
-            Ok(report(&image, &[result], started.elapsed(), None))
+            let phases = [Phase {
+                name: "the run",
+                took: started.elapsed(),
+                bound: None,
+            }];
+            Ok(report(&image, &[result], &phases))
         }
     }
 }
@@ -637,30 +650,89 @@ fn fuse_device(name: &str) -> Vec<String> {
 /// `flock` on `$XDG_RUNTIME_DIR/diskgc-e2e-host-pid.lock` (the user's
 /// runtime directory, shared by every checkout and worktree; created if
 /// missing, never written or removed), held while the container runs.
-fn host_pid_lock() -> Result<File, String> {
+fn host_pid_lock(deadline: Instant) -> Result<File, String> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|d| !d.is_empty())
         .ok_or(
             "XDG_RUNTIME_DIR is not set: the host-PID-namespace containers need the user's \
                 runtime directory for their host-wide lock",
         )?;
-    let path = Path::new(&dir).join("diskgc-e2e-host-pid.lock");
+    host_pid_lock_at(&Path::new(&dir).join("diskgc-e2e-host-pid.lock"), deadline)
+}
+
+/// [`host_pid_lock`] on the lock file `path`.
+fn host_pid_lock_at(path: &Path, deadline: Instant) -> Result<File, String> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&path)
+        .open(path)
         .map_err(|e| format!("open {}: {e}", path.display()))?;
-    if rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
-        info!(
-            "waiting for {} (another runner's host-PID-namespace container)",
-            path.display()
-        );
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
-            .map_err(|e| format!("flock {}: {e}", path.display()))?;
+    let mut announced = false;
+    // Bounded by `deadline` (the host-PID tail's allowance, TASK-363): a
+    // lock another runner holds past it fails this test, naming the holder.
+    loop {
+        if rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok() {
+            return Ok(file);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the host-wide lock {} was still held at this phase's deadline, by {}",
+                path.display(),
+                lock_holder(path)
+            ));
+        }
+        if !announced {
+            info!(
+                "waiting for {} (held by {}: another runner's host-PID-namespace container)",
+                path.display(),
+                lock_holder(path)
+            );
+            announced = true;
+        }
+        std::thread::sleep(HOST_PID_LOCK_POLL);
     }
-    Ok(file)
+}
+
+/// How often [`host_pid_lock`] tries the lock again while another runner
+/// holds it.
+const HOST_PID_LOCK_POLL: Duration = Duration::from_millis(200);
+
+/// Who holds the `flock` on `path`, from `/proc/locks`: its pid, working
+/// directory and command line, or `unknown` when that cannot be read. A
+/// best-effort diagnostic: the host's `/proc/locks` is often more than one
+/// read, so it is read whole and each line parsed on its own (a line torn
+/// between reads is skipped), not through the consistent
+/// [`crate::proc_locks::sample`], which gives up on such a host.
+fn lock_holder(path: &Path) -> String {
+    let holder = crate::proc_locks::FileId::of(path).and_then(|id| {
+        let text =
+            std::fs::read_to_string("/proc/locks").map_err(|e| format!("read /proc/locks: {e}"))?;
+        text.lines()
+            .filter_map(|line| crate::proc_locks::parse(line).ok())
+            .flatten()
+            .find(|lock| lock.file == id && !lock.waiting)
+            .map(|lock| lock.pid)
+            .ok_or_else(|| "no granted lock on it listed in /proc/locks".to_owned())
+    });
+    match holder {
+        Ok(pid) if pid > 0 => {
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
+                .map(|b| {
+                    String::from_utf8_lossy(&b)
+                        .replace('\0', " ")
+                        .trim()
+                        .to_owned()
+                })
+                .unwrap_or_else(|_| "?".to_owned());
+            let cwd = std::fs::read_link(format!("/proc/{pid}/cwd"))
+                .map_or_else(|_| "?".to_owned(), |p| p.display().to_string());
+            format!("pid {pid} in {cwd} ({cmdline})")
+        }
+        Ok(pid) => format!("unknown (pid {pid} in /proc/locks)"),
+        Err(e) => format!("unknown ({e})"),
+    }
 }
 
 /// Whether the container of test `name` shares the host's PID namespace
@@ -874,20 +946,47 @@ pub struct TestRun {
 /// Load from other work on the host, another worktree's suite included,
 /// is not covered by this: the product's handling of an unsettled scan
 /// is.
-fn schedule(tests: Vec<Listed>, release_under_test: bool) -> (Vec<Listed>, Vec<Listed>) {
-    let (serial, parallel) = tests
-        .into_iter()
-        .partition(|test| shares_host_pid_namespace(release_under_test, &test.name));
+fn schedule(tests: Vec<Listed>, host_pid: impl Fn(&Listed) -> bool) -> (Vec<Listed>, Vec<Listed>) {
+    let (serial, parallel) = tests.into_iter().partition(|test| host_pid(test));
     (parallel, serial)
 }
 
+/// What each host-PID-namespace test adds to the serial tail's allowance
+/// ([`run_parallel`]): its own bound, separate from the parallel phase's
+/// budget. The slowest of them took 12.5 s in a fast suite on a busy host
+/// (2026-11-06); about 1.5 times that, and the allowance is their sum, so a
+/// slow one borrows from the others. It guards a hang and a lock held by
+/// another runner; it is not a speed target.
+pub const HOST_PID_TEST_ALLOWANCE: Duration = Duration::from_secs(20);
+
+/// One phase of a suite run: how long it took and its own bound
+/// ([`verdict`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Phase {
+    pub name: &'static str,
+    pub took: Duration,
+    pub bound: Option<Duration>,
+}
+
+/// Runs a suite's `tests` ([`schedule`]): the tests in a PID namespace of
+/// their own `jobs` at a time, by `deadline` (the suite's budget from
+/// `started`, setup included); then the host-PID-namespace tests
+/// (`host_pid`) one at a time, by a deadline of their own:
+/// [`HOST_PID_TEST_ALLOWANCE`] for each, from the end of the parallel
+/// phase. Each phase is bounded on its own, so neither can use up the
+/// other's time: under load from other work the parallel phase may end
+/// late, and the tail still gets its whole allowance (TASK-363). `run`
+/// runs one test by the deadline it is given. Returns the results and
+/// both phases.
 fn run_parallel(
-    config: &Config,
+    started: Instant,
     tests: Vec<Listed>,
     jobs: usize,
     deadline: Instant,
-) -> Vec<TestRun> {
-    let (parallel, serial) = schedule(tests, release_under_test(config));
+    host_pid: impl Fn(&Listed) -> bool,
+    run: impl Fn(&Listed, Instant) -> TestRun + Sync,
+) -> (Vec<TestRun>, Vec<Phase>) {
+    let (parallel, serial) = schedule(tests, host_pid);
     let queue = Mutex::new(VecDeque::from(parallel));
     let results = Mutex::new(Vec::new());
     std::thread::scope(|scope| {
@@ -896,24 +995,38 @@ fn run_parallel(
                 loop {
                     let next = queue.lock().expect("queue lock").pop_front();
                     let Some(test) = next else { break };
-                    let result = run_container(config, &test, deadline, false);
+                    let result = run(&test, deadline);
                     results.lock().expect("results lock").push(result);
                 }
             });
         }
     });
     let mut results = results.into_inner().expect("results lock");
+    let mut phases = vec![Phase {
+        name: "setup and parallel phase",
+        took: started.elapsed(),
+        bound: Some(deadline.saturating_duration_since(started)),
+    }];
     if !serial.is_empty() {
+        let allowance =
+            HOST_PID_TEST_ALLOWANCE.saturating_mul(u32::try_from(serial.len()).unwrap_or(u32::MAX));
         info!(
             "running {} host-PID-namespace tests one at a time, with no other container of \
-             this suite running",
+             this suite running, within {allowance:?}",
             serial.len()
         );
+        let tail_started = Instant::now();
+        let tail_deadline = tail_started + allowance;
+        for test in &serial {
+            results.push(run(test, tail_deadline));
+        }
+        phases.push(Phase {
+            name: "host-PID tail",
+            took: tail_started.elapsed(),
+            bound: Some(allowance),
+        });
     }
-    for test in &serial {
-        results.push(run_container(config, test, deadline, false));
-    }
-    results
+    (results, phases)
 }
 
 /// Runs one test in its own container, logging its output to a file.
@@ -943,7 +1056,7 @@ fn run_container(config: &Config, test: &Listed, deadline: Instant, keep: bool) 
     // runners' containers included: one at a time on the whole host, not
     // only in this runner (TASK-263 review, mped S1).
     let _host_pid_lock = if shares_host_pid_namespace(release_under_test(config), &test.name) {
-        match host_pid_lock() {
+        match host_pid_lock(deadline) {
             Ok(lock) => Some(lock),
             Err(e) => {
                 eprintln!("runner: {}: {e}", test.name);
@@ -1074,9 +1187,11 @@ fn outcome_label(outcome: &Outcome) -> String {
 
 /// Exit code of a run: failure when any test did not pass or the run took
 /// longer than its budget.
-pub fn verdict(results: &[TestRun], elapsed: Duration, budget: Option<Duration>) -> i32 {
+pub fn verdict(results: &[TestRun], phases: &[Phase]) -> i32 {
     let all_passed = !results.is_empty() && results.iter().all(|r| r.outcome == Outcome::Pass);
-    let within_budget = budget.is_none_or(|b| elapsed <= b);
+    let within_budget = phases
+        .iter()
+        .all(|phase| phase.bound.is_none_or(|b| phase.took <= b));
     if all_passed && within_budget {
         exit::PASS
     } else {
@@ -1086,7 +1201,7 @@ pub fn verdict(results: &[TestRun], elapsed: Duration, budget: Option<Duration>)
 
 /// Prints the per-test table, failing logs and the summary; returns the
 /// exit code.
-fn report(image: &str, results: &[TestRun], elapsed: Duration, budget: Option<Duration>) -> i32 {
+fn report(image: &str, results: &[TestRun], phases: &[Phase]) -> i32 {
     let mut sorted: Vec<&TestRun> = results.iter().collect();
     sorted.sort_by_key(|r| std::cmp::Reverse(r.took));
     eprintln!("\ne2e per-test durations (slowest first):");
@@ -1117,7 +1232,7 @@ fn report(image: &str, results: &[TestRun], elapsed: Duration, budget: Option<Du
         .iter()
         .filter(|r| r.outcome == Outcome::Pass)
         .count();
-    let code = verdict(results, elapsed, budget);
+    let code = verdict(results, phases);
     let broken_toolchain = results
         .iter()
         .filter(|r| r.outcome == Outcome::Fail(Some(exit::TOOLCHAIN)))
@@ -1128,14 +1243,22 @@ fn report(image: &str, results: &[TestRun], elapsed: Duration, budget: Option<Du
              failed its smoke check (TOOLCHAIN): a toolchain problem, not a race failure"
         );
     }
-    let budget_text = match budget {
-        Some(b) if elapsed > b => format!("; BUDGET EXCEEDED: {elapsed:.1?} > {b:?}"),
-        Some(b) => format!(" (budget {b:?})"),
-        None => String::new(),
-    };
+    let timing = phases
+        .iter()
+        .map(|phase| match phase.bound {
+            Some(b) if phase.took > b => {
+                format!(
+                    "{} {:.1?}, BUDGET EXCEEDED: > {b:?}",
+                    phase.name, phase.took
+                )
+            }
+            Some(b) => format!("{} {:.1?} (budget {b:?})", phase.name, phase.took),
+            None => format!("{} {:.1?}", phase.name, phase.took),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     eprintln!(
-        "\ne2e ({image} image): {passed} of {} tests passed in {elapsed:.1?}{budget_text}; \
-         logs in {}",
+        "\ne2e ({image} image): {passed} of {} tests passed: {timing}; logs in {}",
         results.len(),
         results
             .first()
@@ -1214,7 +1337,8 @@ mod tests {
             listed("ensure_dry_run_plans_real_targets_and_deletes_nothing"),
         ];
         let names = |tests: &[Listed]| tests.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
-        let (parallel, serial) = schedule(tests.clone(), false);
+        let shared = |release: bool| move |t: &Listed| shares_host_pid_namespace(release, &t.name);
+        let (parallel, serial) = schedule(tests.clone(), shared(false));
         assert_eq!(
             names(&parallel),
             [
@@ -1223,9 +1347,115 @@ mod tests {
             ]
         );
         assert_eq!(names(&serial), [host_pid]);
-        let (parallel, serial) = schedule(tests, true);
+        let (parallel, serial) = schedule(tests, shared(true));
         assert!(parallel.is_empty());
         assert_eq!(serial.len(), 3);
+    }
+
+    /// TASK-363: the tail starts only once every parallel test has ended,
+    /// runs one test at a time, and is bounded by its own allowance
+    /// ([`HOST_PID_TEST_ALLOWANCE`] for each), not by the parallel phase's
+    /// deadline: with that deadline already past, the tail's tests still
+    /// get the whole allowance, and each phase is reported with its bound.
+    #[test]
+    fn the_host_pid_tail_runs_after_the_parallel_phase_within_its_own_allowance() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listed = |name: &str| Listed {
+            name: name.to_owned(),
+            tier: Tier::Fast,
+        };
+        let tests: Vec<Listed> = ["p1", "h1", "p2", "h2", "p3"]
+            .iter()
+            .map(|n| listed(n))
+            .collect();
+        let started = Instant::now();
+        let deadline = started; // the parallel phase's budget is used up
+        let running = AtomicUsize::new(0);
+        let log = Mutex::new(Vec::new());
+        let (results, phases) = run_parallel(
+            started,
+            tests,
+            3,
+            deadline,
+            |t| t.name.starts_with('h'),
+            |test, by| {
+                let overlap = running.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(20));
+                log.lock()
+                    .expect("log")
+                    .push((test.name.clone(), overlap, by, Instant::now()));
+                running.fetch_sub(1, Ordering::SeqCst);
+                result(Outcome::Pass)
+            },
+        );
+        assert_eq!(results.len(), 5);
+        let log = log.into_inner().expect("log");
+        let order: Vec<&str> = log.iter().map(|(n, ..)| n.as_str()).collect();
+        let first_tail = order
+            .iter()
+            .position(|n| n.starts_with('h'))
+            .expect("tail ran");
+        assert!(
+            order[..first_tail].iter().all(|n| n.starts_with('p'))
+                && order[first_tail..].iter().all(|n| n.starts_with('h')),
+            "the tail ran before a parallel test ended: {order:?}"
+        );
+        for (name, overlap, by, _) in &log {
+            if name.starts_with('h') {
+                assert_eq!(*overlap, 0, "{name} ran beside another test");
+                assert!(
+                    by.saturating_duration_since(started)
+                        >= 2 * HOST_PID_TEST_ALLOWANCE - Duration::from_secs(1)
+                        && *by > deadline,
+                    "{name}: its deadline is not the tail's own allowance"
+                );
+            } else {
+                assert_eq!(*by, deadline, "{name}: the parallel phase's deadline");
+            }
+        }
+        assert_eq!(
+            phases.iter().map(|p| (p.name, p.bound)).collect::<Vec<_>>(),
+            [
+                ("setup and parallel phase", Some(Duration::ZERO)),
+                ("host-PID tail", Some(2 * HOST_PID_TEST_ALLOWANCE)),
+            ]
+        );
+    }
+
+    /// TASK-363: waiting for the host-wide lock ends at the deadline it is
+    /// given, with an error naming the holder; a free lock is taken.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a unit test's own temporary lock file"
+    )]
+    fn the_host_pid_lock_wait_ends_at_its_deadline_naming_the_holder() {
+        let path =
+            std::env::temp_dir().join(format!("diskgc-e2e-host-pid-{}.lock", std::process::id()));
+        let held = host_pid_lock_at(&path, Instant::now()).expect("a free lock is taken");
+        let started = Instant::now();
+        let error = host_pid_lock_at(&path, started + Duration::from_millis(500))
+            .expect_err("held by another open file description");
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(500) && waited < Duration::from_secs(5),
+            "{waited:?}"
+        );
+        assert!(
+            error.contains("was still held at this phase's deadline, by "),
+            "{error}"
+        );
+        // The holder, read from /proc/locks: a line torn between two reads
+        // of a busy host's list is skipped, so a few tries.
+        let own = format!("pid {} ", std::process::id());
+        assert!(
+            (0..5).any(|_| lock_holder(&path).starts_with(&own)),
+            "{own}not named: {}",
+            lock_holder(&path)
+        );
+        drop(held);
+        host_pid_lock_at(&path, Instant::now()).expect("taken once released");
+        std::fs::remove_file(&path).unwrap();
     }
 
     const GLOBAL: &[&str] = &[
@@ -1413,9 +1643,29 @@ mod tests {
     fn the_budget_fails_a_run_that_passed_every_test() {
         let ok = [result(Outcome::Pass)];
         let budget = Some(Duration::from_secs(300));
-        assert_eq!(verdict(&ok, Duration::from_secs(299), budget), exit::PASS);
-        assert_eq!(verdict(&ok, Duration::from_secs(301), budget), exit::FAIL);
-        assert_eq!(verdict(&ok, Duration::from_secs(9999), None), exit::PASS);
+        let phase = |name, took, bound| Phase { name, took, bound };
+        let tail = phase(
+            "tail",
+            Duration::from_secs(40),
+            Some(Duration::from_secs(60)),
+        );
+        let secs = Duration::from_secs;
+        assert_eq!(
+            verdict(&ok, &[phase("p", secs(299), budget), tail]),
+            exit::PASS
+        );
+        assert_eq!(
+            verdict(&ok, &[phase("p", secs(301), budget), tail]),
+            exit::FAIL
+        );
+        assert_eq!(verdict(&ok, &[phase("p", secs(9999), None)]), exit::PASS);
+        // Each phase by its own bound: a tail over its allowance fails the
+        // run although the whole run took less than the parallel budget.
+        let over = phase("tail", secs(61), Some(secs(60)));
+        assert_eq!(
+            verdict(&ok, &[phase("p", secs(10), budget), over]),
+            exit::FAIL
+        );
     }
 
     #[test]
@@ -1428,11 +1678,23 @@ mod tests {
             Outcome::Fail(None),
         ] {
             assert_eq!(
-                verdict(&[result(Outcome::Pass), result(bad)], d, None),
+                verdict(
+                    &[result(Outcome::Pass), result(bad)],
+                    &[Phase {
+                        name: "p",
+                        took: d,
+                        bound: None
+                    }]
+                ),
                 exit::FAIL
             );
         }
-        assert_eq!(verdict(&[], d, None), exit::FAIL);
+        let unbounded = [Phase {
+            name: "p",
+            took: d,
+            bound: None,
+        }];
+        assert_eq!(verdict(&[], &unbounded), exit::FAIL);
     }
 
     /// The runner failure probe fails on purpose, so no suite may select it.

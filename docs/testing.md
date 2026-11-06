@@ -3746,7 +3746,7 @@ snapshot, not proof that a path is safe to move.
 |---|---|---|
 | `scratch-tally` | Project and legacy scratch sizes, changes, free space and warnings | before every backlog implementation task |
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, in the dev shell | constantly; seconds |
-| `e2e` | `check` plus fast Nix-image tests, the `e2e-one` retention check, candidate 0.1 artifact probes on Nix and Debian, the native Docker smoke, a profile-vector replay under Docker Engine, and the four-vector QEMU guest check | before every commit (the gate); each ordinary runner has a 5-minute budget including setup (deadlines below) |
+| `e2e` | `check` plus fast Nix-image tests, the `e2e-one` retention check, candidate 0.1 artifact probes on Nix and Debian, the native Docker smoke, a profile-vector replay under Docker Engine, and the four-vector QEMU guest check | before every commit (the gate); each ordinary runner has a 5-minute budget including setup, and its host-PID-namespace tests a serial tail with an allowance of its own (deadlines below) |
 | `e2e-full` | every Nix-image test, then the Debian and native Docker suites, the four-vector QEMU guest check, and the cold ext4 scale VM check | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
 | `e2e-debian` | `check` plus every test but the Nix-only ones on the Debian image (Container setup: Images) | with changes to the static binary's behaviour on a non-Nix machine, the image, or the descriptor; a 15-minute deadline only guards against hangs |
 | `e2e-docker` | `check` plus Docker-only tests in the pinned native dind image | with changes to Docker fixtures or Docker kinds |
@@ -3875,7 +3875,19 @@ fails (the NixOS VM checks also have their test driver's own global
 timeout). Nix evaluation and substitution are not bounded by it
 (downloads have Nix's `stalled-download-timeout`). These limits guard
 hangs; external CPU load can still use up a suite budget before every
-selected test starts.
+selected test starts. A suite's host-PID-namespace tests (Container
+setup) run after it, one at a time, by a deadline of their own: 20 s for
+each such test (`HOST_PID_TEST_ALLOWANCE`, about 1.5 times the slowest
+of them on a busy host), summed, from the end of the parallel phase.
+Each phase has its own bound because they share no time: under load from
+other work the parallel phase can end at its budget, and a tail counted
+against the same 300 s then ran out before its tests started (TASK-363,
+2026-11-06: one timed out, three not run). The report gives each phase's
+time and bound, and a run fails if either is exceeded. Waiting for the
+host-wide host-PID lock counts against the tail's allowance: a runner
+that cannot take it in time fails that test with a message naming the
+holder from `/proc/locks` (its pid, directory and command line), or
+`unknown`.
 
 **`e2e-one` retention.** `tools/e2e_one_retention.py` runs the real
 runner's `one` twice in `just e2e` and `just e2e-full`: on
