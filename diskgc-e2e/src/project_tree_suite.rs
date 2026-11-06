@@ -645,6 +645,89 @@ fn uv_venv(ctx: &Ctx, project: &Path) -> TestResult {
     Ok(())
 }
 
+/// The development package's dry run `development` past the 30-day floor
+/// planned exactly `expected` (the positive control of the release
+/// project-tree tests). If not, the error names what may have kept them
+/// (TASK-363): a dry run's plan names no process, so the processes naming
+/// [`SRC`] are listed, and the same reclaim runs (this container is
+/// disposable) for its skipped rows' details and blocking processes.
+/// Best effort: both come after the dry run, so a process that blocked it
+/// and ended since is not seen; processes outside the container show
+/// their command line only; a failed diagnostic is reported after the
+/// mismatch, never instead of it.
+fn expect_positive_control(
+    ctx: &Ctx,
+    development_package: &Path,
+    development: &Run,
+    select: &str,
+    expected: &Expected,
+) -> TestResult {
+    let planned = plan_of(&report(development)?)?;
+    if planned == sorted(expected) {
+        return Ok(());
+    }
+    let naming = processes_naming(SRC);
+    let skipped = run_ensure(ctx, development_package, false, select, Some(SRC), HOME)
+        .and_then(|reclaim| report(&reclaim))
+        .map_or_else(
+            |e| format!("(the diagnostic reclaim failed: {e})"),
+            |report| report["skipped"].to_string(),
+        );
+    Err(format!(
+        "positive control: the development build past the floor planned {planned:?}, \
+         expected {:?}; processes naming {SRC} then:\n{naming}\nthe same reclaim's skipped \
+         rows: {skipped}",
+        sorted(expected),
+    ))
+}
+
+/// Every process whose command line, working directory or environment
+/// names a path below `dir`, one line each with its cgroup (which
+/// container it is in): a diagnostic for a project kept `in_use` by a
+/// process the test did not start (TASK-363).
+fn processes_naming(dir: &str) -> String {
+    let mut lines = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return "(cannot list /proc)".to_owned();
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .filter(|n| n.bytes().all(|b| b.is_ascii_digit()))
+        else {
+            continue;
+        };
+        let read = |what: &str| std::fs::read(format!("/proc/{pid}/{what}")).unwrap_or_default();
+        let text = |bytes: Vec<u8>| -> Vec<String> {
+            bytes
+                .split(|b| *b == 0)
+                .filter(|part| !part.is_empty())
+                .map(|part| String::from_utf8_lossy(part).into_owned())
+                .collect()
+        };
+        let cmdline = text(read("cmdline"));
+        let environ: Vec<String> = text(read("environ"))
+            .into_iter()
+            .filter(|var| var.contains(dir))
+            .collect();
+        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd"))
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        if cmdline.iter().any(|a| a.contains(dir)) || !environ.is_empty() || cwd.starts_with(dir) {
+            let cgroup = String::from_utf8_lossy(&read("cgroup")).trim().to_owned();
+            lines.push(format!(
+                "pid {pid} cgroup {cgroup:?} cwd {cwd:?} cmdline {cmdline:?} environ {environ:?}"
+            ));
+        }
+    }
+    if lines.is_empty() {
+        "(none)".to_owned()
+    } else {
+        lines.join("\n")
+    }
+}
+
 fn pyproject(ctx: &Ctx, name: &str) -> TestResult {
     write(
         ctx,
@@ -1318,12 +1401,20 @@ pub fn release_candidate_python_venv_keeps_projects_inside_the_30_day_floor(
 ) -> TestResult {
     let binary = crate::release_suite::release_candidate_with(ctx, "python-venv")?;
     versions(ctx, &["python", "uv"])?;
-    for name in ["pyapp", "uvapp"] {
+    // Project names of this test alone (TASK-363), defensive: the project
+    // contract reads other processes' command lines and working
+    // directories as text, so no other test's process names these paths.
+    // (Host-PID-namespace tests never overlap, and a container's
+    // processes end with it, probed: no route is known.)
+    for name in ["rc-venv-pyapp", "rc-venv-uvapp"] {
         pyproject(ctx, name)?;
     }
-    std_venv(ctx, &home("src/pyapp"), true)?;
-    uv_venv(ctx, &home("src/uvapp"))?;
-    let venvs = [home("src/pyapp/.venv"), home("src/uvapp/.venv")];
+    std_venv(ctx, &home("src/rc-venv-pyapp"), true)?;
+    uv_venv(ctx, &home("src/rc-venv-uvapp"))?;
+    let venvs = [
+        home("src/rc-venv-pyapp/.venv"),
+        home("src/rc-venv-uvapp/.venv"),
+    ];
     let _clock = SandboxClockOffset::install(PAST_THE_FLOOR.as_secs())?;
     let oracle = Oracle::arm(Fixture::new())?;
     let development_package = crate::release_suite::binary_path(ctx, "diskgc-development");
@@ -1338,12 +1429,13 @@ pub fn release_candidate_python_venv_keeps_projects_inside_the_30_day_floor(
     oracle.judge(&development)?.assert_clean()?;
     development.expect_code(0)?;
     let past_the_floor: Expected = venvs.iter().map(|v| (v.clone(), None)).collect();
-    ensure!(
-        plan_of(&report(&development)?)? == sorted(&past_the_floor),
-        "positive control: the development build past the floor planned {:?}, expected {:?}",
-        plan_of(&report(&development)?)?,
-        sorted(&past_the_floor)
-    );
+    expect_positive_control(
+        ctx,
+        &development_package,
+        &development,
+        SELECT_VENV,
+        &past_the_floor,
+    )?;
     let inside_the_floor: Expected = venvs
         .iter()
         .map(|v| (v.clone(), Some("not_idle")))
@@ -1373,9 +1465,10 @@ pub fn release_candidate_node_modules_keeps_projects_inside_the_30_day_floor(
     versions(ctx, &["node", "npm"])?;
     control_dir(ctx)?;
     let spec = local_package(ctx)?;
+    // Project names of this test alone (TASK-363), as for python-venv.
     let installs = [
-        npm_project(ctx, "app", &spec)?,
-        npm_workspace(ctx, "mono", &spec)?,
+        npm_project(ctx, "rc-nm-app", &spec)?,
+        npm_workspace(ctx, "rc-nm-mono", &spec)?,
     ];
     let _clock = SandboxClockOffset::install(PAST_THE_FLOOR.as_secs())?;
     let oracle = Oracle::arm(Fixture::new())?;
@@ -1391,12 +1484,13 @@ pub fn release_candidate_node_modules_keeps_projects_inside_the_30_day_floor(
     oracle.judge(&development)?.assert_clean()?;
     development.expect_code(0)?;
     let past_the_floor: Expected = installs.iter().map(|n| (n.clone(), None)).collect();
-    ensure!(
-        plan_of(&report(&development)?)? == sorted(&past_the_floor),
-        "positive control: the development build past the floor planned {:?}, expected {:?}",
-        plan_of(&report(&development)?)?,
-        sorted(&past_the_floor)
-    );
+    expect_positive_control(
+        ctx,
+        &development_package,
+        &development,
+        SELECT_NODE_MODULES,
+        &past_the_floor,
+    )?;
     let inside_the_floor: Expected = installs
         .iter()
         .map(|n| (n.clone(), Some("not_idle")))

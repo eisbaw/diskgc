@@ -3470,7 +3470,13 @@ suite's serial tail: a busy
 host still keeps a one- or two-candidate tier `in_use_unknown`, as the
 executor waits out a busy host only before a tier's fourth and later
 candidates, and a plan never (safety.md, In use: Freshness); that is the
-product's own task. Nested PID
+product's own task. The release `python-venv` and `node-modules` tests
+use project names of their own (`rc-venv-*`, `rc-nm-*`), defensively:
+their contracts read other processes' command lines and working
+directories as text, but host-PID-namespace tests never overlap and a
+container's processes end with it (probed), so no route is known. If
+their positive control fails, the error lists the processes naming the
+project root and the same reclaim's skipped rows (TASK-363). Nested PID
 namespaces are made with `unshare -p -f -m` and entered with `nsenter`. A second
 mount namespace for the "other namespace" tests is made with an `unshare`
 helper that bind-mounts the scratch directory at a different path (nested
