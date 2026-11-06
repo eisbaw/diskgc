@@ -76,7 +76,9 @@
 //! A round is the answer when its listing is complete, every task in it
 //! gave a trusted read, and one of them is live ([`shortfall`] says what a
 //! round lacks). Otherwise another round follows, up to [`MAX_ROUNDS`],
-//! then `Failed`. Only the answering round's reads are returned.
+//! then `Unsettled` when the process only changed under every round
+//! (TASK-348), else `Failed` ([`collect`]). Only the answering round's
+//! reads are returned.
 //!
 //! **Gone** is never inferred from listings or `ENOENT`: a lookup can race
 //! an exec, `hidepid` hides live processes, and a stalled exec can keep
@@ -165,7 +167,7 @@
 //! if that occupant appears in a later listing. The scan's one-second
 //! freshness limit bounds the time this answer can be used, but not the
 //! rate of pid reuse within it. A zombie whose `status` is hidden
-//! (`hidepid`) is `Failed`, not `Gone`.
+//! (`hidepid`) is `Unsettled`, not `Gone`.
 //!
 //! For [`Want::EveryTask`], a task whose entry the kernel says is the very
 //! object an earlier task of the round was read for (an fd table shared by
@@ -636,6 +638,27 @@ enum Shortfall {
 }
 
 impl Shortfall {
+    /// Whether the round lacked its answer only because the process
+    /// changed under it: its listing changed or miscounted (threads
+    /// starting or ending), no task was live (every one exiting), the
+    /// leader's entry vanished or a task changed identity (an exec). Those
+    /// end when the process holds still or has exited (TASK-348). A live
+    /// task whose read gave nothing ([`Seen::Empty`], [`Seen::Missing`]) is
+    /// not: it can be a process whose environment or fd table really is
+    /// empty, which stays so while it runs. A listing that vanishes in
+    /// every round passes too: that is an exit, or `hidepid` hiding the
+    /// process, which the scan's visibility check reports first
+    /// (`incomplete_process_list`), so it is never taken for a busy host.
+    fn passes(self) -> bool {
+        match self {
+            Self::Changed | Self::Miscounted { .. } | Self::NothingLive | Self::NoLiveRead => true,
+            Self::Untrusted { seen, .. } => match seen {
+                Seen::LeaderVanished | Seen::Reused => true,
+                Seen::Empty | Seen::Missing(_) | Seen::Trusted(_) => false,
+            },
+        }
+    }
+
     /// Says what the round lacked; `what` names what a read gives.
     fn describe(self, what: &str) -> String {
         match self {
@@ -725,8 +748,10 @@ fn shortfall(listing: &Listing, seen: &BTreeMap<u32, Seen>, want: Want) -> Optio
 /// a non-leader task is seen ended (`Z`, `X` or vanished), the leader's tid
 /// is read once more, after every other read of the round. The round is the
 /// answer unless [`shortfall`] says what it lacks; then the next round
-/// follows. After [`MAX_ROUNDS`] rounds: `Failed`, saying what the last
-/// round lacked.
+/// follows. After [`MAX_ROUNDS`] rounds, saying what the last round
+/// lacked: `Unsettled` when every round lacked its answer only because the
+/// process changed under it ([`Shortfall::passes`]; a vanished listing
+/// too), else `Failed` (TASK-348).
 ///
 /// Per task: `EACCES`/`EPERM` is `Denied`; any error other than `ENOENT` /
 /// `ESRCH` is `Failed`; an error reading `stat` other than the entry's
@@ -752,6 +777,8 @@ pub(crate) fn collect<T>(
         return Err(ProcError::Gone);
     }
     let mut lacked = String::new();
+    // Whether every round so far lacked only what waiting ends.
+    let mut passes = true;
     for _ in 0..MAX_ROUNDS {
         let Some(listing) = (process.list)()? else {
             if exited()? {
@@ -779,6 +806,14 @@ pub(crate) fn collect<T>(
             None => return Ok(round.results),
             Some(lack) => {
                 lacked = lack.describe(tasks.what);
+                // `shortfall` names one lack (a changed listing before any
+                // read, the first untrusted task by tid): a live task that
+                // showed nothing anywhere in the round counts too.
+                let showed_nothing = round
+                    .seen
+                    .values()
+                    .any(|seen| matches!(seen, Seen::Empty | Seen::Missing(_)));
+                passes &= lack.passes() && !showed_nothing;
                 // The Linux poll closure waits at most 2 ms after the
                 // initial check. This gives an exiting task time to be
                 // released before another round repeats the same reads.
@@ -788,11 +823,16 @@ pub(crate) fn collect<T>(
             }
         }
     }
-    Err(ProcError::Failed(HostError::invalid(
+    let error = HostError::invalid(
         "read",
         format!("process {pid}"),
         format!("no trustworthy read in {MAX_ROUNDS} rounds: {lacked}"),
-    )))
+    );
+    Err(if passes {
+        ProcError::Unsettled(error)
+    } else {
+        ProcError::Failed(error)
+    })
 }
 
 /// The owner of a live task's `fd` directory (see `ProcStatus::fd_dir_owner`
@@ -1013,6 +1053,15 @@ mod tests {
         matches!(got, Err(ProcError::Failed(e)) if e.detail.contains(text))
     }
 
+    /// Out of rounds only because the process changed under them (TASK-348).
+    fn unsettled(got: &Result<Vec<&'static str>, ProcError>) -> bool {
+        matches!(got, Err(ProcError::Unsettled(_)))
+    }
+
+    fn unsettled_saying(got: &Result<Vec<&'static str>, ProcError>, text: &str) -> bool {
+        matches!(got, Err(ProcError::Unsettled(e)) if e.detail.contains(text))
+    }
+
     #[test]
     fn task_stat_is_parsed_from_the_last_parenthesis() {
         let s = parse_task_stat(b"42 (a b) c)) S 1 42 42 0 -1 4194560 0 0 0 0 0 0 0 0 0 0 0 0 17")
@@ -1123,7 +1172,10 @@ mod tests {
             },
             Want::EveryTask,
         );
-        assert!(failed_saying(&got, "task 11 changed identity"), "{got:?}");
+        assert!(
+            unsettled_saying(&got, "task 11 changed identity"),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -1202,7 +1254,7 @@ mod tests {
     }
 
     #[test]
-    fn every_task_exiting_is_failed_not_gone() {
+    fn every_task_exiting_is_unsettled_not_gone() {
         let got = scan(
             10,
             rounds(vec![complete(&[10, 11])]),
@@ -1211,7 +1263,7 @@ mod tests {
             Want::EveryTask,
         );
         assert!(
-            failed_saying(&got, "no task of a complete listing was live"),
+            unsettled_saying(&got, "no task of a complete listing was live"),
             "{got:?}"
         );
     }
@@ -1285,7 +1337,7 @@ mod tests {
             |_| zombie(),
             Want::EveryTask,
         );
-        assert!(failed(&got), "{got:?}");
+        assert!(unsettled(&got), "{got:?}");
         // The listing vanished and the process was released.
         let released = Pidfd {
             poll: polls(vec![PidfdPoll::Running, PidfdPoll::Hangup]),
@@ -1364,7 +1416,7 @@ mod tests {
             |_| zombie(),
             Want::EveryTask,
         );
-        assert!(failed(&got), "{got:?}");
+        assert!(unsettled(&got), "{got:?}");
     }
 
     /// Codex 1 (round 8): a stalled exec CPU keeps the swap window open, and
@@ -1378,7 +1430,7 @@ mod tests {
             |_| zombie(),
             Want::EveryTask,
         );
-        assert!(failed(&got), "{got:?}");
+        assert!(unsettled(&got), "{got:?}");
     }
 
     /// Codex 2 (round 8): [10] with a count of 1, then [10] with a count of 2
@@ -1392,7 +1444,7 @@ mod tests {
             |_| zombie(),
             Want::EveryTask,
         );
-        assert!(failed(&got), "{got:?}");
+        assert!(unsettled(&got), "{got:?}");
     }
 
     /// Codex 3 (round 8): hidepid=2 and PR_SET_DUMPABLE(0): every lookup says
@@ -1400,7 +1452,10 @@ mod tests {
     #[test]
     fn invisible_in_proc_is_never_gone() {
         let got = scan(10, || Ok(None), |_| Ok(""), |_| live(), Want::EveryTask);
-        assert!(failed_saying(&got, "its task listing vanished"), "{got:?}");
+        assert!(
+            unsettled_saying(&got, "its task listing vanished"),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -1413,7 +1468,7 @@ mod tests {
             Want::EveryTask,
         );
         assert!(
-            failed_saying(&got, "not complete (1 tasks, 2 counted)"),
+            unsettled_saying(&got, "not complete (1 tasks, 2 counted)"),
             "{got:?}"
         );
         let got = scan(
@@ -1424,7 +1479,7 @@ mod tests {
             Want::EveryTask,
         );
         assert!(
-            failed_saying(&got, "its task listing changed between reads"),
+            unsettled_saying(&got, "its task listing changed between reads"),
             "unconfirmed: {got:?}"
         );
         let got = scan(
@@ -1525,7 +1580,7 @@ mod tests {
             Want::EveryTask,
         );
         assert!(
-            failed_saying(&got, "task 20 changed identity"),
+            unsettled_saying(&got, "task 20 changed identity"),
             "an already vanished pinned task cannot establish the round: {got:?}"
         );
         assert!(
@@ -1781,7 +1836,7 @@ mod tests {
             },
             Want::FirstLiveTask,
         );
-        assert!(failed_saying(&got, "changed identity"), "{got:?}");
+        assert!(unsettled_saying(&got, "changed identity"), "{got:?}");
     }
 
     /// TASK-306 review: `PF_KTHREAD` must show in both `stat`s around the
@@ -1799,7 +1854,7 @@ mod tests {
             },
             Want::FirstLiveTask,
         );
-        assert!(failed_saying(&got, "changed identity"), "{got:?}");
+        assert!(unsettled_saying(&got, "changed identity"), "{got:?}");
     }
 
     /// Dead (`X`) is never final: neither the answer's source nor "exited".
@@ -1812,11 +1867,11 @@ mod tests {
             |_| dead(),
             Want::EveryTask,
         );
-        assert!(failed(&got), "{got:?}");
+        assert!(unsettled(&got), "{got:?}");
     }
 
     #[test]
-    fn a_task_list_that_never_settles_is_failed_after_the_bound() {
+    fn a_task_list_that_never_settles_is_unsettled_after_the_bound() {
         let calls = Cell::new(0);
         let got = scan(
             10,
@@ -1829,10 +1884,59 @@ mod tests {
             Want::EveryTask,
         );
         assert!(
-            failed_saying(&got, &format!("no trustworthy read in {MAX_ROUNDS} rounds")),
+            unsettled_saying(&got, &format!("no trustworthy read in {MAX_ROUNDS} rounds")),
             "{got:?}"
         );
         assert_eq!(calls.get(), MAX_ROUNDS);
+    }
+
+    /// TASK-348: one round in which a live task showed nothing (an empty fd
+    /// table, which a process that closed every fd keeps while it runs)
+    /// makes the bound `Failed`, even when every later round lacked only
+    /// what waiting ends: waiting may not end it. Without that round, the
+    /// same churn is `Unsettled`.
+    #[test]
+    fn a_live_task_that_showed_nothing_once_is_failed_not_unsettled() {
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10]), counted(&[10], 2)]),
+            reads(vec![(10, vec![Ok(""), Ok("x")])]),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert!(
+            failed_saying(&got, "not complete (1 tasks, 2 counted)"),
+            "{got:?}"
+        );
+        let got = scan(
+            10,
+            rounds(vec![counted(&[10], 2)]),
+            reads(vec![(10, vec![Ok("x")])]),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert!(unsettled(&got), "{got:?}");
+        let got = scan(
+            10,
+            rounds(vec![complete(&[10])]),
+            |_| Ok(""),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert!(failed_saying(&got, "gave an empty"), "{got:?}");
+        // The same empty read in a round whose listing also changed: the
+        // round's named lack is the listing, but a live task showed nothing.
+        let got = scan(
+            10,
+            rounds(vec![counted(&[10], 2)]),
+            |_| Ok(""),
+            |_| live(),
+            Want::EveryTask,
+        );
+        assert!(
+            failed_saying(&got, "not complete (1 tasks, 2 counted)"),
+            "{got:?}"
+        );
     }
 
     /// Only the answering round's reads are returned: a read from an
@@ -2194,6 +2298,6 @@ mod tests {
             |_| live(),
             Want::EveryTask,
         );
-        assert!(failed_saying(&got, "listing changed"), "{got:?}");
+        assert!(unsettled_saying(&got, "listing changed"), "{got:?}");
     }
 }

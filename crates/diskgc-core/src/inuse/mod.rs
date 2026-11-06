@@ -41,7 +41,7 @@ use crate::engine::{
 };
 use crate::host::{
     Access, Base, BoundSocket, Delete, Dev, DevIno, Errno, FileType, Host, HostError, LockMode,
-    Locked, MonoTime, MountEntry, Pid, PidNamespace, TryLock,
+    Locked, MonoTime, MountEntry, Pid, PidNamespace, ProcError, TryLock,
 };
 use crate::liveness::pytest::Processes;
 use crate::liveness::{HIDEPID, NOT_INITIAL_PID_NAMESPACE, PidTable};
@@ -592,6 +592,11 @@ impl Scan {
                     excuse.as_str(),
                     u.error
                 )),
+                None if matches!(u.error, ProcError::Unsettled(_)) => notes.push(format!(
+                    "pid {} ({name}, {ids}) did not hold still to be read (exiting or \
+                     changing) and is treated as using every candidate: {}",
+                    u.pid, u.error
+                )),
                 None => notes.push(format!(
                     "pid {} ({name}, {ids}) cannot be inspected and is treated as using every \
                      candidate: {}",
@@ -626,12 +631,13 @@ impl Scan {
 
     /// The one unreadable process that blocks every candidate, if a scan
     /// settled and nothing else blocks it first ([`Self::blocked`]). An
-    /// unsettled scan has no complete attribution.
+    /// unsettled scan has no complete attribution, and neither has a busy
+    /// host's process whose reads did not settle (its skip is `busy`).
     pub fn blocking_unreadable(&self) -> Option<crate::engine::ProcessBlocker> {
         if self.blocked_by().map(|(cause, _)| cause) != Some(UnknownCause::UnreadableProcess) {
             return None;
         }
-        let u = self.unreadable.iter().find(|u| u.excuse.is_none())?;
+        let u = self.first_blocking_unreadable()?;
         Some(crate::engine::ProcessBlocker {
             pid: u.pid.0,
             command: u
@@ -692,6 +698,13 @@ impl Scan {
     /// the scan is unsettled, or a process that blocks could not be read
     /// (docs/safety.md, In use). `None`: it can judge candidates (a loop
     /// device may still refuse those on one filesystem, [`Self::check`]).
+    ///
+    /// A blocking process whose reads did not settle
+    /// ([`ProcError::Unsettled`]: exiting, churning or in an exec) is a
+    /// busy host, as an unsettled scan is: waiting ends it (TASK-348). Any
+    /// other blocking process (`unreadable_process`) can stay so while it
+    /// runs and decides first, since it keeps every candidate whether or
+    /// not the other settles.
     pub fn blocked_by(&self) -> Option<(UnknownCause, String)> {
         if let Err(why) = &self.visibility {
             return Some((UnknownCause::IncompleteProcessList, why.clone()));
@@ -702,18 +715,41 @@ impl Scan {
         if let Some(why) = &self.unsettled {
             return Some((UnknownCause::Busy, why.clone()));
         }
-        let u = self.unreadable.iter().find(|u| u.excuse.is_none())?;
+        let u = self.first_blocking_unreadable()?;
         let name = u
             .name
             .as_ref()
             .map_or("?".into(), |n| n.to_string_lossy().into_owned());
-        Some((
-            UnknownCause::UnreadableProcess,
-            format!(
-                "pid {} ({name}) cannot be inspected, so it may be using any candidate: {}",
-                u.pid, u.error
+        Some(match u.error {
+            ProcError::Unsettled(_) => (
+                UnknownCause::Busy,
+                format!(
+                    "pid {} ({name}) did not hold still to be read (exiting or changing), so it \
+                     may be using any candidate: {}",
+                    u.pid, u.error
+                ),
             ),
-        ))
+            _ => (
+                UnknownCause::UnreadableProcess,
+                format!(
+                    "pid {} ({name}) cannot be inspected, so it may be using any candidate: {}",
+                    u.pid, u.error
+                ),
+            ),
+        })
+    }
+
+    /// The blocking unreadable process that decides [`Self::blocked_by`]:
+    /// the first (by pid) that is not [`ProcError::Unsettled`], else the
+    /// first.
+    fn first_blocking_unreadable(&self) -> Option<&Unreadable> {
+        let mut blocking = self.unreadable.iter().filter(|u| u.excuse.is_none());
+        let first = blocking.clone().next()?;
+        Some(
+            blocking
+                .find(|u| !matches!(u.error, ProcError::Unsettled(_)))
+                .unwrap_or(first),
+        )
     }
 
     /// The open-but-deleted files of the visible processes on the

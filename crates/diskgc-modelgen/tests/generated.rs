@@ -53,7 +53,7 @@ proptest! {
                         prop_assert_eq!(fd.target.stat.dev_ino(), stat.dev_ino());
                     }
                 }
-                Err(ProcError::Denied(_) | ProcError::Failed(_)) => {}
+                Err(ProcError::Denied(_) | ProcError::Failed(_) | ProcError::Unsettled(_)) => {}
                 Err(ProcError::Gone) => return Err(TestCaseError::fail("listed pids are not gone")),
                 Err(ProcError::Exhausted(e)) => {
                     return Err(TestCaseError::fail(format!("no event injects EMFILE: {e}")));

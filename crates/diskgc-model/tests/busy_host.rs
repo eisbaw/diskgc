@@ -52,6 +52,11 @@ fn model(n: usize, stale: u32, events: &str) -> ModelHost {
 
 /// [`model`] with more tree entries `extra` (indented as tree entries).
 fn model_with(n: usize, stale: u32, extra: &str, events: &str) -> ModelHost {
+    model_with_processes(n, stale, extra, "", events)
+}
+
+/// [`model_with`] with more processes `procs` (indented as process items).
+fn model_with_processes(n: usize, stale: u32, extra: &str, procs: &str, events: &str) -> ModelHost {
     let mut tree = String::from(extra);
     for i in 1..=n {
         tree.push_str(&format!(
@@ -77,7 +82,7 @@ tree:
   /tmp/big: {{size: 3G}}
 {tree}processes:
   - {{pid: 10, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [PATH=/usr/bin], fds: [{{path: /usr/bin/tool}}]}}
-events:
+{procs}events:
 {stale_events}{events}"#
     ))
 }
@@ -585,4 +590,177 @@ fn a_tier_timeout_during_a_storm_excludes_the_tier_naming_the_busy_host() {
     for i in 1..=6 {
         assert!(exists(&host, &candidate(i)));
     }
+}
+
+/// `/usr/bin/rust-lld` in the tree, for a linker's process.
+const LINKER_TREE: &str = "  /usr/bin/rust-lld: {}\n";
+
+/// A short-lived linker of someone else's build, pid 11, whose `/proc`
+/// reads never hold still while it exits (`LinuxHost`: "no trustworthy
+/// read in 16 rounds: no task of a complete listing was live").
+const EXITING_LINKER: &str =
+    "  - {pid: 11, exe: /usr/bin/rust-lld, maps: [/usr/bin/rust-lld], proc: unsettled}\n";
+
+/// A shell of the user started with `newgrp` (pid 12): dumpable, all its
+/// uids the user's, refused for its group. It stays so while it runs.
+const NEWGRP_SHELL: &str =
+    "  - {pid: 12, exe: /usr/bin/tool, name: bash, gid: 1001, proc: denied}\n";
+
+/// The `in_use_unknown` rows in report order, as (candidate, cause,
+/// checked, the first blocker's pid).
+fn unknown_rows(report: &Report) -> Vec<(PathBuf, Option<UnknownCause>, bool, Option<u32>)> {
+    report
+        .skipped
+        .iter()
+        .filter(|s| s.reason == Reason::InUseUnknown)
+        .map(|s| {
+            (
+                s.candidate.clone().expect("one row per candidate"),
+                s.unknown_cause,
+                !s.detail.as_deref().unwrap_or("").starts_with("not checked"),
+                s.process_blockers
+                    .as_deref()
+                    .and_then(<[_]>::first)
+                    .map(|b| b.pid),
+            )
+        })
+        .collect()
+}
+
+/// TASK-348's dogfood in small (tmp/walks/2026-11-04-dogfood/a4-rc-real):
+/// a concurrent build's linker exits slowly while the tier runs, and every
+/// read of it in the meantime ends unsettled. Three candidates in a row are
+/// kept `in_use_unknown` on its account, each checked; that is a busy host
+/// (waiting ends it), so the tier backs off, the linker is gone after the
+/// pause, and the rest is reclaimed. Master classed the linker as a process
+/// that cannot be inspected, a cause waiting does not end, and skipped
+/// c-04 to c-08 unchecked (127,645 candidates in the dogfood).
+#[test]
+fn a_process_whose_reads_do_not_settle_is_waited_out_like_a_busy_host() {
+    let host = model_with_processes(
+        8,
+        0,
+        LINKER_TREE,
+        EXITING_LINKER,
+        "  - {at: {elapsed: 1s}, exit: 11}\n",
+    );
+    let (report, lines) = ensure(&host, &request("profile:probe", "100%", None));
+    let rows = unknown_rows(&report);
+    assert_eq!(
+        rows,
+        (1..=3)
+            .map(|i| (candidate(i), Some(UnknownCause::Busy), true, None))
+            .collect::<Vec<_>>(),
+        "{report:#?}"
+    );
+    for skip in report.skipped.iter() {
+        let detail = skip.detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("pid 11 (rust-lld)") && detail.contains("no trustworthy read"),
+            "the skip names the process and why: {skip:#?}"
+        );
+    }
+    assert_eq!(
+        acted(&report),
+        (4..=8).map(candidate).collect::<Vec<_>>(),
+        "{report:#?}"
+    );
+    for i in 1..=3 {
+        assert!(exists(&host, &candidate(i)), "kept while it was unsettled");
+    }
+    assert_eq!(report.status, Status::Exhausted, "{report:#?}");
+    assert_eq!(back_offs(&host).len(), 1, "{:?}", pauses(&host));
+    assert!(
+        lines.iter().any(|l| l.contains("(the host is too busy)")),
+        "{lines:#?}"
+    );
+    let json: Value = serde_json::from_str(&report.to_json()).expect("JSON");
+    assert_eq!(json["skipped"][0]["unknown_cause"], "busy");
+    assert!(json["skipped"][0]["process_blockers"].is_null());
+}
+
+/// A process whose reads never settle and that never exits (a task stuck
+/// in its exit) costs what a storm that never settles costs: the tier backs
+/// off until the deadline, deletes nothing, and the run ends `deadline`
+/// (124: retry later), each candidate it reached checked.
+#[test]
+fn a_process_that_never_settles_holds_the_tier_to_its_deadline() {
+    let timeout = Duration::from_secs(60);
+    let host = model_with_processes(8, 0, LINKER_TREE, EXITING_LINKER, "");
+    let started = host.now();
+    let (report, _) = ensure(&host, &request("profile:probe", "100%", Some(timeout)));
+    let took = host.now().saturating_since(started);
+    assert!(acted(&report).is_empty(), "{report:#?}");
+    for i in 1..=8 {
+        assert!(exists(&host, &candidate(i)));
+    }
+    assert_eq!(report.status, Status::Deadline, "{report:#?}");
+    assert_eq!(report.exit_code(), 124);
+    let rows = unknown_rows(&report);
+    assert!(rows.len() > 3 && rows.len() < 8, "{rows:?}");
+    assert!(
+        rows.iter()
+            .all(|(_, cause, checked, _)| *cause == Some(UnknownCause::Busy) && *checked),
+        "{rows:?}"
+    );
+    assert!(
+        took >= timeout && took < timeout + Duration::from_secs(1),
+        "{took:?}"
+    );
+    assert!(back_offs(&host).len() >= 2, "{:?}", pauses(&host));
+}
+
+/// TASK-340's other half, kept: a process of the user the kernel refuses
+/// to show for a reason no status explains (a `newgrp` shell) stays so
+/// while it runs. Three candidates in a row kept on its account skip the
+/// tier's rest unchecked at once, without a back-off, each naming it
+/// (`unreadable_process`, pid 12).
+#[test]
+fn a_refused_process_of_the_user_still_skips_the_rest_without_a_back_off() {
+    let host = model_with_processes(6, 0, "", NEWGRP_SHELL, "");
+    let started = host.now();
+    let (report, _) = ensure(&host, &request("profile:probe", "100%", None));
+    assert!(acted(&report).is_empty(), "{report:#?}");
+    let rows = unknown_rows(&report);
+    assert_eq!(
+        rows,
+        (1..=6)
+            .map(|i| (
+                candidate(i),
+                Some(UnknownCause::UnreadableProcess),
+                i <= 3,
+                Some(12)
+            ))
+            .collect::<Vec<_>>(),
+        "{report:#?}"
+    );
+    assert!(back_offs(&host).is_empty(), "{:?}", pauses(&host));
+    let took = host.now().saturating_since(started);
+    assert!(took < Duration::from_secs(2), "no back-off: {took:?}");
+}
+
+/// Both at once: one scan finds the exiting linker and the `newgrp` shell.
+/// The shell keeps every candidate whether or not the linker settles, so
+/// it decides: the skips name it (`unreadable_process`), and three of them
+/// skip the rest without a back-off, as the shell alone would.
+#[test]
+fn a_refused_process_decides_over_one_whose_reads_do_not_settle() {
+    let procs = format!("{EXITING_LINKER}{NEWGRP_SHELL}");
+    let host = model_with_processes(5, 0, LINKER_TREE, &procs, "");
+    let (report, _) = ensure(&host, &request("profile:probe", "100%", None));
+    assert!(acted(&report).is_empty(), "{report:#?}");
+    let rows = unknown_rows(&report);
+    assert_eq!(
+        rows,
+        (1..=5)
+            .map(|i| (
+                candidate(i),
+                Some(UnknownCause::UnreadableProcess),
+                i <= 3,
+                Some(12)
+            ))
+            .collect::<Vec<_>>(),
+        "{report:#?}"
+    );
+    assert!(back_offs(&host).is_empty(), "{:?}", pauses(&host));
 }

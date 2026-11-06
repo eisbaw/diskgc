@@ -665,6 +665,15 @@ impl ModelHost {
                     None,
                     "failed".to_owned(),
                 ),
+                ProcAccess::Unsettled => (
+                    Err(ProcError::Unsettled(HostError::invalid(
+                        "read",
+                        format!("process {pid}"),
+                        "no trustworthy read in 16 rounds: no task of a complete listing was live",
+                    ))),
+                    None,
+                    "unsettled".to_owned(),
+                ),
             }
         })
     }
@@ -2595,7 +2604,9 @@ impl Host for ModelHost {
                         "denied".to_owned(),
                     );
                 }
-                ProcAccess::Failed => return unopened("the model says it cannot be inspected"),
+                ProcAccess::Failed | ProcAccess::Unsettled => {
+                    return unopened("the model says it cannot be inspected");
+                }
             }
             match view_lookup(state, proc, path) {
                 Err(e) => fail(e),
@@ -2654,7 +2665,7 @@ impl Host for ModelHost {
                         "denied".to_owned(),
                     );
                 }
-                ProcAccess::Failed => {
+                ProcAccess::Failed | ProcAccess::Unsettled => {
                     return (
                         Err(ProcError::Failed(HostError::invalid(
                             "open",

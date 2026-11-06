@@ -1102,8 +1102,9 @@ fn is_gone<T>(answer: &Result<T, ProcError>) -> bool {
 }
 
 /// Why a `/proc/<pid>` reader returned nothing (docs/safety.md, In use:
-/// unreadable or vanishing processes). Callers treat `Denied` and `Failed`
-/// as "may be using anything", and `Exhausted` as an error of the run.
+/// unreadable or vanishing processes). Callers treat `Denied`, `Failed`
+/// and `Unsettled` as "may be using anything", and `Exhausted` as an error
+/// of the run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcError {
     /// The kernel said, through the process's pidfd, that the process has
@@ -1113,8 +1114,19 @@ pub enum ProcError {
     /// Not readable by this user (`EACCES`, `EPERM`): another user's or a
     /// non-dumpable process.
     Denied(HostError),
-    /// Anything else, including a live task that could not be inspected.
+    /// Anything else, including a live task that could not be inspected
+    /// or that showed nothing (an empty fd table or environment): it can
+    /// stay so for as long as the process runs.
     Failed(HostError),
+    /// The process changed under every read until the reader's rounds ran
+    /// out: its tasks were all exiting, its task listing kept changing, a
+    /// task changed identity or the leader's entry vanished (an exit or an
+    /// exec in progress, thread churn). Never a refusal, and never a live
+    /// task that showed nothing. It ends when the process has exited or
+    /// holds still; until then it may be using anything (TASK-348: a
+    /// linker exiting during a busy build). Its own variant, so a caller
+    /// decides what waiting means for it rather than take it for `Failed`.
+    Unsettled(HostError),
     /// diskgc itself ran out of file descriptors (`EMFILE`: its own
     /// `RLIMIT_NOFILE`; `ENFILE`: the system's table). Says nothing about
     /// the process being read and would hit the next one too: an error of
@@ -1155,7 +1167,7 @@ impl fmt::Display for ProcError {
         match self {
             Self::Gone => f.write_str("process gone"),
             Self::Denied(e) => write!(f, "denied: {e}"),
-            Self::Failed(e) | Self::Exhausted(e) => write!(f, "{e}"),
+            Self::Failed(e) | Self::Unsettled(e) | Self::Exhausted(e) => write!(f, "{e}"),
         }
     }
 }

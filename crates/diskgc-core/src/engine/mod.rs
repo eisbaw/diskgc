@@ -928,12 +928,17 @@ pub struct Skip {
 /// on it, not on the detail text (TASK-263 review, mped S2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnknownCause {
-    /// No in-use scan stayed fresh or settled for the candidate (a busy
-    /// host): a later run may judge it. Three in a row make the tier back
-    /// off, never skip candidates unchecked (TASK-340).
+    /// No in-use scan stayed fresh or settled for the candidate, or a
+    /// process's own reads did not settle (it was exiting or changing,
+    /// TASK-348): a busy host, and a later run may judge it. Three in a row
+    /// make the tier back off, never skip candidates unchecked (TASK-340).
     Busy,
-    /// A process of the user could not be inspected (TASK-190; its
-    /// `process_blockers` name it).
+    /// A process of the user could not be inspected, and can stay so while
+    /// it runs: the kernel refused it for no privilege boundary its status
+    /// shows (a `newgrp` shell), a read of it failed otherwise, or a live
+    /// task of it showed nothing (TASK-190; its `process_blockers` name
+    /// it). One whose reads only did not settle is [`Self::Busy`], whatever
+    /// its status read showed.
     UnreadableProcess,
     /// The held `/proc` cannot list every process (`hidepid`, a PID
     /// namespace other than the initial one, facts unread or changed):
@@ -963,15 +968,17 @@ impl UnknownCause {
         }
     }
 
-    /// Whether the cause stays until someone changes the environment or
-    /// the device, so that running again later does not help: an
-    /// incomplete process list, a loop device. A busy host passes, and an
-    /// unreadable process may end; those keep the "host too busy" wording
-    /// they had before causes were recorded. (Which a tier waits out after
-    /// three in a row is another matter: only a busy host, docs/safety.md,
-    /// In use: Freshness.)
+    /// Whether waiting does not end the cause: it lasts until someone acts
+    /// (ends the process, detaches the device, changes the environment).
+    /// Only a busy host passes by itself (TASK-348). The one rule for both
+    /// what a tier does after three in a row (it backs off only for a cause
+    /// that does not stay, docs/safety.md, In use: Freshness) and what the
+    /// summary tells the user to do.
     pub fn stays(self) -> bool {
-        matches!(self, Self::IncompleteProcessList | Self::LoopDevice)
+        match self {
+            Self::Busy => false,
+            Self::UnreadableProcess | Self::IncompleteProcessList | Self::LoopDevice => true,
+        }
     }
 }
 

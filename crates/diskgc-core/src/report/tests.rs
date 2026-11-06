@@ -1544,6 +1544,71 @@ fn an_uninspectable_process_is_named_not_blamed() {
     assert!(!text.contains("used by"), "{text}");
 }
 
+/// TASK-348: the summary follows the tier's classification. A candidate
+/// kept because a process of the user cannot be inspected (it stays so
+/// while it runs) is not counted as the host's load and gets its own line
+/// on what to do; one kept on a busy host's account, a process whose reads
+/// did not settle included, is counted as busy (TASK-340's follow-up: master
+/// told the user to run again when the host is less busy for both).
+#[test]
+fn human_summary_tells_an_uninspectable_process_from_a_busy_host() {
+    use crate::engine::UnknownCause;
+    let mut report = Report::new(Status::Exhausted, Some(Path::new("/tmp")), false);
+    report.mount = Some("/tmp".into());
+    let mut refused = tier_skip(
+        "t",
+        "/tmp/a",
+        Reason::InUseUnknown,
+        "pid 12 (bash) cannot be inspected, so it may be using any candidate: denied: EACCES",
+    );
+    refused.unknown_cause = Some(UnknownCause::UnreadableProcess);
+    refused.process_blockers = Some(vec![crate::engine::ProcessBlocker {
+        pid: 12,
+        command: Some("bash".into()),
+        evidence: crate::engine::ProcessEvidence::Unreadable,
+    }]);
+    let mut unchecked = refused.clone();
+    unchecked.candidate = Some("/tmp/b".into());
+    report.skipped = vec![refused, unchecked];
+    let text = report.summary().expect("summary");
+    assert!(!text.contains("too busy"), "{text}");
+    assert!(
+        text.contains(
+            "a process diskgc cannot inspect kept 2 candidate(s) (in_use_unknown): it stays so \
+             while it runs; run again once it has exited"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("kept /tmp/a: in_use_unknown, pid 12 (bash) cannot be inspected"),
+        "{text}"
+    );
+    let mut exiting = tier_skip(
+        "t",
+        "/tmp/c",
+        Reason::InUseUnknown,
+        "pid 11 (rust-lld) did not hold still to be read (exiting or changing), so it may be \
+         using any candidate: read process 11: no trustworthy read in 16 rounds",
+    );
+    exiting.unknown_cause = Some(UnknownCause::Busy);
+    report.skipped.push(exiting);
+    let text = report.summary().expect("summary");
+    assert!(
+        text.contains("the host was too busy to check 1 candidate(s) for use (in_use_unknown)"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "kept /tmp/c: in_use_unknown, the host was too busy to check whether it is in use"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("cannot inspect kept 2 candidate(s)"),
+        "{text}"
+    );
+}
+
 /// TASK-221 (Debian walk dumps 14-16): in a container diskgc has its own
 /// PID namespace, and every `/tmp` candidate whose contract needs the
 /// process list is kept `producer_unknown`. The summary says why in words

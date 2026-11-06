@@ -609,10 +609,20 @@ Model scenarios required by [safety.md](safety.md) and
   A process that cannot be inspected counts toward the three but skips
   the tier's rest without a back-off, each skip naming it
   (`unreadable_process`, its pid; diskgc-model
-  `an_unreadable_process_counts_toward_the_in_use_unknown_breaker`). Not
-  in a container: a fork storm cannot be timed to diskgc's listings there
-  (the kernel cases pin only that no unsettled scan clears), and a process
-  diskgc cannot inspect, which a container can make, does not back off;
+  `an_unreadable_process_counts_toward_the_in_use_unknown_breaker`, and a
+  `newgrp`-like refused shell in `busy_host.rs`), also when a process
+  whose reads do not settle is in the same scan. A process whose reads do
+  not settle (TASK-348, the model's `proc: unsettled`: a linker exiting
+  during a busy build) is a busy host's: three in a row make the tier back
+  off, and once it has exited the rest is reclaimed; one that never
+  settles holds the tier to its deadline (`busy_host.rs`). Which read
+  failures count as not settling is pinned on the readers' scripted
+  rounds (diskgc-linux `tasks.rs`,
+  `a_live_task_that_showed_nothing_once_is_failed_not_unsettled` and the
+  churn cases). Not in a container: a fork storm cannot be timed to
+  diskgc's listings there (the kernel cases pin only that no unsettled
+  scan clears), nor can a process held mid-exit, and a process diskgc
+  cannot inspect, which a container can make, does not back off;
 - a bind mount of a subdirectory of a protected tree (TASK-260;
   `/mnt/x` binds `/gen/x` of `/tmp`'s filesystem): a candidate under the
   bind is `protected` while the match is the bind source's ancestor

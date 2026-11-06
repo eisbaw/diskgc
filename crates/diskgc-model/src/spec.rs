@@ -790,6 +790,11 @@ pub enum ProcAccess {
     Denied,
     /// `ProcError::Failed`: a live process that could not be inspected.
     Failed,
+    /// A live process whose reads never hold still, as `LinuxHost`'s
+    /// readers end after their 16 rounds when every task was exiting (a
+    /// short-lived linker releasing its memory): `ProcError::Unsettled`.
+    /// It lasts until an `exit` or `access` event ends it.
+    Unsettled,
 }
 
 impl ProcAccess {

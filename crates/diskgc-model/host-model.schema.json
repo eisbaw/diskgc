@@ -1601,6 +1601,11 @@
           "description": "`ProcError::Failed`: a live process that could not be inspected.",
           "type": "string",
           "const": "failed"
+        },
+        {
+          "description": "A live process whose reads never hold still, as `LinuxHost`'s\nreaders end after their 16 rounds when every task was exiting (a\nshort-lived linker releasing its memory): `ProcError::Unsettled`.\nIt lasts until an `exit` or `access` event ends it.",
+          "type": "string",
+          "const": "unsettled"
         }
       ]
     },

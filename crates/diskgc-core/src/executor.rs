@@ -898,12 +898,13 @@ struct Reclaim<'a, 'l, H: Delete> {
     /// Candidates in a row, in the order taken, whose reclaim ended
     /// `in_use_unknown` ([`IN_USE_UNKNOWN_IN_A_ROW_MAX`]).
     in_use_unknown_in_a_row: usize,
-    /// The latest of them, when its cause is not a busy host (a process
-    /// that cannot be inspected, a loop device, an incomplete process list
-    /// keep every candidate while they last, and waiting does not end
-    /// them): the tier's rest is skipped unchecked with its cause, detail
-    /// and process. `None` with a count of three or more: a busy host, and
-    /// the tier backs off instead ([`Reclaim::before_check`]).
+    /// The latest of them, when its cause stays ([`UnknownCause::stays`]:
+    /// a process that cannot be inspected, a loop device, an incomplete
+    /// process list keep every candidate while they last, and waiting does
+    /// not end them): the tier's rest is skipped unchecked with its cause,
+    /// detail and process. `None` with a count of three or more: a busy
+    /// host (stale or unsettled scans, a process whose reads did not
+    /// settle), and the tier backs off instead ([`Reclaim::before_check`]).
     in_use_unknown_last: Option<Skip>,
     /// The run's index, which the reclaim walk takes its queue from
     /// ([`indexed`]); `None` for a tier that discovers only.
@@ -924,15 +925,17 @@ struct Reclaim<'a, 'l, H: Delete> {
 
 /// After this many candidates in a row of one tier end `in_use_unknown`
 /// (each spent its [`crate::inuse::FRESH_ATTEMPTS`], or its scan did not
-/// settle), the host is taken to be too busy for now: before each further
-/// candidate the tier backs off ([`busy_back_off`]) instead of spending one
-/// candidate's scans and pauses after another (docs/safety.md, In use:
-/// Freshness). Three: one unlucky candidate, or two, is a spike; three in a
-/// row (at least nine stale scans, or six unsettled ones) is the load the
-/// run is in. For any other cause (a process that cannot be inspected, a
-/// loop device, an incomplete process list) waiting does not help: it keeps
-/// every candidate while it lasts, so the tier's rest is skipped unchecked,
-/// naming it.
+/// settle, or a process's own reads did not), the host is taken to be too
+/// busy for now: before each further candidate the tier backs off
+/// ([`busy_back_off`]) instead of spending one candidate's scans and pauses
+/// after another (docs/safety.md, In use: Freshness). Three: one unlucky
+/// candidate, or two, is a spike; three in a row (at least nine stale
+/// scans, or six unsettled ones; a process whose reads did not settle can
+/// keep three on one blocking scan, reused for half a second) is the load
+/// the run is in. For a cause that stays ([`UnknownCause::stays`]: a
+/// process that cannot be inspected, a loop device, an incomplete process
+/// list) waiting does not help: it keeps every candidate while it lasts,
+/// so the tier's rest is skipped unchecked, naming it.
 const IN_USE_UNKNOWN_IN_A_ROW_MAX: usize = 3;
 
 /// The tier's first back-off on a busy host ([`IN_USE_UNKNOWN_IN_A_ROW_MAX`]):
@@ -2661,9 +2664,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         // After the skip's own log line, so the give-up line follows it.
         if let Some(skip) = in_use_unknown {
             self.in_use_unknown_in_a_row += 1;
-            // Only a busy host passes by itself (TASK-340).
-            let busy = skip.unknown_cause.is_none_or(|c| c == UnknownCause::Busy);
-            self.in_use_unknown_last = (!busy).then_some(skip);
+            // Only a busy host passes by itself (TASK-340, TASK-348).
+            let stays = skip.unknown_cause.is_some_and(UnknownCause::stays);
+            self.in_use_unknown_last = stays.then_some(skip);
             if self.in_use_unknown_in_a_row == IN_USE_UNKNOWN_IN_A_ROW_MAX {
                 let then = match &self.in_use_unknown_last {
                     Some(_) => {

@@ -167,6 +167,13 @@ fn live_text(report: &Report, held: Option<String>) -> String {
             .map(|skip| skip.count)
             .fold(0, u64::saturating_add),
     ));
+    lines.extend(uninspectable_line(
+        live.kept
+            .iter()
+            .filter(|skip| uninspectable(skip.reason, skip.unknown_cause))
+            .map(|skip| skip.count)
+            .fold(0, u64::saturating_add),
+    ));
     lines.extend(hidden_processes_line(
         live.kept
             .iter()
@@ -425,9 +432,16 @@ fn plain_diagnostic(
 }
 
 /// Whether an `in_use_unknown` counts toward [`busy_line`]: its cause does
-/// not stay ([`UnknownCause::stays`]; a skip without one counts).
+/// not stay ([`UnknownCause::stays`]; a skip without one counts). A process
+/// that cannot be inspected stays while it runs, so running again when the
+/// host is less busy does not help (TASK-348): [`uninspectable_line`].
 fn busy(cause: Option<UnknownCause>) -> bool {
     !cause.is_some_and(UnknownCause::stays)
+}
+
+/// Whether a refusal counts toward [`uninspectable_line`].
+fn uninspectable(reason: Reason, cause: Option<UnknownCause>) -> bool {
+    reason == Reason::InUseUnknown && cause == Some(UnknownCause::UnreadableProcess)
 }
 
 /// Why diskgc cannot see every process, when that kept a candidate
@@ -513,6 +527,18 @@ fn busy_line(count: u64) -> Option<String> {
         format!(
             "  the host was too busy to check {count} candidate(s) for use (in_use_unknown): \
              kept; run again when the host is less busy"
+        )
+    })
+}
+
+/// What to do about candidates kept because a process of the user cannot
+/// be inspected (the kept lines name it): waiting for a less busy host does
+/// not help, its end does.
+fn uninspectable_line(count: u64) -> Option<String> {
+    (count > 0).then(|| {
+        format!(
+            "  a process diskgc cannot inspect kept {count} candidate(s) (in_use_unknown): it \
+             stays so while it runs; run again once it has exited"
         )
     })
 }
@@ -634,6 +660,17 @@ fn dry_run_text(report: &Report, held: Option<String>) -> String {
             .iter()
             .filter(|row| {
                 row.entry.reason == Some(Reason::InUseUnknown) && busy(row.entry.unknown_cause)
+            })
+            .count() as u64,
+    ));
+    lines.extend(uninspectable_line(
+        folded
+            .rows
+            .iter()
+            .filter(|row| {
+                row.entry
+                    .reason
+                    .is_some_and(|reason| uninspectable(reason, row.entry.unknown_cause))
             })
             .count() as u64,
     ));

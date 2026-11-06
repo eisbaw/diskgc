@@ -1062,6 +1062,10 @@ fn proc_result<T>(what: &str, r: Result<T, ProcError>) -> Option<T> {
             println!("{what} failed {e}");
             None
         }
+        Err(ProcError::Unsettled(e)) => {
+            println!("{what} unsettled {e}");
+            None
+        }
         Err(ProcError::Exhausted(e)) => {
             println!("{what} exhausted {e}");
             None
@@ -1071,7 +1075,8 @@ fn proc_result<T>(what: &str, r: Result<T, ProcError>) -> Option<T> {
 
 /// Prints what the `/proc` readers return for `pid`:
 /// `fd N <dev:ino>`, `cwd|root|exe <dev:ino>`, `map <dev:ino>` (file
-/// mappings only), `env NAME=VALUE`, or `<what> gone|denied|failed ...`.
+/// mappings only), `env NAME=VALUE`, or `<what> gone|denied|failed|unsettled
+/// ...`.
 fn proc_readers(host: &LinuxHost, pid: &str) -> Result<(), String> {
     let pid = Pid(pid.parse().map_err(|_| format!("bad pid {pid:?}"))?);
     let id = |s: &Stat| {
@@ -1217,7 +1222,7 @@ fn wait_for_zombie(tid: i32) -> Result<(), String> {
 /// `host-maps-watch PID DEV:INO MILLIS`: calls `proc_maps(PID)` in a loop
 /// for MILLIS ms and counts the outcomes, and, independently, how often the
 /// thread-group leader was seen exiting (`PF_EXITING`, not yet a zombie).
-/// Prints one line: `calls= with= without= gone= failed= denied=
+/// Prints one line: `calls= with= without= gone= failed= unsettled= denied=
 /// leader_exiting_seen=`, where `with`/`without` count `Ok` results that do
 /// or do not contain a mapping of DEV:INO.
 fn maps_watch(host: &LinuxHost, pid: &str, want: &str, millis: &str) -> Result<(), String> {
@@ -1226,8 +1231,9 @@ fn maps_watch(host: &LinuxHost, pid: &str, want: &str, millis: &str) -> Result<(
         .parse()
         .map_err(|_| format!("bad millis {millis:?}"))?;
     let leader_stat = format!("/proc/{pid_n}/task/{pid_n}/stat");
-    let (mut calls, mut with, mut without, mut gone, mut failed, mut denied, mut exiting) =
-        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut calls, mut with, mut without, mut gone, mut failed, mut unsettled) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut denied, mut exiting) = (0u64, 0u64);
     let started = Instant::now();
     while started.elapsed() < Duration::from_millis(millis) {
         if let Ok(stat) = std::fs::read_to_string(&leader_stat)
@@ -1245,12 +1251,13 @@ fn maps_watch(host: &LinuxHost, pid: &str, want: &str, millis: &str) -> Result<(
             Ok(_) => without += 1,
             Err(ProcError::Gone) => gone += 1,
             Err(ProcError::Failed(_) | ProcError::Exhausted(_)) => failed += 1,
+            Err(ProcError::Unsettled(_)) => unsettled += 1,
             Err(ProcError::Denied(_)) => denied += 1,
         }
     }
     println!(
         "calls={calls} with={with} without={without} gone={gone} failed={failed} \
-         denied={denied} leader_exiting_seen={exiting}"
+         unsettled={unsettled} denied={denied} leader_exiting_seen={exiting}"
     );
     Ok(())
 }

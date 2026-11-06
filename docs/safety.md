@@ -953,16 +953,32 @@ reclaim on any desktop):
   after its `setresuid`), that stands, as for any other user's process.
   Limit: a privileged process that switches all its uids to another user
   while keeping the user's files open is then not seen;
+- a process whose reads did not settle (any user's: only a refusal is
+  excused, above; each of its reads
+  ran out of rounds only because the process changed under them: every
+  task exiting, its task listing changing or miscounted, a task changing
+  identity or the leader's entry vanishing; Threads, below; its last
+  read in the scan decides, as for any unreadable process) makes every
+  candidate `in_use_unknown` as a busy host does (`unknown_cause: busy`;
+  the skip's detail names it, `process_blockers` is `null` as for an
+  unsettled scan), counted toward the three in a row like an unsettled
+  scan, after which the tier backs off (Freshness): it ends when the
+  process has exited or holds still (TASK-348; dogfood 2026-11-05, a
+  concurrent build's exiting `rust-lld`);
 - any other unreadable process of the user makes every candidate
   `in_use_unknown` (it could be using any of them, and whether it does
-  cannot be told; the skip names it, evidence `unreadable`), counted
-  toward the three in a row like an unsettled scan (TASK-190), but three
-  of them skip the tier's rest naming it, without a back-off (Freshness):
-  one whose reads fail for another reason (also another user's: a failed
-  read says nothing about who may read it), one whose status cannot be
-  read, and one refused although it is dumpable, unprivileged and the
-  user's (a shell started with `newgrp` or `sg`: the kernel also compares
-  groups).
+  cannot be told; the skip names it, evidence `unreadable`,
+  `unknown_cause: unreadable_process`), counted toward the three in a row
+  like an unsettled scan (TASK-190), but three of them skip the tier's
+  rest naming it, without a back-off (Freshness), since it can stay so
+  for as long as it runs: one refused although it is dumpable,
+  unprivileged and the user's (a shell started with `newgrp` or `sg`: the
+  kernel also compares groups), one whose status cannot be read, one
+  with a live task that showed nothing in some round (an empty fd table
+  or environment), and one whose reads fail for any other reason (also
+  another user's: a failed read says nothing about who may read it). When
+  a scan finds both kinds, such a process decides: it keeps every
+  candidate whether or not the other settles.
 
 The cost of the noted ones is stated plainly: their open files, mappings
 and working directories are not seen, so a candidate one of them uses can
@@ -1043,8 +1059,15 @@ after the second listing. It then holds every thread alive at the count.
 A tid reused between the listings invalidates the round even if both
 lists contain the same number. A round is the answer when its listing is
 complete, every task in it gave a trustworthy read, and one task is live.
-Otherwise another round follows, for a bounded number of rounds, after
-which the process is treated as unreadable. Only the answering round's
+Otherwise another round follows, for a bounded number of rounds (16),
+after which the process is treated as unreadable: as one whose reads did
+not settle when every round lacked its answer only because the process
+changed under it (its listing changed or miscounted, no task was live, a
+task changed identity, the leader's entry or the whole listing vanished),
+else, after any round in which a live task's read found nothing or said
+`ENOENT`/`ESRCH` (whatever else that round lacked), as one that cannot be
+inspected (Unreadable or vanishing
+processes, above). Only the answering round's
 reads are used; within it, results of tasks that exit meanwhile are kept. A
 task that is exiting (`PF_EXITING`) shows empty or missing entries while it
 releases them: it is never the source of the memory map or environment.
@@ -1120,10 +1143,11 @@ time) has no memory map or environment of its own: a read of either that
 finds nothing, or `ESRCH` as Linux 6.18 answers a kernel thread's
 `environ`, is its answer, nothing, in one round (TASK-306); a user
 task's `ESRCH` is still retried. A live task that cannot be read is treated like an
-unreadable process, and so is a process that keeps creating and ending
-threads faster than a round completes (each round needs its listing to
-hold still from the first listing to the second); while that lasts it
-costs every candidate it could be using. A 30-second, eight-worker fork
+unreadable process; a process that keeps creating and ending threads
+faster than a round completes (each round needs its listing to hold still
+from the first listing to the second) is one whose reads did not settle,
+a busy host's; while either lasts it costs every candidate it could be
+using. A 30-second, eight-worker fork
 storm in a disposable container produced 261 unsettled checker samples;
 all 261 blocked the unused fixture and explicitly reached the 16-growth-listing
 limit. A scan after the storm cleared the fixture.
@@ -1254,9 +1278,11 @@ backoff a few times, then skip that candidate and carry on"). A part-way
 Cargo target stops at the part that hit it, as for `in_use`. A signal
 during a retry pause ends it within 50 ms and stops the run. After three
 candidates in a row of one tier (in the order taken) end `in_use_unknown`
-(a stale scan, an unsettled scan, or a process that cannot be inspected),
-the last of them decides. A stale or unsettled scan (`unknown_cause:
-busy`): the host is taken to be too busy for now, and the tier **backs off**
+(a stale scan, an unsettled scan, a process whose reads did not settle,
+or a process that cannot be inspected), the last of them decides. A stale
+or unsettled scan, or a process whose reads did not settle
+(`unknown_cause: busy`): the host is taken to be too busy for now, and the
+tier **backs off**
 before each further candidate: 2 s, doubling with each further candidate
 in a row that ends so, at most 60 s (TASK-340). The candidate after a
 pause is checked in full against a new scan under this bound, as any
@@ -1277,11 +1303,21 @@ below `--min-free`, [reference.md](reference.md#exit-codes-ensure)).
 Any other cause (`unknown_cause` in [reference.md](reference.md#output):
 a process of the user that cannot be inspected, a loop device's backing
 file, a process list that stopped being complete) keeps every candidate
-while it lasts and does not pass by waiting (the processes left unexcused
-above are mostly long-lived, such as a `newgrp` shell; one in the middle of
-an exec is read again first): the tier's remaining candidates are skipped
-`in_use_unknown` without a scan, each with that cause, detail and process
-(TASK-340; before it, one that cannot be inspected was reported `busy`).
+while it lasts and does not pass by waiting (a process that cannot be
+inspected, such as a `newgrp` shell, stays so while it runs; one in the
+middle of an exec is read again first, and one whose reads only did not
+settle is a busy host's, above): the tier's remaining candidates are
+skipped `in_use_unknown` without a scan, each with that cause, detail and
+process (TASK-340; before it, one that cannot be inspected was reported
+`busy`). Until TASK-348 a process whose reads did not settle was one that
+cannot be inspected too: on the development laptop under concurrent
+builds, a `--timeout 30h` `ensure` of `nix-shell-rc` met an exiting
+`rust-lld` ("no trustworthy read in 16 rounds: no task of a complete
+listing was live") in three candidates in a row and skipped 127,645
+unchecked after reclaiming 19,986 (dogfood 2026-11-05). A process
+misjudged as one whose reads only did not settle (a task stuck in its
+exit) costs what a storm that never settles costs: the tier backs off
+until its deadline, deleting nothing.
 Refusing needs no freshness. Index blocks
 ([architecture.md](architecture.md#memory-budget-and-collapse)) only
 group candidates for scheduling; each member is found again when its

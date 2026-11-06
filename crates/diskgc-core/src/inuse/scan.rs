@@ -238,8 +238,9 @@ pub(crate) struct Read {
     pub environ: Vec<(OsString, PathBuf)>,
     /// Held open with no name left: identity, mount id, bytes, link text.
     pub deleted: Vec<(DevIno, Option<u64>, u64, OsString)>,
-    /// The environment could not be read (`Failed`) while every other
-    /// reader worked; the heuristic then has no evidence from it.
+    /// The environment could not be read (`Failed`, or `Unsettled`: it
+    /// would not hold still) while every other reader worked; the heuristic
+    /// then has no evidence from it.
     pub environ_failed: Option<HostError>,
     /// The whole initial environment of the latest read that gave one
     /// (the pytest contract reads its variables, not only its paths).
@@ -771,7 +772,9 @@ pub(crate) fn pid_table<H: Host>(
             match host.proc_nspid(pid) {
                 Ok(levels) => table.add_levels(&levels),
                 Err(ProcError::Gone) => {}
-                Err(ProcError::Denied(_) | ProcError::Failed(_)) => failed.push(pid),
+                Err(ProcError::Denied(_) | ProcError::Failed(_) | ProcError::Unsettled(_)) => {
+                    failed.push(pid)
+                }
                 Err(ProcError::Exhausted(e)) => {
                     return Err(ScanError::Failed(with_descriptor_advice(e)));
                 }
@@ -952,7 +955,9 @@ pub(crate) fn is_users_ids(ids: crate::host::Ids, users: &[u32]) -> bool {
 fn out_of_descriptors(error: &ProcError) -> Option<HostError> {
     match error {
         ProcError::Exhausted(e) => Some(with_descriptor_advice(e.clone())),
-        ProcError::Gone | ProcError::Denied(_) | ProcError::Failed(_) => None,
+        ProcError::Gone | ProcError::Denied(_) | ProcError::Failed(_) | ProcError::Unsettled(_) => {
+            None
+        }
     }
 }
 
@@ -1006,7 +1011,10 @@ fn identity_error(error: ProcError) -> HostError {
             "held process",
             "a held process identity returned Gone instead of a release result",
         ),
-        ProcError::Denied(e) | ProcError::Failed(e) | ProcError::Exhausted(e) => e,
+        ProcError::Denied(e)
+        | ProcError::Failed(e)
+        | ProcError::Unsettled(e)
+        | ProcError::Exhausted(e) => e,
     }
 }
 
@@ -1168,8 +1176,8 @@ pub(crate) fn outcome(pid: Pid, view: Result<ProcView, ProcError>, project: bool
 }
 
 /// The uses in a process's view. A failed environment is kept as no
-/// evidence (`environ_failed`) when it is `Failed`; `Denied` there makes
-/// the process unreadable.
+/// evidence (`environ_failed`) when it is `Failed` or `Unsettled`;
+/// `Denied` there makes the process unreadable.
 fn uses_of(pid: Pid, view: ProcView, project: bool) -> Result<Read, ProcError> {
     let mut read = Read::default();
     let mut hold = |how: How, id: DevIno, target: &crate::host::LinkTarget| {
@@ -1264,7 +1272,10 @@ fn uses_of(pid: Pid, view: ProcView, project: bool) -> Result<Read, ProcError> {
                 .collect();
             read.environ_raw = Some(env);
         }
-        Err(ProcError::Failed(e)) => read.environ_failed = Some(e),
+        // An environment that would not hold still (every task exiting
+        // after the other readers worked) is no evidence either, as before
+        // the two were told apart.
+        Err(ProcError::Failed(e) | ProcError::Unsettled(e)) => read.environ_failed = Some(e),
         Err(e) => return Err(e),
     }
     Ok(read)

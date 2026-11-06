@@ -181,7 +181,7 @@ pub(crate) fn collect<H: Host>(
                 Err(ProcError::Exhausted(e)) => {
                     return Err(ScanError::Failed(super::scan::with_descriptor_advice(e)));
                 }
-                Err(ProcError::Denied(e) | ProcError::Failed(e)) => {
+                Err(ProcError::Denied(e) | ProcError::Failed(e) | ProcError::Unsettled(e)) => {
                     out.failed.push(ClimbFailed {
                         pid: *pid,
                         how: held.how,

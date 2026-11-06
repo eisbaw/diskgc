@@ -2602,7 +2602,12 @@ impl Host for LinuxHost {
         match open_pidfd(pid) {
             Ok(_) => Ok(true),
             Err(ProcError::Gone) => Ok(false),
-            Err(ProcError::Denied(e) | ProcError::Failed(e) | ProcError::Exhausted(e)) => Err(e),
+            Err(
+                ProcError::Denied(e)
+                | ProcError::Failed(e)
+                | ProcError::Unsettled(e)
+                | ProcError::Exhausted(e),
+            ) => Err(e),
         }
     }
 
