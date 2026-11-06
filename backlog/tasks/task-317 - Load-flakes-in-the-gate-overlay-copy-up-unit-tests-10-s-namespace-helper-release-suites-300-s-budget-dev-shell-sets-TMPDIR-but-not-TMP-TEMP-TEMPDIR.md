@@ -3,10 +3,10 @@ id: TASK-317
 title: >-
   Load flakes in the gate: overlay copy-up unit test's 10 s namespace helper;
   release suites' 300 s budget; dev shell sets TMPDIR but not TMP/TEMP/TEMPDIR
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-02T13:27:00Z'
-updated_date: '2026-11-06T12:39:00Z'
+updated_date: '2026-11-06T12:40:00Z'
 labels:
   - test
   - flaky
@@ -26,4 +26,6 @@ From TASK-311's three just e2e runs (2026-11-02, host load 16-27 from another pr
 2026-11-02 recurrence (TASK-315 gate, docs-only diff on c2005b4): nix develop -c just check exit 101, only host::tests::a_lock_file_on_an_overlay_is_not_copied_up: 'wait for the namespace helper: test child ... did not exit in 10 seconds'; 212 passed in diskgc-linux lib. Host load 24.5/21.8/18.9, PSI io some avg60 17.9, concurrent rustc builds (another worktree). Raw log: tmp/evidence-t315/check-run1-flake.log (main checkout). Not resolved by the rerun.
 
 2026-11-06: the overlay copy-up unit test's 10 s namespace helper timed out in 2 of 4 TASK-365 gate runs (load ~36) and in TASK-359/337 runs; it now blocks gates regularly. Raise to a root fix next.
+
+2026-11-06 orchestrator: implementer in tmp/worktrees/t317 (branch t317-load-flakes, from master 27cfe20e).
 <!-- SECTION:NOTES:END -->
