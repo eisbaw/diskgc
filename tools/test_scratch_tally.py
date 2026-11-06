@@ -2,12 +2,13 @@
 
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from scratch_tally import MAX_HISTORY_BYTES, MAX_HISTORY_RECORDS, read_records, record_tally
+from scratch_tally import MAX_HISTORY_BYTES, MAX_HISTORY_RECORDS, read_records, record_tally, sizes
 
 
 def record(value):
@@ -59,6 +60,31 @@ class ScratchHistoryTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "interrupted"):
                     record_tally(record(8))
             self.assertEqual(history.read_text(), json.dumps(record(7)) + "\n")
+
+
+class SizesTests(unittest.TestCase):
+    def test_an_unreadable_directory_is_reported_and_the_total_kept(self):
+        # TASK-330: a rootless overlay's work/work directory is unreadable.
+        if os.geteuid() == 0:
+            self.skipTest("root reads every directory")
+        with tempfile.TemporaryDirectory() as root:
+            tree = Path(root, "tree")
+            (tree / "work" / "work").mkdir(parents=True)
+            (tree / "data").write_bytes(b"x" * 8192)
+            (tree / "work" / "work").chmod(0)
+            try:
+                unreadable = []
+                values = sizes([tree], unreadable)
+            finally:
+                (tree / "work" / "work").chmod(0o700)
+            self.assertGreaterEqual(values[str(tree)], 8192)
+            self.assertEqual(len(unreadable), 1)
+            self.assertIn("work/work", unreadable[0])
+
+    def test_a_missing_path_is_an_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(ValueError):
+                sizes([Path(root, "absent")], [])
 
 
 if __name__ == "__main__":

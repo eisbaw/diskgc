@@ -28,12 +28,19 @@ MAX_HISTORY_BYTES = 1024 * 1024
 MAX_HISTORY_RECORDS = 1024
 
 
-def sizes(paths):
+def sizes(paths, unreadable):
+    """Bytes below each path, by `du`; what it could not read is appended to
+    `unreadable` (its messages) and the sizes are then lower bounds.
+
+    A rootless container run leaves overlay `work/work` directories that its
+    user cannot read (TASK-330): `du` still prints a total for each path and
+    exits 1, which is reported, not fatal. A path without a total is an
+    error.
+    """
     if not paths:
         return {}
     result = subprocess.run(
         ["du", "-x", "-B1", "-s", "-0", "--", *map(os.fspath, paths)],
-        check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -42,6 +49,14 @@ def sizes(paths):
         if row:
             size, name = row.split(b"\t", 1)
             values[os.fsdecode(name)] = int(size)
+    missing = [os.fspath(p) for p in paths if os.fspath(p) not in values]
+    if missing:
+        raise ValueError(
+            f"du printed no total for {missing} (exit {result.returncode}): "
+            f"{os.fsdecode(result.stderr).strip()}"
+        )
+    if result.returncode != 0:
+        unreadable.extend(line for line in os.fsdecode(result.stderr).splitlines() if line)
     return values
 
 
@@ -137,11 +152,14 @@ def main():
 
     children, skipped_children = same_fs_entries(SCRATCH, "", repo_device)
     legacy, skipped_legacy = same_fs_entries(Path("/tmp"), "diskgc", tmp_device)
-    child_sizes = sizes(children)
-    legacy_sizes = sizes(legacy)
-    scratch_bytes = sizes([SCRATCH])[str(SCRATCH)]
+    unreadable = []
+    child_sizes = sizes(children, unreadable)
+    legacy_sizes = sizes(legacy, unreadable)
+    scratch_bytes = sizes([SCRATCH], unreadable)[str(SCRATCH)]
     root_target = REPO / "target"
-    root_target_bytes = sizes([root_target])[str(root_target)] if root_target.exists() else 0
+    root_target_bytes = (
+        sizes([root_target], unreadable)[str(root_target)] if root_target.exists() else 0
+    )
     legacy_bytes = sum(legacy_sizes.values())
     filesystem = os.statvfs(REPO)
     capacity = filesystem.f_blocks * filesystem.f_frsize
@@ -168,6 +186,16 @@ def main():
             f"Skipped other-filesystem entries: tmp={len(skipped_children)}, "
             f"legacy={len(skipped_legacy)}"
         )
+    if unreadable:
+        shown = sorted(set(unreadable))
+        print(
+            f"WARNING: du reported {len(shown)} errors, so the sizes above are lower bounds "
+            "(an unreadable rootless overlay work/work directory is one cause):"
+        )
+        for line in shown[:5]:
+            print(f"  {line}")
+        if len(shown) > 5:
+            print(f"  ... and {len(shown) - 5} more")
     if corrupt:
         print(f"WARNING: ignored {corrupt} incomplete or corrupt tally history records")
     if previous is not None:

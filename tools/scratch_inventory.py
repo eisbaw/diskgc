@@ -85,7 +85,8 @@ def inventory():
     entries, skipped = same_fs_entries(tmp, "diskgc", tmp.stat().st_dev)
     worktrees = registered_worktrees()
     refs, unreadable = process_references()
-    entry_sizes = sizes(entries)
+    du_errors = []
+    entry_sizes = sizes(entries, du_errors)
     targets = []
     for path in entries:
         if not stat.S_ISDIR(path.lstat().st_mode):
@@ -97,7 +98,7 @@ def inventory():
             continue
         if stat.S_ISDIR(target_stat.st_mode) and target_stat.st_dev == tmp.stat().st_dev:
             targets.append(target)
-    target_sizes = sizes(targets)
+    target_sizes = sizes(targets, du_errors)
     rows = []
     for path in entries:
         registered = worktrees.get(str(path))
@@ -130,6 +131,8 @@ def inventory():
         "observed_processes": len({pid for row in rows for pid in row["observed_pids"]}),
         "unreadable_process_fd_tables": unreadable,
         "skipped_other_filesystem": skipped,
+        # du errors (unreadable directories): the byte counts are lower bounds.
+        "du_errors": sorted(set(du_errors)),
     }
     return summary, rows
 
