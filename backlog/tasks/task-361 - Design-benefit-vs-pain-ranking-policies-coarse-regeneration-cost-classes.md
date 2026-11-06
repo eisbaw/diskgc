@@ -4,7 +4,7 @@ title: 'Design: benefit-vs-pain ranking policies (coarse regeneration-cost class
 status: To Do
 assignee: []
 created_date: '2026-11-05T20:58:00Z'
-updated_date: '2026-11-05T21:04:00Z'
+updated_date: '2026-11-06T08:44:00Z'
 labels:
   - design
   - ranking
@@ -22,4 +22,6 @@ Mark 2026-11-05 brainstorm: priorities across profiles instead of one profile at
 
 <!-- SECTION:NOTES:BEGIN -->
 Mark 2026-11-05: policies = ordered (today's tiers; DEFAULT), global-score (every eligible candidate competes on benefit/pain across all profiles; tiers only group configuration), cheapest-first (by pain class only: free, download, rebuild, expensive, until the goal). Not banded-score.
+
+Mark 2026-11-06: deferred until after 0.2 (0.3).
 <!-- SECTION:NOTES:END -->

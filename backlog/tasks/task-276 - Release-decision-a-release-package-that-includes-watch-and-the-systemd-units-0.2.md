@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-31T04:49:00Z'
-updated_date: '2026-11-05T21:04:00Z'
+updated_date: '2026-11-06T08:44:00Z'
 labels:
   - release
 dependencies: []
@@ -39,4 +39,6 @@ Everything else a 0.2 release needs (RC QA: e2e-full, release runners, docs-vs-b
 Mark 2026-11-05 (answers): 0.2 may run the package managers' own clean subcommands for the lock-safe five only: pip-cache, ccache, jest-cache, uv-cache, pnpm-store. npm, go-build, yarn, platformio wait (no lock vs their own cleaner).
 
 Mark 2026-11-05 (answers): 0.2 ships a RECLAIMING watch (not only --tally-only); 0.2 supersedes 0.1.0 (no 0.1.x): 0.2's release notes carry a notice listing which 0.1.0 flaws it fixes and tell 0.1.0 users to upgrade.
+
+Mark 2026-11-06: NixOS module ships in 0.2 (VM test in TASK-362's evidence). 0.2 profile families: runtime caches (TASK-352) and build outputs (TASK-354) are in scope; toolchains/app versions (353), browsers/Electron (355), Docker/Podman (356) wait for 0.3. Ranking policies (TASK-361) after 0.2. python-pycache stays admitted (TASK-358 later).
 <!-- SECTION:NOTES:END -->

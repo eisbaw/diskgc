@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-05T16:54:00Z'
+updated_date: '2026-11-06T08:44:00Z'
 labels:
   - admission
   - profiles
@@ -19,3 +20,9 @@ priority: medium
 <!-- SECTION:DESCRIPTION:BEGIN -->
 TASK-350 host evidence (2026-11-05): of 692 __pycache__ under ~, 5 hold Git-tracked .pyc (some with no source, in saleae_logic_8_pro); others are inside venvs, ~/.claude/skills, ~/.cache/torch. Recoverable from Git but dirties the tree. Mark decides: accept the tolerated residual, or a successor profile skipping hidden directories, venvs and tracked files.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Mark 2026-11-06: deferred until after 0.2 (0.3).
+<!-- SECTION:NOTES:END -->
