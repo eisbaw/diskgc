@@ -163,13 +163,13 @@ class ReferenceShapeTests(unittest.TestCase):
         self.assertIn("cargo-target", catalogs["0.1"])
         self.assertNotIn("nix-garbage", catalogs["0.1"])
         # TASK-335: 0.2's catalog is 0.1's plus nix-garbage; TASK-359: and
-        # five project-tree sources, not node-modules.
+        # six project-tree sources.
         self.assertLessEqual(catalogs["0.1"], catalogs["0.2"])
         self.assertIn("nix-garbage", catalogs["0.2"])
-        project_tree = {"pytest-cache", "python-pycache", "mypy-cache", "python-venv", "node-compile-cache"}
+        project_tree = {"pytest-cache", "python-pycache", "mypy-cache", "python-venv", "node-compile-cache",
+                        "node-modules"}
         self.assertLessEqual(project_tree, catalogs["0.2"])
         self.assertFalse(project_tree & catalogs["0.1"])
-        self.assertNotIn("node-modules", catalogs["0.2"])
         for members in catalogs.values():
             self.assertLessEqual(members, sources)
         self.assertNotIn("docker-dangling", set().union(*catalogs.values()))

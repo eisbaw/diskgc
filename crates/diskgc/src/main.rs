@@ -1676,7 +1676,7 @@ mod tests {
     /// version's row of the release descriptor, and this
     /// list is the second key a widening of the catalog must turn (with
     /// TASK-65's sign-off for `/tmp`, Mark's admission of `nix-garbage` for
-    /// 0.2, TASK-335, and of five project-tree sources, TASK-359), not a
+    /// 0.2, TASK-335, and of six project-tree sources, TASK-359), not a
     /// stale copy to derive away.
     #[test]
     fn release_catalog_keeps_only_its_admitted_built_ins_on_every_listing_surface() {
@@ -1703,6 +1703,7 @@ mod tests {
                 "nix-garbage",
                 "nix-shell-rc",
                 "node-compile-cache",
+                "node-modules",
                 "pytest-cache",
                 "pytest-tmp",
                 "python-pycache",
@@ -1718,11 +1719,11 @@ mod tests {
             }
             assert!(!surface.contains("docker-build-cache"));
             assert!(!surface.contains("pip-cache"));
-            assert!(!surface.contains("node-modules"));
+            assert!(!surface.contains("bun-cache"));
         }
         assert!(library.get("docker-build-cache").is_none());
         assert!(library.get("pip-cache").is_none());
-        assert!(library.get("node-modules").is_none());
+        assert!(library.get("bun-cache").is_none());
     }
 
     #[test]
@@ -1764,6 +1765,7 @@ mod tests {
             "python-pycache",
             "mypy-cache",
             "python-venv",
+            "node-modules",
         ] {
             Tier::select(&format!("profile:{name}"), &library, Some(&roots), 1000).expect(name);
         }
@@ -1775,7 +1777,7 @@ mod tests {
     #[test]
     fn opt_in_binary_uses_the_narrowed_library_for_help_and_select() {
         let library = builtin_library().expect("binary catalog");
-        assert_eq!(library.profiles().count(), 16);
+        assert_eq!(library.profiles().count(), 17);
         assert!(library.get("nix-garbage").is_some());
         assert!(library.get("python-venv").is_some());
         assert!(library.get("docker-build-cache").is_none());

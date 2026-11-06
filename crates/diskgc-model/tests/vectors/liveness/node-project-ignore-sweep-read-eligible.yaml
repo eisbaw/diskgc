@@ -1,4 +1,4 @@
-# MUST 5 (PENDING Mark's confirmation): rule 2 counts reads only inside the
+# MUST 5 (accepted by Mark with node-modules' admission, 2026-11-05, TASK-359): rule 2 counts reads only inside the
 # project's dependency directories of the candidate's name. A daily sweep
 # that read the project's .gitignore and README.md yesterday (tree walkers,
 # agents) no longer keeps an otherwise idle project's node_modules.

@@ -1244,6 +1244,7 @@ mod tests {
                 "release_candidate_nix_garbage_dry_run_then_bounded_gc",
                 // TASK-359: on the Nix image only.
                 "release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles",
+                "release_candidate_node_modules_keeps_projects_inside_the_30_day_floor",
                 "release_candidate_pytest_cache_reclaim_then_a_live_session_rewrites_it",
                 "release_candidate_python_pycache_reclaim_then_a_live_importer_recompiles",
                 "release_candidate_python_venv_keeps_projects_inside_the_30_day_floor",

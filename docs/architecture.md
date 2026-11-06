@@ -1386,7 +1386,7 @@ Decisions (Mark), before the RC commit:
 - [ ] **Scope** (TASK-276). Is 0.2 the descriptor's provisional `0.2`
   row (`crates/diskgc-core/src/releases.json`), with or without a
   reclaiming `watch`, and with which catalog (Mark admitted
-  `nix-garbage` to it, 2026-11-04, TASK-335, and five project-tree
+  `nix-garbage` to it, 2026-11-04, TASK-335, and six project-tree
   sources, 2026-11-05, TASK-359); does the NixOS module
   ship? Recorded in TASK-276's notes; the row, the PRD's Scope and the
   draft notes then follow it. A `/tmp` built-in new to the catalog

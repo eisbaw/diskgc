@@ -10,6 +10,7 @@ usage: candidate_catalog.py FILE RELEASE LIST
 
 LIST is a file of profile names, one per line (`#` and blank lines
 ignored): diskgc-e2e/candidate-catalog, the one home of the candidates.
+An empty list is valid: FILE is left as it is (every candidate admitted).
 Each NAME must be a top-level `- name: NAME` entry with a
 `  liveness_class:` line and no `  releases:` line yet (a built-in already
 in some catalog is a mistake in the candidate list, not something to
@@ -64,8 +65,6 @@ def admit(text, release, names):
     """Return text with `releases: [release]` added to each named entry."""
     if not RELEASE.match(release):
         raise ValueError(f"release {release!r} is not MAJOR.MINOR")
-    if not names:
-        raise ValueError("no profile named")
     if len(set(names)) != len(names):
         raise ValueError(f"a profile is named twice: {names}")
     lines = text.splitlines(keepends=True)
@@ -98,6 +97,9 @@ def main(argv):
     except (OSError, ValueError) as error:
         print(f"candidate_catalog: {path}: {error}", file=sys.stderr)
         return 1
+    if not names:
+        print(f"candidate_catalog: {path}: no candidates; catalog {release} unchanged")
+        return 0
     path.write_text(patched)
     print(f"candidate_catalog: {path}: {', '.join(names)} added to catalog {release}")
     return 0

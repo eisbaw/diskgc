@@ -18,7 +18,7 @@ use crate::{TESTER, ensure};
 // The release candidate's (0.2) catalog: 0.1's, signed off by TASK-65
 // (Mark, 2026-10-24: Cargo, the two /tmp built-ins with a liveness
 // contract, and the idle filters), plus nix-garbage (Mark, 2026-11-04,
-// TASK-335) and five project-tree sources (Mark, 2026-11-05, TASK-359).
+// TASK-335) and six project-tree sources (Mark, 2026-11-05, TASK-359).
 const ADMITTED: &[&str] = &[
     "cargo-target",
     "nix-garbage",
@@ -29,6 +29,7 @@ const ADMITTED: &[&str] = &[
     "mypy-cache",
     "python-venv",
     "node-compile-cache",
+    "node-modules",
     "idle-1h",
     "idle-1d",
     "idle-2d",
@@ -74,8 +75,6 @@ const EXCLUDED: &[&str] = &[
     // TASK-94, pending Mark's admission: development library only.
     "rustup-toolchains",
     "elan-toolchains",
-    // TASK-350's family member held back (TASK-357).
-    "node-modules",
     // TASK-78, pending Mark's admission of the app names: development
     // library only.
     "teams-for-linux-electron-cache",

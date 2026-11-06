@@ -20,11 +20,11 @@
 //! mtime or atime to an hour before that clock's now (a kernel ctime
 //! cannot be set back).
 //!
-//! TASK-359 admitted five of the six to the 0.2 catalog: the
+//! TASK-359 admitted all six to the 0.2 catalog: the
 //! `release_candidate_*` tests run the `pytest-cache`, `python-pycache`,
 //! `mypy-cache` and `node-compile-cache` scenarios through the gate-lifted
-//! release-candidate package, and `python-venv` only on the keep side of
-//! its floor (that build reads no clock offset).
+//! release-candidate package, and `python-venv` and `node-modules` only on
+//! the keep side of their floor (that build reads no clock offset).
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -1359,6 +1359,59 @@ pub fn release_candidate_python_venv_keeps_projects_inside_the_30_day_floor(
     Ok(())
 }
 
+/// TASK-359: `node-modules` through the gate-lifted release-candidate
+/// package, as [`release_candidate_python_venv_keeps_projects_inside_the_30_day_floor`]
+/// does for `python-venv`: only the keep side of the 30-day floor. A real
+/// `npm install` of a project and of a workspace, made now, is planned
+/// reclaimable by the development package with its clock advanced past the
+/// floor (the positive control); the release candidate, with the same
+/// offset installed, keeps both `not_idle` and deletes nothing.
+pub fn release_candidate_node_modules_keeps_projects_inside_the_30_day_floor(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "node-modules")?;
+    versions(ctx, &["node", "npm"])?;
+    control_dir(ctx)?;
+    let spec = local_package(ctx)?;
+    let installs = [
+        npm_project(ctx, "app", &spec)?,
+        npm_workspace(ctx, "mono", &spec)?,
+    ];
+    let _clock = SandboxClockOffset::install(PAST_THE_FLOOR.as_secs())?;
+    let oracle = Oracle::arm(Fixture::new())?;
+    let development_package = crate::release_suite::binary_path(ctx, "diskgc-development");
+    let development = run_ensure(
+        ctx,
+        &development_package,
+        true,
+        SELECT_NODE_MODULES,
+        Some(SRC),
+        HOME,
+    )?;
+    oracle.judge(&development)?.assert_clean()?;
+    development.expect_code(0)?;
+    let past_the_floor: Expected = installs.iter().map(|n| (n.clone(), None)).collect();
+    ensure!(
+        plan_of(&report(&development)?)? == sorted(&past_the_floor),
+        "positive control: the development build past the floor planned {:?}, expected {:?}",
+        plan_of(&report(&development)?)?,
+        sorted(&past_the_floor)
+    );
+    let inside_the_floor: Expected = installs
+        .iter()
+        .map(|n| (n.clone(), Some("not_idle")))
+        .collect();
+    dry_run_then_reclaim(
+        ctx,
+        &binary,
+        SELECT_NODE_MODULES,
+        Some(SRC),
+        HOME,
+        &inside_the_floor,
+    )?;
+    Ok(())
+}
+
 // ---- python-pycache --------------------------------------------------------
 
 /// docs/testing.md, Admission evidence (`python-pycache`): bytecode the
@@ -1725,8 +1778,8 @@ fn candidate_list(ctx: &Ctx) -> Result<BTreeSet<String>, String> {
         .collect())
 }
 
-/// The family this suite builds fixtures for: TASK-350's six, five of them
-/// in the 0.2 catalog since TASK-359, `node-modules` on the candidate list.
+/// The family this suite builds fixtures for: TASK-350's six, all in the
+/// 0.2 catalog since TASK-359 (the candidate list is empty now).
 const FAMILY: &[&str] = &[
     "node-modules",
     "python-venv",
@@ -1738,7 +1791,8 @@ const FAMILY: &[&str] = &[
 
 /// docs/testing.md, Admission evidence (candidate catalog): the release
 /// build's catalog code path with the family in its catalog, the members
-/// not yet admitted through a test-only candidate list. Its catalog is
+/// not yet admitted through a test-only candidate list (empty since
+/// TASK-359 admitted all six). Its catalog is
 /// exactly the release candidate's plus the candidate list, the list is
 /// part of this family and disjoint from the release catalog, and every
 /// member is in one of the two. Over one fixture of
@@ -1767,11 +1821,10 @@ pub fn candidate_catalog_project_tree_family_matches_the_development_build(
         "family members in neither the release catalog nor the candidate list: {:?}",
         family.difference(&covered).collect::<Vec<_>>()
     );
-    let want: BTreeSet<String> = released.union(&admitted).cloned().collect();
     ensure!(
-        listed == want,
+        listed == covered,
         "the candidate catalog lists {listed:?}, expected the release candidate's plus the \
-         candidate list: {want:?}"
+         candidate list: {covered:?}"
     );
 
     control_dir(ctx)?;

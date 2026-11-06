@@ -1598,7 +1598,7 @@ untranslatable cases), and a mapping is matched by identity only
 | `python-project-no-pyvenv-cfg-filtered` | `.venv` without `pyvenv.cfg` | `filtered` |
 | `python-project-editable-checkout-refused` | `.venv/src/pkg/.git/HEAD` | `contains_checkout` |
 | `python-project-requirements-manifest` | only `requirements-dev.txt` as manifest, all old | eligible |
-| `node-project-source-read-only-eligible` | all old; `src/a.js` read (`atime`) yesterday, nothing in `node_modules` | eligible: rule 2 counts reads only in the dependency directories (narrowing PENDING Mark) |
+| `node-project-source-read-only-eligible` | all old; `src/a.js` read (`atime`) yesterday, nothing in `node_modules` | eligible: rule 2 counts reads only in the dependency directories (narrowing accepted by Mark, 2026-11-05) |
 | `node-project-undeclared-workspace-residual-eligible` | as `node-project-workspace-member-root-active-kept`, `w/package.json` without `workspaces` and no `.git` | eligible: the stated residual (an undeclared workspace) |
 | `node-project-workspace-manifest-unparsable-unknown` | `w/package.json` not JSON above a member | `producer_unknown` |
 | `node-project-nearest-project-stops-the-climb` | `w/package.json` not JSON; the member `w/packages/a` holds its own `.git`; all old but `w/src` changed yesterday | eligible: the nearest project is the member, and nothing above it is read |
@@ -1622,7 +1622,7 @@ untranslatable cases), and a mapping is matched by identity only
 | `node-project-bind-from-other-filesystem-held-file-kept` | `p/data` binds `/data` of another filesystem, also mounted at `/fast`; a process holds `/fast/data/f` | `in_use`, `fd`: another filesystem than the project's, which the project's path cannot place |
 | `node-project-script-argv-kept`, `node-project-relative-argv-kept` | all old; a `node` with cwd `/` and `cmdline: [node, /home/tester/p/server.js]`, or cwd `/home/tester` and `p/server.js` | `in_use`, `command_line` |
 | `python-project-interpreter-argv-kept` | all old; `cmdline: [q/.venv/bin/python, q/server.py]` (absolute), exe `/usr/bin/python3`, cwd `/` | `in_use`, `command_line` |
-| `node-project-ignore-sweep-read-eligible` | all old; `p/.gitignore` and `p/README.md` read yesterday | eligible (narrowed rule 2, PENDING Mark) |
+| `node-project-ignore-sweep-read-eligible` | all old; `p/.gitignore` and `p/README.md` read yesterday | eligible (narrowed rule 2, accepted by Mark 2026-11-05) |
 | `node-project-npm-link-read-outside-kept` | `node_modules/mylib` a symlink to `/home/tester/mylib`; `src/a.js` read yesterday | `not_idle`: a link out falls back to project-wide reads |
 | `python-project-editable-install-read-outside-kept` | `.venv/lib/__editable__.q-1.0.pth`; `pkg/m.py` read yesterday | `not_idle`: an editable install falls back to project-wide reads |
 | `python-project-interpreter-symlink-no-fallback-eligible` | `.venv/bin/python` a symlink to `/usr/bin/python3`; `README.md` read yesterday | eligible: the interpreter link is not a package |
@@ -2840,8 +2840,8 @@ clock's now. Roots `/home/tester/src` (the development machine's
 - `candidate_catalog_project_tree_family_matches_the_development_build`
   (host PID namespace): the release path, below.
 
-Through the gate-lifted package (TASK-359, after Mark admitted five of
-the family to 0.2 on 2026-11-05; host PID namespace, Nix image, in the
+Through the gate-lifted package (TASK-359, after Mark admitted the
+family to 0.2 on 2026-11-05; host PID namespace, Nix image, in the
 fast suite and in the Nix release runner's `--suite release`): each first
 requires the `release-candidate` package's narrowed catalog to list the
 profile (`profiles list`, `profiles show`), then runs the same scenario
@@ -2862,6 +2862,11 @@ with that binary instead of the development build.
   keeps both `not_idle`, and its reclaim deletes nothing. The reclaim
   past the floor, the live interpreter and the activated-shell scenarios
   run only the development build and the candidate catalog below.
+- `release_candidate_node_modules_keeps_projects_inside_the_30_day_floor`:
+  the same for `node-modules`, with a real `npm install` of a project and
+  of a workspace (member linked, package hoisted). The reclaim past the
+  floor, the live Node and the home-level install scenarios run only the
+  development build (and the reclaim the candidate catalog below).
 
 **Package-manager cache family** (TASK-351; diskgc-e2e `pkg_cache_suite.rs`,
 Nix image only, except the last). Class *delegated*: the tool's own cleaner
@@ -2954,8 +2959,10 @@ deterministically.
 **The candidate catalog** (`diskgc-candidate-catalog` in the under-test
 bundle). The release-candidate package carries the real catalog only, and
 the PRD lets no other build lift the sandbox gate, so a profile awaiting
-admission (since TASK-359 only `node-modules` of this family) cannot run
-through the gate-lifted package. Instead the flake
+admission cannot run through the gate-lifted package (since TASK-359
+none of this family awaits it: the candidate list is empty, which
+`tools/candidate_catalog.py` accepts, leaving the build's catalog the
+release's). Instead the flake
 builds the release build's catalog code path (`release-catalog`: this
 version's release row, its commands, the user-profile refusal, the
 catalog's scope checks and narrowing) from a source copy whose
@@ -2967,13 +2974,12 @@ the release candidate's plus that list, that the list is part of the
 family it tests and disjoint from the release catalog, and that every
 member is in one of the two; then, over one fixture with every member and
 a live Node, its dry run plans exactly what the development build's
-does, and its reclaims delete exactly the reclaimable set. It still
-covers the admitted five, since its catalog holds them too, and is the
-only release-catalog-path run of `python-venv` past its floor. What it
-does not show: the gate-lifted package with `node-modules` (not
-admitted), and, for the 30-day floor without the clock offset, a guest
-whose clock was held back as `vm-release-tmp-reclaim` does; no such
-guest runs `python-venv` yet.
+does, and its reclaims delete exactly the reclaimable set. With the list
+empty its catalog is the release candidate's, gated with the clock
+offset: the only release-catalog-path run of `python-venv` and
+`node-modules` past their floor. What it does not show: for the 30-day
+floor without the clock offset, a guest whose clock was held back as
+`vm-release-tmp-reclaim` does; no such guest runs these profiles yet.
 
 Not exercised: pnpm, Yarn and Bun layouts; `virtualenv`; an editable
 install made by a real build backend (none is available offline); mypy's
@@ -3601,7 +3607,7 @@ check compares the `release-candidate` binary with a positive development
 control. The default package remains gated. The separate
 `release-candidate` output combines this version's release row (its
 commands and its catalog: Cargo, `nix-shell-rc`, `pytest-tmp`,
-`nix-garbage`, five project-tree sources, the idle filters) and
+`nix-garbage`, six project-tree sources, the idle filters) and
 lifted gate solely for testing in disposable containers. It is unapproved
 for deployment (docs/reference.md, Built-in profile library). The `just e2e` gate runs candidate negatives
 and the real Cargo reclaim, busy-lock, rebuild and dry-run CLI cases on Nix
@@ -3613,7 +3619,8 @@ The Nix GC stage (`_e2e-nix-gc`) runs the candidate's `nix-garbage` dry
 run and bounded GC (`release_candidate_nix_garbage_dry_run_then_bounded_gc`,
 TASK-335) on the Nix GC image. The project-tree scenarios through the
 candidate (`release_candidate_pytest_cache_*`, `*_python_pycache_*`,
-`*_mypy_cache_*`, `*_node_compile_cache_*`, `*_python_venv_*`, TASK-359:
+`*_mypy_cache_*`, `*_node_compile_cache_*`, `*_python_venv_*`,
+`*_node_modules_*`, TASK-359:
 Admission evidence) run on the Nix image only, in the fast suite and the
 Nix release runner.
 

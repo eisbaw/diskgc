@@ -1,4 +1,4 @@
-# MUST 5 (PENDING Mark's confirmation): the project's own code was read
+# MUST 5 (accepted by Mark with node-modules' admission, 2026-11-05, TASK-359): the project's own code was read
 # yesterday (src/a.js atime), nothing changed and nothing in node_modules
 # was read. Rule 2 counts reads only in the dependency directories, so this
 # no longer keeps node_modules (a run that imports a dependency reads it;

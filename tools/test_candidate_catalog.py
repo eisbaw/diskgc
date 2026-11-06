@@ -41,6 +41,20 @@ class Admit(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not MAJOR.MINOR"):
             candidate_catalog.admit(LIBRARY, "v0.2", ["a"])
 
+    def test_an_empty_list_changes_nothing(self):
+        self.assertEqual(candidate_catalog.admit(LIBRARY, "0.2", []), LIBRARY)
+        with self.assertRaisesRegex(ValueError, "not MAJOR.MINOR"):
+            candidate_catalog.admit(LIBRARY, "v0.2", [])
+
+    def test_main_leaves_the_file_alone_for_an_empty_list(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            library, names = Path(tmp) / "builtin.yaml", Path(tmp) / "list"
+            library.write_text(LIBRARY)
+            names.write_text("# no candidates\n\n")
+            self.assertEqual(candidate_catalog.main([str(library), "0.2", str(names)]), 0)
+            self.assertEqual(library.read_text(), LIBRARY)
+
     def test_refuses_an_entry_without_one_liveness_class(self):
         text = "- name: x\n  description: d\n"
         with self.assertRaisesRegex(ValueError, "x has 0 liveness_class"):
@@ -55,7 +69,6 @@ class Admit(unittest.TestCase):
         """The real files: every listed candidate can be patched into the real library."""
         real = Path(__file__).resolve().parent.parent / "crates/diskgc-core/src/profile/builtin.yaml"
         family = candidate_catalog.read_list(real.parents[4] / "diskgc-e2e/candidate-catalog")
-        self.assertTrue(family)
         out = candidate_catalog.admit(real.read_text(), "0.2", family)
         self.assertEqual(out.count('releases: ["0.2"]\n'), real.read_text().count('releases: ["0.2"]\n') + len(family))
 
