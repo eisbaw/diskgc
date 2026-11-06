@@ -1,0 +1,9 @@
+{
+  "name": "diskgc-e2e-electron-get",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@electron/get": "5.1.0",
+    "extract-zip": "2.0.1"
+  }
+}

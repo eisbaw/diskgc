@@ -92,6 +92,7 @@ pub mod pytest_contract_suite;
 pub mod release_check;
 pub mod release_suite;
 pub mod runner;
+pub mod runtime_cache_suite;
 pub mod scale_suite;
 pub mod scratch;
 pub mod signal_suite;

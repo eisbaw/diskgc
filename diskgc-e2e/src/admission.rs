@@ -16,8 +16,11 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::ensure_suite::report;
+use crate::oracle::{Fixture, Oracle};
 use crate::owner_pid_suite::{KillOnDrop, wait_for};
 use crate::suite::{Ctx, TestResult};
+use crate::under_test::Run;
 use crate::{TESTER, ensure, info};
 
 /// Tester's home, the measured filesystem of the admission scenarios.
@@ -318,8 +321,15 @@ impl Registry {
 /// Lets every gated request (and gated fixture) carry on. Written only after
 /// the oracle judged the reclaim: it is not part of the run.
 pub(crate) fn release(ctx: &Ctx) -> TestResult {
+    open_gate(ctx, "gate")
+}
+
+/// Writes `ctl/NAME.go`, the go file a fixture paused as `NAME` waits for.
+/// Written only after the oracle judged the reclaim: it is not part of the
+/// run.
+pub(crate) fn open_gate(ctx: &Ctx, name: &str) -> TestResult {
     ctx.home
-        .write_file(&format!("{CTL}/gate.go"), b"go\n", 0o644, TESTER)?;
+        .write_file(&format!("{CTL}/{name}.go"), b"go\n", 0o644, TESTER)?;
     Ok(())
 }
 
@@ -603,9 +613,80 @@ pub(crate) fn expect_in_use_by(
         "the run in flight holds no {what} below {}: {held:?}",
         candidate.display()
     );
+    expect_blocked_by(report, candidate, run, evidence)
+}
+
+/// The working directories of `run`'s processes that lie below `dir`.
+pub(crate) fn cwds_below(run: &InFlight, dir: &Path) -> Result<BTreeSet<PathBuf>, String> {
+    let mut cwds = BTreeSet::new();
+    for pid in run.process_tree()? {
+        // A process may end between the listing and the read.
+        if let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd"))
+            && cwd.starts_with(dir)
+        {
+            cwds.insert(cwd);
+        }
+    }
+    Ok(cwds)
+}
+
+/// The entries (`NAME=VALUE`) of the initial environments of `run`'s
+/// processes whose value, or one of its `:`-separated parts, names a path
+/// below `dir`.
+pub(crate) fn environ_below(run: &InFlight, dir: &Path) -> Result<BTreeSet<String>, String> {
+    let mut named = BTreeSet::new();
+    for pid in run.process_tree()? {
+        // A process may end between the listing and the read.
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        for entry in environ.split(|b| *b == 0) {
+            let entry = String::from_utf8_lossy(entry);
+            if let Some((_, value)) = entry.split_once('=')
+                && value.split(':').any(|v| Path::new(v).starts_with(dir))
+            {
+                named.insert(entry.into_owned());
+            }
+        }
+    }
+    Ok(named)
+}
+
+/// [`expect_in_use_by`] for any use `/proc` shows: a working directory,
+/// an open file, a mapping, or an initial-environment entry (`NAME=VALUE`)
+/// below `candidate`, at least one of which `uses` accepts. Logs them.
+pub(crate) fn expect_used_by(
+    report: &Value,
+    candidate: &Path,
+    run: &InFlight,
+    evidence: &[&str],
+    uses: &dyn Fn(&str) -> bool,
+) -> TestResult {
+    let mut seen: BTreeSet<String> = held_by(run, candidate)?
+        .iter()
+        .chain(&cwds_below(run, candidate)?)
+        .map(|p| p.display().to_string())
+        .collect();
+    seen.extend(environ_below(run, candidate)?);
+    info!("{}: the run's processes use {seen:?}", candidate.display());
+    ensure!(
+        seen.iter().any(|u| uses(u)),
+        "the run in flight shows no expected use of {}: {seen:?}",
+        candidate.display()
+    );
+    expect_blocked_by(report, candidate, run, evidence)
+}
+
+/// The reclaim acted not on `candidate` but skipped it `in_use`, and every
+/// process blocker it names is a process of `run`'s tree with one of the
+/// `evidence` kinds.
+fn expect_blocked_by(
+    report: &Value,
+    candidate: &Path,
+    run: &InFlight,
+    evidence: &[&str],
+) -> TestResult {
     ensure!(
         !actions(report)?.contains(&candidate.display().to_string()),
-        "the cleaner ran although {} was in use: {report}",
+        "diskgc acted on {} although it was in use: {report}",
         candidate.display()
     );
     let entry = skipped(report, candidate)?;
@@ -670,4 +751,239 @@ pub(crate) fn count_files(root: &Path, keep: &dyn Fn(&str) -> bool) -> Result<us
 
 pub(crate) fn any_file(_: &str) -> bool {
     true
+}
+
+// ---- diskgc runs of plain-delete profiles ----------------------------------
+
+/// `ensure [--dry-run] --json --no-index --min-free 100% --select SELECT
+/// [--roots ROOTS] PATH`: asked for every byte, so a reclaim takes every
+/// eligible candidate (and exits 1).
+pub(crate) fn ensure_args<'a>(
+    dry_run: bool,
+    select: &'a str,
+    roots: Option<&'a str>,
+    path: &'a str,
+) -> Vec<&'a str> {
+    let mut args = vec!["ensure"];
+    if dry_run {
+        args.push("--dry-run");
+    }
+    args.extend([
+        "--json",
+        "--no-index",
+        "--min-free",
+        "100%",
+        "--select",
+        select,
+    ]);
+    if let Some(roots) = roots {
+        args.extend(["--roots", roots]);
+    }
+    args.push(path);
+    args
+}
+
+/// `binary ensure ...` as tester under strace, logged.
+pub(crate) fn run_ensure(
+    ctx: &Ctx,
+    binary: &Path,
+    dry_run: bool,
+    select: &str,
+    roots: Option<&str>,
+    path: &str,
+) -> Result<Run, String> {
+    let args = ensure_args(dry_run, select, roots, path);
+    let run = ctx.run_as_tester(binary, &args)?;
+    info!(
+        "{} {} -> {:?}\n--- stdout\n{}--- stderr\n{}",
+        binary.display(),
+        args.join(" "),
+        run.code,
+        run.stdout,
+        run.stderr
+    );
+    Ok(run)
+}
+
+pub(crate) fn reclaimable(expected: &Expected) -> BTreeSet<String> {
+    expected
+        .iter()
+        .filter(|(_, reason)| reason.is_none())
+        .map(|(path, _)| path.display().to_string())
+        .collect()
+}
+
+/// A dry run, then a reclaim, of `select` with `binary`, both judged by one
+/// deletion oracle whose eligible set is exactly the expected reclaimable
+/// candidates (declared from the fixture, never read from the report).
+/// The dry run plans exactly `expected`; the reclaim (asked for 100 %, so
+/// exit 1) deletes exactly the reclaimable ones and skips every other one
+/// for its expected reason. Returns the reclaim's report.
+pub(crate) fn dry_run_then_reclaim(
+    ctx: &Ctx,
+    binary: &Path,
+    select: &str,
+    roots: Option<&str>,
+    path: &str,
+    expected: &Expected,
+) -> Result<Value, String> {
+    let fixture = expected
+        .iter()
+        .filter(|(_, reason)| reason.is_none())
+        .fold(Fixture::new(), |fixture, (path, _)| {
+            fixture.eligible(path.clone())
+        });
+    let oracle = Oracle::arm(fixture)?;
+    let dry = run_ensure(ctx, binary, true, select, roots, path)?;
+    let run = run_ensure(ctx, binary, false, select, roots, path)?;
+    let verdict = oracle.judge_runs(&[&dry, &run])?;
+    dry.expect_code(0)?;
+    run.expect_code(1)?;
+    let planned = report(&dry)?;
+    ensure!(
+        plan_of(&planned)? == sorted(expected),
+        "{select}: the dry run planned {:?}, expected {:?}: {planned}",
+        plan_of(&planned)?,
+        sorted(expected)
+    );
+    let reclaimed = report(&run)?;
+    let actions = actions(&reclaimed)?;
+    ensure!(
+        actions == reclaimable(expected),
+        "{select}: the reclaim acted on {actions:?}, expected {:?}: {reclaimed}",
+        reclaimable(expected)
+    );
+    for (candidate, reason) in expected {
+        match reason {
+            None => ensure!(
+                !exists(candidate),
+                "{select}: {} was reported deleted but exists",
+                candidate.display()
+            ),
+            Some(reason) => {
+                let entry = skipped(&reclaimed, candidate)?;
+                ensure!(
+                    entry["reason"] == *reason,
+                    "{select}: {} skipped as {}, expected {reason}: {entry}",
+                    candidate.display(),
+                    entry["reason"]
+                );
+                ensure!(
+                    exists(candidate),
+                    "{select}: kept {} is gone",
+                    candidate.display()
+                );
+            }
+        }
+    }
+    verdict.assert_clean()?;
+    Ok(reclaimed)
+}
+
+/// The skipped entry names exactly one process blocker, `pid` with
+/// `evidence`, and its detail starts with `detail`.
+pub(crate) fn expect_blocker(
+    report: &Value,
+    candidate: &Path,
+    pid: u32,
+    evidence: &str,
+    detail: &str,
+) -> TestResult {
+    let entry = skipped(report, candidate)?;
+    let blockers: Vec<(u64, String)> = entry["process_blockers"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(|b| {
+                    (
+                        b["pid"].as_u64().unwrap_or(0),
+                        b["evidence"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ensure!(
+        blockers == [(u64::from(pid), evidence.to_owned())],
+        "{} blockers {blockers:?}, expected [({pid}, {evidence})]: {entry}",
+        candidate.display()
+    );
+    ensure!(
+        entry["detail"]
+            .as_str()
+            .is_some_and(|d| d.starts_with(detail)),
+        "{} detail {}, expected to start with {detail:?}",
+        candidate.display(),
+        entry["detail"]
+    );
+    Ok(())
+}
+
+// ---- the candidate catalog -------------------------------------------------
+
+/// The profile names `binary profiles list --json` lists.
+pub(crate) fn listed_profiles(ctx: &Ctx, binary: &Path) -> Result<BTreeSet<String>, String> {
+    let oracle = Oracle::arm(Fixture::new())?;
+    let run = ctx.run_as_tester(binary, &["profiles", "list", "--json"])?;
+    oracle.judge(&run)?.assert_clean()?;
+    run.expect_code(0)?;
+    crate::release_suite::profile_names(&run.stdout)
+}
+
+/// The candidate list the flake built `diskgc-candidate-catalog` with
+/// (diskgc-e2e/candidate-catalog, copied beside the binary).
+pub(crate) fn candidate_list(ctx: &Ctx) -> Result<BTreeSet<String>, String> {
+    let path = ctx.bin_dir.join("diskgc-candidate-catalog.list");
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Every family whose not-yet-admitted members may be in the test-only
+/// candidate list (diskgc-e2e/candidate-catalog): each suite with a
+/// candidate-catalog scenario names its family here.
+const CANDIDATE_FAMILIES: &[&[&str]] = &[
+    crate::project_tree_suite::FAMILY,
+    crate::runtime_cache_suite::FAMILY,
+];
+
+/// docs/testing.md, Admission evidence (candidate catalog): checks the
+/// candidate-catalog build against the release candidate and returns its
+/// path. Its catalog is exactly the release candidate's plus the candidate
+/// list; the list belongs to the families of [`CANDIDATE_FAMILIES`] and is
+/// disjoint from the release catalog; and every member of `family` (the
+/// calling suite's) is in one of the two.
+pub(crate) fn check_candidate_catalog(ctx: &Ctx, family: &[&str]) -> Result<PathBuf, String> {
+    let candidate = ctx.bin_dir.join("diskgc-candidate-catalog");
+    let release = crate::release_suite::binary_path(ctx, "diskgc-release");
+    let listed = listed_profiles(ctx, &candidate)?;
+    let released = listed_profiles(ctx, &release)?;
+    let admitted = candidate_list(ctx)?;
+    let families: BTreeSet<String> = CANDIDATE_FAMILIES
+        .iter()
+        .flat_map(|members| members.iter().map(|s| (*s).to_owned()))
+        .collect();
+    ensure!(
+        admitted.is_subset(&families) && released.is_disjoint(&admitted),
+        "the candidate list {admitted:?} is not a part of the candidate families {families:?} \
+         outside the release candidate's catalog {released:?}"
+    );
+    let covered: BTreeSet<String> = released.union(&admitted).cloned().collect();
+    let family: BTreeSet<String> = family.iter().map(|s| (*s).to_owned()).collect();
+    ensure!(
+        family.is_subset(&covered),
+        "family members in neither the release catalog nor the candidate list: {:?}",
+        family.difference(&covered).collect::<Vec<_>>()
+    );
+    ensure!(
+        listed == covered,
+        "the candidate catalog lists {listed:?}, expected the release candidate's plus the \
+         candidate list: {covered:?}"
+    );
+    Ok(candidate)
 }

@@ -44,8 +44,8 @@ use crate::{
     fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey,
     lifecycle_suite, meson_suite, nix_gc_suite, owner_pid_suite, packaging_suite, pkg_cache_suite,
     profile_vector_suite, project_cache_suite, project_tree_suite, pytest_contract_suite,
-    release_suite, scale_suite, signal_suite, stdout_suite, survey_suite, temp_safety_suite,
-    watch_suite,
+    release_suite, runtime_cache_suite, scale_suite, signal_suite, stdout_suite, survey_suite,
+    temp_safety_suite, watch_suite,
 };
 
 /// Which gate runs a test.
@@ -254,6 +254,38 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
     (
         "release_candidate_python_venv_keeps_projects_inside_the_30_day_floor",
         "needs the pinned CPython and uv in the Nix image",
+    ),
+    (
+        "go_mod_cache_real_go_downloads_reclaim_then_redownload_and_a_build_in_flight_is_kept",
+        "needs the pinned Go in the Nix image",
+    ),
+    (
+        "bun_cache_real_bun_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+        "needs the pinned Bun from the Nix store and npm in the Nix image",
+    ),
+    (
+        "node_gyp_headers_real_node_gyp_install_reclaim_then_reinstall_and_a_build_between_compiles_fails_once",
+        "needs npm's node-gyp, make and the C toolchain from the Nix store",
+    ),
+    (
+        "electron_download_cache_real_electron_get_reclaim_then_redownload_and_an_extraction_in_flight_is_kept",
+        "needs the pinned @electron/get and extract-zip from the Nix store",
+    ),
+    (
+        "huggingface_hub_repos_real_hub_downloads_reclaim_then_redownload_and_runs_in_flight_are_kept",
+        "needs the pinned huggingface_hub from the Nix store",
+    ),
+    (
+        "cargo_registry_src_real_cargo_extracts_reclaim_then_reextract_and_a_build_in_flight_fails_once",
+        "needs the pinned Cargo toolchain in the Nix image",
+    ),
+    (
+        "nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_flight_is_kept",
+        "needs the pinned Nix in the Nix image and Git from the Nix store",
+    ),
+    (
+        "candidate_catalog_runtime_cache_family_matches_the_development_build",
+        "needs every runtime-cache tool from the Nix image and the Nix store",
     ),
     ("pip_cache_cleaner", "needs the pinned pip in the Nix image"),
     ("uv_cache_cleaner", "needs the pinned uv in the Nix image"),
@@ -506,6 +538,8 @@ pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
     "release_candidate_uv_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
     "release_candidate_pnpm_store_prune_keeps_referenced_packages_and_an_install_in_flight",
     "release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes",
+    // TASK-352: the runtime-cache family through the candidate-catalog build.
+    "candidate_catalog_runtime_cache_family_matches_the_development_build",
 ];
 
 /// The one test whose container receives the pinned Buildah closure.
@@ -525,6 +559,18 @@ pub static MYPY_TESTS: &[&str] = &[
     "mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept",
     "candidate_catalog_project_tree_family_matches_the_development_build",
     "release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept",
+];
+
+/// TASK-352's runtime-cache tests that run tools only the under-test bundle
+/// links (Bun, huggingface_hub, @electron/get, node-gyp's build tools,
+/// Git): their closure is the host store's, mounted read-only.
+pub static RUNTIME_CACHE_STORE_TESTS: &[&str] = &[
+    "bun_cache_real_bun_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+    "node_gyp_headers_real_node_gyp_install_reclaim_then_reinstall_and_a_build_between_compiles_fails_once",
+    "electron_download_cache_real_electron_get_reclaim_then_redownload_and_an_extraction_in_flight_is_kept",
+    "huggingface_hub_repos_real_hub_downloads_reclaim_then_redownload_and_runs_in_flight_are_kept",
+    "nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_flight_is_kept",
+    "candidate_catalog_runtime_cache_family_matches_the_development_build",
 ];
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
@@ -1524,6 +1570,55 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: pkg_cache_suite::delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path,
+    },
+    // TASK-352: admission evidence for the language and runtime cache built-ins.
+    Test {
+        name: "go_mod_cache_real_go_downloads_reclaim_then_redownload_and_a_build_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: runtime_cache_suite::go_mod_cache_real_go_downloads_reclaim_then_redownload_and_a_build_in_flight_is_kept,
+    },
+    Test {
+        name: "bun_cache_real_bun_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: runtime_cache_suite::bun_cache_real_bun_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept,
+    },
+    Test {
+        name: "node_gyp_headers_real_node_gyp_install_reclaim_then_reinstall_and_a_build_between_compiles_fails_once",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: runtime_cache_suite::node_gyp_headers_real_node_gyp_install_reclaim_then_reinstall_and_a_build_between_compiles_fails_once,
+    },
+    Test {
+        name: "electron_download_cache_real_electron_get_reclaim_then_redownload_and_an_extraction_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: runtime_cache_suite::electron_download_cache_real_electron_get_reclaim_then_redownload_and_an_extraction_in_flight_is_kept,
+    },
+    Test {
+        name: "huggingface_hub_repos_real_hub_downloads_reclaim_then_redownload_and_runs_in_flight_are_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: runtime_cache_suite::huggingface_hub_repos_real_hub_downloads_reclaim_then_redownload_and_runs_in_flight_are_kept,
+    },
+    Test {
+        name: "cargo_registry_src_real_cargo_extracts_reclaim_then_reextract_and_a_build_in_flight_fails_once",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: runtime_cache_suite::cargo_registry_src_real_cargo_extracts_reclaim_then_reextract_and_a_build_in_flight_fails_once,
+    },
+    Test {
+        name: "nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: runtime_cache_suite::nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_flight_is_kept,
+    },
+    Test {
+        name: "candidate_catalog_runtime_cache_family_matches_the_development_build",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: runtime_cache_suite::candidate_catalog_runtime_cache_family_matches_the_development_build,
     },
     Test {
         name: "anchored_west_build_keeps_unrebuildable_outputs",

@@ -29,7 +29,6 @@
 //! the release build's catalog path only as a candidate
 //! ([`candidate_catalog_project_tree_family_matches_the_development_build`]).
 
-use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Stdio};
@@ -38,8 +37,9 @@ use std::time::{Duration, SystemTime};
 use serde_json::Value;
 
 use crate::admission::{
-    CTL, Expected, HOME, NODE, NPM, UV, actions, control_dir, exists, held_in, home, plan_of,
-    python, skipped, sorted, tester_command, tool, write,
+    CTL, Expected, HOME, NODE, NPM, UV, check_candidate_catalog, control_dir, dry_run_then_reclaim,
+    exists, expect_blocker, held_in, home, plan_of, python, run_ensure, skipped, sorted,
+    tester_command, tool, write,
 };
 use crate::differential_suite::SandboxClockOffset;
 use crate::ensure_suite::report;
@@ -51,6 +51,9 @@ use crate::{TESTER, ensure, info};
 
 /// The supplied project root (on the development machine: `~/topics`).
 const SRC: &str = "/home/tester/src";
+
+/// The pinned tools of the Nix image (flake.nix: `cacheTools`, the
+/// pytest link) and of the under-test bundle (`agent-python3`, `mypy`).
 const PYTEST: &str = "/opt/pytest-under-test";
 
 /// npm without a registry: the containers have no network.
@@ -173,167 +176,6 @@ fn recent(path: &Path, change: bool) -> TestResult {
     std::fs::File::open(path)
         .and_then(|file| file.set_times(times))
         .map_err(|e| format!("set the times of {}: {e}", path.display()))
-}
-
-fn ensure_args<'a>(
-    dry_run: bool,
-    select: &'a str,
-    roots: Option<&'a str>,
-    path: &'a str,
-) -> Vec<&'a str> {
-    let mut args = vec!["ensure"];
-    if dry_run {
-        args.push("--dry-run");
-    }
-    args.extend([
-        "--json",
-        "--no-index",
-        "--min-free",
-        "100%",
-        "--select",
-        select,
-    ]);
-    if let Some(roots) = roots {
-        args.extend(["--roots", roots]);
-    }
-    args.push(path);
-    args
-}
-
-/// `binary ensure ...` as tester under strace, logged.
-fn run_ensure(
-    ctx: &Ctx,
-    binary: &Path,
-    dry_run: bool,
-    select: &str,
-    roots: Option<&str>,
-    path: &str,
-) -> Result<Run, String> {
-    let args = ensure_args(dry_run, select, roots, path);
-    let run = ctx.run_as_tester(binary, &args)?;
-    info!(
-        "{} {} -> {:?}\n--- stdout\n{}--- stderr\n{}",
-        binary.display(),
-        args.join(" "),
-        run.code,
-        run.stdout,
-        run.stderr
-    );
-    Ok(run)
-}
-
-fn reclaimable(expected: &Expected) -> BTreeSet<String> {
-    expected
-        .iter()
-        .filter(|(_, reason)| reason.is_none())
-        .map(|(path, _)| path.display().to_string())
-        .collect()
-}
-
-/// A dry run, then a reclaim, of `select` with `binary`, both judged by one
-/// deletion oracle whose eligible set is exactly the expected reclaimable
-/// candidates (declared from the fixture, never read from the report).
-/// The dry run plans exactly `expected`; the reclaim (asked for 100 %, so
-/// exit 1) deletes exactly the reclaimable ones and skips every other one
-/// for its expected reason. Returns the reclaim's report.
-fn dry_run_then_reclaim(
-    ctx: &Ctx,
-    binary: &Path,
-    select: &str,
-    roots: Option<&str>,
-    path: &str,
-    expected: &Expected,
-) -> Result<Value, String> {
-    let fixture = expected
-        .iter()
-        .filter(|(_, reason)| reason.is_none())
-        .fold(Fixture::new(), |fixture, (path, _)| {
-            fixture.eligible(path.clone())
-        });
-    let oracle = Oracle::arm(fixture)?;
-    let dry = run_ensure(ctx, binary, true, select, roots, path)?;
-    let run = run_ensure(ctx, binary, false, select, roots, path)?;
-    let verdict = oracle.judge_runs(&[&dry, &run])?;
-    dry.expect_code(0)?;
-    run.expect_code(1)?;
-    let planned = report(&dry)?;
-    ensure!(
-        plan_of(&planned)? == sorted(expected),
-        "{select}: the dry run planned {:?}, expected {:?}: {planned}",
-        plan_of(&planned)?,
-        sorted(expected)
-    );
-    let reclaimed = report(&run)?;
-    let actions = actions(&reclaimed)?;
-    ensure!(
-        actions == reclaimable(expected),
-        "{select}: the reclaim acted on {actions:?}, expected {:?}: {reclaimed}",
-        reclaimable(expected)
-    );
-    for (candidate, reason) in expected {
-        match reason {
-            None => ensure!(
-                !exists(candidate),
-                "{select}: {} was reported deleted but exists",
-                candidate.display()
-            ),
-            Some(reason) => {
-                let entry = skipped(&reclaimed, candidate)?;
-                ensure!(
-                    entry["reason"] == *reason,
-                    "{select}: {} skipped as {}, expected {reason}: {entry}",
-                    candidate.display(),
-                    entry["reason"]
-                );
-                ensure!(
-                    exists(candidate),
-                    "{select}: kept {} is gone",
-                    candidate.display()
-                );
-            }
-        }
-    }
-    verdict.assert_clean()?;
-    Ok(reclaimed)
-}
-
-/// The skipped entry names exactly one process blocker, `pid` with
-/// `evidence`, and its detail starts with `detail`.
-fn expect_blocker(
-    report: &Value,
-    candidate: &Path,
-    pid: u32,
-    evidence: &str,
-    detail: &str,
-) -> TestResult {
-    let entry = skipped(report, candidate)?;
-    let blockers: Vec<(u64, String)> = entry["process_blockers"]
-        .as_array()
-        .map(|list| {
-            list.iter()
-                .map(|b| {
-                    (
-                        b["pid"].as_u64().unwrap_or(0),
-                        b["evidence"].as_str().unwrap_or_default().to_owned(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    ensure!(
-        blockers == [(u64::from(pid), evidence.to_owned())],
-        "{} blockers {blockers:?}, expected [({pid}, {evidence})]: {entry}",
-        candidate.display()
-    );
-    ensure!(
-        entry["detail"]
-            .as_str()
-            .is_some_and(|d| d.starts_with(detail)),
-        "{} detail {}, expected to start with {detail:?}",
-        candidate.display(),
-        entry["detail"]
-    );
-    Ok(())
 }
 
 /// The skipped entry's detail contains `fragment` (the deciding rule).
@@ -1632,33 +1474,10 @@ fn node_compile_cache_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
 
 // ---- the candidate catalog -------------------------------------------------
 
-/// The profile names `binary profiles list --json` lists.
-fn listed_profiles(ctx: &Ctx, binary: &Path) -> Result<BTreeSet<String>, String> {
-    let oracle = Oracle::arm(Fixture::new())?;
-    let run = ctx.run_as_tester(binary, &["profiles", "list", "--json"])?;
-    oracle.judge(&run)?.assert_clean()?;
-    run.expect_code(0)?;
-    crate::release_suite::profile_names(&run.stdout)
-}
-
-/// The candidate list the flake built `diskgc-candidate-catalog` with
-/// (diskgc-e2e/candidate-catalog, copied beside the binary).
-fn candidate_list(ctx: &Ctx) -> Result<BTreeSet<String>, String> {
-    let path = ctx.bin_dir.join("diskgc-candidate-catalog.list");
-    let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    Ok(text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(str::to_owned)
-        .collect())
-}
-
 /// The family this suite builds fixtures for: TASK-350's six, five of them
 /// in the 0.2 catalog since TASK-359, `node-modules` on the candidate list
 /// (held, TASK-365).
-const FAMILY: &[&str] = &[
+pub(crate) const FAMILY: &[&str] = &[
     "node-modules",
     "python-venv",
     "python-pycache",
@@ -1668,11 +1487,10 @@ const FAMILY: &[&str] = &[
 ];
 
 /// docs/testing.md, Admission evidence (candidate catalog): the release
-/// build's catalog code path with the family in its catalog, the members
-/// not yet admitted through a test-only candidate list. Its catalog is
-/// exactly the release candidate's plus the candidate list, the list is
-/// part of this family and disjoint from the release catalog, and every
-/// member is in one of the two. Over one fixture of
+/// build's catalog code path with the family in its catalog (five in the
+/// real 0.2 catalog since TASK-359, `node-modules` through the test-only
+/// candidate list since TASK-365); its catalog is checked by
+/// [`check_candidate_catalog`]. Over one fixture of
 /// every family member (real tools), its dry run plans exactly what the
 /// development build's does, a live Node keeps its project with the same
 /// verdict, and its reclaims delete exactly the reclaimable set; the
@@ -1681,28 +1499,7 @@ pub fn candidate_catalog_project_tree_family_matches_the_development_build(
     ctx: &Ctx,
 ) -> TestResult {
     versions(ctx, &["node", "npm", "python", "uv", "mypy", "pytest"])?;
-    let candidate = ctx.bin_dir.join("diskgc-candidate-catalog");
-    let release = crate::release_suite::binary_path(ctx, "diskgc-release");
-    let listed = listed_profiles(ctx, &candidate)?;
-    let released = listed_profiles(ctx, &release)?;
-    let admitted = candidate_list(ctx)?;
-    let family: BTreeSet<String> = FAMILY.iter().map(|s| (*s).to_owned()).collect();
-    ensure!(
-        admitted.is_subset(&family) && released.is_disjoint(&admitted),
-        "the candidate list {admitted:?} is not a part of this suite's family {family:?} \
-         outside the release candidate's catalog {released:?}"
-    );
-    let covered: BTreeSet<String> = released.union(&admitted).cloned().collect();
-    ensure!(
-        family.is_subset(&covered),
-        "family members in neither the release catalog nor the candidate list: {:?}",
-        family.difference(&covered).collect::<Vec<_>>()
-    );
-    ensure!(
-        listed == covered,
-        "the candidate catalog lists {listed:?}, expected the release candidate's plus the \
-         candidate list: {covered:?}"
-    );
+    let candidate = check_candidate_catalog(ctx, FAMILY)?;
 
     control_dir(ctx)?;
     let spec = local_package(ctx)?;

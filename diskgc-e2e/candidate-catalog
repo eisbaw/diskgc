@@ -7,3 +7,12 @@
 # catalog (Mark, 2026-11-05, TASK-359); node-modules was held out of it
 # (Mark, 2026-11-06, TASK-365) and awaits TASK-357.
 node-modules
+#
+# TASK-352's language and runtime cache family, awaiting Mark's decision:
+go-mod-cache
+bun-cache
+node-gyp-headers
+electron-download-cache
+huggingface-hub-repos
+cargo-registry-src
+nix-user-cache

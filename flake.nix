@@ -621,6 +621,16 @@
         # TASK-350's project-tree scenarios run the pinned mypy, reached
         # through the store closure their containers mount read-only.
         ln -s ${pkgs.mypy}/bin/mypy $out/bin/mypy
+        # TASK-352's runtime-cache scenarios (diskgc-e2e/src/runtime_cache_suite.rs)
+        # run these pinned tools, reached through the store closure their
+        # containers mount read-only: Bun, huggingface_hub, @electron/get
+        # with extract-zip (NODE_PATH), npm's own node-gyp, and Git for
+        # Nix's fetchGit.
+        ln -s ${pkgs.bun}/bin/bun $out/bin/bun
+        ln -s ${hfPython}/bin/python3 $out/bin/hf-python3
+        ln -s ${electronGet}/lib/node_modules/diskgc-e2e-electron-get/node_modules $out/bin/electron-get-modules
+        ln -s ${pkgs.nodejs}/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js $out/bin/node-gyp.js
+        ln -s ${pkgs.git}/bin $out/bin/git-bin
         ln -s ${pkgs.cmake}/bin/cmake $out/bin/cmake
         ln -s ${pkgs.dtc}/bin/dtc $out/bin/dtc
         ln -s ${pkgs.gperf}/bin/gperf $out/bin/gperf
@@ -824,6 +834,19 @@
             --add-flags $out/lib/node_modules/diskgc-e2e-jest-cleaner/node_modules/jest/bin/jest.js
         '';
       };
+      # TASK-352: @electron/get and extract-zip, the two packages the
+      # electron npm package's install script fetches and unpacks Electron
+      # with; the runtime-cache scenarios load them through NODE_PATH.
+      electronGet = pkgs.buildNpmPackage {
+        pname = "diskgc-e2e-electron-get";
+        version = "5.1.0";
+        src = ./diskgc-e2e/npm-electron-get;
+        npmDepsHash = "sha256-Tc9N4R5vMMMZU1iN3C9+ln00kvPR7NCklK2PAsYrB9U=";
+        dontNpmBuild = true;
+        dontNpmPrune = true;
+      };
+      # TASK-352: huggingface_hub in the pinned CPython.
+      hfPython = pkgs.python3.withPackages (ps: [ ps.huggingface-hub ]);
       cacheTools = pkgs.buildEnv {
         name = "diskgc-cache-tools";
         paths = [
