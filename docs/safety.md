@@ -1736,7 +1736,10 @@ contract class, recorded in the
   in that release's row ([Command actions](#command-actions), In a
   release); 0.2 lists five, by Mark's decision ("only the lock-safe five",
   2026-11-05, TASK-360): in the container tests a run of each tool in
-  flight survived its cleaner (uv and pnpm by their lock). The other four
+  flight survived its cleaner (uv and pnpm by their lock; pip and ccache
+  also when the clean landed after the run's cache lookup, as they create
+  the directories they write into), except a Jest run that loads no
+  module after the clear, which exits 1 (its row). The other four
   delegated cleaners' reasons are their rows in
   [reference.md](reference.md#liveness-contracts).
 - **none**: no contract. The profile is not admissible as a built-in, and

@@ -2898,7 +2898,12 @@ from `/proc/locks`. Each test first requires the tool version
 - `pip_cache_real_pip_installs_reclaim_then_refetch_and_an_install_in_flight_completes`:
   pip 26.1.2 caches only through `--trusted-host` on plain HTTP; `pip
   cache purge` empties `http-v2`; an install waiting on its next wheel holds
-  nothing in the cache, is purged under and completes.
+  nothing in the cache, is purged under and completes. Then Jest's failure
+  mode (TASK-360): an install of one wheel held at that wheel, after its
+  cache lookup, is purged under by diskgc (the cache then holds no
+  entry); it fetches the wheel once, stores it in the purged cache and
+  completes without a warning. pip creates the directories it writes into;
+  that the purge also keeps them is logged, not relied on.
 - `uv_cache_real_uv_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept`:
   uv 0.13.0's cache holds `sdists-v10/.git`, an empty regular file, which
   the profile's `empty_checkout_markers` tolerate (TASK-360): `uv cache
@@ -2924,9 +2929,13 @@ from `/proc/locks`. Each test first requires the tool version
   missing lock; a retry installs.
 - `ccache_real_compiles_reclaim_then_recompile_and_a_compile_in_flight_completes`:
   both `~/.cache/ccache` and `~/.ccache` are reclaimed; a compile in
-  flight (a gated compiler) holds its inode cache (`in_use`) while the
-  other cache is cleared; `ccache --clear` run directly leaves it to
-  complete, and the program runs.
+  flight, held at the compiler's compile step (not its `-E`
+  preprocessing: after ccache's cache lookup for it, the arguments
+  checked), holds its inode cache (`in_use`) while the other cache is
+  cleared; `ccache --clear` run directly leaves it to complete and store
+  its result, and the program runs. diskgc itself never clears under a
+  compile here (the inode cache keeps it `in_use`); that needs the inode
+  cache off, which was not exercised.
 - `go_build_cache_real_go_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept`:
   a build in flight (the compile of package main gated by `-toolexec`) has
   an entry mapped (`in_use`, `map`); `go clean -cache` run directly then
@@ -2939,7 +2948,14 @@ from `/proc/locks`. Each test first requires the tool version
   Jest's default caches in `/tmp` and in a `nix-shell.*` `TMPDIR` are
   reclaimed (`/var/tmp`, another filesystem here, is its `other_fs` row);
   a run in flight (a gated test) holds nothing there, is cleared under,
-  passes and writes its cache again.
+  and, its held test then loading a module (which recreates the cache
+  directory), passes and writes its cache again.
+- `jest_cache_clear_under_a_run_with_no_later_module_load_fails_the_run`
+  (TASK-360, Codex's counterexample): a run whose one test is held after
+  Jest transformed it and requires nothing afterwards is cleared under by
+  diskgc; the test passes and Jest exits 1, failing to write its
+  `perf-cache-*` timings into the removed directory (`ENOENT`). The test
+  asserts that failure, so a Jest that survives its clear fails it.
 - `delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path`
   (Nix and Debian images): with only `env` on `PATH` each profile's tier
   is `missing` and nothing changes; with stand-ins that would report

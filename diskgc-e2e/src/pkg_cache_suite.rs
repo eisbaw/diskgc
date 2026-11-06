@@ -230,11 +230,15 @@ impl Registry {
     }
 
     /// Waits until a tool's request reached the gate; returns its path.
+    /// The server creates `gate.hit` before it writes the line: a read is
+    /// taken only once the line ends.
     fn wait_gated(&self, run: &mut InFlight) -> Result<String, String> {
         let hit = home(&format!("{CTL}/gate.hit"));
         wait_for(TOOL_TIMEOUT, "a request at the registry's gate", || {
             run.still_running()?;
-            Ok(std::fs::read_to_string(&hit).ok())
+            Ok(std::fs::read_to_string(&hit)
+                .ok()
+                .filter(|text| text.ends_with('\n')))
         })
         .map(|text| text.trim().to_owned())
     }
@@ -245,6 +249,17 @@ impl Registry {
 fn release(ctx: &Ctx) -> TestResult {
     ctx.home
         .write_file(&format!("{CTL}/gate.go"), b"go\n", 0o644, TESTER)?;
+    Ok(())
+}
+
+/// Closes the gate again for a second run in flight: removes `gate.go`
+/// and the registry's `gate.hit`.
+fn rearm(ctx: &Ctx) -> TestResult {
+    ctx.home.remove_file(&format!("{CTL}/gate.go"))?;
+    let hit = format!("{CTL}/gate.hit");
+    if exists(&home(&hit)) {
+        ctx.home.remove_file(&hit)?;
+    }
     Ok(())
 }
 
@@ -775,6 +790,29 @@ fn count_files(root: &Path, keep: &dyn Fn(&str) -> bool) -> Result<usize, String
     Ok(count)
 }
 
+/// The directories below `root` (0 when it is gone).
+fn count_dirs(root: &Path) -> Result<usize, String> {
+    if !exists(root) {
+        return Ok(0);
+    }
+    let mut count = 0;
+    let mut pending = vec![root.to_owned()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+            let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
+            if entry
+                .file_type()
+                .map_err(|e| format!("stat {}: {e}", entry.path().display()))?
+                .is_dir()
+            {
+                count += 1;
+                pending.push(entry.path());
+            }
+        }
+    }
+    Ok(count)
+}
+
 fn any_file(_: &str) -> bool {
     true
 }
@@ -954,6 +992,89 @@ fn pip_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
             "-c",
             "import alpha, beta, gamma; assert gamma.NAME == 'gamma'",
         ],
+    )?;
+
+    // Jest's failure mode (TASK-360), for pip: the purge lands after the
+    // install's cache lookup, and the install then only writes. A single
+    // install of gamma, held at its wheel (the purge before makes it a
+    // cache miss; the version check, off, would read the cache later):
+    // after the gate pip stores the response in the purged cache, creating
+    // its directories, and installs it.
+    tool(
+        ctx,
+        Path::new(HOME),
+        &[],
+        PIP,
+        &[
+            "--cache-dir",
+            cache.to_str().ok_or("cache")?,
+            "cache",
+            "purge",
+        ],
+    )?;
+    rearm(ctx)?;
+    let mut last = InFlight::start(
+        ctx,
+        "pip-install-last",
+        Path::new(HOME),
+        &[],
+        PIP,
+        &[
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--target",
+            "/home/tester/site/four",
+            "--index-url",
+            &format!("{REGISTRY}/simple"),
+            "--trusted-host",
+            "127.0.0.1",
+            "gamma",
+        ],
+    )?;
+    let gated = registry.wait_gated(&mut last)?;
+    ensure!(
+        gated.ends_with("/gamma-1.0-py3-none-any.whl"),
+        "pip was held at {gated}, not at its only wheel"
+    );
+    let wheel = "/simple/gamma/gamma-1.0-py3-none-any.whl";
+    let served = registry.served(wheel)?;
+    let reclaimed = reclaim_in_flight(ctx, &sel, &[&cache])?;
+    expect_actions(&reclaimed, &[&cache])?;
+    ensure!(
+        pip_entries(&cache)? == 0,
+        "diskgc's purge under the held install left entries"
+    );
+    // Diagnostic only: pip creates the directories it writes into
+    // (`ensure_dir` before each cache write), whatever the purge kept.
+    info!(
+        "after pip cache purge: {} directories left in {}",
+        count_dirs(&cache)?,
+        cache.display()
+    );
+    release(ctx)?;
+    let output = last.expect_success()?;
+    ensure!(
+        registry.served(wheel)? == served + 1,
+        "pip fetched gamma's wheel other than once after the gate"
+    );
+    ensure!(
+        !output.to_lowercase().contains("warning"),
+        "pip warned after its cache was purged under it:\n{output}"
+    );
+    ensure!(
+        pip_entries(&cache)? > 0,
+        "pip did not store gamma in the purged cache"
+    );
+    tool(
+        ctx,
+        Path::new(HOME),
+        &[
+            ("PYTHONPATH", "/home/tester/site/four"),
+            ("PYTHONDONTWRITEBYTECODE", "1"),
+        ],
+        python(ctx)?,
+        &["-c", "import gamma; assert gamma.NAME == 'gamma'"],
     )?;
     Ok(())
 }
@@ -1767,11 +1888,14 @@ fn c_project(ctx: &Ctx) -> TestResult {
         "src/c/main.c",
         b"int one(void);\nint two(void);\nint main(void) { return one() + two() - 3; }\n",
     )?;
-    // Stops when ccache runs it on main.c until the gate opens.
+    // Stops when ccache compiles main.c (not when it preprocesses it:
+    // `-E`) until the gate opens, and records the arguments: ccache has
+    // then done its cache lookup for the compile (TASK-360); afterwards it
+    // stores, reading only its manifest and stats, which may be gone.
     write_script(
         ctx,
         "gated-cc/gcc",
-        b"#!/bin/sh\ncase \"$*\" in *main.c*) : > /home/tester/ctl/cc.hit\n  while [ ! -e /home/tester/ctl/gate.go ]; do sleep 0.1; done;; esac\nexec /opt/cargo-under-test/cc/bin/gcc \"$@\"\n",
+        b"#!/bin/sh\ncase \"$*\" in *-E*) ;; *main.c*) printf '%s\\n' \"$*\" > /home/tester/ctl/cc.hit\n  while [ ! -e /home/tester/ctl/gate.go ]; do sleep 0.1; done;; esac\nexec /opt/cargo-under-test/cc/bin/gcc \"$@\"\n",
     )?;
     Ok(())
 }
@@ -1884,6 +2008,16 @@ fn ccache_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
         ],
     )?;
     wait_file(&mut compile, &home(&format!("{CTL}/cc.hit")))?;
+    // The file appears before its line is written: wait for the newline.
+    let hit = wait_for(TOOL_TIMEOUT, "the gated compile's arguments", || {
+        let text = std::fs::read_to_string(home(&format!("{CTL}/cc.hit"))).unwrap_or_default();
+        Ok(text.ends_with('\n').then_some(text))
+    })?;
+    info!("ccache in flight at the compiler: {}", hit.trim());
+    ensure!(
+        hit.split_whitespace().any(|a| a == "-c") && !hit.contains("-E"),
+        "the compile was held at {hit:?}, not at the compiler's compile step"
+    );
     let reclaimed = reclaim_in_flight(ctx, &sel, &[&caches[0], &caches[1]])?;
     expect_actions(&reclaimed, &[&caches[1]])?;
     ensure!(
@@ -1912,6 +2046,12 @@ fn ccache_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     ensure!(
         ccache_entries(&caches[0])? == 0,
         "ccache --clear left entries"
+    );
+    // Diagnostic only: ccache creates the directories it stores into.
+    info!(
+        "after ccache --clear: {} directories left in {}",
+        count_dirs(&caches[0])?,
+        caches[0].display()
     );
     release(ctx)?;
     compile.expect_success()?;
@@ -2287,9 +2427,15 @@ fn jest_project(ctx: &Ctx) -> TestResult {
 
 /// Jest's default cache directory under `tmpdir` (`--showConfig`).
 fn jest_default_cache(ctx: &Ctx, tmpdir: &str) -> Result<PathBuf, String> {
+    jest_default_cache_in(ctx, "src/jproj", tmpdir)
+}
+
+/// Jest's default cache directory for the project at `project` (below
+/// tester's home) under `tmpdir`.
+fn jest_default_cache_in(ctx: &Ctx, project: &str, tmpdir: &str) -> Result<PathBuf, String> {
     let out = tool(
         ctx,
-        &home("src/jproj"),
+        &home(project),
         &[("TMPDIR", tmpdir)],
         JEST,
         &["--showConfig"],
@@ -2319,8 +2465,11 @@ fn jest_run(ctx: &Ctx, env: &[(&str, &str)], extra: &[&str]) -> TestResult {
 /// and a lookalike `/tmp/jest` are never found; `jest --clearCache`
 /// removes each measured directory; the next run caches again. A run held
 /// in flight (a test gated) holds nothing open in the cache, so diskgc
-/// clears it; Jest has no cache lock and needs none: the run passes and
-/// writes its cache again.
+/// clears it; this run's held test then loads a module, which recreates
+/// the cache directory, and the run passes and writes its cache again.
+/// Jest has no cache lock: a run that loads no module after the clear
+/// fails
+/// ([`jest_cache_clear_under_a_run_with_no_later_module_load_fails_the_run`]).
 pub fn jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes(
     ctx: &Ctx,
 ) -> TestResult {
@@ -2432,6 +2581,79 @@ fn jest_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     ensure!(
         count_files(&default, &any_file)? > 0,
         "the run in flight did not write its cache again"
+    );
+    Ok(())
+}
+
+/// `jest-cache`'s counterexample (Codex review of TASK-360): a run in
+/// flight whose test, held after Jest transformed and cached everything it
+/// needs, loads no module after the clear. diskgc clears the cache (the run
+/// holds nothing open in it), the test then passes, and Jest exits 1: at
+/// its end it writes its test timings (`perf-cache-*`) into the cache
+/// directory the clear removed, without creating it. A run that loads a
+/// module after the clear recreates the directory first and passes
+/// ([`jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes`]),
+/// so Jest needs a lock against its own `--clearCache` and has none.
+pub fn jest_cache_clear_under_a_run_with_no_later_module_load_fails_the_run(
+    ctx: &Ctx,
+) -> TestResult {
+    versions(ctx, &[(JEST, &["--version"], "30.1.3")])?;
+    control_dir(ctx)?;
+    write(
+        ctx,
+        "src/jidle/package.json",
+        br#"{"name":"jidle","version":"1.0.0"}"#,
+    )?;
+    // Requires nothing after the gate: no transform, no cache write.
+    write(
+        ctx,
+        "src/jidle/idle.test.js",
+        b"const fs = require('fs');\ntest('idle', async () => {\n  fs.writeFileSync('/home/tester/ctl/jest.hit', '');\n  while (!fs.existsSync('/home/tester/ctl/gate.go')) await new Promise((r) => setTimeout(r, 50));\n}, 120000);\n",
+    )?;
+    let cache = jest_default_cache_in(ctx, "src/jidle", "/tmp")?;
+    // Space no profile frees, so the reclaim cannot meet its goal on a
+    // near-empty /tmp and runs the cleaner once (exhausted, exit 1).
+    ctx.scratch
+        .write_file("filler.bin", &payload(1 << 20), 0o600, TESTER)?;
+    let sel = Selection {
+        binary: &ctx.diskgc(),
+        profile: "jest-cache",
+        roots: None,
+        path: "/tmp",
+        config: None,
+        operation: JEST_OP,
+    };
+    let mut run = InFlight::start(
+        ctx,
+        "jest-idle",
+        &home("src/jidle"),
+        &[("TMPDIR", "/tmp")],
+        JEST,
+        &["--ci", "--runInBand"],
+    )?;
+    wait_file(&mut run, &home(&format!("{CTL}/jest.hit")))?;
+    ensure!(
+        count_files(&cache, &any_file)? > 0,
+        "the run in flight cached nothing in {}",
+        cache.display()
+    );
+    let reclaimed = reclaim_in_flight(ctx, &sel, &[&cache])?;
+    expect_actions(&reclaimed, &[&cache])?;
+    ensure!(
+        !exists(&cache),
+        "jest --clearCache under the run in flight left its cache"
+    );
+    release(ctx)?;
+    let (status, output) = run.finish()?;
+    ensure!(
+        output.contains("1 passed"),
+        "the held test did not pass:\n{output}"
+    );
+    ensure!(
+        status.code() == Some(1) && output.contains("ENOENT") && output.contains("perf-cache"),
+        "the run in flight ended {status} after jest --clearCache, not exit 1 writing its \
+         perf-cache into the removed directory; Jest now survives its own clear? Update the \
+         jest-cache liveness row:\n{output}"
     );
     Ok(())
 }

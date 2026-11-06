@@ -325,6 +325,10 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
         "jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes",
         "needs the pinned Jest in the Nix image",
     ),
+    (
+        "jest_cache_clear_under_a_run_with_no_later_module_load_fails_the_run",
+        "needs the pinned Jest in the Nix image",
+    ),
     // TASK-360: the five admitted cleaners through the release candidate.
     (
         "release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes",
@@ -1499,6 +1503,12 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: pkg_cache_suite::jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes,
+    },
+    Test {
+        name: "jest_cache_clear_under_a_run_with_no_later_module_load_fails_the_run",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: pkg_cache_suite::jest_cache_clear_under_a_run_with_no_later_module_load_fails_the_run,
     },
     // TASK-360: the five admitted cleaners through the release candidate.
     Test {
