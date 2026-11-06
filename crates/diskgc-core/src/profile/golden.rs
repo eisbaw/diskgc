@@ -302,7 +302,9 @@ fn project_python_caches_have_frozen_depth_and_marker_rules() {
 /// one through five below a required root, exactly their directory name
 /// (no `.venv-*`, no `node_modules.old`), their contract, the 30-day
 /// floor, checkouts refused, plain delete, no other predicate, and their
-/// release catalogs: both in 0.2 only (Mark, 2026-11-05, TASK-359).
+/// release catalogs: `python-venv` in 0.2 only (Mark, 2026-11-05,
+/// TASK-359), `node-modules` in none (Mark held it, 2026-11-06, TASK-365;
+/// successor TASK-357).
 #[test]
 fn project_dependency_profiles_have_frozen_depth_contract_and_floor() {
     let library = Library::builtin().expect("built-ins");
@@ -312,7 +314,7 @@ fn project_dependency_profiles_have_frozen_depth_contract_and_floor() {
             "node-modules",
             "node_modules",
             LivenessContract::NodeProject,
-            &[Release::V0_2][..],
+            &[][..],
         ),
         (
             "python-venv",

@@ -97,11 +97,11 @@
   releases: ["0.1", "0.2"]
 
 # TASK-350's project-tree family: pytest-cache, python-pycache, mypy-cache,
-# python-venv, node-compile-cache and node-modules are in the 0.2 catalog,
-# not 0.1 (Mark, 2026-11-05, TASK-359: "admit all", and for node-modules
-# "admit current as-is"; their residuals accepted as named in
-# docs/reference.md, Liveness contracts; node-modules' lockfile successor
-# is TASK-357).
+# python-venv and node-compile-cache are in the 0.2 catalog, not 0.1 (Mark,
+# 2026-11-05, TASK-359: "admit all", their residuals accepted as named in
+# docs/reference.md, Liveness contracts). node-modules is not: Mark held it
+# on 2026-11-06 (TASK-365, the `npm install --no-save` residual); its
+# successor is TASK-357.
 - name: pytest-cache
   category: test
   description: pytest cache directories up to three levels below a supplied root
@@ -280,8 +280,9 @@
 # editable install can put a real checkout under .venv/src). Nothing below a
 # hidden directory under the root is a candidate (`exclude`): those are
 # tool-managed installs (~/.npm/_npx, editor extensions, ~/.cache), not the
-# user's projects, which a root of ~ would otherwise reach. Both are in
-# the 0.2 catalog (TASK-359).
+# user's projects, which a root of ~ would otherwise reach. python-venv is
+# in the 0.2 catalog (TASK-359); node-modules in none (held, TASK-365;
+# successor TASK-357).
 - name: node-modules
   category: python / js
   description: Node project dependency directories (node_modules beside a package.json) through depth five below a supplied project or workspace root, outside hidden directories, once their project shows no change, read or visible use for 30 days
@@ -299,7 +300,6 @@
     no_match: [/home/mark/src/app/node_modules/left-pad, /home/mark/src/a/b/c/d/e/node_modules, /home/mark/src/app/node_modules.old, /home/mark/other/app/node_modules, /home/mark/src/.npm/_npx/f00d/node_modules, /home/mark/src/app/.cache/tool/node_modules]
   verified_with: npm 11.19.0 and Node.js 24.21.0 install layout on the development host (read-only dry runs 2026-11-02 and 2026-11-05), the ModelHost vectors and the container tests (TASK-350)
   liveness_class: verified-heuristic
-  releases: ["0.2"]
 
 - name: python-venv
   category: python / js

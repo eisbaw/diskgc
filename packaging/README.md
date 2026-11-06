@@ -5,9 +5,9 @@ deleting rebuildable cache that, as far as it can tell, nothing is using:
 Cargo `target/` directories, the leftovers of ended pytest sessions and
 nix-shell runs in `/tmp`, the dead paths of a multi-user Nix store
 (through the system Nix daemon's own garbage collector), and in the
-project trees you name, pytest, Python bytecode and mypy caches, and
-Python virtual environments and `node_modules` idle for 30 days, plus
-Node's compile cache in `/tmp`, and the pip, uv, pnpm and ccache
+project trees you name, pytest, Python bytecode and mypy caches and
+Python virtual environments idle for 30 days, plus Node's compile cache
+in `/tmp`, and the pip, uv, pnpm and ccache
 caches, emptied by each tool's own cleaner. `ensure` brings one filesystem up to a free-space
 goal once and exits with a code a CI hook or an agent script can branch on.
 Unlike age-only cleanup (`find -mtime +N -delete`, systemd-tmpfiles age

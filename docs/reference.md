@@ -1756,7 +1756,7 @@ file serves `watch` on a laptop and `ensure` on a runner.
 A configuration for diskgc 0.1 uses only the 0.1 built-ins
 (`cargo-target`, `nix-shell-rc`, `pytest-tmp` and the idle filters); 0.2's
 catalog adds `nix-garbage`, `pytest-cache`, `python-pycache`,
-`mypy-cache`, `python-venv`, `node-compile-cache` and `node-modules` (see
+`mypy-cache`, `python-venv` and `node-compile-cache` (see
 [Release notes](#release-notes-next-release-draft)).
 It extends `docs/example.yaml` (the example the package installs) with a
 laptop's roots, a protected project and a pressure group:
@@ -2203,7 +2203,8 @@ The report always names the measure used.
 Status: every contract is implemented and judged. `nix-shell` and
 `pytest` (TASK-112 step 5) are used by the `nix-shell-rc` and
 `pytest-tmp` built-ins; `node-project` and `python-project` (TASK-79) by
-`node-modules` and `python-venv`, both in the 0.2 catalog. What
+`node-modules` (development library only) and `python-venv` (in the 0.2
+catalog). What
 each contract shows,
 and when it cannot decide, is in
 [safety.md](safety.md#producer-liveness); which built-in uses which
@@ -2555,11 +2556,12 @@ refusal test, the module checks' reclaiming case). The development build
 keeps a
 reclaiming `watch`, behind the sandbox gate. The 0.2 row's catalog is
 builtin.yaml's label `0.2` (`catalog: "0.2"`): 0.1's built-ins, which
-list both labels, plus `nix-garbage` (Mark, 2026-11-04, TASK-335), six
+list both labels, plus `nix-garbage` (Mark, 2026-11-04, TASK-335), five
 project-tree sources, `pytest-cache`, `python-pycache`, `mypy-cache`,
-`python-venv`, `node-compile-cache` and `node-modules` (Mark, 2026-11-05,
-TASK-359), and four package-manager caches whose tool's own cleaner is
-safe against a run of that tool in flight, `pip-cache`, `uv-cache`,
+`python-venv` and `node-compile-cache` (Mark, 2026-11-05, TASK-359;
+`node-modules` held out, Mark, 2026-11-06, TASK-365), and four
+package-manager caches whose tool's own cleaner is safe against a run of
+that tool in flight, `pip-cache`, `uv-cache`,
 `pnpm-store` and `ccache` (Mark, 2026-11-05, TASK-360: "only the
 lock-safe five"; the fifth, `jest-cache`, left after review: its clear
 can fail a run in flight). A release runs a command action only when its
@@ -2572,7 +2574,7 @@ catalog does not hold with that command, so no other cleaner (not
 Docker or Podman prune and no operator-written command runs in 0.2. So
 the candidate keeps `cargo-target`, the two `/tmp` built-ins with a
 liveness contract (`nix-shell-rc`, `pytest-tmp`; TASK-65, Mark
-2026-10-24), `nix-garbage`, those six, those four and the seven idle
+2026-10-24), `nix-garbage`, those five, those four and the seven idle
 filters, and rejects every operator-authored profile, including
 overrides. It also refuses configured tiers and `--select` expressions that
 refer to excluded built-ins, even during a dry run. `profiles list`,
@@ -2581,7 +2583,7 @@ refer to excluded built-ins, even during a dry run. `profiles list`,
 refuse` on any of them (on `nix-garbage` it changes nothing: a GC has no
 file candidates), `allow` only where the built-in already allows
 (`cargo-target`, `pytest-tmp`); `allow` on `nix-shell-rc`, `nix-garbage`,
-one of the six project-tree sources or one of the four caches (`uv-cache`
+one of the five project-tree sources or one of the four caches (`uv-cache`
 included: its built-in tolerates only its own empty marker) is refused, as
 are policies for excluded sources, including `npm-cache`, at load time. The other `/tmp` proposals stay out: `nix-shell-tmpdir`, `mktemp-dir`
 and `tmp-entry` have no owner evidence ([Liveness
@@ -2619,7 +2621,7 @@ remain a release decision under TASK-67.
 | python / js | `bun-cache` | `.bun/install/cache` or `.cache/.bun/install/cache` below a supplied home root | `delete` |
 | python / js | `python-pycache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359): `__pycache__` directories at relative depths 1 through 5 below each supplied project root | `delete` |
 | python / js | `mypy-cache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359): `.mypy_cache` directories at relative depths 1 through 5 below each supplied project root, with a regular `CACHEDIR.TAG` file | `delete` |
-| python / js | `node-modules`, `python-venv` | `node_modules` directories beside a regular `package.json`, and `.venv` directories holding `pyvenv.cfg` beside a Python project manifest, at relative depths 1 through 5 below a supplied project or workspace root, with no hidden directory between the root and them (`find.exclude`: tool-managed installs such as `~/.npm/_npx`, editor extensions and `~/.cache` are not the user's projects), and inside no other dependency directory; `liveness_contract: node-project` or `python-project`, `min_idle_for: 30d`, judged by their project's activity ([Liveness contracts](#liveness-contracts)); `checkouts: refuse`. Both are in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359) | `delete` |
+| python / js | `node-modules`, `python-venv` | `node_modules` directories beside a regular `package.json`, and `.venv` directories holding `pyvenv.cfg` beside a Python project manifest, at relative depths 1 through 5 below a supplied project or workspace root, with no hidden directory between the root and them (`find.exclude`: tool-managed installs such as `~/.npm/_npx`, editor extensions and `~/.cache` are not the user's projects), and inside no other dependency directory; `liveness_contract: node-project` or `python-project`, `min_idle_for: 30d`, judged by their project's activity ([Liveness contracts](#liveness-contracts)); `checkouts: refuse`. `python-venv` is in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359); `node-modules` is in the development library only (Mark held it, 2026-11-06, TASK-365; successor TASK-357) | `delete` |
 | python / js | `jest-cache` | Jest's default `jest_*` cache under `/tmp` or `/var/tmp`, including the temp-prefix v1 preset below | `jest --config '{}' --cacheDirectory '{path}' --clearCache` from the checked parent; Jest removes the measured directory itself |
 | python / js | `node-compile-cache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359): `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
 | c / c++ | `cmake-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `CMakeCache.txt`, a direct `CMakeFiles/` directory, no `CMakeLists.txt` entry, and a surviving recorded CMake source ancestor; minimum 3-day idle age and `checkouts: refuse` | `delete` |
@@ -2900,7 +2902,7 @@ package itself.
 | `zephyr-tmp` | no tool: on the host, a project script (`mktemp -d /tmp/zephyr-h5e5-run.XXXXXXXX`; 2,578 such and 213 `zephyr-h5-run.*`) removes its run directory on success and keeps it on failure, printing its Renode and UART log paths for the user; hand-made directories (`zephyr-h5-clock-patch`, `zephyr-usart-patch.*`, without `.git`) and Git checkouts match too | in use only; no floor | none | Not a built-in. Was: Failure diagnostics the user was pointed to; hand-made work without a checkout; a live run's directory between two steps. Counterexample vector (user probe `zephyr-tmp-probe`) `zephyr-tmp-kept-failure-diagnostics-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). |
 | `renode-tmp` | Renode 1.17.0 TemporaryFilesManager (source read, renode-infrastructure `f3d5d7b7d`): one `renode-<pid>` per process; `GetTemporaryFile` creates each file and closes it; at start and exit Renode removes `renode-<pid>` directories of pids that are not alive, never `*-crash` (its crash reports) and nothing under `--keep-temporary-files` | in use only; no floor | none | Not a built-in. Was: A live Renode's directory holds no descriptor between uses, so a running emulation loses the files it created; crash reports (`renode-<pid>-crash`, 29 on the host) and directories kept on request are deleted. Counterexample vector (user probe `renode-tmp-probe`) `renode-tmp-live-emulation-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). Re-admission: a new name over `renode-<pid>` only, without `-crash`, under an Owner PID contract (Renode's own rule). |
 | `xdg-cache-entry-v2` | any application under `$XDG_CACHE_HOME` (XDG Base Directory Specification 0.8 calls it non-essential data; the profile's own exclusion list records applications that keep sessions, credentials, models and backups there) | in use, `min_idle_for: 30d`, `checkouts: refuse`, exact-name exclusions | none | Not a built-in. Was: Not all can be named: any unknown application's state, or a cache that is the only copy; a dormant application that reads its cache only when it starts. Counterexample vector (user probe `xdg-cache-entry-v2-probe`) `xdg-cache-entry-v2-unknown-app-state-eligible`. | Withdrawn (TASK-122, mark-emulator for Mark, 2026-10-24). |
-| `node-modules` | npm 11.19.0 with Node.js 24.21.0 (the development host's install layout, read-only dry runs 2026-11-02 and 2026-11-05; in the container, TASK-350: real installs of a project and a workspace, restored by `npm ci`); TASK-79's container probe: reading `node_modules` changed neither mtime nor ctime. pnpm (its store links: vector `node-project-pnpm-layout-eligible`), Yarn and Bun: not verified; consumers are `node` and editors | `liveness_contract: node-project`, `min_idle_for: 30d`, `checkouts: refuse`: no change in the project, no read in its `node_modules` directories (project-wide when one links out; this narrowing accepted for `node-modules` with its admission, Mark 2026-11-05), no visible use (identity, held paths, environment, command line); kept while an outer `node_modules` exists | verified heuristic: project activity | Those named in safety.md, Project dependency directories (Residuals), among them a cached consumer launched through a path outside the project, a removal-only change, and under the narrowing a project whose own code but no dependency was read; plus safety.md, A process's paths (a mapping is matched by identity only). The loss in a residual is a reinstall, except hand-edited dependency files, a dated exception to the admission rule (Mark, 2026-10-23; remedy `.diskgc-keep` or `protect`). False positive accepted with the admission (Mark, 2026-11-05, "admit current as-is"): a `node_modules` beside a `package.json` with no lockfile and no `node_modules/.package-lock.json`, such as an extracted application bundle or a vendored dependency tree (seen on the development host, 2026-11-05), matches, and once its project is idle for 30 days it is deleted although npm cannot reinstall it; a successor requiring a lockfile is TASK-357's. A package installed into it by hand without being recorded in the manifest (`npm install --no-save`) is not restored by a reinstall either; it ships with the profile as it is, and that Mark's "admit current as-is" covers it is the implementer's reading, to confirm (TASK-357). | Shipped, admitted by Mark, 2026-10-23 (TASK-79); in the 0.2 catalog, not 0.1's (admitted by Mark, 2026-11-05, TASK-359, as it is, with rule 2's narrowed scope and the residuals named here). Nested dependency directories, and one an outer `node_modules` would replace, are never candidates, so a removal cannot silently switch Node to a hoisted copy. Vectors: `node-project-*` in crates/diskgc-model/tests/vectors/liveness, `node-modules` in vectors/builtins. Container tests: `node_modules_real_npm_projects_reclaim_only_idle_projects_then_npm_ci_restores`, `node_modules_live_node_processes_keep_their_projects`, `node_modules_home_level_install_filters_every_project_below_it`, `candidate_catalog_project_tree_family_matches_the_development_build` (the release build's catalog path with the clock offset, so past the floor); through the gate-lifted package, which has no clock offset, only the keep side of the floor: `release_candidate_node_modules_keeps_projects_inside_the_30_day_floor`. A home-level install (`~/package.json` and `~/node_modules`, as on the development host) keeps every project below it `filtered`, so the profile reclaims nothing there. |
+| `node-modules` | npm 11.19.0 with Node.js 24.21.0 (the development host's install layout, read-only dry runs 2026-11-02 and 2026-11-05; in the container, TASK-350: real installs of a project and a workspace, restored by `npm ci`); TASK-79's container probe: reading `node_modules` changed neither mtime nor ctime. pnpm (its store links: vector `node-project-pnpm-layout-eligible`), Yarn and Bun: not verified; consumers are `node` and editors | `liveness_contract: node-project`, `min_idle_for: 30d`, `checkouts: refuse`: no change in the project, no read in its `node_modules` directories (project-wide when one links out; this narrowing is PENDING Mark's confirmation), no visible use (identity, held paths, environment, command line); kept while an outer `node_modules` exists | verified heuristic: project activity | Those named in safety.md, Project dependency directories (Residuals), among them a cached consumer launched through a path outside the project, a removal-only change, and under the pending narrowing a project whose own code but no dependency was read; plus safety.md, A process's paths (a mapping is matched by identity only). The loss in a residual is a reinstall, except hand-edited dependency files, a dated exception to the admission rule (Mark, 2026-10-23; remedy `.diskgc-keep` or `protect`). False positive, accepted by Mark with "admit current as-is" for its 0.2 admission (2026-11-05), not in effect while he holds the profile: a `node_modules` beside a `package.json` with no lockfile and no `node_modules/.package-lock.json`, such as an extracted application bundle or a vendored dependency tree (seen on the development host, 2026-11-05), matches, and once its project is idle for 30 days it is deleted although npm cannot reinstall it; a successor requiring a lockfile is TASK-357's. A package installed into it by hand without being recorded in the manifest (`npm install --no-save`) is not restored by a reinstall either. | Shipped, admitted by Mark, 2026-10-23 (TASK-79): development library only, in no release catalog: Mark held it out of 0.2 on the `npm install --no-save` residual ("No, hold node-modules", 2026-11-06, TASK-365, withdrawing its admission to 0.2 of 2026-11-05, TASK-359), until a successor (TASK-357's, which also targets the no-lockfile false positive) handles that residual or he decides on it. Rule 2's narrowed scope for `node-project` is the orchestrator's, PENDING Mark's confirmation. Nested dependency directories, and one an outer `node_modules` would replace, are never candidates, so a removal cannot silently switch Node to a hoisted copy. Vectors: `node-project-*` in crates/diskgc-model/tests/vectors/liveness, `node-modules` in vectors/builtins. Container tests: `node_modules_real_npm_projects_reclaim_only_idle_projects_then_npm_ci_restores`, `node_modules_live_node_processes_keep_their_projects`, `node_modules_home_level_install_filters_every_project_below_it`, `candidate_catalog_project_tree_family_matches_the_development_build` (the release build's catalog path, with `node-modules` on the test-only candidate list and the clock offset, so past the floor); the gate-lifted package refuses it (`release_candidate_catalog_refuses_every_excluded_builtin`). A home-level install (`~/package.json` and `~/node_modules`, as on the development host) keeps every project below it `filtered`, so the profile reclaims nothing there. |
 | `python-venv` | CPython 3.13.15 `venv` (the development host's layout, read-only dry runs 2026-11-02 and 2026-11-05); CPython 3.14.7 `venv` and uv 0.13.0 `uv venv` in the container (TASK-350); TASK-79's container probe: reading `.venv` changed neither mtime nor ctime. virtualenv: not verified; consumers are `python` and editors | `liveness_contract: python-project`, `min_idle_for: 30d`, `checkouts: refuse`: no change in the project, no read in its `.venv` directories (project-wide with an editable install or a link out; this narrowing accepted for `python-venv` with its admission, Mark 2026-11-05), no visible use (identity, held paths, environment, command line) | verified heuristic: project activity | Those named in safety.md, Project dependency directories (Residuals), among them a cached consumer launched through a path outside the project, a removal-only change, and under the narrowing a project whose own code but no dependency was read; plus safety.md, A process's paths (a mapping is matched by identity only). A shell that sourced `activate` and then left the project names nothing in it (`VIRTUAL_ENV` is exported after `exec`), so its environment can be reclaimed while it runs and its next `python` is not found (container test). The loss in a residual is a reinstall, except two dated exceptions to the admission rule: hand-edited dependency files (Mark, 2026-10-23) and packages installed by hand into the environment without being recorded in the manifest, which a reinstall from it does not bring back (Mark, 2026-11-05); remedy for both `.diskgc-keep` or `protect`. | Shipped, admitted by Mark, 2026-10-23 (TASK-79); in the 0.2 catalog, not 0.1's (admitted by Mark, 2026-11-05, TASK-359, with rule 2's narrowed scope and the residuals named here). A `.venv` inside another dependency directory, or without `pyvenv.cfg` or a manifest beside it, is never a candidate; an editable install's checkout keeps it (`contains_checkout`). Vectors: `python-project-*` in crates/diskgc-model/tests/vectors/liveness, `python-venv` in vectors/builtins. Container tests: `python_venv_real_venv_and_uv_projects_reclaim_only_idle_projects_then_recreate`, `python_venv_live_interpreter_and_activated_shell_keep_their_projects`, `python_venv_activated_shell_that_left_its_project_is_a_named_residual` (the residual of a consumer that names nothing in the project: an activated shell that left it), `candidate_catalog_project_tree_family_matches_the_development_build` (the release build's catalog path with the clock offset, so past the floor). Through the gate-lifted package, which has no clock offset, only the keep side of the floor: `release_candidate_python_venv_keeps_projects_inside_the_30_day_floor`. |
 | `nix-shell-tmpdir` | `nix develop`'s rc runs `mktemp -d -t nix-shell.XXXXXX` and exports it after `exec`; no exit cleanup (left after a normal exit, Nix 2.34.8) | none: the name records no owner; a dormant shell shows no use | none | Not a built-in. | Excluded. Counterexample: the dormant-temp-users container test. The class is fixed at the producer, upstream (TASK-123). |
 | `mktemp-dir` | any program | none | none | Not a built-in. | Excluded. Counterexample: a shell that exports `TMPDIR=$(mktemp -d)` after `exec`. |
@@ -3094,9 +3096,9 @@ line says it was reproduced.
 - TASK-335: the catalog adds `nix-garbage`, a garbage collection of the
   system Nix store (What it does; its limits under Known limits). 0.1.0:
   not affected; it shipped no Nix kind.
-- TASK-359: the catalog adds six project-tree sources, `pytest-cache`,
-  `python-pycache`, `mypy-cache`, `python-venv`, `node-compile-cache` and
-  `node-modules` (What it does; their limits under Known limits). 0.1.0: not affected;
+- TASK-359: the catalog adds five project-tree sources, `pytest-cache`,
+  `python-pycache`, `mypy-cache`, `python-venv` and `node-compile-cache`
+  (What it does; their limits under Known limits). 0.1.0: not affected;
   it shipped none of them.
 - TASK-360: the catalog adds four package-manager caches cleaned by the
   tool's own cleaner, `pip-cache`, `uv-cache`, `pnpm-store` and `ccache`
@@ -3142,7 +3144,7 @@ warm, two read-only ones explain it:
   and never deletes ([Tally only](#tally-only); Install, item 5).
 - `diskgc check` validates a configuration without touching the machine;
   `diskgc profiles list|show|test` shows the built-in catalog.
-- The catalog is fifteen sources and the seven idle filters (`idle-1h` to
+- The catalog is thirteen sources and the seven idle filters (`idle-1h` to
   `idle-30d`): `cargo-target` (Cargo `target/` directories under supplied
   roots, reclaimed by Cargo's lock protocol), `nix-shell-rc` (rc
   directories of ended `nix-shell` and `nix develop` shells directly in
@@ -3151,7 +3153,7 @@ warm, two read-only ones explain it:
   multi-user `/nix/store`, collected by one `nix-store --gc --max-freed
   NEED` through the system Nix daemon as your user, where NEED is what
   is still missing; Nix decides what is dead, and GC roots, profiles and
-  generations are never removed) and six project-tree sources, also new
+  generations are never removed) and five project-tree sources, also new
   in 0.2: `pytest-cache` (`.pytest_cache` up to three levels below a
   supplied root), `python-pycache` (`__pycache__` through five levels
   below a supplied root), `mypy-cache` (`.mypy_cache` through five
@@ -3159,10 +3161,8 @@ warm, two read-only ones explain it:
   `.venv` holding `pyvenv.cfg` beside a Python project manifest, through
   five levels and outside hidden directories, once its whole project
   shows no change, no read in its environments and no visible use for
-  30 days), `node-modules` (a `node_modules` beside a `package.json`,
-  through five levels and outside hidden directories, on the same 30-day
-  rule) and `node-compile-cache` (Node's compile cache in `/tmp` and in
-  the shell temp directories below it). Those six are deleted only
+  30 days) and `node-compile-cache` (Node's compile cache in `/tmp` and
+  in the shell temp directories below it). Those five are deleted only
   after diskgc's own checks: never while a process it can see holds a
   file in them, and never with a version-control checkout inside.
   Also new in 0.2, four package-manager caches that diskgc does not
@@ -3359,21 +3359,18 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   mypy 2.1's default SQLite cache was seen held open while a run parses;
   that it stays held through the whole write phase, and mypy's JSON cache
   (`sqlite_cache = false`), were not tested.
-- **`python-venv` and `node-modules`.** A dependency directory (a
-  `.venv`, a `node_modules`) is kept while its project shows, within 30
-  days, a change or a read of a file in its dependency directories, or
-  while a process uses it at the moment diskgc checks. The project is the nearest enclosing repository (for
-  `node-modules` also a declared workspace: `workspaces` in a
-  `package.json`, or a `pnpm-workspace.yaml`), else the
-  directory holding the dependency directory; a repository above the
-  supplied root (a dotfiles `~/.git` with `--roots ~/src`) keeps every
-  dependency directory below it that has none of its own
-  (`producer_unknown`). A read is the access time the filesystem records,
-  not the read itself: under the default `relatime` mount option it can
-  lag the last real read by up to about a day, so a dependency last read
-  just over 29 days ago can already look 30 days old, and on a filesystem
-  mounted `noatime` reads are not seen at all. What diskgc cannot see, it
-  can delete:
+- **`python-venv`.** An environment (a `.venv`) is kept while its
+  project shows, within 30 days, a change or a read of a file in its
+  environments, or while a process uses it at the moment diskgc checks.
+  The project is the nearest enclosing repository, else the directory
+  holding the `.venv`; a repository above the supplied root (a dotfiles
+  `~/.git` with `--roots ~/src`) keeps every environment below it that
+  has none of its own (`producer_unknown`). A read is the access time
+  the filesystem records, not the read itself: under the default
+  `relatime` mount option it can lag the last real read by up to about a
+  day, so an environment last read just over 29 days ago can already
+  look 30 days old, and on a filesystem mounted `noatime` reads are not
+  seen at all. What diskgc cannot see, it can delete:
   - a project used without any change, recorded read or visible process
     at that moment: a tool run from a timer, a project you return to
     after a month;
@@ -3388,41 +3385,20 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
     in another mount namespace is another text), or that holds nothing in
     the project but a memory-mapped file in what diskgc's walk of the
     project leaves out (its version-control metadata, a mount below it);
-  - a workspace that is neither declared nor a repository top: each
-    member is judged by its own directory only;
-  - a project whose own code was read but none of its dependency files:
-    reads elsewhere in the project count only when the dependency
-    directory links out of itself (an editable install, `npm link`, a
-    `file:` dependency).
+    among these, a shell that ran `source .venv/bin/activate` and then
+    left the project with `cd`: its environment can be deleted while the
+    shell runs, its next `python` then runs another interpreter on `PATH`
+    (or is not found), and late imports fail;
+  - a project whose own code was read but none of its environment's
+    files: reads elsewhere in the project count only when the
+    environment links out of itself (an editable install, a symlink to a
+    package outside it).
 
   The loss is a reinstall from the project's manifest, which can resolve
-  other versions where no lockfile pins them. Files you edited inside the
-  dependency directory do not come back; keep such a directory with a
+  other versions where no lockfile pins them. Packages you installed by
+  hand without recording them in the manifest, and files you edited
+  inside `.venv`, do not come back: keep such an environment with a
   `.diskgc-keep` file in it or a `protect` entry.
-  - `python-venv`: a shell that ran `source .venv/bin/activate` and then
-    left the project with `cd` names nothing in it, so its environment
-    can be deleted while the shell runs; its next `python` then runs
-    another interpreter on `PATH` (or is not found), and late imports
-    fail. Packages you installed by hand without recording them in the
-    manifest do not come back either.
-  - `node-modules`: any `node_modules` beside a `package.json` matches,
-    whether or not npm could install it again. One that is not an
-    install of that `package.json` (an extracted application bundle, a
-    vendored dependency tree such as the one in an unpacked Node release,
-    typically with no lockfile such as `package-lock.json` beside it and
-    no `node_modules/.package-lock.json`) is deleted once its project is
-    idle for 30 days, although npm cannot reinstall it. Keep such a tree
-    out of the supplied roots, or protect it with `.diskgc-keep` or a
-    `protect` entry. Packages installed by hand without being recorded in
-    the manifest (`npm install --no-save`) do not come back either. A
-    home-level install (`~/package.json` beside `~/node_modules`) keeps
-    every `node_modules` below the home `filtered` under a root below the
-    home, so the profile reclaims nothing there: Node would resolve the
-    home's copies once a project's own were gone. With the home itself as
-    the root, `~/node_modules` is a candidate judged by the whole home
-    (usually kept, the home being active or too large to walk); once it
-    is gone, the projects below become candidates. Only npm's layout
-    was tested in a container; pnpm, Yarn and Bun layouts were not.
 - **`node-compile-cache`.** Node compiles again on its next start (time
   only); a running Node's writes to a deleted cache fail silently. A
   cache at a `NODE_COMPILE_CACHE` path outside `/tmp` and the shell temp
@@ -3503,7 +3479,8 @@ exit 2; `watch --tally-only` runs), the Docker kinds, every command action
 but the four caches' cleaners (`npm-cache`, `go-build-cache`, `yarn-cache`,
 `platformio-cache` and `jest-cache` stay out, TASK-360; each one's reason
 is in its row of [Liveness contracts](#liveness-contracts)), user profiles and overrides, `ipc: live-only` in `ensure`, and every other
-built-in in the [library](#built-in-profile-library), including the other
+built-in in the [library](#built-in-profile-library) (`node-modules`
+among them, held by Mark, TASK-365), including the other
 `/tmp` entries (`nix-shell.*` TMPDIRs themselves, `tmp.*`, anything
 else). The `docs/ci-pre-job.sh` example stays in the source tree; the
 package does not install it.
@@ -3514,10 +3491,10 @@ Evidence for the candidate package, and what it does not cover:
 |---|---|
 | Package contents | The actual `release-candidate` derivation passes the static ELF and installed-file check (the binary is byte-identical to its compile; the file list is exactly its release row's, each copy byte for byte; the notes' header and `--help`'s `watch` lines follow the row); its tmpfiles rule and example config are exercised in disposable Nix and Debian containers, and its `watch --tally-only` starts, writes its snapshot, stops on SIGTERM with exit 0 and deletes nothing there. Its unit templates are checked by `systemd-analyze verify` only as the development package's (byte-identical sources) and in the module's drop-in verification; no live `systemd` runs them from this package. |
 | Cargo operator journey | Those containers run the packaged, gate-lifted binary against real Cargo targets: dry run, busy-lock preservation, eligible deletion judged by the filesystem oracle, and a successful rebuild. Default and explicit `checkouts: allow`, and explicit `checkouts: refuse`, are checked on vendored checkout content. |
-| Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp`, `nix-garbage`, `pytest-cache`, `python-pycache`, `mypy-cache`, `python-venv`, `node-compile-cache`, `node-modules`, `pip-cache`, `uv-cache`, `pnpm-store`, `ccache` and the seven idle filters. Excluded built-ins (the other five cleaners among them) and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
+| Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp`, `nix-garbage`, `pytest-cache`, `python-pycache`, `mypy-cache`, `python-venv`, `node-compile-cache`, `pip-cache`, `uv-cache`, `pnpm-store`, `ccache` and the seven idle filters. Excluded built-ins (the other five cleaners and `node-modules` among them) and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
 | Package-manager caches | In disposable Nix containers sharing the host's PID namespace, with the pinned real tools (pip 26.1.2, uv 0.13.0, pnpm 12.9.0, ccache 4.14.1) and a registry the test serves, the packaged binary runs the development build's scenarios: the tool fills its cache, a dry run plans exactly it with the profile's command and no lookalike or cache at a non-default place, a reclaim under the deletion oracle runs the cleaner, and the tool fetches or builds again; a run held in flight is kept `in_use` (uv, pnpm) or survives the cleaner (pip, ccache; each also held after its cache lookup, so that it only writes afterwards); for `uv-cache`, dry runs with a `.git` directory, a non-empty `.git` file, an empty `.git` elsewhere and a checkout-shaped `.git` below `git-v0` keep the cache. Not run through the package: for uv and pnpm, the tool's own cleaner run directly against the install in flight and its lock wait (the release variants stop at diskgc's `in_use` verdict); the missing-tool and any-version-on-`PATH` scenario (development build only); a real `git` dependency in a uv cache (no network, no git in the image). |
 | Nix GC journey | In the Nix GC image (a container's own CppNix 2.34.8 store and daemon), the packaged binary plans `nix-garbage` in a dry run that deletes nothing, then runs one GC bounded by the asked need: a direct root, an out-link, system and per-user generations, a running build's input and a store file a process holds open all survive, and the dead paths go, judged by the deletion oracle. Every other Nix GC scenario (refusals, signals, the pinned socket) runs the e2e harness's development build, which shares the kind's code. |
-| Project-tree caches | In disposable Nix containers sharing the host's PID namespace, with the pinned real tools (pytest 9.1.1, CPython 3.14.7, mypy 2.1.0, Node.js 24.21.0 with npm 11.19.0, uv 0.13.0), the packaged binary runs the development build's scenarios for `pytest-cache`, `python-pycache`, `mypy-cache` and `node-compile-cache`: the tool makes the caches, a dry run plans exactly them and no lookalike, and a reclaim under the deletion oracle deletes exactly those it may while a pytest session, an importing Python and a Node keep running (each finishes and writes its cache again), and keeps a paused mypy run's cache `in_use`; the tools then rebuild. For `python-venv` and `node-modules` it shows only the keep side of the 30-day floor: environments made by `python -m venv` and `uv venv`, and `npm install`s of a project and a workspace, are kept `not_idle` and nothing is deleted. Their reclaim after the floor, the live-use and residual scenarios ran the development build, and the release build's catalog path only gated with a test clock offset; the gate-lifted binary has no clock offset, and no guest with a held-back clock has run it. |
+| Project-tree caches | In disposable Nix containers sharing the host's PID namespace, with the pinned real tools (pytest 9.1.1, CPython 3.14.7, mypy 2.1.0, Node.js 24.21.0, uv 0.13.0), the packaged binary runs the development build's scenarios for `pytest-cache`, `python-pycache`, `mypy-cache` and `node-compile-cache`: the tool makes the caches, a dry run plans exactly them and no lookalike, and a reclaim under the deletion oracle deletes exactly those it may while a pytest session, an importing Python and a Node keep running (each finishes and writes its cache again), and keeps a paused mypy run's cache `in_use`; the tools then rebuild. For `python-venv` it shows only the keep side of the 30-day floor: environments made by `python -m venv` and `uv venv` are kept `not_idle` and nothing is deleted. Their reclaim after the floor, the live-use and residual scenarios ran the development build, and the release build's catalog path only gated with a test clock offset; the gate-lifted binary has no clock offset, and no guest with a held-back clock has run it. |
 | Host and filesystem deployment | The candidate has no approval for an operator host or its filesystem, mount, permissions and running-work mix. Container results establish behavior only in those disposable fixtures. |
 | Race and temporary paths | Cargo race protocol tests use a separate development test driver, so they do not establish packaged-binary race behavior. The `nix-shell-rc` and `pytest-tmp` contracts' container tests run the development binary; their packaged binary's `/tmp` evidence is the release vectors (ModelHost) and a recorded walk in a disposable container (TASK-65), not a container suite, because `min_idle_for: 1h` meets the kernel's ctime and the gate-lifted binary has no test clock offset. |
 | Operator policy and rollout | Operator-authored `fs`/delete and command actions are excluded; the final policy contract, installation environment and rollout evidence are unresolved. Do not deploy the candidate built from master. |

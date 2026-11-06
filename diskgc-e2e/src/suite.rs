@@ -255,10 +255,6 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
         "release_candidate_python_venv_keeps_projects_inside_the_30_day_floor",
         "needs the pinned CPython and uv in the Nix image",
     ),
-    (
-        "release_candidate_node_modules_keeps_projects_inside_the_30_day_floor",
-        "needs the pinned npm and Node in the Nix image",
-    ),
     ("pip_cache_cleaner", "needs the pinned pip in the Nix image"),
     ("uv_cache_cleaner", "needs the pinned uv in the Nix image"),
     (
@@ -505,7 +501,6 @@ pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
     "release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept",
     "release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles",
     "release_candidate_python_venv_keeps_projects_inside_the_30_day_floor",
-    "release_candidate_node_modules_keeps_projects_inside_the_30_day_floor",
     // TASK-360: the four admitted cleaners through the release candidate.
     "release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes",
     "release_candidate_uv_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
@@ -1323,12 +1318,6 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: project_tree_suite::release_candidate_python_venv_keeps_projects_inside_the_30_day_floor,
-    },
-    Test {
-        name: "release_candidate_node_modules_keeps_projects_inside_the_30_day_floor",
-        tier: Tier::Fast,
-        expect: Expect::Pass,
-        run: project_tree_suite::release_candidate_node_modules_keeps_projects_inside_the_30_day_floor,
     },
     Test {
         name: "pip_cache_cleaner",

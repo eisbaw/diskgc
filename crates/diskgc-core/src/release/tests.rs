@@ -85,20 +85,20 @@ fn the_0_1_row_is_what_v0_1_0_shipped() {
 }
 
 /// 0.2's catalog is 0.1's plus `nix-garbage` (Mark, 2026-11-04, TASK-335),
-/// TASK-350's six project-tree sources (Mark, 2026-11-05, TASK-359) and
+/// five of TASK-350's project-tree sources (Mark, 2026-11-05, TASK-359;
+/// `node-modules` held out, Mark, 2026-11-06, TASK-365) and
 /// four delegated cleaners (Mark, 2026-11-05, TASK-360; `jest-cache` left
 /// after review), through the same
 /// narrowing the binary uses; 0.1's stays without them.
 #[test]
 fn the_0_2_catalog_is_0_1_plus_nix_garbage_the_project_tree_caches_and_four_cleaners() {
-    const ADDED: [&str; 11] = [
+    const ADDED: [&str; 10] = [
         "nix-garbage",
         "pytest-cache",
         "python-pycache",
         "mypy-cache",
         "python-venv",
         "node-compile-cache",
-        "node-modules",
         "pip-cache",
         "uv-cache",
         "pnpm-store",
@@ -118,7 +118,9 @@ fn the_0_2_catalog_is_0_1_plus_nix_garbage_the_project_tree_caches_and_four_clea
     );
     want.extend(ADDED.iter().map(|n| (*n).to_owned()));
     want.sort();
-    assert_eq!(names("0.2"), want);
+    let got = names("0.2");
+    assert!(!got.iter().any(|n| n == "node-modules"), "{got:?}");
+    assert_eq!(got, want);
     assert_eq!(release("0.2").expect("0.2").catalog, Some(Release::V0_2));
 }
 

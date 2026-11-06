@@ -1676,8 +1676,9 @@ mod tests {
     /// version's row of the release descriptor, and this
     /// list is the second key a widening of the catalog must turn (with
     /// TASK-65's sign-off for `/tmp`, Mark's admission of `nix-garbage` for
-    /// 0.2, TASK-335, of six project-tree sources, TASK-359, and of four
-    /// delegated cleaners, TASK-360), not a stale copy to derive away.
+    /// 0.2, TASK-335, of five project-tree sources, TASK-359, and of four
+    /// delegated cleaners, TASK-360; `node-modules` held, TASK-365), not a
+    /// stale copy to derive away.
     #[test]
     fn release_catalog_keeps_only_its_admitted_built_ins_on_every_listing_surface() {
         let row = release::release_of_version(env!("CARGO_PKG_VERSION")).expect("this release");
@@ -1704,7 +1705,6 @@ mod tests {
                 "nix-garbage",
                 "nix-shell-rc",
                 "node-compile-cache",
-                "node-modules",
                 "pip-cache",
                 "pnpm-store",
                 "pytest-cache",
@@ -1725,6 +1725,7 @@ mod tests {
                 "docker-build-cache",
                 "bun-cache",
                 "npm-cache",
+                "node-modules",
                 "go-build-cache",
                 "yarn-cache",
                 "platformio-cache",
@@ -1736,6 +1737,7 @@ mod tests {
             "docker-build-cache",
             "bun-cache",
             "npm-cache",
+            "node-modules",
             "go-build-cache",
             "yarn-cache",
             "platformio-cache",
@@ -1783,7 +1785,6 @@ mod tests {
             "python-pycache",
             "mypy-cache",
             "python-venv",
-            "node-modules",
         ] {
             Tier::select(&format!("profile:{name}"), &library, Some(&roots), 1000).expect(name);
         }
@@ -1798,11 +1799,12 @@ mod tests {
     #[test]
     fn opt_in_binary_uses_the_narrowed_library_for_help_and_select() {
         let library = builtin_library().expect("binary catalog");
-        assert_eq!(library.profiles().count(), 21);
+        assert_eq!(library.profiles().count(), 20);
         assert!(library.get("nix-garbage").is_some());
         assert!(library.get("python-venv").is_some());
         assert!(library.get("uv-cache").is_some());
         assert!(library.get("npm-cache").is_none());
+        assert!(library.get("node-modules").is_none());
         assert!(library.get("docker-build-cache").is_none());
         let error = Tier::select("profile:docker-build-cache", &library, None, 1000)
             .expect_err("excluded source");

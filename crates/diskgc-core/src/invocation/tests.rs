@@ -269,18 +269,18 @@ fn the_0_2_catalog_takes_a_nix_garbage_tier() {
     );
 }
 
-/// TASK-359: tiers of the six project-tree sources admitted to 0.2 load
+/// TASK-359: tiers of the five project-tree sources admitted to 0.2 load
 /// under its catalog and each is refused by 0.1's; `checkouts: allow` on
-/// one of them is refused under 0.2 (none of them allows checkouts).
+/// one of them is refused under 0.2 (none of them allows checkouts), and
+/// `node-modules`, held out (Mark, 2026-11-06, TASK-365), stays refused.
 #[test]
 fn the_0_2_catalog_takes_the_project_tree_tiers() {
-    const ADMITTED: [(&str, &str); 6] = [
+    const ADMITTED: [(&str, &str); 5] = [
         ("pytest-cache", "        roots: [/home/mark/src]\n"),
         ("python-pycache", "        roots: [/home/mark/src]\n"),
         ("mypy-cache", "        roots: [/home/mark/src]\n"),
         ("python-venv", "        roots: [/home/mark/src]\n"),
         ("node-compile-cache", ""),
-        ("node-modules", "        roots: [/home/mark/src]\n"),
     ];
     let path = Path::new("/tmp/policy.yaml");
     let release_02 = Catalog::from(crate::release::release("0.2").expect("0.2"));
@@ -312,6 +312,14 @@ fn the_0_2_catalog_takes_the_project_tree_tiers() {
         .expect_err("python-venv does not allow checkouts");
     assert!(
         error.contains("python-venv") && error.contains("may only narrow"),
+        "{error}"
+    );
+    let node = "version: 1\ngroups:\n  - name: g\n    tiers:\n      - name: t\n        select: profile:node-modules\n        roots: [/home/mark/src]\n";
+    let error = release_02
+        .config(path, node.as_bytes(), ConfigUse::Run)
+        .expect_err("node-modules is not in 0.2");
+    assert!(
+        error.contains("`node-modules` is a built-in that diskgc 0.2 does not ship"),
         "{error}"
     );
 }

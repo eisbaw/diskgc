@@ -3,5 +3,7 @@
 # lines ignored). Not a release decision. Empty is valid: the candidate
 # build is then the release build's catalog path with the real catalog.
 #
-# TASK-350's project-tree family is in the real 0.2 catalog (Mark,
-# 2026-11-05, TASK-359); no candidate is listed now.
+# TASK-350, project-tree cruft. The rest of that family is in the real 0.2
+# catalog (Mark, 2026-11-05, TASK-359); node-modules was held out of it
+# (Mark, 2026-11-06, TASK-365) and awaits TASK-357.
+node-modules

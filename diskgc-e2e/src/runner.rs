@@ -1533,7 +1533,6 @@ mod tests {
                 "release_candidate_nix_garbage_dry_run_then_bounded_gc",
                 // TASK-359: on the Nix image only.
                 "release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles",
-                "release_candidate_node_modules_keeps_projects_inside_the_30_day_floor",
                 // TASK-360: on the Nix image only.
                 "release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes",
                 "release_candidate_pnpm_store_prune_keeps_referenced_packages_and_an_install_in_flight",

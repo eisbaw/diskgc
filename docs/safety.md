@@ -1716,11 +1716,10 @@ contract class, recorded in the
   `python-venv` only, packages installed by hand into a `.venv` without
   being recorded in its project's manifest, admitted with that residual
   named in its row, TASK-359; Mark 2026-11-05, for `node-modules` only,
-  admitted as it is, a `node_modules` npm cannot reinstall because its
-  project has no lockfile and it has no `.package-lock.json` (an
-  extracted application bundle, a vendored dependency tree), named in its
-  row, TASK-359; a successor requiring a lockfile is TASK-357's);
-  every known counterexample has a checked-in
+  with "admit current as-is", a `node_modules` npm cannot reinstall,
+  granted with its 0.2 admission and not in effect while he holds the
+  profile, 2026-11-06, TASK-365; successor TASK-357); every known
+  counterexample has a checked-in
   ModelHost vector and, where the kernel's view matters, a container test
   with the real pinned producer; and Mark's decision to admit it is recorded
   in the task and in the table. A decision made on his delegation is
@@ -2386,9 +2385,10 @@ longest):
    would otherwise keep every other one of the project for `T` (TASK-79
    review, mped). Failure: `not_idle`, detail naming the newest path.
 2. *No read* (narrowed scope: the orchestrator's implementation of
-   mped's recommendation, TASK-79 review; accepted by Mark for both
-   contracts with the admission of `python-venv` and `node-modules` to
-   0.2, 2026-11-05, TASK-359). The newest atime of a regular file in the project's
+   mped's recommendation, TASK-79 review; accepted by Mark for
+   `python-project` with `python-venv`'s admission to 0.2, 2026-11-05,
+   TASK-359; for `node-project` PENDING his confirmation, `node-modules`
+   being held, TASK-365, TASK-357). The newest atime of a regular file in the project's
    dependency directories of the candidate's name (every `node_modules`,
    or every `.venv`, the candidate included: a workspace's root and
    members share this evidence) is older than `T`. Under the default
@@ -2475,8 +2475,8 @@ this class of loss on 2026-10-23):
   namespace's paths (strings are compared as bytes). Its next lazy import
   or resource read fails. A cooperative lock (below) is the only sound
   remedy (Codex, TASK-79 review);
-- under the narrowed rule 2 (accepted with both admissions): a project
-  whose own code was
+- under the narrowed rule 2 (accepted for `python-venv`, pending for
+  `node-modules`): a project whose own code was
   read in the last `T` while none of its dependency directories was;
 - the `relatime` boundary: the last read can be up to a day older than
   the newest atime shows; with a 30-day floor this moves the boundary by
@@ -2487,16 +2487,16 @@ this class of loss on 2026-10-23):
   from the manifest does not bring them back, so the loss is the user's
   to repeat by hand, not this list's reinstall. A dated exception for
   `python-venv` (Mark, 2026-11-05, TASK-359; admission rule above). For
-  `node-modules` (`npm install --no-save`) it ships with the profile as
-  it is, named in its row; that "admit current as-is" covers it is the
-  implementer's reading, not recorded as Mark's decision (to confirm,
-  TASK-357);
+  `node-modules` (`npm install --no-save`) not accepted: Mark held the
+  profile out of 0.2 on it ("No, hold node-modules", 2026-11-06,
+  TASK-365; successor TASK-357);
 - for `node-modules`, a `node_modules` beside a `package.json` with no
   lockfile and no `node_modules/.package-lock.json` (an extracted
   application bundle, a vendored dependency tree): npm cannot reinstall
-  it, yet it matches and goes once its project is idle for `T`. A dated
-  exception (Mark, 2026-11-05, "admit current as-is", TASK-359); a
-  successor profile requiring a lockfile is TASK-357's;
+  it, yet it matches and goes once its project is idle for `T`. Mark
+  accepted it with "admit current as-is" (2026-11-05, TASK-359), granted
+  with the 0.2 admission and not in effect while he holds the profile
+  (TASK-365); a successor profile requiring a lockfile is TASK-357's;
 - a project whose only change in `T` was removing entries (a directory's
   mtime and ctime do not count, rule 1), or a change only in VCS
   metadata;

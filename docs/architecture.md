@@ -1386,8 +1386,9 @@ Decisions (Mark), before the RC commit:
 - [ ] **Scope** (TASK-276). Is 0.2 the descriptor's provisional `0.2`
   row (`crates/diskgc-core/src/releases.json`), with or without a
   reclaiming `watch`, and with which catalog (Mark admitted
-  `nix-garbage` to it, 2026-11-04, TASK-335, six project-tree
-  sources, 2026-11-05, TASK-359, and four lock-safe package-manager
+  `nix-garbage` to it, 2026-11-04, TASK-335, five project-tree
+  sources, 2026-11-05, TASK-359, `node-modules` held out, 2026-11-06,
+  TASK-365, and four lock-safe package-manager
   cleaners with their exact commands, 2026-11-05, TASK-360, Jest left out
   after review); does the
   NixOS module
