@@ -409,7 +409,7 @@ impl Library {
     /// own action (`fs` with `delete`, `cargo-target` with its lock
     /// protocol, `nix-store` with its bounded GC), or of kind `fs` with a
     /// command action that the release row lists for it exactly
-    /// (`command_actions`: [`crate::release::CommandAction`]; 0.2's five
+    /// (`command_actions`: [`crate::release::CommandAction`]; 0.2's four
     /// cleaners, TASK-360), and of an admissible class (the loader already
     /// refuses `releases` on class none). Every listed command action must
     /// be a catalog member's, with that command. A violation is a bug in

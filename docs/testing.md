@@ -2964,8 +2964,9 @@ from `/proc/locks`. Each test first requires the tool version
   cleaner version allowlist: any program of the name first on `PATH` runs
   (safety.md, Command actions).
 
-Through the gate-lifted package (TASK-360, after Mark admitted the five
-lock-safe cleaners to 0.2 on 2026-11-05; host PID namespace, Nix image, in
+Through the gate-lifted package (TASK-360, after Mark admitted the
+lock-safe cleaners to 0.2 on 2026-11-05, four after Jest left; host PID
+namespace, Nix image, in
 the fast suite and in the Nix release runner's `--suite release`): each
 first requires the `release-candidate` package's narrowed catalog to list
 the profile (`profiles list`, `profiles show`), then runs the same
@@ -2979,15 +2980,15 @@ the tool, not diskgc's binary, so only the development variant runs it:
 `release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes`,
 `release_candidate_uv_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept`
 (the refused marker shapes too),
-`release_candidate_pnpm_store_prune_keeps_referenced_packages_and_an_install_in_flight`,
-`release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes`
-and `release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes`.
+`release_candidate_pnpm_store_prune_keeps_referenced_packages_and_an_install_in_flight`
+and `release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes`.
 `delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path` runs
-the development build only. The other four (`npm-cache`,
-`go-build-cache`, `yarn-cache`, `platformio-cache`) stay out of 0.2: the
+the development build only. The other five (`npm-cache`,
+`go-build-cache`, `yarn-cache`, `platformio-cache`, `jest-cache`) stay out
+of 0.2: the
 release catalog code path refuses each patched into 0.2 as
 `tools/candidate_catalog.py` would
-(`the_release_catalog_refuses_the_four_excluded_cleaners_and_takes_the_five`,
+(`the_release_catalog_refuses_the_five_excluded_cleaners_and_takes_the_four`,
 diskgc-core), because 0.2's release row lists no command action for it
 (`command_actions`, releases.json), and the vector
 `release/npm-cache-cleaner-refused-under-the-0.2-catalog` shows the

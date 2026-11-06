@@ -543,7 +543,6 @@
     no_match: [/tmp/jest, /tmp/subdir/jest_app_hash, /tmp/jest_app_hash/file]
   verified_with: Jest npm package 30.2.0 (pinned lockfile), real-tool scenarios in the Nix container (TASK-351, 2026-11-05)
   liveness_class: delegated
-  releases: ["0.2"]
 
 - name: west-build-anchored
   category: embedded

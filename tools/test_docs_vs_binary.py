@@ -170,11 +170,11 @@ class ReferenceShapeTests(unittest.TestCase):
                         "node-modules"}
         self.assertLessEqual(project_tree, catalogs["0.2"])
         self.assertFalse(project_tree & catalogs["0.1"])
-        # TASK-360: and the five lock-safe cleaners, not the other four.
-        cleaners = {"pip-cache", "uv-cache", "pnpm-store", "ccache", "jest-cache"}
+        # TASK-360: and four delegated cleaners, not the other five.
+        cleaners = {"pip-cache", "uv-cache", "pnpm-store", "ccache"}
         self.assertLessEqual(cleaners, catalogs["0.2"])
         self.assertFalse(cleaners & catalogs["0.1"])
-        excluded = {"npm-cache", "go-build-cache", "yarn-cache", "platformio-cache"}
+        excluded = {"npm-cache", "go-build-cache", "yarn-cache", "platformio-cache", "jest-cache"}
         self.assertFalse(excluded & set().union(*catalogs.values()))
         for members in catalogs.values():
             self.assertLessEqual(members, sources)

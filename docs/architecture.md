@@ -1387,8 +1387,9 @@ Decisions (Mark), before the RC commit:
   row (`crates/diskgc-core/src/releases.json`), with or without a
   reclaiming `watch`, and with which catalog (Mark admitted
   `nix-garbage` to it, 2026-11-04, TASK-335, six project-tree
-  sources, 2026-11-05, TASK-359, and the five lock-safe package-manager
-  cleaners with their exact commands, 2026-11-05, TASK-360); does the
+  sources, 2026-11-05, TASK-359, and four lock-safe package-manager
+  cleaners with their exact commands, 2026-11-05, TASK-360, Jest left out
+  after review); does the
   NixOS module
   ship? Recorded in TASK-276's notes; the row, the PRD's Scope and the
   draft notes then follow it. A `/tmp` built-in new to the catalog
@@ -1460,7 +1461,7 @@ Evidence on the RC commit:
   `docs-vs-binary:`, with `artifact:` (store path, the binary's
   sha256).
 - [ ] **Release notes list the limits.** The draft's Known limits say,
-  in a user's terms: the Nix GC's (TASK-335); the five package-manager
+  in a user's terms: the Nix GC's (TASK-335); the four package-manager
   cleaners' (TASK-360); overlay copy-up ending a reclaim part-way
   (TASK-309); the per-user and index locks untested on NFS (TASK-314);
   what rests on the model only ([testing.md](testing.md), Not covered

@@ -86,11 +86,12 @@ fn the_0_1_row_is_what_v0_1_0_shipped() {
 
 /// 0.2's catalog is 0.1's plus `nix-garbage` (Mark, 2026-11-04, TASK-335),
 /// TASK-350's six project-tree sources (Mark, 2026-11-05, TASK-359) and
-/// five delegated cleaners (Mark, 2026-11-05, TASK-360), through the same
+/// four delegated cleaners (Mark, 2026-11-05, TASK-360; `jest-cache` left
+/// after review), through the same
 /// narrowing the binary uses; 0.1's stays without them.
 #[test]
-fn the_0_2_catalog_is_0_1_plus_nix_garbage_the_project_tree_caches_and_five_cleaners() {
-    const ADDED: [&str; 12] = [
+fn the_0_2_catalog_is_0_1_plus_nix_garbage_the_project_tree_caches_and_four_cleaners() {
+    const ADDED: [&str; 11] = [
         "nix-garbage",
         "pytest-cache",
         "python-pycache",
@@ -102,7 +103,6 @@ fn the_0_2_catalog_is_0_1_plus_nix_garbage_the_project_tree_caches_and_five_clea
         "uv-cache",
         "pnpm-store",
         "ccache",
-        "jest-cache",
     ];
     let names = |release: &str| -> Vec<String> {
         let library = Catalog::from(super::release(release).expect(release))

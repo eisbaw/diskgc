@@ -1734,12 +1734,12 @@ contract class, recorded in the
 - **tolerant** and **delegated**: as in the table above, verified per tool.
   A delegated cleaner enters a release only with its exact command listed
   in that release's row ([Command actions](#command-actions), In a
-  release); 0.2 lists five, by Mark's decision ("only the lock-safe five",
-  2026-11-05, TASK-360): in the container tests a run of each tool in
-  flight survived its cleaner (uv and pnpm by their lock; pip and ccache
-  also when the clean landed after the run's cache lookup, as they create
-  the directories they write into), except a Jest run that loads no
-  module after the clear, which exits 1 (its row). The other four
+  release); 0.2 lists four, by Mark's decision ("only the lock-safe five",
+  2026-11-05, TASK-360, less Jest, whose clear failed a run in flight in
+  review): in the container tests a run of each tool in flight survived
+  its cleaner (uv and pnpm by their lock; pip and ccache also when the
+  clean landed after the run's cache lookup, as they create the
+  directories they write into). The other five
   delegated cleaners' reasons are their rows in
   [reference.md](reference.md#liveness-contracts).
 - **none**: no contract. The profile is not admissible as a built-in, and
@@ -4476,8 +4476,9 @@ development machine):
   row does not list or lists differently, and a listed one the catalog
   does not hold with that command, so admitting a cleaner, or changing an
   admitted cleaner's argv, needs both its `releases:` label and the row.
-  0.2 lists `pip-cache`, `uv-cache`, `pnpm-store`, `ccache` and
-  `jest-cache` (Mark, 2026-11-05: "only the lock-safe five"); 0.1 lists
+  0.2 lists `pip-cache`, `uv-cache`, `pnpm-store` and `ccache` (Mark,
+  2026-11-05: "only the lock-safe five"; `jest-cache` left after review);
+  0.1 lists
   none. User profiles stay refused in every release, so no
   operator-written command runs there. The program is still looked up on
   `PATH` at run time, and no version is checked (above).

@@ -329,7 +329,7 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
         "jest_cache_clear_under_a_run_with_no_later_module_load_fails_the_run",
         "needs the pinned Jest in the Nix image",
     ),
-    // TASK-360: the five admitted cleaners through the release candidate.
+    // TASK-360: the four admitted cleaners through the release candidate.
     (
         "release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes",
         "needs the pinned pip and CPython in the Nix image",
@@ -345,10 +345,6 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
     (
         "release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes",
         "needs the pinned ccache and C compiler in the Nix image",
-    ),
-    (
-        "release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes",
-        "needs the pinned Jest in the Nix image",
     ),
     (
         "cargo_race_6_a_mixed_layout_target_killed_at_seeded_positions",
@@ -510,12 +506,11 @@ pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
     "release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles",
     "release_candidate_python_venv_keeps_projects_inside_the_30_day_floor",
     "release_candidate_node_modules_keeps_projects_inside_the_30_day_floor",
-    // TASK-360: the five admitted cleaners through the release candidate.
+    // TASK-360: the four admitted cleaners through the release candidate.
     "release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes",
     "release_candidate_uv_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
     "release_candidate_pnpm_store_prune_keeps_referenced_packages_and_an_install_in_flight",
     "release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes",
-    "release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes",
 ];
 
 /// The one test whose container receives the pinned Buildah closure.
@@ -1510,7 +1505,7 @@ pub static TESTS: &[Test] = &[
         expect: Expect::Pass,
         run: pkg_cache_suite::jest_cache_clear_under_a_run_with_no_later_module_load_fails_the_run,
     },
-    // TASK-360: the five admitted cleaners through the release candidate.
+    // TASK-360: the four admitted cleaners through the release candidate.
     Test {
         name: "release_candidate_pip_cache_reclaim_then_refetch_and_an_install_in_flight_completes",
         tier: Tier::Fast,
@@ -1534,12 +1529,6 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: pkg_cache_suite::release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes,
-    },
-    Test {
-        name: "release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes",
-        tier: Tier::Fast,
-        expect: Expect::Pass,
-        run: pkg_cache_suite::release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes,
     },
     Test {
         name: "delegated_cleaners_skip_a_missing_tool_and_run_any_version_on_path",

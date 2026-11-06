@@ -1676,7 +1676,7 @@ mod tests {
     /// version's row of the release descriptor, and this
     /// list is the second key a widening of the catalog must turn (with
     /// TASK-65's sign-off for `/tmp`, Mark's admission of `nix-garbage` for
-    /// 0.2, TASK-335, of six project-tree sources, TASK-359, and of five
+    /// 0.2, TASK-335, of six project-tree sources, TASK-359, and of four
     /// delegated cleaners, TASK-360), not a stale copy to derive away.
     #[test]
     fn release_catalog_keeps_only_its_admitted_built_ins_on_every_listing_surface() {
@@ -1700,7 +1700,6 @@ mod tests {
                 "idle-30d",
                 "idle-3d",
                 "idle-7d",
-                "jest-cache",
                 "mypy-cache",
                 "nix-garbage",
                 "nix-shell-rc",
@@ -1793,14 +1792,13 @@ mod tests {
         for name in ["pip-cache", "uv-cache", "pnpm-store", "ccache"] {
             Tier::select(&format!("profile:{name}"), &library, Some(&roots), 1000).expect(name);
         }
-        Tier::select("profile:jest-cache", &library, None, 1000).expect("jest-cache");
     }
 
     #[cfg(feature = "release-catalog")]
     #[test]
     fn opt_in_binary_uses_the_narrowed_library_for_help_and_select() {
         let library = builtin_library().expect("binary catalog");
-        assert_eq!(library.profiles().count(), 22);
+        assert_eq!(library.profiles().count(), 21);
         assert!(library.get("nix-garbage").is_some());
         assert!(library.get("python-venv").is_some());
         assert!(library.get("uv-cache").is_some());

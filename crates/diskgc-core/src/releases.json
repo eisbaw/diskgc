@@ -46,7 +46,6 @@
       "catalog": "0.2",
       "command_actions": {
         "ccache": { "command": ["env", "CCACHE_DIR={path}", "ccache", "--clear"], "cwd": "candidate" },
-        "jest-cache": { "command": ["jest", "--config", "{}", "--cacheDirectory", "{path}", "--clearCache"], "cwd": "parent" },
         "pip-cache": { "command": ["pip", "--cache-dir", "{path}", "cache", "purge"], "cwd": "candidate" },
         "pnpm-store": { "command": ["pnpm", "store", "prune", "--store-dir", "{path}"], "cwd": "candidate" },
         "uv-cache": { "command": ["uv", "cache", "clean", "--cache-dir", "{path}"], "cwd": "parent" }

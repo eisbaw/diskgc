@@ -2,7 +2,7 @@
 # not in the 0.2 catalog (Mark's decision; its reason is its liveness row
 # in docs/reference.md), so a 0.2 build refuses `--select profile:npm-cache` (exit 2)
 # before anything is read, as a built-in it does not ship, and runs no
-# command. go-build-cache, yarn-cache and platformio-cache are left out
+# command. go-build-cache, yarn-cache, platformio-cache and jest-cache are left out
 # the same way (profile::golden).
 profile_vector: 1
 catalog: release-0.2

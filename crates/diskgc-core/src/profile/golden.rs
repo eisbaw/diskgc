@@ -1454,29 +1454,26 @@ fn catalog_0_2(yaml: &str) -> Result<Library, String> {
 }
 
 /// TASK-360 (Mark, 2026-11-05: "Only the lock-safe five"): 0.2 runs the
-/// command actions of `pip-cache`, `uv-cache`, `pnpm-store`, `ccache`
-/// and `jest-cache`, each exactly as its 0.2 release row lists it, and
-/// no other. The other four delegated cleaners (TASK-351's evidence:
-/// no lock against their own cleaner, or a named residual) stay out:
+/// command actions of `pip-cache`, `uv-cache`, `pnpm-store` and `ccache`,
+/// each exactly as its 0.2 release row lists it, and no other.
+/// `jest-cache` left the five after the review found Jest's run in flight
+/// failing its clear (exit 1); the other delegated cleaners (TASK-351's
+/// evidence: no lock against their own cleaner, or a named residual)
+/// stay out too:
 /// given `releases: ["0.2"]` in a copy of the real builtin.yaml, each is
 /// refused by the release catalog code path, so a 0.2 package with it
-/// would not start; so is one of the five whose argv changed, and a row
+/// would not start; so is one of the four whose argv changed, and a row
 /// that lists a cleaner the catalog lost. Of every built-in only uv-cache
 /// tolerates a checkout marker, exactly its empty `sdists-v*/.git`.
 #[test]
-fn the_release_catalog_refuses_the_four_excluded_cleaners_and_takes_the_five() {
-    const ADMITTED: [&str; 5] = [
-        "pip-cache",
-        "uv-cache",
-        "pnpm-store",
-        "ccache",
-        "jest-cache",
-    ];
-    const EXCLUDED: [&str; 4] = [
+fn the_release_catalog_refuses_the_five_excluded_cleaners_and_takes_the_four() {
+    const ADMITTED: [&str; 4] = ["pip-cache", "uv-cache", "pnpm-store", "ccache"];
+    const EXCLUDED: [&str; 5] = [
         "npm-cache",
         "go-build-cache",
         "yarn-cache",
         "platformio-cache",
+        "jest-cache",
     ];
     let row = crate::release::release("0.2").expect("0.2");
     let listed: Vec<&str> = row.command_actions.keys().map(String::as_str).collect();
@@ -1569,15 +1566,15 @@ fn the_release_catalog_refuses_the_four_excluded_cleaners_and_takes_the_five() {
         "{error}"
     );
     // The row names a cleaner the catalog no longer holds.
-    let yaml = edited_builtin("jest-cache", &|entry| {
+    let yaml = edited_builtin("ccache", &|entry| {
         entry.replacen("  releases: [\"0.2\"]\n", "", 1)
     });
     let error = catalog_0_2(&yaml).expect_err("a label removed");
     assert!(
         error.contains(
-            "diskgc 0.2's release row lists the command action [\"jest\", \"--config\", \"{}\", \
-             \"--cacheDirectory\", \"{path}\", \"--clearCache\"] (cwd: parent) for \
-             `jest-cache`, which its catalog (0.2) does not hold with that action"
+            "diskgc 0.2's release row lists the command action [\"env\", \"CCACHE_DIR={path}\", \
+             \"ccache\", \"--clear\"] (cwd: candidate) for `ccache`, which its catalog (0.2) \
+             does not hold with that action"
         ),
         "{error}"
     );

@@ -1527,8 +1527,6 @@ mod tests {
                 "release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes",
                 "release_candidate_checkout_policy_accepts_only_admitted_builtin",
                 "release_candidate_files_work_in_container",
-                // TASK-360: on the Nix image only.
-                "release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes",
                 // TASK-359: on the Nix image only.
                 "release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept",
                 // TASK-335: on the Nix GC image only.

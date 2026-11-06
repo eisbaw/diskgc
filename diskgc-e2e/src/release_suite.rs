@@ -18,8 +18,9 @@ use crate::{TESTER, ensure};
 // The release candidate's (0.2) catalog: 0.1's, signed off by TASK-65
 // (Mark, 2026-10-24: Cargo, the two /tmp built-ins with a liveness
 // contract, and the idle filters), plus nix-garbage (Mark, 2026-11-04,
-// TASK-335), six project-tree sources (Mark, 2026-11-05, TASK-359) and the
-// five lock-safe package-manager cleaners (Mark, 2026-11-05, TASK-360).
+// TASK-335), six project-tree sources (Mark, 2026-11-05, TASK-359) and
+// four package-manager cleaners (Mark, 2026-11-05, TASK-360: "only the
+// lock-safe five", less jest-cache after review).
 const ADMITTED: &[&str] = &[
     "cargo-target",
     "nix-garbage",
@@ -35,7 +36,6 @@ const ADMITTED: &[&str] = &[
     "uv-cache",
     "pnpm-store",
     "ccache",
-    "jest-cache",
     "idle-1h",
     "idle-1d",
     "idle-2d",
@@ -60,11 +60,13 @@ const EXCLUDED: &[&str] = &[
     "cmake-build-anchored",
     "meson-build-anchored",
     "autotools-build-anchored",
-    // TASK-360: the delegated cleaners Mark left out of 0.2 (no lock
-    // against their own cleaner, or a named residual; TASK-351).
+    // TASK-360: the delegated cleaners left out of 0.2 (a run in flight
+    // fails their cleaner, or a named residual; TASK-351, and Jest's
+    // perf-cache counterexample).
     "go-build-cache",
     "npm-cache",
     "yarn-cache",
+    "jest-cache",
     "west-build-anchored",
     "platformio-cache",
     "brave-browser-cache",

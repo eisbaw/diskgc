@@ -2476,16 +2476,6 @@ pub fn jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_complete
     jest_scenario(ctx, &ctx.diskgc())
 }
 
-/// TASK-360: [`jest_cache_real_jest_runs_reclaim_then_rerun_and_a_run_in_flight_completes`] through the gate-lifted release-candidate package,
-/// whose 0.2 catalog holds `jest-cache` and whose release row lists its
-/// command.
-pub fn release_candidate_jest_cache_reclaim_then_rerun_and_a_run_in_flight_completes(
-    ctx: &Ctx,
-) -> TestResult {
-    let binary = crate::release_suite::release_candidate_with(ctx, "jest-cache")?;
-    jest_scenario(ctx, &binary)
-}
-
 fn jest_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     // The Jest 30.2.0 package prints 30.1.3 (its lockfile pins jest,
     // jest-cli and @jest/core at 30.2.0).
