@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-06T00:13:00Z'
-updated_date: '2026-11-06T05:18:00Z'
+updated_date: '2026-11-06T05:37:00Z'
 labels:
   - flaky
   - e2e
@@ -24,4 +24,6 @@ TASK-359 e2e run 2 (2026-11-06, tree of 4493790e): release_candidate_python_pyca
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-06: recurred twice in TASK-360's full e2e (release_candidate_ccache_* kept ~/.cache/ccache or ~/.ccache in_use_unknown, 'process list still growing or replacing pids after 16 listings'; release_candidate_python_venv_* kept both venvs in_use, hypothesis: another test container in the host PID namespace had a process naming the identical /home/tester/src/pyapp path -> false in_use, a test-isolation flaw). Logs tmp/evidence-t363/. Assigned to the t360 implementer (branch t360-cleaners) as separate commits before the Jest exclusion commit. Root-fix candidates: give release scenarios a deadline long enough for TASK-340's back-off to retry instead of asserting on the first unsettled scan; unique per-test project paths; deterministic busy-host test separate.
+
+2026-11-06 orchestrator decision: (1) product fix filed as TASK-364 (after TASK-348); (2) t360 implements test isolation now: run the host-PID-namespace tests after the parallel phase (self-induced churn is a test-isolation defect; does not cover other projects' load, TASK-364 does); (3) unique per-test project paths; keep the venv diagnostic.
 <!-- SECTION:NOTES:END -->
