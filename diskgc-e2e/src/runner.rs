@@ -857,36 +857,63 @@ pub struct TestRun {
     pub log: PathBuf,
 }
 
+/// The order a suite's `tests` run in ([`run_parallel`]): the tests in a
+/// PID namespace of their own, `jobs` at a time, then the
+/// host-PID-namespace tests ([`shares_host_pid_namespace`]) one at a time,
+/// with no other container of the suite running (TASK-363).
+///
+/// A host-PID-namespace test's process scan sees every process on the
+/// host. Run beside the suite's other containers (their podman, strace,
+/// compilers and tools start processes all the time), its scans did not
+/// settle and its candidates were kept `in_use_unknown`: the suite
+/// disturbing its own tests, a test-isolation defect, not product
+/// behaviour. (Latent too: through the shifted uid map
+/// ([`HOST_PID_NAMESPACE_ARGS`]) its tester is the same host uid as
+/// another container's uid 1001, whose processes diskgc would read as the
+/// user's own; no test starts one today, and none can run beside it now.)
+/// Load from other work on the host, another worktree's suite included,
+/// is not covered by this: the product's handling of an unsettled scan
+/// is.
+fn schedule(tests: Vec<Listed>, release_under_test: bool) -> (Vec<Listed>, Vec<Listed>) {
+    let (serial, parallel) = tests
+        .into_iter()
+        .partition(|test| shares_host_pid_namespace(release_under_test, &test.name));
+    (parallel, serial)
+}
+
 fn run_parallel(
     config: &Config,
     tests: Vec<Listed>,
     jobs: usize,
     deadline: Instant,
 ) -> Vec<TestRun> {
-    let queue = Mutex::new(VecDeque::from(tests));
+    let (parallel, serial) = schedule(tests, release_under_test(config));
+    let queue = Mutex::new(VecDeque::from(parallel));
     let results = Mutex::new(Vec::new());
-    // The host-PID-namespace tests run one at a time: they pick a free
-    // namespace pid range by looking at every host process, check then use.
-    let host_pid_slot = Mutex::new(());
     std::thread::scope(|scope| {
         for _ in 0..jobs {
             scope.spawn(|| {
                 loop {
                     let next = queue.lock().expect("queue lock").pop_front();
                     let Some(test) = next else { break };
-                    let result =
-                        if shares_host_pid_namespace(release_under_test(config), &test.name) {
-                            let _slot = host_pid_slot.lock().expect("host pid slot");
-                            run_container(config, &test, deadline, false)
-                        } else {
-                            run_container(config, &test, deadline, false)
-                        };
+                    let result = run_container(config, &test, deadline, false);
                     results.lock().expect("results lock").push(result);
                 }
             });
         }
     });
-    results.into_inner().expect("results lock")
+    let mut results = results.into_inner().expect("results lock");
+    if !serial.is_empty() {
+        info!(
+            "running {} host-PID-namespace tests one at a time, with no other container of \
+             this suite running",
+            serial.len()
+        );
+    }
+    for test in &serial {
+        results.push(run_container(config, test, deadline, false));
+    }
+    results
 }
 
 /// Runs one test in its own container, logging its output to a file.
@@ -1169,6 +1196,36 @@ mod tests {
             true,
             "ensure_dry_run_plans_real_targets_and_deletes_nothing@1.99.1"
         ));
+    }
+
+    /// TASK-363: the host-PID-namespace tests run after every other test
+    /// of the suite, one at a time; with the release candidate under test
+    /// every test is one of them.
+    #[test]
+    fn host_pid_namespace_tests_run_after_the_parallel_ones() {
+        let listed = |name: &str| Listed {
+            name: name.to_owned(),
+            tier: Tier::Fast,
+        };
+        let host_pid = crate::suite::HOST_PID_NAMESPACE_TESTS[0];
+        let tests = vec![
+            listed(host_pid),
+            listed("fs_reclaim_never_deletes_a_socket_or_fifo"),
+            listed("ensure_dry_run_plans_real_targets_and_deletes_nothing"),
+        ];
+        let names = |tests: &[Listed]| tests.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+        let (parallel, serial) = schedule(tests.clone(), false);
+        assert_eq!(
+            names(&parallel),
+            [
+                "fs_reclaim_never_deletes_a_socket_or_fifo",
+                "ensure_dry_run_plans_real_targets_and_deletes_nothing"
+            ]
+        );
+        assert_eq!(names(&serial), [host_pid]);
+        let (parallel, serial) = schedule(tests, true);
+        assert!(parallel.is_empty());
+        assert_eq!(serial.len(), 3);
     }
 
     const GLOBAL: &[&str] = &[

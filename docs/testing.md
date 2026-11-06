@@ -3450,12 +3450,27 @@ processes it cannot signal (probed: host processes show as `nobody`,
 only processes it started, nested PID namespaces' init through a pidfd.
 The shifted map also makes in-container tester a different host uid from
 other containers' tester, so their processes are not the user's to
-diskgc; but it is the host uid of another container's uid 1001 (`OTHER`),
-so a test that keeps a uid 1001 process alive must not run beside them
-(none does today). Their `podman run` uses Podman's default `TMPDIR`, not the dev
+diskgc; but it is the host uid of another container's uid 1001 (`OTHER`;
+probed: both show as host uid 101000 here), whose processes diskgc would
+read as the user's own; no test starts a uid 1001 process today. Their `podman run` uses Podman's default `TMPDIR`, not the dev
 shell's (below the checkout in a 0700 home, which crun, running as a
 subordinate uid under the shifted map, cannot reach). The runner runs these tests one at a time (each picks a free
-namespace pid range by looking at every host process). Nested PID
+namespace pid range by looking at every host process), and in a suite
+only after every other test of it has finished, with no other container
+of the suite running (TASK-363). Run beside the suite's parallel
+containers, whose podman, strace, compilers and tools start processes
+all the time, their process scans did not settle and kept candidates
+`in_use_unknown` (`release_candidate_ccache_*` failed that way in two
+fast suites of four and in two full runs, 2026-11-06); the uid 1001
+overlap above can no longer meet them either. That is the suite
+disturbing its own tests, a test-isolation defect, not product
+behaviour. It does not cover load from other work on the host, such as
+another worktree's `just e2e` running its parallel phase beside this
+suite's serial tail: a busy
+host still keeps a one- or two-candidate tier `in_use_unknown`, as the
+executor waits out a busy host only before a tier's fourth and later
+candidates, and a plan never (safety.md, In use: Freshness); that is the
+product's own task. Nested PID
 namespaces are made with `unshare -p -f -m` and entered with `nsenter`. A second
 mount namespace for the "other namespace" tests is made with an `unshare`
 helper that bind-mounts the scratch directory at a different path (nested
