@@ -3,10 +3,10 @@ id: TASK-359
 title: >-
   Admit five project-tree profiles into the 0.2 catalog (pytest-cache,
   node-compile-cache, mypy-cache, python-pycache, python-venv)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-05T19:17:00Z'
-updated_date: '2026-11-05T19:17:00Z'
+updated_date: '2026-11-06T00:13:00Z'
 labels:
   - admission
   - release
@@ -25,4 +25,6 @@ Mark 2026-11-05: 'admit all' after TASK-350's evidence (node-modules held back p
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-05 orchestrator: implementer in tmp/worktrees/tadmit (branch t-admit-project-tree).
+
+Merged de9f2af13b457e011eb56041cc62256a211d1224 (2026-11-06): pytest-cache, node-compile-cache, mypy-cache, python-pycache, python-venv, node-modules in the 0.2 catalog. Open for Mark: the npm install --no-save residual (packages not in the manifest are not reinstalled) is named for node-modules and marked unconfirmed (TASK-357). Busy-host test flake: TASK-363.
 <!-- SECTION:NOTES:END -->
