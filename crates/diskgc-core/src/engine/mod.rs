@@ -921,6 +921,14 @@ pub struct Skip {
     /// eligible. `None` for a refusal before or during the walk, where a
     /// size would be a partial count (docs/reference.md, Output: `summary`).
     pub measured_bytes: Option<u64>,
+    /// An `in_use_unknown` `busy` skip made by a scan that could judge no
+    /// candidate because the host was busy ([`crate::inuse::Scan::busy`]):
+    /// the reclaim walk waits it out and checks the same candidate again
+    /// (TASK-364). `false` for every other skip, also for a `busy` one whose
+    /// scans were only stale ([`crate::inuse::FreshAttempts`]), which can be
+    /// the candidate's own (a check slower than the freshness bound). Not
+    /// in the report.
+    pub(crate) busy_scan: bool,
 }
 
 /// Why an `in_use_unknown` candidate could not be judged: a stable report
@@ -928,17 +936,22 @@ pub struct Skip {
 /// on it, not on the detail text (TASK-263 review, mped S2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnknownCause {
-    /// No in-use scan stayed fresh or settled for the candidate, or a
-    /// process's own reads did not settle (it was exiting or changing,
-    /// TASK-348): a busy host, and a later run may judge it. Three in a row
-    /// make the tier back off, never skip candidates unchecked (TASK-340).
+    /// No in-use scan stayed fresh for the candidate in its attempts, or
+    /// one did not settle (the process list kept growing, a process's own
+    /// reads did not hold still while it was exiting or changing, TASK-348)
+    /// and the waits for it (TASK-364) ended
+    /// first: the deadline, a signal, the goal reached by someone else, or
+    /// a Cargo target stopped part-way. A busy host, and a later run may
+    /// judge it. Stale ones three in a row make the tier back off, never
+    /// skip candidates unchecked (TASK-340).
     Busy,
     /// A process of the user could not be inspected, and can stay so while
     /// it runs: the kernel refused it for no privilege boundary its status
     /// shows (a `newgrp` shell), a read of it failed otherwise, or a live
     /// task of it showed nothing (TASK-190; its `process_blockers` name
     /// it). One whose reads only did not settle is [`Self::Busy`], whatever
-    /// its status read showed.
+    /// its status read showed, until it has not held still for
+    /// [`crate::inuse::STUCK_AFTER`] (taken to be stuck, TASK-364).
     UnreadableProcess,
     /// The held `/proc` cannot list every process (`hidepid`, a PID
     /// namespace other than the initial one, facts unread or changed):
@@ -1078,6 +1091,7 @@ impl Skip {
             process_blockers: None,
             unknown_cause: None,
             measured_bytes: None,
+            busy_scan: false,
         }
     }
 

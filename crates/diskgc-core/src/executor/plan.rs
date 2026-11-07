@@ -9,7 +9,7 @@ use crate::config::Order;
 use crate::engine::{Checkouts, Identity, Reason, Rules, Skip, checkout_metadata_below};
 use crate::fs_kind::{self, Find, TermVerdict};
 use crate::host::{DevIno, Host, MonoTime, Timestamp};
-use crate::inuse::{Checker, PlanScan};
+use crate::inuse::{BusyBackOff, Checker, PlanScan};
 use crate::profile::{Action, IdleWindow};
 use crate::report::{BuildEvidence, PlanEntry, Report, RunTerm, Status};
 use std::collections::HashMap;
@@ -807,17 +807,42 @@ pub(super) fn plan_cargo<H: Host>(
                     skipped.push(plan_skip(tier, &target.path, &skip));
                     continue;
                 }
-                match cargo_target::eligibility(
-                    host,
-                    target,
-                    rules,
-                    IdleWindow {
-                        at_least: tier.idle_for,
-                        before: tier.idle_before,
-                    },
-                    checker,
-                    deadline,
-                ) {
+                // A busy host is waited out and the target judged again
+                // (TASK-364). Bounded: each pass waits at least one
+                // back-off, or ends at the deadline or a signal.
+                let mut back_off = BusyBackOff::default();
+                let judged_now = loop {
+                    let judged_now = cargo_target::eligibility(
+                        host,
+                        target,
+                        rules,
+                        IdleWindow {
+                            at_least: tier.idle_for,
+                            before: tier.idle_before,
+                        },
+                        checker,
+                        deadline,
+                    );
+                    let Ok(Err(skip)) = &judged_now else {
+                        break judged_now;
+                    };
+                    let shown = target.path.display();
+                    match checker.wait_to_judge_again(
+                        host,
+                        deadline,
+                        skip,
+                        &mut back_off,
+                        &mut |line| log(&format!("{shown}: {line}")),
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => break judged_now,
+                        Err(error) => {
+                            skipped.push(plan_skip(tier, &target.path, skip));
+                            break Err(error.at(&target.path));
+                        }
+                    }
+                };
+                match judged_now {
                     Ok(Ok(e)) => {
                         eligible.push(PlanEntry {
                             idle_since: e.last_build,
@@ -1452,17 +1477,48 @@ pub(super) fn plan_fs_union<H: Host>(
                 idle: source.idle,
                 space,
             };
-            match fs_kind::judge_term(
-                host,
-                &judge,
-                found,
-                &mut checker,
-                deadline,
-                // In-use is checked for each term that may still be
-                // selected, on its own walk and the current scan; the
-                // reclaim checks it for the term it selected (TASK-337).
-                selected.is_none(),
-            ) {
+            // A busy host is waited out and the term judged again
+            // (TASK-364). Bounded: each pass waits at least one back-off,
+            // or ends at the deadline or a signal.
+            let mut back_off = BusyBackOff::default();
+            let verdict = loop {
+                let verdict = fs_kind::judge_term(
+                    host,
+                    &judge,
+                    found,
+                    &mut checker,
+                    deadline,
+                    // In-use is checked for each term that may still be
+                    // selected, on its own walk and the current scan; the
+                    // reclaim checks it for the term it selected (TASK-337).
+                    selected.is_none(),
+                );
+                let Ok(TermVerdict::InUse(skip)) = &verdict else {
+                    break verdict;
+                };
+                let shown = found.path.display();
+                match checker.wait_to_judge_again(
+                    host,
+                    deadline,
+                    skip,
+                    &mut back_off,
+                    &mut |line| log(&format!("{shown}: {line}")),
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => break verdict,
+                    Err(error) => {
+                        let mut entry = plan_skip(tier, &found.path, skip);
+                        entry.profile = source.profile.to_owned();
+                        entry.checkouts = source.checkouts;
+                        entry.build_evidence = skipped_build_evidence(candidate.discovered(*index));
+                        planned.skipped.push(entry);
+                        planned.stopped = Some(error.at(&found.path));
+                        unjudged_from(&mut planned, judged + 1);
+                        return planned;
+                    }
+                }
+            };
+            match verdict {
                 Ok(TermVerdict::Admitted(tally, record)) => {
                     admitted.push(*index);
                     if source.checkouts == Checkouts::Refuse && tally.contains_checkout {

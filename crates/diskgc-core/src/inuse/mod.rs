@@ -30,7 +30,7 @@ pub mod held;
 pub mod loops;
 pub mod scan;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -94,11 +94,67 @@ pub const FRESH_ATTEMPTS: usize = 3;
 pub const FRESH_RETRY_PAUSES: [Duration; FRESH_ATTEMPTS - 1] =
     [Duration::from_millis(250), Duration::from_millis(1000)];
 
-/// One short pause before retrying a process list that kept growing. The
-/// retry is a complete scan; neither scan can clear a candidate unless it
-/// settles. A persistent fork storm stays a conservative `in_use_unknown`
-/// skip (TASK-190).
+/// One short pause before retrying a scan that could judge nothing because
+/// the host was busy ([`Scan::blocked_by`] says `busy`: its process list
+/// kept growing, or a process's reads did not hold still).
+/// The retry is a complete scan; neither scan can clear a candidate unless
+/// it settles. What outlasts it is waited out with [`BusyBackOff`]: by the
+/// reclaim walk before it checks the candidate again, by a plan's checker
+/// before it judges (TASK-190, TASK-364).
 pub const UNSETTLED_RETRY_PAUSE: Duration = Duration::from_millis(20);
+
+/// The first back-off on a busy host ([`busy_pause`]): far longer than the
+/// short retries a busy scan or a stale one already had
+/// ([`UNSETTLED_RETRY_PAUSE`], [`REREAD_PAUSES`], [`FRESH_RETRY_PAUSES`]),
+/// which the load outlasted. Tentative, like every back-off constant (PRD,
+/// Irreversibility map).
+pub const BUSY_BACK_OFF_FIRST: Duration = Duration::from_secs(2);
+
+/// The longest back-off: in a storm that does not end, one scan (or one
+/// candidate's check) per minute until the deadline, so a run neither
+/// spins nor gives up while its deadline leaves time for the host to settle
+/// (TASK-340).
+pub const BUSY_BACK_OFF_MAX: Duration = Duration::from_secs(60);
+
+/// How long one process may go on not holding still in every scan of a
+/// checker before it is taken to be stuck (a task stuck in its exit, one
+/// whose threads never stop changing): from then on it is a process that
+/// cannot be inspected (`unreadable_process`, a cause waiting does not end)
+/// instead of a busy host, so it no longer holds a tier or a plan to its
+/// deadline (TASK-348's follow-up, TASK-364). Four back-offs
+/// (2 + 4 + 8 + 16 s); a linker's exit takes milliseconds. Measured from
+/// the start of the first scan in which it did not hold still to the start
+/// of the latest; any scan in which it was not seen unsettled (read, found
+/// gone, or not looked at) ends the run, which only delays the bound.
+pub const STUCK_AFTER: Duration = Duration::from_secs(30);
+
+/// The pause before the `nth` (from 0) wait in a row for a busy host:
+/// [`BUSY_BACK_OFF_FIRST`], doubling with each further one, capped at
+/// [`BUSY_BACK_OFF_MAX`].
+pub fn busy_pause(nth: usize) -> Duration {
+    let factor = u32::try_from(nth)
+        .ok()
+        .and_then(|d| 1u32.checked_shl(d))
+        .unwrap_or(u32::MAX);
+    BUSY_BACK_OFF_FIRST
+        .saturating_mul(factor)
+        .min(BUSY_BACK_OFF_MAX)
+}
+
+/// The back-offs one candidate (or one plan judgement) has waited for a
+/// busy host ([`Checker::wait_out_busy`]): the next pause grows with them
+/// ([`busy_pause`]).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BusyBackOff {
+    waited: usize,
+}
+
+impl BusyBackOff {
+    /// How many back-offs it waited.
+    pub fn waited(&self) -> usize {
+        self.waited
+    }
+}
 
 /// The longest single sleep of a retry pause ([`FRESH_RETRY_PAUSES`]): a
 /// signal is noticed within this, not after the whole pause (TASK-189).
@@ -238,7 +294,14 @@ pub struct Scan {
     finished: MonoTime,
     listings: usize,
     unsettled: Option<String>,
-    retried_unsettled: Option<String>,
+    /// Why the scan before this one could judge nothing on a busy host,
+    /// when this one is its quick retry ([`UNSETTLED_RETRY_PAUSE`]).
+    retried_busy: Option<String>,
+    /// The processes that have not held still in any scan of its checker
+    /// for at least [`STUCK_AFTER`], with how long (set by the
+    /// [`Checker`]): each is a process that cannot be inspected, not a
+    /// busy host ([`Self::blocked_by`]).
+    stuck: BTreeMap<Pid, Duration>,
     /// What the `/proc` readers reported ([`Host::take_proc_read_notes`]).
     reader_notes: Vec<String>,
     processes: usize,
@@ -394,7 +457,8 @@ pub fn scan<H: Host>(
         finished: gathered.finished,
         listings: gathered.listings,
         unsettled: gathered.unsettled,
-        retried_unsettled: None,
+        retried_busy: None,
+        stuck: BTreeMap::new(),
         reader_notes: host.take_proc_read_notes(),
         processes: gathered.read.len(),
         gone: gathered.gone,
@@ -547,9 +611,10 @@ impl Scan {
     /// read.
     pub fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
-        if let Some(why) = &self.retried_unsettled {
+        if let Some(why) = &self.retried_busy {
             notes.push(format!(
-                "process scan unsettled; retried after {UNSETTLED_RETRY_PAUSE:?}: {why}"
+                "process scan could judge nothing on a busy host; retried after \
+                 {UNSETTLED_RETRY_PAUSE:?}: {why}"
             ));
         }
         if let Some(why) = &self.unsettled {
@@ -594,8 +659,15 @@ impl Scan {
                 )),
                 None if matches!(u.error, ProcError::Unsettled(_)) => notes.push(format!(
                     "pid {} ({name}, {ids}) did not hold still to be read (exiting or \
-                     changing) and is treated as using every candidate: {}",
-                    u.pid, u.error
+                     changing){} and is treated as using every candidate: {}",
+                    u.pid,
+                    self.stuck
+                        .get(&u.pid)
+                        .map_or_else(String::new, |lasted| format!(
+                            " in any scan for {} s, so it is taken to be stuck",
+                            lasted.as_secs()
+                        )),
+                    u.error
                 )),
                 None => notes.push(format!(
                     "pid {} ({name}, {ids}) cannot be inspected and is treated as using every \
@@ -681,10 +753,11 @@ impl Scan {
     /// judge candidates.
     pub fn unknown(&self, path: &Path) -> Option<Skip> {
         let (cause, why) = self.blocked_by()?;
-        Some(
-            Skip::in_use_unknown(path.to_owned(), cause, why)
-                .with_process_blockers(self.blocking_unreadable().into_iter().collect()),
-        )
+        Some(Skip {
+            busy_scan: cause == UnknownCause::Busy,
+            ..Skip::in_use_unknown(path.to_owned(), cause, why)
+                .with_process_blockers(self.blocking_unreadable().into_iter().collect())
+        })
     }
 
     /// Why this scan cannot clear anything ([`Self::blocked_by`]), as text.
@@ -701,10 +774,12 @@ impl Scan {
     ///
     /// A blocking process whose reads did not settle
     /// ([`ProcError::Unsettled`]: exiting, churning or in an exec) is a
-    /// busy host, as an unsettled scan is: waiting ends it (TASK-348). Any
+    /// busy host, as an unsettled scan is: waiting ends it (TASK-348), and
+    /// the run waits for it ([`Checker::wait_out_busy`], TASK-364). Any
     /// other blocking process (`unreadable_process`) can stay so while it
     /// runs and decides first, since it keeps every candidate whether or
-    /// not the other settles.
+    /// not the other settles; so does one that has not held still for
+    /// [`STUCK_AFTER`] ([`Self::stuck`]).
     pub fn blocked_by(&self) -> Option<(UnknownCause, String)> {
         if let Err(why) = &self.visibility {
             return Some((UnknownCause::IncompleteProcessList, why.clone()));
@@ -720,13 +795,23 @@ impl Scan {
             .name
             .as_ref()
             .map_or("?".into(), |n| n.to_string_lossy().into_owned());
-        Some(match u.error {
-            ProcError::Unsettled(_) => (
+        Some(match (&u.error, self.stuck.get(&u.pid)) {
+            (ProcError::Unsettled(_), None) => (
                 UnknownCause::Busy,
                 format!(
                     "pid {} ({name}) did not hold still to be read (exiting or changing), so it \
                      may be using any candidate: {}",
                     u.pid, u.error
+                ),
+            ),
+            (ProcError::Unsettled(_), Some(lasted)) => (
+                UnknownCause::UnreadableProcess,
+                format!(
+                    "pid {} ({name}) has not held still to be read (exiting or changing) in any \
+                     scan for {} s, so it is taken to be stuck and may be using any candidate: {}",
+                    u.pid,
+                    lasted.as_secs(),
+                    u.error
                 ),
             ),
             _ => (
@@ -740,16 +825,35 @@ impl Scan {
     }
 
     /// The blocking unreadable process that decides [`Self::blocked_by`]:
-    /// the first (by pid) that is not [`ProcError::Unsettled`], else the
-    /// first.
+    /// the first (by pid) whose cause lasts (not [`ProcError::Unsettled`],
+    /// or [`Self::stuck`]), else the first.
     fn first_blocking_unreadable(&self) -> Option<&Unreadable> {
         let mut blocking = self.unreadable.iter().filter(|u| u.excuse.is_none());
         let first = blocking.clone().next()?;
         Some(
             blocking
-                .find(|u| !matches!(u.error, ProcError::Unsettled(_)))
+                .find(|u| {
+                    !matches!(u.error, ProcError::Unsettled(_)) || self.stuck.contains_key(&u.pid)
+                })
                 .unwrap_or(first),
         )
+    }
+
+    /// The processes this scan saw not hold still: blocking ones whose
+    /// reads did not settle ([`ProcError::Unsettled`]). Its [`Checker`]
+    /// follows them from scan to scan for [`STUCK_AFTER`].
+    fn unsettled_pids(&self) -> BTreeSet<Pid> {
+        self.unreadable
+            .iter()
+            .filter(|u| u.excuse.is_none() && matches!(u.error, ProcError::Unsettled(_)))
+            .map(|u| u.pid)
+            .collect()
+    }
+
+    /// Whether this scan could judge nothing because the host was busy
+    /// ([`Self::blocked_by`] says `busy`): waiting may end it.
+    pub fn busy(&self) -> bool {
+        matches!(self.blocked_by(), Some((UnknownCause::Busy, _)))
     }
 
     /// The open-but-deleted files of the visible processes on the
@@ -1088,6 +1192,10 @@ pub struct Checker<'a> {
     /// without `--in-use`): it never scans, and the judges stop before
     /// their in-use step ([`Checker::checks_in_use`]).
     not_checked: Option<crate::survey::InUseNotChecked>,
+    /// Since when (the start of the first scan of an unbroken run) each
+    /// process has not held still in every scan of this checker
+    /// ([`Scan::unsettled_pids`]): one past [`STUCK_AFTER`] is stuck.
+    unsettled_since: BTreeMap<Pid, MonoTime>,
 }
 
 /// Whether a plan's checker scans processes. [`PlanScan::NotChecked`]
@@ -1122,6 +1230,7 @@ impl<'a> Checker<'a> {
             reuse_limit: reuse_limit.min(FRESHNESS),
             latest: None,
             not_checked: None,
+            unsettled_since: BTreeMap::new(),
         }
     }
 
@@ -1137,6 +1246,7 @@ impl<'a> Checker<'a> {
                 PlanScan::Processes => None,
                 PlanScan::NotChecked(token) => Some(token),
             },
+            unsettled_since: BTreeMap::new(),
         }
     }
 
@@ -1323,7 +1433,10 @@ impl<'a> Checker<'a> {
     /// (stopping at `deadline` or a signal). For judging without deleting
     /// (a plan, a survey): refusing needs no freshness, and nothing it
     /// clears is deleted on its word (deleting goes through
-    /// [`Checker::with_fresh_clear`] and its [`Clear`]).
+    /// [`Checker::with_fresh_clear`] and its [`Clear`]). It never waits: a
+    /// scan that judges nothing on a busy host comes back as it is, and its
+    /// caller waits it out ([`Checker::wait_out_busy`]) once it holds no
+    /// lock.
     pub fn current<H: Host>(
         &mut self,
         host: &H,
@@ -1337,6 +1450,95 @@ impl<'a> Checker<'a> {
         Ok(self.latest.as_ref().expect("made above"))
     }
 
+    /// Whether the kept scan judges nothing because the host is busy
+    /// ([`Scan::busy`]): what [`Checker::wait_out_busy`] waits out.
+    pub fn busy(&self) -> bool {
+        self.latest.as_ref().is_some_and(Scan::busy)
+    }
+
+    /// One wait for a busy host, if the kept scan is busy ([`Checker::busy`]):
+    /// logs why and for how long, pauses for the next of [`busy_pause`]
+    /// (growing with `back_off`, which the caller keeps for one candidate,
+    /// so its waits grow across its checks), cut at `deadline` and ended
+    /// by a signal within [`PAUSE_SLICE`] ([`ScanError::DeadlinePassed`],
+    /// [`ScanError::Interrupted`]), then scans again. `Ok(false)` when the
+    /// kept scan was not busy: nothing waited. A caller must hold no lock
+    /// of a candidate (its `flock`, a Cargo target's locks), or it would
+    /// hold it through the pause: the reclaim walk waits after the
+    /// candidate's protocol has returned, a plan between judgements.
+    pub fn back_off_once<H: Host>(
+        &mut self,
+        host: &H,
+        deadline: Option<MonoTime>,
+        back_off: &mut BusyBackOff,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<bool, ScanError> {
+        let Some((UnknownCause::Busy, why)) = self.latest.as_ref().and_then(Scan::blocked_by)
+        else {
+            return Ok(false);
+        };
+        let wanted = busy_pause(back_off.waited);
+        back_off.waited += 1;
+        let started = host.now();
+        let pause = deadline.map_or(wanted, |deadline| {
+            wanted.min(deadline.saturating_since(started))
+        });
+        log(&format!(
+            "the host is too busy to judge candidates ({why}); back-off {}: waiting {} ms, then \
+             scanning again",
+            back_off.waited,
+            pause.as_millis()
+        ));
+        let until = started.checked_add(pause).unwrap_or(started);
+        sleep_until_unless_interrupted(host, until).map_err(|()| ScanError::Interrupted)?;
+        ScanError::stop_if_due(host, deadline)?;
+        self.rescan(host, deadline)?;
+        Ok(true)
+    }
+
+    /// For a plan, after a judgement refused with `skip`: when a scan that
+    /// judged nothing on a busy host made it ([`Skip::busy_scan`]), waits
+    /// the host out ([`Checker::wait_out_busy`]) and says to judge the
+    /// candidate again (`Ok(true)`), as the reclaim walk checks it again;
+    /// `Ok(false)`: the verdict stands. A plan holds no lock between its
+    /// judgements. `Err`: the deadline or a signal ended the waits, and the
+    /// verdict stands for what was judged.
+    pub fn wait_to_judge_again<H: Host>(
+        &mut self,
+        host: &H,
+        deadline: Option<MonoTime>,
+        skip: &Skip,
+        back_off: &mut BusyBackOff,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<bool, ScanError> {
+        if !skip.busy_scan || !self.busy() {
+            return Ok(false);
+        }
+        self.wait_out_busy(host, deadline, back_off, log)?;
+        Ok(true)
+    }
+
+    /// [`Checker::back_off_once`] until the kept scan is not busy: it may
+    /// still block for a cause that stays (a process that cannot be
+    /// inspected, one that has not held still for [`STUCK_AFTER`]), which
+    /// no wait ends. For a plan, which has no goal to watch meanwhile (the
+    /// reclaim walk samples the space between the waits). Without a
+    /// deadline, a storm that never settles keeps it waiting until a
+    /// signal (docs/reference.md, Limits); a process that does not hold
+    /// still ends it after [`STUCK_AFTER`].
+    pub fn wait_out_busy<H: Host>(
+        &mut self,
+        host: &H,
+        deadline: Option<MonoTime>,
+        back_off: &mut BusyBackOff,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<(), ScanError> {
+        // Bounded: each pass pauses at least the first back-off, or ends
+        // at the deadline or a signal; without a deadline see above.
+        while self.back_off_once(host, deadline, back_off, log)? {}
+        Ok(())
+    }
+
     fn rescan<H: Host>(&mut self, host: &H, deadline: Option<MonoTime>) -> Result<(), ScanError> {
         // Every scan starts here: a checker that does not check (a
         // default survey's) reaching it is a bug, never a silent scan.
@@ -1345,21 +1547,47 @@ impl<'a> Checker<'a> {
             "a checker made with PlanScan::NotChecked was asked for a process scan"
         );
         self.latest = None;
-        let mut latest = scan(host, &self.options, deadline)?;
-        if let Some(why) = latest.unsettled.take() {
+        let mut latest = self.scan_following(host, deadline)?;
+        if let Some((UnknownCause::Busy, why)) = latest.blocked_by() {
             host.sleep(UNSETTLED_RETRY_PAUSE);
-            latest = scan(host, &self.options, deadline)?;
-            latest.retried_unsettled = Some(why);
+            latest = self.scan_following(host, deadline)?;
+            latest.retried_busy = Some(why);
         }
         self.latest = Some(latest);
         Ok(())
     }
 
+    /// A new scan, its processes that did not hold still followed from the
+    /// scans before ([`Self::unsettled_since`]): one that has not held
+    /// still in every scan for [`STUCK_AFTER`] is marked stuck on it
+    /// ([`Scan::stuck`]). A scan in which a process held still (read, or
+    /// found gone) ends its run.
+    fn scan_following<H: Host>(
+        &mut self,
+        host: &H,
+        deadline: Option<MonoTime>,
+    ) -> Result<Scan, ScanError> {
+        let mut scan = scan(host, &self.options, deadline)?;
+        let unsettled = scan.unsettled_pids();
+        self.unsettled_since
+            .retain(|pid, _| unsettled.contains(pid));
+        for pid in unsettled {
+            let since = *self.unsettled_since.entry(pid).or_insert(scan.started);
+            let lasted = scan.started.saturating_since(since);
+            if lasted >= STUCK_AFTER {
+                scan.stuck.insert(pid, lasted);
+            }
+        }
+        Ok(scan)
+    }
+
     fn reusable_at(&self, now: MonoTime) -> bool {
         self.latest.as_ref().is_some_and(|scan| {
-            // An unsettled listing did not inspect every process. Retry for
-            // each candidate, including read-only plans with a long limit.
-            if scan.unsettled.is_some() {
+            // A scan that could judge nothing on a busy host (a listing that
+            // kept growing, a process that did not hold still) is never
+            // reused: every candidate, a read-only plan's with its long
+            // limit too, gets a scan of its own (TASK-348's follow-up).
+            if scan.busy() {
                 return false;
             }
             let blocked = scan.blocks_all();
@@ -1483,9 +1711,11 @@ impl Checker<'_> {
 /// The last step of every deletion of a checked candidate (docs/safety.md,
 /// Deletion; the Cargo protocol's parts): the in-use check of exactly
 /// `record` against a scan within the freshness rules
-/// ([`Checker::with_fresh_clear`]; an unsettled scan is retried once, and a
-/// persistently blocking scan is kept for at most the checker's short reuse
-/// window), the caller's own check on the same scan (`also`: the Cargo
+/// ([`Checker::with_fresh_clear`]; a scan that judges nothing on a busy
+/// host is retried once and never reused, its skip marked
+/// [`Skip::busy_scan`] for the caller to wait out after it has released its
+/// locks, and any other persistently blocking scan is kept for at most the
+/// checker's short reuse window), the caller's own check on the same scan (`also`: the Cargo
 /// process heuristics, the `fs` kind's final path and policy checks), then
 /// [`delete_cleared`] right away. A stale scan or a clear that expired
 /// before the delete could start spends one of the candidate's `attempts`;

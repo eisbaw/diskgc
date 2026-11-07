@@ -613,9 +613,39 @@ Model scenarios required by [safety.md](safety.md) and
   `newgrp`-like refused shell in `busy_host.rs`), also when a process
   whose reads do not settle is in the same scan. A process whose reads do
   not settle (TASK-348, the model's `proc: unsettled`: a linker exiting
-  during a busy build) is a busy host's: three in a row make the tier back
-  off, and once it has exited the rest is reclaimed; one that never
-  settles holds the tier to its deadline (`busy_host.rs`). A refusal seen
+  during a busy build) is a busy host's: the candidate is waited out and
+  checked again, and once it has exited every candidate is reclaimed; one
+  that never settles is taken to be stuck after four back-offs (30 s) and
+  skips the rest naming it, also when its status would excuse a refusal
+  (`busy_host.rs`). A scan that does not settle is waited out for the
+  candidate it was made for whatever the size of the tier (TASK-364,
+  `busy_host.rs`, a storm modelled as a fork after each listing): a tier
+  of one candidate and one of two reclaim after one 2 s back-off; a dry
+  run waits the same way and plans the candidate eligible; a storm until
+  the deadline ends a one-candidate run and its dry run `deadline` (124)
+  with the deadline used and no more, the candidate kept `busy` (a row in
+  the plan too); a signal during the waits stops the reclaim and the dry
+  run within a slice; space someone else frees during them ends the tier
+  at the next back-off, also in a storm that outlasts the deadline; an
+  oversleep in them is one `busy back-off` overrun; a tier's own
+  `timeout` during them excludes it naming the busy host; no back-off is
+  taken holding a candidate's `flock` or a Cargo target's locks (a host
+  that checks at every sleep, `busy_host_locks.rs`; the protocol's own
+  short pauses, at most 1 s, stay under them); a lasting
+  cause (a `newgrp` shell) keeps a one-candidate tier and its plan at once
+  without a back-off; a Cargo target the host turns busy on after its
+  first part was deleted is recorded part-way, not run again (a run again
+  lost the first part's action from the report). Those of the waits failed on the stack's base (TASK-317 + TASK-348), and each
+  mechanism has a mutation that fails one (a wait for any cause, no stuck bound, no retry in the reclaim
+  walk, no wait in a plan, the goal not sampled between waits, the busy
+  flag at a tier timeout, the waits' overrun). Not pinned: that a scan in
+  which a process held still restarts its 30 s (never restarting only
+  takes it to be stuck sooner, which keeps candidates). TASK-337's union
+  tests (`fs_union_in_use.rs`) forced the first term's `in_use_unknown`
+  with a storm; since a storm is waited out they force it with a refused
+  shell, one that exits between the two terms' checks for the bite, and a
+  storm variant pins that plan and reclaim both wait under the first
+  term. A refusal seen
   earlier in the scan still decides when its later rereads only do not
   settle, and no status (another user's, setuid, more capable,
   non-dumpable) ever excuses a read that did not settle (`busy_host.rs`;
@@ -625,8 +655,11 @@ Model scenarios required by [safety.md](safety.md) and
   `a_live_task_that_showed_nothing_once_is_failed_not_unsettled` and the
   churn cases). Not in a container: a fork storm cannot be timed to
   diskgc's listings there (the kernel cases pin only that no unsettled
-  scan clears), nor can a process held mid-exit, and a process diskgc
-  cannot inspect, which a container can make, does not back off;
+  scan clears), nor can a process held mid-exit, and a process diskgc cannot inspect, which a
+  container can make, does not back off. On a real kernel the waits run
+  only when a run meets real churn (TASK-317's gate met it in the serial
+  host-PID tail of `release_candidate_pip_cache_*`); no container test
+  stages it on purpose;
 - a bind mount of a subdirectory of a protected tree (TASK-260;
   `/mnt/x` binds `/gen/x` of `/tmp`'s filesystem): a candidate under the
   bind is `protected` while the match is the bind source's ancestor
@@ -2099,8 +2132,9 @@ registered container case that pins the kernel-side invariant
 (`python-pycache-fork-*.yaml`: the fork-churn host tests, that the
 candidate clears once the churn ends; that no unsettled scan clears a
 candidate, which the sustained-churn case requires to occur and the burst
-case checks only if one occurs). The checker's retry and its refusal to reuse an unsettled scan
-for the next candidate are model-only: they rest on the vectors alone. Here “direct” means no
+case checks only if one occurs). The checker's retry, its refusal to reuse a scan that did not
+settle for the next candidate, and the waits for a busy host (TASK-364) are model-only: they
+rest on the vectors and `busy_host.rs` alone. Here “direct” means no
 fixture-specific transformation; every outcome replay still uses the common
 typed projection of nominal clock and mount geometry. The projections keep the
 original expectations and check them before the transformed replay. West and

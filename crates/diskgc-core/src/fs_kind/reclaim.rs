@@ -32,8 +32,11 @@
 //!    locked ([`locked_is_walked`]);
 //! 5. and 6. [`clear_and_delete`]: **in use?** against a process scan
 //!    within the freshness rules (docs/safety.md, In use: Freshness);
-//!    an unsettled scan is retried once, and a persistently blocking one
-//!    only skips candidates briefly. On that scan, the mount table read
+//!    a scan that judges nothing on a busy host is retried once, and if
+//!    it stays so the protocol returns its `in_use_unknown` skip (marked
+//!    [`crate::engine::Skip::busy_scan`]) so that the reclaim walk waits
+//!    the host out with the lock released and runs it again; any other
+//!    persistently blocking scan only skips candidates briefly. On that scan, the mount table read
 //!    again and [`Judge::again`] once more (a directory on the way renamed
 //!    during the walk), then the policy (`protect`) on the path that still
 //!    leads to it. A clear candidate is **deleted**

@@ -415,8 +415,9 @@ stacked on `PATH` does not change what is watched):
 
 A cycle on a busy host backs off between checks as `ensure` does, and
 holds the lock (the background tally paused) until the host settles or
-the cycle's deadline ([safety.md](safety.md#in-use), Freshness); a cycle
-that ends at that deadline is `deadline`, class `retry` below.
+the cycle's deadline ([safety.md](safety.md#in-use), Freshness, Busy
+host); a cycle that ends at that deadline is `deadline`, class `retry`
+below.
 
 The cycle's outcome is the status `ensure` would report for the same run
 (Exit codes (`ensure`), JSON `status`): `met`, `exhausted`, `error`,
@@ -801,7 +802,9 @@ toward a size, except that the in-use check is opt-in (Mark, TASK-116,
   ([safety.md](safety.md#in-use)), and the same refusal where diskgc
   cannot see every process. A candidate that passes is eligible, one
   that does not is kept `in_use`, `in_use_unknown` or `producer_unknown`.
-  It costs `/proc` scans of every visible process (one per reuse window
+  On a busy host it waits as a dry run does ([safety.md](safety.md#in-use),
+  Busy host): a candidate is judged once the host settles, for up to
+  `--timeout` (with `--timeout 0`, until a signal). It costs `/proc` scans of every visible process (one per reuse window
   and profile, and one at the end of each profile's plan for its notes on
   what it could not see). On the development laptop the scans were a
   small part of a survey's time: walking the trees is most of it.
@@ -1236,7 +1239,7 @@ The first matching row wins:
 | 130 / 143 | Interrupted by SIGINT / SIGTERM. |
 | 75 | Deadline reached while waiting for another reclaim, and a fresh sample is still below `--min-free` (EX_TEMPFAIL). Nothing was deleted; retry later. If the other holder freed enough meanwhile, the result is 0. |
 | 0 | Final sample of available space ≥ `--min-free`. |
-| 124 | Deadline reached during reclaim, below `--min-free` (also while a tier waited for a busy host to settle: the candidates it had not reached were not judged, [safety.md](safety.md#in-use), Freshness); or during a dry run (its plan has every candidate judged before it). |
+| 124 | Deadline reached during reclaim, below `--min-free` (also while a tier waited for a busy host to settle: the candidate it waited for is kept `in_use_unknown`, `busy`, and the ones it had not reached were not judged, [safety.md](safety.md#in-use), Freshness, Busy host); or during a dry run (its plan has every candidate judged before it, and the one it waited for a busy host to settle for, `in_use_unknown`). |
 | 3 | A host or planning operation failed (including the first or final space sample), or a tier failed or was excluded as misconfigured below `--min-free`. A dry run may have a partial plan; a reclaim may have deleted something. The report says what. Also returned if writing the result to stdout fails; stderr names the write error, and the report may be absent or partial. |
 | 1 | Every eligible candidate was processed without errors, still below `--min-free`. The report lists what was skipped and why. |
 
@@ -1511,13 +1514,20 @@ is `host`.
   0.1 contract that ignores unknown fields is unaffected) says why an
   `in_use_unknown` could not be judged, and is `null` for every other
   reason and for an aggregated row: `busy` (no in-use scan stayed fresh
-  or settled for this candidate, or a process's own reads did not settle
-  because it was exiting or changing, checked in full: a later run may
-  judge it; since TASK-340 a busy host makes a tier back off, never skip
-  candidates unchecked; since TASK-348 a process whose reads did not
-  settle is `busy`, its detail naming it), `unreadable_process` (a
-  process of the user could not be inspected and can stay so while it
-  runs, such as a `newgrp` shell; `process_blockers` names it),
+  for this candidate in its attempts, checked in full; or a scan that
+  did not settle, because the process list kept growing, a process's own
+  reads did not hold still while it was exiting or changing, was waited
+  out for this
+  candidate until the deadline, a signal, or the goal reached by someone
+  else ended the waits, or it stopped a Cargo target part-way: a later
+  run may judge it; since TASK-340 a busy host makes a tier back off,
+  never skip candidates unchecked; since TASK-348 a process whose reads
+  did not settle is `busy`, its detail naming it; since TASK-364 a scan
+  that did not settle is waited out for each candidate before it is
+  kept), `unreadable_process` (a process of the user could not be
+  inspected and can stay so while it runs, such as a `newgrp` shell, or
+  one has not held still in any scan for 30 s and is taken to be stuck,
+  TASK-364; `process_blockers` names it),
   `incomplete_process_list` (`hidepid`, a PID namespace other than the
   initial one, or its facts unread or changed during the run) and
   `loop_device` (a loop device's backing file cannot be told apart from
@@ -1528,8 +1538,9 @@ is `host`.
 - `skipped[].process_blockers` is `null` when the refusal cannot be
   attributed to an observed process, including flock contention, an
   unsettled process scan, a process whose reads did not settle
-  (`unknown_cause: busy`, a busy host's; its detail names it, TASK-348)
-  and grouped rows. Otherwise it is a nonempty array
+  (`unknown_cause: busy`, a busy host's; its detail names it, TASK-348;
+  once taken to be stuck it is `unreadable_process`
+  and named here) and grouped rows. Otherwise it is a nonempty array
   of `{pid: u32, command: string|null, evidence: string}`. `pid` and
   `command` are scan-time observations; an unreadable process can have a
   known PID but no command. Evidence is one of `fd`, `cwd`, `root`, `exe`,
@@ -1939,10 +1950,11 @@ term-local evidence and admitted-term checkout policy still decide which source
 supplies the action and report identity. It rechecks each term under one
 candidate lock. The in-use check is not term-local evidence: it judges the
 candidate for the first term whose own evidence admits it. A refusal
-there (`in_use`; `in_use_unknown`, including a process scan that never
-settled; a live socket's `contains_ipc`) is never handed to a later term to
-admit, in the plan as in the reclaim, so a busy host cannot move a
-candidate to another profile (TASK-337). A term that may still supply the
+there (`in_use`; `in_use_unknown`; a live socket's `contains_ipc`) is
+never handed to a later term to admit, in the plan as in the reclaim, so a
+cause that ends between two terms' checks cannot move a candidate to
+another profile (TASK-337); a process scan that does not settle is waited
+out under the term that asked for it (TASK-364). A term that may still supply the
 action is checked on its own walk against the scan current then, never on
 an earlier term's clearance. The live half of a `protect_toolchains` guard
 (a running manager, a pin in a process's environment or above its working
@@ -3144,6 +3156,21 @@ line says it was reproduced.
   unchecked; [safety.md](safety.md#in-use), Freshness). 0.1.0: yes; it
   classes such a process as one that cannot be inspected (static
   reading; reproduced on master before this change in the model).
+- TASK-364: a scan that judges nothing on a busy host (its process list
+  kept growing, a process's reads did not hold still) no longer costs the
+  candidate it was made for after one 20 ms retry: the reclaim walk waits
+  it out (TASK-340's pauses, cut at the deadline, after the candidate's
+  locks are released) and checks the candidate again, whatever the size
+  of the tier, and a dry run's plan waits before judging. A storm until
+  the deadline ends `deadline` (124), the candidate waited for kept
+  `busy`; before, a tier of one or two candidates, and every dry run,
+  ended `exhausted` (1) or planned `in_use_unknown` with the deadline
+  unused (TASK-317's gate: `release_candidate_pip_cache_*`, ~119 s of
+  120 s left). A process that has not held still for 30 s is taken to be
+  stuck: `unreadable_process`, naming it, instead of holding the tier to
+  its deadline. Stale scans keep TASK-340's three in a row. 0.1.0: yes;
+  it has the one retry (static reading; reproduced on this change's base
+  in the model).
 
 **What it does.** One command frees space, a service keeps its index
 warm, two read-only ones explain it:
@@ -3461,20 +3488,24 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   a process scan less than a second old. On a host where one scan takes
   longer (hundreds of processes holding thousands of descriptors; the
   static musl binary scans slower than a glibc build), a candidate whose
-  three attempts all see a stale scan is kept `in_use_unknown`, as is one
-  whose scan's process list keeps growing (a fork storm), one a process
-  whose reads do not settle (exiting or changing, such as a concurrent
-  build's linker) could be using, or one that a process of the user
-  diskgc cannot inspect could be using. After three stale or unsettled
-  ones in a row the tier backs off before each further check until the
-  host settles ([safety.md](safety.md#in-use), Freshness), and a storm
-  that lasts until the deadline ends the run `deadline` (124) with the
-  rest of the tier not judged; three kept by a process diskgc cannot
-  inspect skip the rest of the tier, naming it. Nothing is deleted on a
-  stale scan, and the summary says to run again when the host is less
-  busy, or once the process that cannot be inspected has exited. With
-  `--timeout 0` (no deadline) a host that never settles keeps
-  the run waiting, holding the lock, until a signal stops it.
+  three attempts all see a stale scan is kept `in_use_unknown`, and after
+  three in a row the tier backs off before each further check. A scan
+  whose process list keeps growing (a fork storm), or that meets a
+  process whose reads
+  do not hold still (exiting or changing, such as a concurrent build's
+  linker), is waited out for the candidate it was made for, which is then
+  checked again ([safety.md](safety.md#in-use), Freshness, Busy host); a
+  dry run waits the same way. A storm that lasts until the deadline ends
+  the run `deadline` (124), the candidate waited for kept `busy` and the
+  rest of the tier not judged. A candidate a process of the user diskgc
+  cannot inspect could be using is kept at once, as is one a process
+  that has not held still for 30 s could be using (taken to be stuck);
+  three of them in a row skip the rest of the tier, naming it. Nothing is
+  deleted on a stale or unsettled scan, and the summary says to run again
+  when the host is less busy, or once the process that cannot be
+  inspected has exited. With `--timeout 0` (no deadline) a host that
+  never settles keeps the run waiting, holding the lock, until a signal
+  stops it.
 - A program running from a Cargo target is protected by process
   heuristics only (Cargo holds no lock while it runs), and Linux has no
   unlink-by-inode: diskgc is not a defence against a hostile local user

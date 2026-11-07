@@ -24,7 +24,7 @@ use super::source_anchor::SourceEvidence;
 use super::{Find, Found};
 use crate::engine::{Reason, Rules, Skip, WalkRecord};
 use crate::host::{Host, MonoTime};
-use crate::inuse::{Checker, PlanScan};
+use crate::inuse::{BusyBackOff, Checker, PlanScan};
 use crate::outcome::{Judged, Stop};
 use crate::profile::IdleWindow;
 use crate::resolve::{Want, resolve_in};
@@ -165,13 +165,37 @@ pub fn plan<H: Host>(
             .and_then(|found| found.source_evidence.clone());
         let verdict = match candidate {
             Err(skip) => Err(skip.clone()),
-            Ok(found) => match judge_one(host, &judge, found, &mut checker, deadline) {
-                Ok(verdict) => verdict,
-                Err(stop) => {
-                    out.unjudged = total - out.judged.len();
-                    return (out, Some(stop));
+            Ok(found) => {
+                // A busy host is waited out and the candidate judged again
+                // (TASK-364). Bounded: each pass waits at least one
+                // back-off, or ends at the deadline or a signal.
+                let mut back_off = BusyBackOff::default();
+                let mut wait_log = |line: &str| log(&format!("{}: {line}", found.path.display()));
+                loop {
+                    match judge_one(host, &judge, found, &mut checker, deadline) {
+                        Ok(Err(skip)) => match checker.wait_to_judge_again(
+                            host,
+                            deadline,
+                            &skip,
+                            &mut back_off,
+                            &mut wait_log,
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => break Err(skip),
+                            Err(error) => {
+                                out.judged.push((path.clone(), source_evidence, Err(skip)));
+                                out.unjudged = total - out.judged.len();
+                                return (out, Some(error.at(&found.path)));
+                            }
+                        },
+                        Ok(verdict) => break verdict,
+                        Err(stop) => {
+                            out.unjudged = total - out.judged.len();
+                            return (out, Some(stop));
+                        }
+                    }
                 }
-            },
+            }
         };
         out.judged.push((path.clone(), source_evidence, verdict));
         if out.judged.len().is_multiple_of(10_000) {

@@ -695,6 +695,7 @@ impl<H: Delete> Tallied<'_, H> {
                 run_stopped: false,
                 in_use_unknown_in_a_row: 0,
                 in_use_unknown_last: None,
+                busy_until_deadline: false,
                 index: index.as_deref_mut(),
                 tallied: &mut *tallied,
                 run_started: self.run_started,

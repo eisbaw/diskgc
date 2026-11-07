@@ -95,7 +95,7 @@ use crate::host::{
     SecondSignal, Space, Timestamp,
 };
 use crate::hostlock::{self, HeldLock, LockError, ReclaimLock};
-use crate::inuse::{Checker, REUSE_LIMIT};
+use crate::inuse::{BusyBackOff, Checker, REUSE_LIMIT, ScanError};
 use crate::profile::{Action, IdleWindow};
 use crate::report::{
     ActionEntry, ErrorCause, ErrorEntry, HeldEntry, OverrunEntry, Report, SkipEntry, Status,
@@ -903,9 +903,14 @@ struct Reclaim<'a, 'l, H: Delete> {
     /// process list keep every candidate while they last, and waiting does
     /// not end them): the tier's rest is skipped unchecked with its cause,
     /// detail and process. `None` with a count of three or more: a busy
-    /// host (stale or unsettled scans, a process whose reads did not
-    /// settle), and the tier backs off instead ([`Reclaim::before_check`]).
+    /// host (stale scans; a scan that did not settle is waited out for its
+    /// candidate, [`Reclaim::wait_if_busy`], and is recorded only when the
+    /// deadline, a signal or the goal ended the waits), and the tier backs
+    /// off instead ([`Reclaim::before_check`]).
     in_use_unknown_last: Option<Skip>,
+    /// The deadline came while the tier waited for a busy host to settle
+    /// before checking a candidate again ([`Reclaim::wait_if_busy`]).
+    busy_until_deadline: bool,
     /// The run's index, which the reclaim walk takes its queue from
     /// ([`indexed`]); `None` for a tier that discovers only.
     index: Option<&'a mut TallyState>,
@@ -924,45 +929,42 @@ struct Reclaim<'a, 'l, H: Delete> {
 }
 
 /// After this many candidates in a row of one tier end `in_use_unknown`
-/// (each spent its [`crate::inuse::FRESH_ATTEMPTS`], or its scan did not
-/// settle, or a process's own reads did not), the host is taken to be too
-/// busy for now: before each further candidate the tier backs off
-/// ([`busy_back_off`]) instead of spending one candidate's scans and pauses
-/// after another (docs/safety.md, In use: Freshness). Three: one unlucky
-/// candidate, or two, is a spike; three in a row (at least nine stale
-/// scans, or six unsettled ones; a process whose reads did not settle can
-/// keep three on one blocking scan, reused for half a second) is the load
-/// the run is in. For a cause that stays ([`UnknownCause::stays`]: a
+/// (each spent its [`crate::inuse::FRESH_ATTEMPTS`] on stale scans), the
+/// host is taken to be too busy for now: before each further candidate the
+/// tier backs off ([`busy_back_off`]) instead of spending one candidate's
+/// scans and pauses after another (docs/safety.md, In use: Freshness).
+/// Three: one unlucky candidate, or two, is a spike, or a check slower than
+/// the bound that is the candidate's own; three in a row (at least nine
+/// stale scans) is the load the run is in. A scan that did not settle is
+/// waited out for its own candidate first ([`Reclaim::wait_if_busy`],
+/// TASK-364); its skip counts here only when it is recorded anyway (the
+/// goal came during the waits, a Cargo target stopped part-way). For a
+/// cause that stays ([`UnknownCause::stays`]: a
 /// process that cannot be inspected, a loop device, an incomplete process
 /// list) waiting does not help: it keeps every candidate while it lasts,
 /// so the tier's rest is skipped unchecked, naming it.
 const IN_USE_UNKNOWN_IN_A_ROW_MAX: usize = 3;
 
-/// The tier's first back-off on a busy host ([`IN_USE_UNKNOWN_IN_A_ROW_MAX`]):
-/// longer than a candidate's own retry pauses
-/// ([`crate::inuse::FRESH_RETRY_PAUSES`]), which the load outlasted.
-const BUSY_BACK_OFF_FIRST: Duration = Duration::from_secs(2);
-
-/// The longest back-off: in a storm that does not end, the tier checks one
-/// candidate (at most [`crate::inuse::FRESH_ATTEMPTS`] scans) per minute
-/// until the deadline, so it neither spins nor gives up its rest while the
-/// deadline leaves time for the host to settle (TASK-340). Tentative, like
-/// every back-off constant (PRD, Irreversibility map).
-const BUSY_BACK_OFF_MAX: Duration = Duration::from_secs(60);
-
 /// The pause before the next check after `in_a_row` candidates in a row
-/// ended `in_use_unknown` (at least [`IN_USE_UNKNOWN_IN_A_ROW_MAX`]):
-/// [`BUSY_BACK_OFF_FIRST`], doubling with each further one, capped at
-/// [`BUSY_BACK_OFF_MAX`].
+/// ended `in_use_unknown` (at least [`IN_USE_UNKNOWN_IN_A_ROW_MAX`]): the
+/// busy host's schedule ([`crate::inuse::busy_pause`]: 2 s, doubling,
+/// at most a minute), from its first pause on.
 fn busy_back_off(in_a_row: usize) -> Duration {
-    let doublings = in_a_row.saturating_sub(IN_USE_UNKNOWN_IN_A_ROW_MAX);
-    let factor = u32::try_from(doublings)
-        .ok()
-        .and_then(|d| 1u32.checked_shl(d))
-        .unwrap_or(u32::MAX);
-    BUSY_BACK_OFF_FIRST
-        .saturating_mul(factor)
-        .min(BUSY_BACK_OFF_MAX)
+    crate::inuse::busy_pause(in_a_row.saturating_sub(IN_USE_UNKNOWN_IN_A_ROW_MAX))
+}
+
+/// What the reclaim walk does after a candidate's reclaim ended
+/// ([`Reclaim::wait_if_busy`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterReclaim {
+    /// Record how it ended, and go on.
+    Record,
+    /// The host was too busy to check it, and has settled since: check it
+    /// again with the space available now (sampled after the waits).
+    Again(u64),
+    /// Record how it ended, then the tier stops (reported): the deadline
+    /// came during the waits, a signal ended them, or a scan failed.
+    Stop,
 }
 
 /// What a tier does before checking its next candidate after candidates
@@ -1222,8 +1224,128 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     /// Whether the tier ended backing off for a busy host (its deadline
     /// came first): a tier timeout then says so.
     pub(super) fn ended_busy(&self) -> bool {
-        self.in_use_unknown_in_a_row >= IN_USE_UNKNOWN_IN_A_ROW_MAX
-            && self.in_use_unknown_last.is_none()
+        self.busy_until_deadline
+            || (self.in_use_unknown_in_a_row >= IN_USE_UNKNOWN_IN_A_ROW_MAX
+                && self.in_use_unknown_last.is_none())
+    }
+
+    /// After a candidate's reclaim ended (`outcome`): when a scan could
+    /// judge nothing because the host was busy ([`Skip::busy_scan`]: its
+    /// process list kept growing, a process did not
+    /// hold still), waits it out one back-off at a time
+    /// ([`Checker::back_off_once`], growing with `back_off`, which stays
+    /// with the candidate), sampling the space after each, and has it
+    /// checked again from the start once a scan judges again, whatever the
+    /// size of the tier and its place in it (TASK-364). No candidate lock
+    /// is held meanwhile: the candidate's protocol has returned and
+    /// released its `flock` or Cargo locks. Nothing is deleted on a scan
+    /// older than the freshness bound: the check again judges against a
+    /// scan within it as always. Only an attempt that changed nothing runs
+    /// again: a Cargo target stopped part-way (a later part's scan was
+    /// busy) is recorded as it is, its deletion an action, as for `in_use`.
+    /// Any other end is recorded as it is: stale scans keep TASK-340's
+    /// back-off before the next candidate ([`Self::before_check`]), a cause
+    /// that stays skips without waiting. When it waited, the time until the
+    /// waits began is the reclaim's (its overrun recorded here) and the
+    /// waits are the `busy back-off`'s, so `outcome` restarts now.
+    fn wait_if_busy(
+        &mut self,
+        candidate: &Path,
+        outcome: &mut Outcome,
+        checker: &mut Checker<'_>,
+        back_off: &mut BusyBackOff,
+    ) -> AfterReclaim {
+        let ReclaimEnd::Skipped(skip) = &outcome.end else {
+            return AfterReclaim::Record;
+        };
+        if !skip.busy_scan
+            || outcome.removed_entries > 0
+            || outcome.attempted_command
+            || !checker.busy()
+        {
+            return AfterReclaim::Record;
+        }
+        let started = self.host.now();
+        self.record_overrun("reclaim", candidate, outcome.started, started);
+        let after = self.wait_steps(candidate, checker, back_off);
+        self.record_overrun("busy back-off", candidate, started, self.host.now());
+        outcome.started = self.host.now();
+        after
+    }
+
+    /// The waits of [`Self::wait_if_busy`]: a back-off, then the space,
+    /// until a scan judges again (`Again` with the space now), the goal is
+    /// observed (`Record`: the candidate stays as judged), or the
+    /// deadline, a signal, a failed scan or a failed sample ends the tier
+    /// (`Stop`, reported).
+    fn wait_steps(
+        &mut self,
+        candidate: &Path,
+        checker: &mut Checker<'_>,
+        back_off: &mut BusyBackOff,
+    ) -> AfterReclaim {
+        let (tier, shown) = (self.tier.name.clone(), candidate.display().to_string());
+        // The space after the latest wait.
+        let mut avail = None;
+        // Bounded: each pass waits one back-off of at least 2 s, or ends;
+        // the deadline ends them (without one, a signal, or STUCK_AFTER for
+        // a process that does not hold still).
+        loop {
+            let waited = checker.back_off_once(self.host, self.deadline, back_off, &mut |line| {
+                (self.log)(&format!("{tier}: {shown}: {line}"));
+            });
+            match waited {
+                // Settled (or a cause that stays now decides): check again.
+                Ok(false) => break,
+                Ok(true) => {}
+                Err(ScanError::Interrupted) => {
+                    self.run_stopped = true;
+                    (self.log)(&format!(
+                        "{tier}: interrupted while waiting for the host to settle"
+                    ));
+                    return AfterReclaim::Stop;
+                }
+                Err(ScanError::DeadlinePassed) => {
+                    self.deadline_hit = true;
+                    self.busy_until_deadline = true;
+                    (self.log)(&format!(
+                        "{tier}: the host stayed too busy to check candidates until the deadline: \
+                         {shown} is kept, and the rest of this tier is not judged"
+                    ));
+                    return AfterReclaim::Stop;
+                }
+                Err(error @ ScanError::Failed(_)) => {
+                    self.stop(&error.at(candidate));
+                    return AfterReclaim::Stop;
+                }
+            }
+            let sampling = self.host.now();
+            let sampled = sample(self.host, self.measured);
+            self.record_overrun("statvfs", &self.measured.path, sampling, self.host.now());
+            match sampled {
+                // The goal came meanwhile (someone else freed space): the
+                // candidate stays as it was judged, and the walk observes
+                // the goal after recording it.
+                Ok(space) if space.avail_bytes >= self.measured.target => {
+                    return AfterReclaim::Record;
+                }
+                Ok(space) => avail = Some(space.avail_bytes),
+                Err(error) => {
+                    self.host_failure(error);
+                    return AfterReclaim::Stop;
+                }
+            }
+        }
+        // None: nothing waited (the caller saw a busy scan, so this does not
+        // happen); a check again would spin.
+        let Some(avail) = avail else {
+            return AfterReclaim::Record;
+        };
+        (self.log)(&format!(
+            "{tier}: checking {shown} again after {} back-off(s) for a busy host",
+            back_off.waited()
+        ));
+        AfterReclaim::Again(avail)
     }
 
     /// The busy host's back-off ([`busy_back_off`]) before checking
@@ -1707,53 +1829,65 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     target.path.display()
                 ),
             });
-            let started = self.host.now();
             let idle_age_seconds = age_seconds(
                 self.host.wall_clock(),
                 tally.as_ref().and_then(|t| t.last_build),
             );
-            // An accepted tally's age is a precheck, not a freshness bound:
-            // the protocol still measures the target under its locks and
-            // applies the idle requirement again before deleting.
-            let done = cargo_target::reclaim_checked(
-                self.host,
-                target,
-                cargo_target::ReclaimPolicy {
-                    judged_last_build: None,
-                    rules,
-                    idle,
-                    deadline: self.deadline,
-                },
-                checker,
-                &mut |path, at| {
-                    DeletePolicy {
-                        protections: &self.tier.protections,
-                        protection: &mut self.protection,
-                        negated: &[&self.tier.negated],
-                        negated_matches: std::slice::from_mut(&mut negated_matches),
-                        term: Some(0),
-                    }
-                    .skip(self.host, self.deadline, path, at)
-                },
-            );
-            let held = format!(
-                ", Cargo locks held {} ms",
-                done.locks_held.map_or(0, |d| d.as_millis())
-            );
-            let outcome = Outcome {
-                started,
-                before: avail,
-                expected_bytes: tally.as_ref().map(|t| t.bytes),
-                tallied_bytes: tally.as_ref().map(|t| t.bytes),
-                idle_age_seconds,
-                removed_entries: done.removed_entries,
-                attempted_command: false,
-                end: done.end,
-                note: held,
+            let mut back_off = BusyBackOff::default();
+            // Bounded: each pass records, or waits out a busy host first
+            // (at least one back-off, cut at the deadline).
+            let (outcome, stop) = loop {
+                let started = self.host.now();
+                // An accepted tally's age is a precheck, not a freshness
+                // bound: the protocol still measures the target under its
+                // locks and applies the idle requirement again before
+                // deleting.
+                let done = cargo_target::reclaim_checked(
+                    self.host,
+                    target,
+                    cargo_target::ReclaimPolicy {
+                        judged_last_build: None,
+                        rules,
+                        idle,
+                        deadline: self.deadline,
+                    },
+                    checker,
+                    &mut |path, at| {
+                        DeletePolicy {
+                            protections: &self.tier.protections,
+                            protection: &mut self.protection,
+                            negated: &[&self.tier.negated],
+                            negated_matches: std::slice::from_mut(&mut negated_matches),
+                            term: Some(0),
+                        }
+                        .skip(self.host, self.deadline, path, at)
+                    },
+                );
+                let held = format!(
+                    ", Cargo locks held {} ms",
+                    done.locks_held.map_or(0, |d| d.as_millis())
+                );
+                let mut outcome = Outcome {
+                    started,
+                    before: avail,
+                    expected_bytes: tally.as_ref().map(|t| t.bytes),
+                    tallied_bytes: tally.as_ref().map(|t| t.bytes),
+                    idle_age_seconds,
+                    removed_entries: done.removed_entries,
+                    attempted_command: false,
+                    end: done.end,
+                    note: held,
+                };
+                // The target's locks are released: waiting holds none.
+                match self.wait_if_busy(&target.path, &mut outcome, checker, &mut back_off) {
+                    AfterReclaim::Record => break (outcome, false),
+                    AfterReclaim::Again(now) => avail = now,
+                    AfterReclaim::Stop => break (outcome, true),
+                }
             };
             match self.record(&target.path, outcome) {
-                Some(after) => avail = after,
-                None => return,
+                Some(after) if !stop => avail = after,
+                _ => return,
             }
         }
     }
@@ -1966,96 +2100,108 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 found.path.display()
             ),
         });
-        let started = self.host.now();
         let idle_age_seconds = age_seconds(
             self.host.wall_clock(),
             tally.as_ref().and_then(|t| t.newest_change),
         );
-        let outcome = match action {
-            Action::Delete { make_writable } => {
-                let done = fs_kind::reclaim_alternatives_checked(
-                    self.host,
-                    &[fs_kind::Alternative {
-                        judge: *judge,
-                        found,
-                        checkouts: judge.rules.checkouts,
-                        admitted: true,
-                    }],
-                    *make_writable,
-                    checker,
-                    self.deadline,
-                    &mut |_, path, at| {
-                        DeletePolicy {
-                            protections: &self.tier.protections,
-                            protection: &mut self.protection,
-                            negated: &[],
-                            negated_matches: &mut [],
-                            term: None,
-                        }
-                        .skip(self.host, self.deadline, path, at)
-                    },
-                );
-                Outcome {
-                    started,
-                    before: avail,
-                    expected_bytes: tally.as_ref().map(|t| t.bytes),
-                    tallied_bytes: tally.as_ref().map(|t| t.bytes),
-                    idle_age_seconds,
-                    removed_entries: done.removed_entries,
-                    attempted_command: false,
-                    end: done.end,
-                    note: String::new(),
-                }
-            }
-            Action::Command { argv, cwd } => {
-                let ready = self.backend.command();
-                let done = fs_kind::run_command_checked(
-                    self.host,
-                    judge,
-                    found,
-                    checker,
-                    fs_kind::CommandSpec {
-                        ready,
-                        argv,
-                        cwd: *cwd,
-                        need_bytes: self.measured.target.saturating_sub(avail),
-                        mount: &self.measured.at.mount.mount_point,
-                        sources: vec![fs_kind::CommandSource {
-                            profile: &self.tier.profile,
-                            output_prefix: format!("{}/{}", self.tier.name, self.tier.profile),
+        let mut avail = avail;
+        let mut back_off = BusyBackOff::default();
+        // Bounded: each pass records, or waits out a busy host first (at
+        // least one back-off, cut at the deadline).
+        let (outcome, stop) = loop {
+            let started = self.host.now();
+            let mut outcome = match action {
+                Action::Delete { make_writable } => {
+                    let done = fs_kind::reclaim_alternatives_checked(
+                        self.host,
+                        &[fs_kind::Alternative {
+                            judge: *judge,
+                            found,
+                            checkouts: judge.rules.checkouts,
+                            admitted: true,
                         }],
-                        deadline: self.deadline,
-                        second_signal: self.second_signal,
-                    },
-                    &mut |path| {
-                        policy_skip(self.host, &self.tier.protections, &[], self.deadline, path)
-                    },
-                );
-                Outcome {
-                    started,
-                    before: avail,
-                    expected_bytes: Some(self.measured.target.saturating_sub(avail)),
-                    tallied_bytes: tally.as_ref().map(|t| t.bytes),
-                    idle_age_seconds,
-                    removed_entries: 0,
-                    attempted_command: done.attempted,
-                    end: done.end,
-                    note: not_forwarded_note(done.lines_not_forwarded),
+                        *make_writable,
+                        checker,
+                        self.deadline,
+                        &mut |_, path, at| {
+                            DeletePolicy {
+                                protections: &self.tier.protections,
+                                protection: &mut self.protection,
+                                negated: &[],
+                                negated_matches: &mut [],
+                                term: None,
+                            }
+                            .skip(self.host, self.deadline, path, at)
+                        },
+                    );
+                    Outcome {
+                        started,
+                        before: avail,
+                        expected_bytes: tally.as_ref().map(|t| t.bytes),
+                        tallied_bytes: tally.as_ref().map(|t| t.bytes),
+                        idle_age_seconds,
+                        removed_entries: done.removed_entries,
+                        attempted_command: false,
+                        end: done.end,
+                        note: String::new(),
+                    }
                 }
+                Action::Command { argv, cwd } => {
+                    let ready = self.backend.command();
+                    let done = fs_kind::run_command_checked(
+                        self.host,
+                        judge,
+                        found,
+                        checker,
+                        fs_kind::CommandSpec {
+                            ready,
+                            argv,
+                            cwd: *cwd,
+                            need_bytes: self.measured.target.saturating_sub(avail),
+                            mount: &self.measured.at.mount.mount_point,
+                            sources: vec![fs_kind::CommandSource {
+                                profile: &self.tier.profile,
+                                output_prefix: format!("{}/{}", self.tier.name, self.tier.profile),
+                            }],
+                            deadline: self.deadline,
+                            second_signal: self.second_signal,
+                        },
+                        &mut |path| {
+                            policy_skip(self.host, &self.tier.protections, &[], self.deadline, path)
+                        },
+                    );
+                    Outcome {
+                        started,
+                        before: avail,
+                        expected_bytes: Some(self.measured.target.saturating_sub(avail)),
+                        tallied_bytes: tally.as_ref().map(|t| t.bytes),
+                        idle_age_seconds,
+                        removed_entries: 0,
+                        attempted_command: done.attempted,
+                        end: done.end,
+                        note: not_forwarded_note(done.lines_not_forwarded),
+                    }
+                }
+                Action::CargoLockProtocol
+                | Action::DockerBuilderPrune
+                | Action::DockerImagePrune { .. }
+                | Action::PodmanImagePrune { .. }
+                | Action::NixStoreGc => unreachable!("fs action admitted by ensure"),
+            };
+            // The candidate's lock is released: waiting holds none.
+            match self.wait_if_busy(&found.path, &mut outcome, checker, &mut back_off) {
+                AfterReclaim::Record => break (outcome, false),
+                AfterReclaim::Again(now) => avail = now,
+                AfterReclaim::Stop => break (outcome, true),
             }
-            Action::CargoLockProtocol
-            | Action::DockerBuilderPrune
-            | Action::DockerImagePrune { .. }
-            | Action::PodmanImagePrune { .. }
-            | Action::NixStoreGc => unreachable!("fs action admitted by ensure"),
         };
         let reclaimed = matches!(outcome.end, ReclaimEnd::Complete) && !outcome.attempted_command;
         match self.record(&found.path, outcome) {
-            Some(after) => Acted::Next {
+            Some(after) if !stop => Acted::Next {
                 avail: after,
                 reclaimed,
             },
-            None => Acted::Stop,
+            _ => Acted::Stop,
         }
     }
 
@@ -2362,111 +2508,127 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     }
                 })
                 .collect();
-            let started = self.host.now();
             let idle_age_seconds = age_seconds(
                 self.host.wall_clock(),
                 tally.as_ref().and_then(|t| t.newest_change),
             );
             let term_negated: Vec<&[NegatedSource]> =
                 sources.iter().map(|source| source.negated).collect();
-            let (selected, removed_entries, attempted_command, end, note) = match &self.tier.action
-            {
-                Action::Delete { make_writable } => {
-                    let done = fs_kind::reclaim_alternatives_checked(
-                        self.host,
-                        &alternatives,
-                        *make_writable,
-                        checker,
-                        self.deadline,
-                        &mut |selected, path, at| {
-                            DeletePolicy {
-                                protections: &self.tier.protections,
-                                protection: &mut self.protection,
-                                negated: &term_negated,
-                                negated_matches: &mut negated_matches,
-                                term: Some(contributors[selected].0),
-                            }
-                            .skip(self.host, self.deadline, path, at)
-                        },
-                    );
-                    (
-                        done.selected,
-                        done.removed_entries,
-                        false,
-                        done.end,
-                        String::new(),
-                    )
-                }
-                Action::Command { argv, cwd } => {
-                    let command_sources: Vec<_> = contributors
-                        .iter()
-                        .map(|(index, _, _)| {
-                            let profile = sources[*index].profile;
-                            fs_kind::CommandSource {
-                                profile,
-                                output_prefix: format!("{}/{}", self.tier.name, profile),
-                            }
-                        })
-                        .collect();
-                    let done = fs_kind::run_command_alternatives_checked(
-                        self.host,
-                        &alternatives,
-                        checker,
-                        fs_kind::CommandSpec {
-                            ready: self.backend.command(),
-                            argv,
-                            cwd: *cwd,
-                            need_bytes: self.measured.target.saturating_sub(avail),
-                            mount: &self.measured.at.mount.mount_point,
-                            sources: command_sources,
-                            deadline: self.deadline,
-                            second_signal: self.second_signal,
-                        },
-                        &mut |selected, path| {
-                            let source = &sources[contributors[selected].0];
-                            policy_skip(
+            let mut back_off = BusyBackOff::default();
+            // Bounded: each pass records, or waits out a busy host first
+            // (at least one back-off, cut at the deadline).
+            let (reported_path, profile, outcome, stop) = loop {
+                let started = self.host.now();
+                let (selected, removed_entries, attempted_command, end, note) =
+                    match &self.tier.action {
+                        Action::Delete { make_writable } => {
+                            let done = fs_kind::reclaim_alternatives_checked(
                                 self.host,
-                                &self.tier.protections,
-                                source.negated,
+                                &alternatives,
+                                *make_writable,
+                                checker,
                                 self.deadline,
-                                path,
+                                &mut |selected, path, at| {
+                                    DeletePolicy {
+                                        protections: &self.tier.protections,
+                                        protection: &mut self.protection,
+                                        negated: &term_negated,
+                                        negated_matches: &mut negated_matches,
+                                        term: Some(contributors[selected].0),
+                                    }
+                                    .skip(
+                                        self.host,
+                                        self.deadline,
+                                        path,
+                                        at,
+                                    )
+                                },
+                            );
+                            (
+                                done.selected,
+                                done.removed_entries,
+                                false,
+                                done.end,
+                                String::new(),
                             )
-                        },
-                    );
-                    (
-                        done.selected,
-                        0,
-                        done.attempted,
-                        done.end,
-                        not_forwarded_note(done.lines_not_forwarded),
-                    )
+                        }
+                        Action::Command { argv, cwd } => {
+                            let command_sources: Vec<_> = contributors
+                                .iter()
+                                .map(|(index, _, _)| {
+                                    let profile = sources[*index].profile;
+                                    fs_kind::CommandSource {
+                                        profile,
+                                        output_prefix: format!("{}/{}", self.tier.name, profile),
+                                    }
+                                })
+                                .collect();
+                            let done = fs_kind::run_command_alternatives_checked(
+                                self.host,
+                                &alternatives,
+                                checker,
+                                fs_kind::CommandSpec {
+                                    ready: self.backend.command(),
+                                    argv,
+                                    cwd: *cwd,
+                                    need_bytes: self.measured.target.saturating_sub(avail),
+                                    mount: &self.measured.at.mount.mount_point,
+                                    sources: command_sources,
+                                    deadline: self.deadline,
+                                    second_signal: self.second_signal,
+                                },
+                                &mut |selected, path| {
+                                    let source = &sources[contributors[selected].0];
+                                    policy_skip(
+                                        self.host,
+                                        &self.tier.protections,
+                                        source.negated,
+                                        self.deadline,
+                                        path,
+                                    )
+                                },
+                            );
+                            (
+                                done.selected,
+                                0,
+                                done.attempted,
+                                done.end,
+                                not_forwarded_note(done.lines_not_forwarded),
+                            )
+                        }
+                        _ => unreachable!("filesystem unions admit delete or command"),
+                    };
+                let profile = selected
+                    .map(|selected| sources[contributors[selected].0].profile.to_owned())
+                    .unwrap_or_else(|| sources[candidate.found_by[0].0].profile.to_owned());
+                let reported_path = selected
+                    .map(|selected| &contributors[selected].1.path)
+                    .unwrap_or(path);
+                let mut outcome = Outcome {
+                    started,
+                    before: avail,
+                    expected_bytes: if attempted_command {
+                        Some(self.measured.target.saturating_sub(avail))
+                    } else {
+                        tally.as_ref().map(|t| t.bytes)
+                    },
+                    tallied_bytes: tally.as_ref().map(|t| t.bytes),
+                    idle_age_seconds,
+                    removed_entries,
+                    attempted_command,
+                    end,
+                    note,
+                };
+                // The candidate's lock is released: waiting holds none.
+                match self.wait_if_busy(reported_path, &mut outcome, checker, &mut back_off) {
+                    AfterReclaim::Record => break (reported_path, profile, outcome, false),
+                    AfterReclaim::Again(now) => avail = now,
+                    AfterReclaim::Stop => break (reported_path, profile, outcome, true),
                 }
-                _ => unreachable!("filesystem unions admit delete or command"),
-            };
-            let profile = selected
-                .map(|selected| sources[contributors[selected].0].profile.to_owned())
-                .unwrap_or_else(|| sources[candidate.found_by[0].0].profile.to_owned());
-            let reported_path = selected
-                .map(|selected| &contributors[selected].1.path)
-                .unwrap_or(path);
-            let outcome = Outcome {
-                started,
-                before: avail,
-                expected_bytes: if attempted_command {
-                    Some(self.measured.target.saturating_sub(avail))
-                } else {
-                    tally.as_ref().map(|t| t.bytes)
-                },
-                tallied_bytes: tally.as_ref().map(|t| t.bytes),
-                idle_age_seconds,
-                removed_entries,
-                attempted_command,
-                end,
-                note,
             };
             match self.record_as(reported_path, &profile, outcome) {
-                Some(after) => avail = after,
-                None => return,
+                Some(after) if !stop => avail = after,
+                _ => return,
             }
         }
     }

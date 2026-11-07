@@ -858,24 +858,24 @@ listings that each brought new pids the scan is **unsettled** (a process
 it did not read could have inherited anything); listings made only for
 re-reads do not count (they are bounded by the re-reads each process
 gets). The checker waits 20 ms and makes one complete new scan before
-judging a candidate. If that scan is unsettled too, whether the candidate
-is in use cannot be told: it is skipped `in_use_unknown`, not `in_use`
-(TASK-190, decided 2026-10-25 on Mark's delegation: `in_use` would give a
-harness evidence of a use that was never seen), and it counts toward the
-tier's three in a row (Freshness, below): after three, the tier backs
-off before each further candidate, so a sustained fork storm costs, once
-the pause has grown to its cap, one candidate's two scans a minute
-instead of two per candidate back to back, and ends at the deadline.
-The next candidate starts a new scan immediately. Other blocking scans can
-be reused for less than half a second from completion. A machine that
-keeps starting processes faster than the scan reads them costs reclaim
-that way. diskgc's own process is never counted: it holds the candidate
-open and locked while it checks it.
+judging a candidate. If that scan is unsettled too, it judges nothing:
+the host is busy, and the candidate is waited for (Busy host, below:
+backed off, scanned again, checked again, never past the deadline). Only
+a candidate the deadline cuts off that way is skipped `in_use_unknown`
+(`busy`), not `in_use` (TASK-190, decided 2026-10-25 on Mark's
+delegation: `in_use` would give a harness evidence of a use that was
+never seen). A scan that judges nothing on a busy host is never reused;
+other blocking scans can be reused for less than half a second from
+completion. A machine that keeps starting processes faster than the scan
+reads them costs reclaim that way, until its deadline. diskgc's own
+process is never counted: it holds the candidate open and locked while it
+checks it.
 
 **The run's deadline and signals** are checked by the scan before every
 listing and after every pause (the re-reads', the 20 ms before the retry
-of an unsettled scan, Owner PID's re-reads): up to 16 growing listings
-and the reads they call for, twice, can take seconds on a busy host. A
+of an unsettled scan, a busy host's back-offs, Owner PID's re-reads): up
+to 16 growing listings and the reads they call for, twice, can take
+seconds on a busy host. A
 scan that reaches the deadline stops the run (`deadline`); one that sees
 SIGINT or SIGTERM stops it (`interrupted`). Neither judges the candidate
 (TASK-189). What a scan cannot interrupt is one batch of reads (every
@@ -960,20 +960,27 @@ reclaim on any desktop):
   leader's entry vanishing, Threads, below; and no earlier read of it in
   the scan was refused or failed otherwise without a successful read
   since: such a refusal or failure can last, and decides as in the next
-  item, since a read that did not settle cannot show it ended) makes every
-  candidate `in_use_unknown` as a busy host does (`unknown_cause: busy`;
-  the skip's detail names it, `process_blockers` is `null` as for an
-  unsettled scan), counted toward the three in a row like an unsettled
-  scan, after which the tier backs off (Freshness): it ends when the
-  process has exited or holds still (TASK-348; dogfood 2026-11-05, a
-  concurrent build's exiting `rust-lld`);
+  item, since a read that did not settle cannot show it ended) makes the
+  scan judge nothing, as an unsettled scan does: a busy host's
+  (`unknown_cause: busy`), waited out (Busy host, below; a candidate the
+  deadline cuts off is kept `in_use_unknown`, its detail naming the
+  process, `process_blockers` `null` as for an unsettled scan): it ends
+  when the process has exited or holds still (TASK-348; dogfood
+  2026-11-05, a concurrent build's exiting `rust-lld`). One that has not
+  held still in any scan of the run's tier (or plan) for 30 s (four
+  back-offs; a linker's exit takes milliseconds) is taken to be stuck (a
+  task stuck in its exit, threads that never stop changing): from then on
+  it is one that cannot be inspected, the next item, naming it (TASK-364).
+  Limit: the run follows it by pid, so another process given the same pid
+  within those 30 s that does not hold still either counts as the same,
+  which only keeps candidates sooner;
 - any other unreadable process of the user makes every candidate
   `in_use_unknown` (it could be using any of them, and whether it does
   cannot be told; the skip names it, evidence `unreadable`,
   `unknown_cause: unreadable_process`), counted toward the three in a row
-  like an unsettled scan (TASK-190), but three of them skip the tier's
-  rest naming it, without a back-off (Freshness), since it can stay so
-  for as long as it runs: one refused although it is dumpable,
+  (TASK-190), and three of them skip the tier's rest naming it, without a
+  back-off (Freshness), since it can stay so for as long as it runs: one
+  refused although it is dumpable,
   unprivileged and the user's (a shell started with `newgrp` or `sg`: the
   kernel also compares groups), one refused whose status cannot be read,
   one with a live task that showed nothing in some round of a reader that
@@ -1281,15 +1288,19 @@ follows available space like any other skip (decided 2026-10-25 for
 TASK-144 on Mark's delegation: "never delete on a stale scan; retry with
 backoff a few times, then skip that candidate and carry on"). A part-way
 Cargo target stops at the part that hit it, as for `in_use`. A signal
-during a retry pause ends it within 50 ms and stops the run. After three
+during a retry pause ends it within 50 ms and stops the run. A scan that
+judges nothing on a busy host is not a stale one: it is waited out for
+the candidate it was made for (Busy host, below). After three
 candidates in a row of one tier (in the order taken) end `in_use_unknown`
-(a stale scan, an unsettled scan, a process whose reads did not settle,
-or a process that cannot be inspected), the last of them decides. A stale
-or unsettled scan, or a process whose reads did not settle
+(stale scans, or a cause that stays: a process that cannot be inspected,
+one taken to be stuck), the last of them decides. Stale scans
 (`unknown_cause: busy`): the host is taken to be too busy for now, and the
 tier **backs off**
 before each further candidate: 2 s, doubling with each further candidate
-in a row that ends so, at most 60 s (TASK-340). The candidate after a
+in a row that ends so, at most 60 s (TASK-340). Two stale candidates in a
+row cost no back-off: a check slower than the bound can be the
+candidate's own (a huge record), and the next candidate may pass. The
+candidate after a
 pause is checked in full against a new scan under this bound, as any
 other: the pause only spaces the checks out, and nothing is deleted on a
 scan made before it. Any other end of a checked candidate resets the
@@ -1319,16 +1330,57 @@ cannot be inspected too: on the development laptop under concurrent
 builds, a `--timeout 30h` `ensure` of `nix-shell-rc` met an exiting
 `rust-lld` ("no trustworthy read in 16 rounds: no task of a complete
 listing was live") in three candidates in a row and skipped 127,645
-unchecked after reclaiming 19,986 (dogfood 2026-11-05). A process
-misjudged as one whose reads only did not settle (a task stuck in its
-exit) costs what a storm that never settles costs: the tier backs off
-until its deadline, deleting nothing.
+unchecked after reclaiming 19,986 (dogfood 2026-11-05).
 Refusing needs no freshness. Index blocks
 ([architecture.md](architecture.md#memory-budget-and-collapse)) only
 group candidates for scheduling; each member is found again when its
 block is expanded and gets its own check under this bound, which a scan
 kept as above may answer: a use that starts after that scan is limit 5
 above.
+
+**Busy host:** a scan that judges nothing because the host is busy (its
+process list kept growing, a process's reads did not hold still) is
+retried once after
+20 ms (Every process, and only once settled, above). If the retry judges nothing either,
+the candidate is not given up (TASK-364): the reclaim walk, once the
+candidate's protocol has returned and released its locks (its `flock`, a
+Cargo target's locks: no lock is held while waiting), **backs off**,
+scans again, and once a scan judges again runs the candidate's protocol
+again from the start (every check, under its lock, against a scan within
+Freshness). Only a check that changed nothing runs again: a Cargo target
+whose later part met the busy scan after an earlier part was deleted
+stops part-way and is recorded as it is (its deletion an action, its
+skip naming the part), as for `in_use`. The pauses are TASK-340's: 2 s, doubling, at most 60 s,
+growing for that candidate across its checks; each sleeps by the clock,
+is cut at the deadline (an oversleep is reported in `overruns`, operation
+`busy back-off`) and ends within 50 ms of a signal; each is logged
+before it starts. A dry run, and a survey with `--in-use`, wait the same
+way between judgements (a plan holds no lock) and judge the candidate
+again; at the deadline a dry run keeps the candidate's `in_use_unknown`
+row, as the reclaim keeps the candidate. This holds whatever the size of the tier: TASK-340's
+back-off needed three candidates in a row, so a tier of one or two, and
+every plan, gave up on the first churn (TASK-317's gate:
+`release_candidate_pip_cache_*`, one candidate, "the process list was
+still growing ... after 16 listings", kept `in_use_unknown` with ~119 s of
+its 120 s deadline left, the churn its own `pip install` in flight). After
+each wait the space is sampled; a goal someone else reached meanwhile
+ends the tier, the candidate kept as judged. A deadline the waits reach
+ends the tier: the candidate is kept `in_use_unknown` (`busy`, checked),
+the rest of the tier is not judged, and the run ends `deadline` (124) or
+the tier is excluded at its own `timeout`, as for TASK-340's back-off. A
+cause that stays (a process that cannot be inspected, one stuck for 30 s,
+In use above) is not waited for. No candidate `flock` or Cargo lock is
+held during a wait; the host lock is, as during TASK-340's back-off.
+Nothing is deleted on a scan older than the freshness bound: the scan
+that ends a wait may serve the candidate's check again like any kept
+scan, under Freshness. Its costs: a storm that never settles holds the
+tier, and the host lock, to its deadline, two scans per back-off (with
+`--timeout 0`, until a signal); a run's other candidates wait behind the
+one being waited for; a dry run, which used to answer at once on a busy
+host, can take up to its `--timeout` (10 min by default). The 30 s after
+which a process that does not hold still is taken to be stuck are
+counted per tier (per profile in a survey): a stuck task costs each tier
+that meets it those 30 s.
 
 What the three in a row bound, and how they still do: a sustained fork
 storm must neither make diskgc spin (every candidate's attempts back to
@@ -1339,14 +1391,15 @@ load 20 to 30 (three parallel builds), a `--timeout 30h` `ensure` of
 `nix-shell-rc` found three unsettled scans in a row after 159 s, skipped
 146,467 candidates unchecked and reported `exhausted` (dogfood
 2026-11-04). Now a storm that never settles costs one candidate's check
-(three scans, or two unsettled ones) at most once a minute once the pause
-is capped, and the tier, the run and the lock end at the deadline:
+(three stale scans, or, waited out as above, two unsettled ones) at most
+once a minute once the pause is capped, and the tier, the run and the
+lock end at the deadline:
 `ensure --timeout` (default 10 min), a `watch` cycle's `--timeout`
 (1 min to 24 h, never none; the cycle then backs off as `retry`,
 [reference.md](reference.md#the-reclaim-cycle), and the background tally
 stays paused while the cycle holds the lock), or a tier's own `timeout`.
-Each candidate checked during the storm is kept `in_use_unknown`
-(`unknown_cause: busy`), each one checked. A pause sleeps by the clock
+Each candidate checked during a storm of stale scans is kept
+`in_use_unknown` (`unknown_cause: busy`), each one checked. A pause sleeps by the clock
 and is cut at the deadline; one that oversleeps it is reported in
 `overruns` (operation `busy back-off`). The cost moves to other reclaims:
 while a storm lasts the lock stays held, mostly by a sleeping diskgc, so
@@ -3054,8 +3107,11 @@ filesystem as it is then, whatever the tally or a plan said:
    the object found and the one locked (`changed`); the idle requirement
    on its newest change (none known: never idle). Then the in-use check
    against a process scan within the freshness bound (In use: Freshness).
-   An unsettled scan is retried once after 20 ms; a persistently blocked
-   scan can only skip candidates for half a second before it is replaced.
+   A scan that judges nothing on a busy host is retried once after 20 ms;
+   if it stays so, the protocol ends (the lock released) and the reclaim
+   walk waits the host out before running it again on the same candidate
+   (In use: Busy host); any other blocking scan can only skip candidates
+   for half a second before it is replaced.
    Right after that check, on its scan, and before the delete starts (or a
    command action's program, which is given the path), the mount table is
    read once more and the path, the place and the keep markers are judged

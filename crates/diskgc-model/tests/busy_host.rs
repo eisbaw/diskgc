@@ -20,6 +20,7 @@ use common::host;
 use diskgc_core::engine::{Reason, UnknownCause};
 use diskgc_core::executor::{self, Request, Tier};
 use diskgc_core::host::Host;
+use diskgc_core::inuse::STUCK_AFTER;
 use diskgc_core::profile::{Library, parse_profiles};
 use diskgc_core::report::{Report, Status};
 use diskgc_core::units::parse_size;
@@ -424,18 +425,23 @@ fn cargo_profile(at: &str) -> String {
 /// with little space; one readable process using none of them. The first
 /// `stale` scans finish stale.
 fn cargo_model(n: usize, stale: u32) -> ModelHost {
+    let mut stale_events = String::new();
+    for nth in 1..=stale {
+        stale_events.push_str(&format!(
+            "  - {{at: {{op: proc_environ, nth: {nth}, when: after}}, advance: 2s}}\n"
+        ));
+    }
+    cargo_model_with_events(n, &stale_events)
+}
+
+/// [`cargo_model`] with event items `events` instead of stale scans.
+fn cargo_model_with_events(n: usize, events: &str) -> ModelHost {
     let mut tree = String::new();
     for i in 1..=n {
         tree.push_str(&format!(
             "  /home/u/src/p{i:02}/Cargo.toml: {{}}\n  /home/u/src/p{i:02}/target: {{CACHEDIR.TAG: \
              {{cachedir_tag: true}}, debug: {}}}\n",
             cargo_profile(&format!("2026-10-{i:02}T00:00:00Z"))
-        ));
-    }
-    let mut stale_events = String::new();
-    for nth in 1..=stale {
-        stale_events.push_str(&format!(
-            "  - {{at: {{op: proc_environ, nth: {nth}, when: after}}, advance: 2s}}\n"
         ));
     }
     host(&format!(
@@ -450,7 +456,7 @@ tree:
 {tree}processes:
   - {{pid: 10, exe: /usr/bin/tool, cwd: /, maps: [/usr/bin/tool], environ: [PATH=/usr/bin], fds: [{{path: /usr/bin/tool}}]}}
 events:
-{stale_events}"#
+{events}"#
     ))
 }
 
@@ -629,12 +635,12 @@ fn unknown_rows(report: &Report) -> Vec<(PathBuf, Option<UnknownCause>, bool, Op
 
 /// TASK-348's dogfood in small (tmp/walks/2026-11-04-dogfood/a4-rc-real):
 /// a concurrent build's linker exits slowly while the tier runs, and every
-/// read of it in the meantime ends unsettled. Three candidates in a row are
-/// kept `in_use_unknown` on its account, each checked; that is a busy host
-/// (waiting ends it), so the tier backs off, the linker is gone after the
-/// pause, and the rest is reclaimed. Master classed the linker as a process
-/// that cannot be inspected, a cause waiting does not end, and skipped
-/// c-04 to c-08 unchecked (127,645 candidates in the dogfood).
+/// read of it in the meantime ends unsettled. That is a busy host (waiting
+/// ends it): the tier waits it out before checking c-01 again (TASK-364),
+/// the linker is gone after the first back-off, and every candidate is
+/// reclaimed, c-01 included. TASK-348 kept c-01 to c-03 `in_use_unknown`
+/// before its back-off; before it, c-04 to c-08 were skipped unchecked as a
+/// process that cannot be inspected (127,645 candidates in the dogfood).
 #[test]
 fn a_process_whose_reads_do_not_settle_is_waited_out_like_a_busy_host() {
     let host = model_with_processes(
@@ -645,47 +651,44 @@ fn a_process_whose_reads_do_not_settle_is_waited_out_like_a_busy_host() {
         "  - {at: {elapsed: 1s}, exit: 11}\n",
     );
     let (report, lines) = ensure(&host, &request("profile:probe", "100%", None));
-    let rows = unknown_rows(&report);
-    assert_eq!(
-        rows,
-        (1..=3)
-            .map(|i| (candidate(i), Some(UnknownCause::Busy), true, None))
-            .collect::<Vec<_>>(),
-        "{report:#?}"
-    );
-    for skip in report.skipped.iter() {
-        let detail = skip.detail.as_deref().unwrap_or_default();
-        assert!(
-            detail.contains("pid 11 (rust-lld)") && detail.contains("no trustworthy read"),
-            "the skip names the process and why: {skip:#?}"
-        );
-    }
+    assert!(unknown_rows(&report).is_empty(), "{report:#?}");
     assert_eq!(
         acted(&report),
-        (4..=8).map(candidate).collect::<Vec<_>>(),
+        (1..=8).map(candidate).collect::<Vec<_>>(),
         "{report:#?}"
     );
-    for i in 1..=3 {
-        assert!(exists(&host, &candidate(i)), "kept while it was unsettled");
-    }
     assert_eq!(report.status, Status::Exhausted, "{report:#?}");
-    assert_eq!(back_offs(&host).len(), 1, "{:?}", pauses(&host));
+    assert_eq!(
+        back_offs(&host),
+        [Duration::from_secs(2)],
+        "{:?}",
+        pauses(&host)
+    );
     assert!(
-        lines.iter().any(|l| l.contains("(the host is too busy)")),
+        lines
+            .iter()
+            .any(|l| l.contains("/tmp/c-01: the host is too busy")
+                && l.contains("pid 11 (rust-lld)")
+                && l.contains("no trustworthy read")),
+        "the wait names the process and why: {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("checking /tmp/c-01 again")),
         "{lines:#?}"
     );
-    let json: Value = serde_json::from_str(&report.to_json()).expect("JSON");
-    assert_eq!(json["skipped"][0]["unknown_cause"], "busy");
-    assert!(json["skipped"][0]["process_blockers"].is_null());
 }
 
-/// A process whose reads never settle and that never exits (a task stuck
-/// in its exit) costs what a storm that never settles costs: the tier backs
-/// off until the deadline, deletes nothing, and the run ends `deadline`
-/// (124: retry later), each candidate it reached checked.
+/// TASK-348's follow-up (TASK-364): a process whose reads never settle and
+/// that never exits (a task stuck in its exit) is waited out for four
+/// back-offs (2 + 4 + 8 + 16 s, [`STUCK_AFTER`]); then it is taken to be
+/// stuck, a process that cannot be inspected (`unreadable_process`, a
+/// cause waiting does not end, naming it): three candidates in a row kept
+/// on its account skip the rest of the tier unchecked, with no further
+/// back-off, long before the deadline. Nothing is deleted. TASK-348 held
+/// the tier to its deadline instead (124).
 #[test]
-fn a_process_that_never_settles_holds_the_tier_to_its_deadline() {
-    let timeout = Duration::from_secs(60);
+fn a_process_that_never_settles_is_taken_to_be_stuck_after_four_back_offs() {
+    let timeout = Duration::from_secs(600);
     let host = model_with_processes(8, 0, LINKER_TREE, EXITING_LINKER, "");
     let started = host.now();
     let (report, _) = ensure(&host, &request("profile:probe", "100%", Some(timeout)));
@@ -694,20 +697,36 @@ fn a_process_that_never_settles_holds_the_tier_to_its_deadline() {
     for i in 1..=8 {
         assert!(exists(&host, &candidate(i)));
     }
-    assert_eq!(report.status, Status::Deadline, "{report:#?}");
-    assert_eq!(report.exit_code(), 124);
-    let rows = unknown_rows(&report);
-    assert!(rows.len() > 3 && rows.len() < 8, "{rows:?}");
-    assert!(
-        rows.iter()
-            .all(|(_, cause, checked, _)| *cause == Some(UnknownCause::Busy) && *checked),
-        "{rows:?}"
+    assert_eq!(report.status, Status::Exhausted, "{report:#?}");
+    assert_eq!(
+        unknown_rows(&report),
+        (1..=8)
+            .map(|i| (
+                candidate(i),
+                Some(UnknownCause::UnreadableProcess),
+                i <= 3,
+                Some(11)
+            ))
+            .collect::<Vec<_>>(),
+        "{report:#?}"
     );
     assert!(
-        took >= timeout && took < timeout + Duration::from_secs(1),
+        report.skipped[0]
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.contains("taken to be stuck")),
+        "{report:#?}"
+    );
+    assert_eq!(
+        back_offs(&host),
+        [2, 4, 8, 16].map(Duration::from_secs),
+        "{:?}",
+        pauses(&host)
+    );
+    assert!(
+        took >= STUCK_AFTER && took < STUCK_AFTER + Duration::from_secs(1),
         "{took:?}"
     );
-    assert!(back_offs(&host).len() >= 2, "{:?}", pauses(&host));
 }
 
 /// TASK-340's other half, kept: a process of the user the kernel refuses
@@ -820,13 +839,412 @@ fn a_process_whose_reads_do_not_settle_is_never_excused_by_its_status() {
              unsettled}}\n"
         );
         let host = model_with_processes(1, 0, LINKER_TREE, &procs, "");
-        let (report, _) = ensure(&host, &request("profile:probe", "100%", None));
+        // A deadline, so a regression that waits for ever fails instead.
+        let (report, _) = ensure(
+            &host,
+            &request("profile:probe", "100%", Some(Duration::from_secs(600))),
+        );
         assert!(acted(&report).is_empty(), "{status}: {report:#?}");
         assert!(exists(&host, &candidate(1)), "{status}");
+        // Waited out as a busy host until it was taken to be stuck
+        // (TASK-364), never excused on the way.
         assert_eq!(
             unknown_rows(&report),
-            [(candidate(1), Some(UnknownCause::Busy), true, None)],
+            [(
+                candidate(1),
+                Some(UnknownCause::UnreadableProcess),
+                true,
+                Some(11)
+            )],
             "{status}: {report:#?}"
         );
+        assert_eq!(back_offs(&host).len(), 4, "{status}: {:?}", pauses(&host));
     }
+}
+
+// TASK-364: a scan that could judge nothing because the host was busy is
+// waited out before the candidate it was made for is given up, whatever
+// the size of the tier, in a reclaim and in a dry run alike. TASK-317's
+// gate (release_candidate_pip_cache_*: one candidate, "the process list
+// was still growing ... after 16 listings", one 20 ms retry, then
+// `in_use_unknown` and `exhausted` with ~119 s of its deadline left) and
+// TASK-363's ccache run are this shape.
+
+/// A fork storm over the first `listings` process listings: pid 10 forks
+/// one child after each, so each listing brings a new process. A scan
+/// gives up after 16 listings that each did ([`MAX_LISTINGS`]), so
+/// `storm(32)` leaves a scan and its 20 ms retry unsettled, and the next
+/// scan settles.
+fn storm(listings: u32) -> String {
+    (1..=listings)
+        .map(|k| {
+            format!(
+                "  - {{at: {{op: pids, nth: {k}, when: after}}, fork: {{pid: 10, child: {}}}}}\n",
+                1000 + k
+            )
+        })
+        .collect()
+}
+
+/// A dry run of `request` and its log.
+fn dry_run(host: &ModelHost, request: &Request) -> (Report, Vec<String>) {
+    let mut lines = Vec::new();
+    let report = executor::dry_run(host, request, &[1000], &mut |l| lines.push(l.to_owned()));
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    (report, lines)
+}
+
+/// The dry run's rows, as (candidate, reason).
+fn plan_rows(report: &Report) -> Vec<(PathBuf, Option<Reason>)> {
+    report
+        .plan
+        .iter()
+        .filter_map(|p| Some((p.candidate.clone()?, p.reason)))
+        .collect()
+}
+
+/// A tier of one candidate, and one of two, whose first scan and its quick
+/// retry do not settle (a storm of 32 growing listings): the tier backs off
+/// once (2 s), scans again, finds the host settled and reclaims every
+/// candidate. On the stack's base each was kept `in_use_unknown` (busy) and
+/// the run ended `exhausted` at once: TASK-340's back-off needs three in a
+/// row.
+#[test]
+fn small_tiers_wait_out_scans_that_do_not_settle_and_reclaim() {
+    for n in [1, 2] {
+        let host = model(n, 0, &storm(32));
+        let (report, lines) = ensure(
+            &host,
+            &request("profile:probe", "100%", Some(Duration::from_secs(120))),
+        );
+        assert!(unknown_rows(&report).is_empty(), "{n}: {report:#?}");
+        assert_eq!(
+            acted(&report),
+            (1..=n).map(candidate).collect::<Vec<_>>(),
+            "{n}: {report:#?}"
+        );
+        for i in 1..=n {
+            assert!(!exists(&host, &candidate(i)), "{n}");
+        }
+        assert_eq!(
+            back_offs(&host),
+            [Duration::from_secs(2)],
+            "{n}: {:?}",
+            pauses(&host)
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("the host is too busy") && l.contains("still growing")),
+            "{n}: {lines:#?}"
+        );
+        assert!(host.unfired_events().is_empty(), "{n}");
+    }
+}
+
+/// The same storm under a dry run: the plan's checker waits it out before
+/// judging, so the plan says what the reclaim would do once the host
+/// settles (eligible), not `in_use_unknown` (the stack's base: the plan
+/// had no retry beyond the 20 ms one). Nothing is deleted.
+#[test]
+fn a_dry_run_waits_out_scans_that_do_not_settle() {
+    let host = model(1, 0, &storm(32));
+    let (report, lines) = dry_run(
+        &host,
+        &request("profile:probe", "100%", Some(Duration::from_secs(120))),
+    );
+    assert_eq!(report.status, Status::DryRun, "{report:#?}");
+    assert_eq!(plan_rows(&report), [(candidate(1), None)], "{report:#?}");
+    assert!(exists(&host, &candidate(1)));
+    assert_eq!(
+        back_offs(&host),
+        [Duration::from_secs(2)],
+        "{:?}",
+        pauses(&host)
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("/tmp/c-01: the host is too busy")),
+        "the wait is logged: {lines:#?}"
+    );
+}
+
+/// A storm that outlasts the deadline, for a tier of one candidate: the
+/// tier backs off (growing pauses) until the deadline, deletes nothing,
+/// keeps the candidate as `busy` (it was checked), and ends `deadline`
+/// (124: retry later) with the time it was given used, no more. A dry run
+/// ends the same way, its plan keeping the candidate's `in_use_unknown`
+/// row. On the stack's base both ended at once (`exhausted`, 1, and a
+/// `dry_run` plan of that row, 0) with the deadline unused.
+#[test]
+fn a_storm_until_the_deadline_ends_a_single_candidate_run_124() {
+    let timeout = Duration::from_secs(60);
+    let host = model(1, 0, &storm(400));
+    let started = host.now();
+    let (report, lines) = ensure(&host, &request("profile:probe", "100%", Some(timeout)));
+    let took = host.now().saturating_since(started);
+    assert!(acted(&report).is_empty(), "{report:#?}");
+    assert!(exists(&host, &candidate(1)));
+    assert_eq!(report.status, Status::Deadline, "{report:#?}");
+    assert_eq!(report.exit_code(), 124);
+    assert_eq!(
+        unknown_rows(&report),
+        [(candidate(1), Some(UnknownCause::Busy), true, None)],
+        "{report:#?}"
+    );
+    assert!(
+        took >= timeout && took < timeout + Duration::from_secs(1),
+        "{took:?}"
+    );
+    let waited = back_offs(&host);
+    assert!(waited.len() >= 4, "{waited:?}");
+    assert!(
+        waited
+            .windows(2)
+            .take(waited.len() - 2)
+            .all(|w| w[1] > w[0]),
+        "back-off grows: {waited:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("until the deadline")),
+        "{lines:#?}"
+    );
+
+    let host = model(1, 0, &storm(400));
+    let started = host.now();
+    let (report, _) = dry_run(&host, &request("profile:probe", "100%", Some(timeout)));
+    let took = host.now().saturating_since(started);
+    assert_eq!(report.status, Status::Deadline, "{report:#?}");
+    assert_eq!(report.exit_code(), 124);
+    assert_eq!(
+        plan_rows(&report),
+        [(candidate(1), Some(Reason::InUseUnknown))],
+        "the candidate waited for keeps its busy verdict, as in the reclaim: {report:#?}"
+    );
+    assert!(
+        took >= timeout && took < timeout + Duration::from_secs(1),
+        "{took:?}"
+    );
+}
+
+/// A cause that stays (a `newgrp` shell the kernel refuses to show) is
+/// not waited out, in a tier of one candidate and in its dry run: the
+/// candidate is kept `unreadable_process` at once, naming it. The stack's
+/// base did the same; the mutation "wait out any blocked scan" fails it.
+#[test]
+fn a_lasting_cause_skips_a_single_candidate_without_waiting() {
+    // A deadline, so a regression that waits fails instead of hanging.
+    let timeout = Some(Duration::from_secs(600));
+    let host = model_with_processes(1, 0, "", NEWGRP_SHELL, "");
+    let started = host.now();
+    let (report, _) = ensure(&host, &request("profile:probe", "100%", timeout));
+    assert!(acted(&report).is_empty(), "{report:#?}");
+    assert_eq!(
+        unknown_rows(&report),
+        [(
+            candidate(1),
+            Some(UnknownCause::UnreadableProcess),
+            true,
+            Some(12)
+        )],
+        "{report:#?}"
+    );
+    assert!(back_offs(&host).is_empty(), "{:?}", pauses(&host));
+    assert!(host.now().saturating_since(started) < Duration::from_secs(1));
+
+    let host = model_with_processes(1, 0, "", NEWGRP_SHELL, "");
+    let (report, _) = dry_run(&host, &request("profile:probe", "100%", timeout));
+    assert_eq!(
+        plan_rows(&report),
+        [(candidate(1), Some(Reason::InUseUnknown))],
+        "{report:#?}"
+    );
+    assert!(back_offs(&host).is_empty(), "{:?}", pauses(&host));
+}
+
+/// A Cargo target is reclaimed part by part, each part checked on its own
+/// scan. When the host turns busy after its first part was deleted (here
+/// pid 10's reads stop holding still once the first entry is unlinked, and
+/// the clock moves past the scan's reuse), the next part's scan judges
+/// nothing and the target stops there, part-way, as for `in_use`. That
+/// target is recorded as it is, its deletion an action, not run again
+/// after a back-off: a run again would report only the second run's
+/// deletions and lose the first's.
+#[test]
+fn a_cargo_target_the_host_turns_busy_on_part_way_is_recorded_not_retried() {
+    let host = cargo_model_with_events(
+        1,
+        "  - {at: {op: unlinkat, nth: 1, when: after}, access: {pid: 10, proc: unsettled}}\n  - \
+         {at: {op: unlinkat, nth: 1, when: after}, advance: 2s}\n",
+    );
+    let library = Library::builtin().unwrap_or_else(|e| panic!("{e}"));
+    let request = Request {
+        path: PathBuf::from("/home/u/src"),
+        min_free: parse_size("100%").expect("a size"),
+        target_free: None,
+        timeout: Some(Duration::from_secs(600)),
+        tally_budget: None,
+        watch: None,
+        tier: Tier::select(
+            "profile:cargo-target",
+            &library,
+            Some(&["/home/u/src".to_owned()]),
+            1000,
+        )
+        .unwrap_or_else(|e| panic!("{e}")),
+    };
+    let (report, _) = ensure(&host, &request);
+    assert!(host.unfired_events().is_empty(), "{report:#?}");
+    let target = PathBuf::from("/home/u/src/p01/target");
+    assert_eq!(acted(&report), std::slice::from_ref(&target), "{report:#?}");
+    let kept = unknown(&report);
+    assert_eq!(kept.len(), 1, "{report:#?}");
+    assert!(
+        kept.iter().all(|part| part.starts_with(&target)),
+        "{report:#?}"
+    );
+    assert!(back_offs(&host).is_empty(), "{:?}", pauses(&host));
+}
+
+// The new waits' edges (QA review of TASK-364): a signal, the goal, an
+// oversleep and a tier's own timeout during them, and a stuck command line
+// in a dry run. TASK-340's tests of these use stale scans, which take the
+// tier's back-off (`before_check`), not these waits.
+
+/// SIGINT 3 s into the waits (the second back-off): the reclaim and the
+/// dry run stop within one 50 ms slice (`interrupted`), nothing deleted.
+#[test]
+fn a_signal_during_a_busy_wait_stops_the_run_promptly() {
+    let events = format!(
+        "{}  - {{at: {{elapsed: 3000ms}}, signal: int}}\n",
+        storm(400)
+    );
+    let timeout = Some(Duration::from_secs(600));
+    let host = model(1, 0, &events);
+    let started = host.now();
+    let (report, _) = ensure(&host, &request("profile:probe", "100%", timeout));
+    let took = host.now().saturating_since(started);
+    assert!(
+        matches!(report.status, Status::Interrupted(_)),
+        "{report:#?}"
+    );
+    assert!(acted(&report).is_empty(), "{report:#?}");
+    assert!(exists(&host, &candidate(1)));
+    assert!(took <= Duration::from_millis(3100), "{took:?}");
+
+    let host = model(1, 0, &events);
+    let started = host.now();
+    let (report, _) = dry_run(&host, &request("profile:probe", "100%", timeout));
+    let took = host.now().saturating_since(started);
+    assert!(
+        matches!(report.status, Status::Interrupted(_)),
+        "{report:#?}"
+    );
+    assert!(took <= Duration::from_millis(3100), "{took:?}");
+}
+
+/// Someone else frees the goal 1 s into the waits (their 3 GiB `big`
+/// goes): the space is sampled after each back-off, so the tier ends at
+/// the goal after the first (2 s), deleting nothing, also in a storm that
+/// would outlast the deadline. Before the QA review the waits sampled only
+/// once the host settled, holding the lock to the deadline after the
+/// space was there.
+#[test]
+fn space_that_comes_back_during_a_busy_wait_ends_it_at_the_next_back_off() {
+    for (listings, timeout) in [(64, 600), (400, 60)] {
+        let host = model(
+            1,
+            0,
+            &format!(
+                "{}  - {{at: {{elapsed: 1000ms}}, remove: /tmp/big}}\n",
+                storm(listings)
+            ),
+        );
+        let started = host.now();
+        let (report, _) = ensure(
+            &host,
+            &request("profile:probe", "2G", Some(Duration::from_secs(timeout))),
+        );
+        let took = host.now().saturating_since(started);
+        assert!(acted(&report).is_empty(), "{listings}: {report:#?}");
+        assert!(exists(&host, &candidate(1)), "{listings}");
+        assert_eq!(report.status, Status::Met, "{listings}: {report:#?}");
+        assert_eq!(
+            back_offs(&host),
+            [Duration::from_secs(2)],
+            "{listings}: {:?}",
+            pauses(&host)
+        );
+        assert!(took < Duration::from_secs(3), "{listings}: {took:?}");
+    }
+}
+
+/// The clock jumps 5 s during the last back-off of a storm that outlasts
+/// a 60 s deadline: the waits stop at once and the crossing is one
+/// `overruns` entry, `busy back-off` (~3 s), not also one for the reclaim
+/// that ended before the waits.
+#[test]
+fn an_oversleep_during_a_busy_wait_is_one_overrun() {
+    let host = model(
+        1,
+        0,
+        &format!("{}  - {{at: {{elapsed: 58s}}, advance: 5s}}\n", storm(400)),
+    );
+    let (report, _) = ensure(
+        &host,
+        &request("profile:probe", "100%", Some(Duration::from_secs(60))),
+    );
+    assert_eq!(report.status, Status::Deadline, "{report:#?}");
+    assert_eq!(report.overruns.len(), 1, "{:#?}", report.overruns);
+    let overrun = &report.overruns[0];
+    assert_eq!(overrun.operation, "busy back-off", "{overrun:?}");
+    assert!((2900..=3100).contains(&overrun.over_ms), "{overrun:?}");
+}
+
+/// A configured tier with its own `timeout` (40 s) whose candidate waits
+/// for a busy host until it: the tier is excluded with an error naming
+/// the busy host, and the next tier runs once the storm is over.
+#[test]
+fn a_tier_timeout_during_a_busy_wait_names_the_busy_host() {
+    let policy = format!(
+        "version: 1\nprofiles:{PROFILES}groups:\n  - name: g\n    tiers:\n      - name: first\n        \
+         select: profile:probe\n        timeout: 40s\n      - name: second\n        select: \
+         profile:other\n"
+    );
+    let config = diskgc_core::config::parse(
+        std::path::Path::new("/etc/diskgc/t.yaml"),
+        policy.as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}\n{policy}"));
+    let mut tiers = Vec::new();
+    let mut timeouts = Vec::new();
+    for group in &config.groups {
+        for setting in &group.tiers {
+            tiers.push(
+                Tier::configured(&group.name, setting, &config.library, 1000)
+                    .unwrap_or_else(|e| panic!("{e}")),
+            );
+            timeouts.push(setting.timeout);
+        }
+    }
+    // Ten scans of 16 growing listings: the storm outlasts the first
+    // tier's 40 s of waits (2 + 4 + 8 + 16 + 10 s), then ends.
+    let others = "  /tmp/o-1: {.: {mtime: 2026-10-01T00:00:00Z}}\n";
+    let host = model_with(1, 0, others, &storm(160));
+    let mut request = request("profile:probe", "100%", Some(Duration::from_secs(600)));
+    request.tier = tiers[0].clone();
+    let mut lines = Vec::new();
+    let report = executor::ensure_grouped(&host, &request, &tiers, &timeouts, &[1000], &mut |l| {
+        lines.push(l.to_owned())
+    });
+    eprintln!("log:\n  {}", lines.join("\n  "));
+    let error = report
+        .errors
+        .iter()
+        .find(|e| e.tier.as_deref() == Some("first"))
+        .unwrap_or_else(|| panic!("{report:#?}"));
+    assert!(error.message.contains("too busy"), "{error:?}");
+    assert!(exists(&host, &candidate(1)));
+    assert_eq!(acted(&report), [PathBuf::from("/tmp/o-1")], "{report:#?}");
 }
