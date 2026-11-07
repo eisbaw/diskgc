@@ -765,7 +765,7 @@ pub(super) fn plan_cargo<H: Host>(
                     };
                 }
             };
-            for (judged, target) in targets.iter().enumerate() {
+            'targets: for (judged, target) in targets.iter().enumerate() {
                 if host.interrupted().is_some() {
                     break;
                 }
@@ -837,8 +837,12 @@ pub(super) fn plan_cargo<H: Host>(
                         Ok(true) => {}
                         Ok(false) => break judged_now,
                         Err(error) => {
+                            // Judged (kept), so not among the not judged
+                            // below: those start after it.
                             skipped.push(plan_skip(tier, &target.path, skip));
-                            break Err(error.at(&target.path));
+                            stopped = Some(error.at(&target.path));
+                            add_unjudged(&mut unjudged, &tier.profile, targets.len() - judged - 1);
+                            break 'targets;
                         }
                     }
                 };

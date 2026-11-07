@@ -1431,3 +1431,110 @@ fn a_stuck_command_line_keeps_every_project_in_a_dry_run() {
     );
     assert_eq!(back_offs(&host).len(), 4, "{:?}", pauses(&host));
 }
+
+// Codex review of TASK-364: two accounting defects of the waits.
+
+/// A space sample after a back-off that crosses the deadline (the clock
+/// jumps 70 s in it, 60 s timeout) is one overrun, `statvfs`, under its
+/// real cause; the back-off before it ended in time and is none. The
+/// waits recorded the whole span again as `busy back-off` (two entries of
+/// the same crossing).
+#[test]
+fn a_slow_sample_after_a_back_off_is_one_statvfs_overrun() {
+    let timeout = Some(Duration::from_secs(60));
+    // Which space sample follows the first back-off: the run's samples
+    // before its first pause longer than a second, plus one.
+    let probe = model(1, 0, &storm(64));
+    let _ = ensure(&probe, &request("profile:probe", "100%", timeout));
+    let mut samples = 0;
+    let mut slept = Duration::ZERO;
+    let mut nth = None;
+    for call in probe.trace() {
+        match call.op {
+            Op::Sleep => slept += parse_debug_duration(call.result.as_str()),
+            Op::Statvfs if slept > Duration::from_secs(1) => {
+                nth = Some(samples + 1);
+                break;
+            }
+            Op::Statvfs => samples += 1,
+            _ => {}
+        }
+    }
+    let nth = nth.expect("a sample after the first back-off");
+    let host = model(
+        1,
+        0,
+        &format!(
+            "{}  - {{at: {{op: statvfs, nth: {nth}, when: after}}, advance: 70s}}\n",
+            storm(64)
+        ),
+    );
+    let (report, _) = ensure(&host, &request("profile:probe", "100%", timeout));
+    assert!(
+        host.unfired_events().is_empty(),
+        "the slow sample did not happen"
+    );
+    assert!(acted(&report).is_empty(), "{report:#?}");
+    assert_eq!(report.overruns.len(), 1, "{:#?}", report.overruns);
+    assert_eq!(
+        report.overruns[0].operation, "statvfs",
+        "{:#?}",
+        report.overruns
+    );
+}
+
+/// A Cargo dry run whose one target the host stays too busy to judge
+/// until the deadline: the target has its `in_use_unknown` row (kept) and
+/// is not also counted not judged: found 1, kept 1, not_judged 0. The
+/// waits counted it twice (found 2).
+#[test]
+fn a_cargo_dry_run_busy_until_the_deadline_counts_its_target_once() {
+    let host = cargo_model_with_events(1, &storm(400));
+    let library = Library::builtin().unwrap_or_else(|e| panic!("{e}"));
+    let request = Request {
+        path: PathBuf::from("/home/u/src"),
+        min_free: parse_size("100%").expect("a size"),
+        target_free: None,
+        timeout: Some(Duration::from_secs(60)),
+        tally_budget: None,
+        watch: None,
+        tier: Tier::select(
+            "profile:cargo-target",
+            &library,
+            Some(&["/home/u/src".to_owned()]),
+            1000,
+        )
+        .unwrap_or_else(|e| panic!("{e}")),
+    };
+    let (report, _) = dry_run(&host, &request);
+    assert_eq!(report.status, Status::Deadline, "{report:#?}");
+    let json: Value = serde_json::from_str(&report.to_json()).expect("JSON");
+    let summary = &json["summary"][0];
+    assert_eq!(summary["found"], 1, "{summary:#}");
+    assert_eq!(
+        summary["kept"][0]["reason"], "in_use_unknown",
+        "{summary:#}"
+    );
+    assert_eq!(summary["kept"][0]["count"], 1, "{summary:#}");
+    assert_eq!(summary["not_judged"], 0, "{summary:#}");
+}
+
+/// The same accounting in the `fs` plan and the `fs` union plan (their
+/// own loops): one candidate busy until the deadline is found 1, kept 1,
+/// not judged 0.
+#[test]
+fn an_fs_dry_run_busy_until_the_deadline_counts_its_candidate_once() {
+    for select in ["profile:probe", "profile:probe || profile:other"] {
+        let host = model(1, 0, &storm(400));
+        let (report, _) = dry_run(
+            &host,
+            &request(select, "100%", Some(Duration::from_secs(60))),
+        );
+        assert_eq!(report.status, Status::Deadline, "{select}: {report:#?}");
+        let json: Value = serde_json::from_str(&report.to_json()).expect("JSON");
+        let summary = &json["summary"][0];
+        assert_eq!(summary["found"], 1, "{select}: {summary:#}");
+        assert_eq!(summary["kept"][0]["count"], 1, "{select}: {summary:#}");
+        assert_eq!(summary["not_judged"], 0, "{select}: {summary:#}");
+    }
+}

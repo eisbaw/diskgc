@@ -627,7 +627,10 @@ Model scenarios required by [safety.md](safety.md) and
   the plan too); a signal during the waits stops the reclaim and the dry
   run within a slice; space someone else frees during them ends the tier
   at the next back-off, also in a storm that outlasts the deadline; an
-  oversleep in them is one `busy back-off` overrun; a tier's own
+  oversleep in them is one `busy back-off` overrun, and a slow space
+  sample after one is one `statvfs` overrun, not both; a dry run busy
+  until its deadline counts the candidate it waited for once (kept, not
+  also not judged), in the Cargo, `fs` and `fs` union plans; a tier's own
   `timeout` during them excludes it naming the busy host; no back-off is
   taken holding a candidate's `flock` or a Cargo target's locks (a host
   that checks at every sleep, `busy_host_locks.rs`; the protocol's own

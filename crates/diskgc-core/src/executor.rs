@@ -1246,8 +1246,9 @@ impl<H: Delete> Reclaim<'_, '_, H> {
     /// Any other end is recorded as it is: stale scans keep TASK-340's
     /// back-off before the next candidate ([`Self::before_check`]), a cause
     /// that stays skips without waiting. When it waited, the time until the
-    /// waits began is the reclaim's (its overrun recorded here) and the
-    /// waits are the `busy back-off`'s, so `outcome` restarts now.
+    /// waits began is the reclaim's (its overrun recorded here), each
+    /// back-off is a `busy back-off` and each sample after one a `statvfs`
+    /// ([`Self::wait_steps`]), so `outcome` restarts now.
     fn wait_if_busy(
         &mut self,
         candidate: &Path,
@@ -1265,10 +1266,8 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         {
             return AfterReclaim::Record;
         }
-        let started = self.host.now();
-        self.record_overrun("reclaim", candidate, outcome.started, started);
+        self.record_overrun("reclaim", candidate, outcome.started, self.host.now());
         let after = self.wait_steps(candidate, checker, back_off);
-        self.record_overrun("busy back-off", candidate, started, self.host.now());
         outcome.started = self.host.now();
         after
     }
@@ -1291,9 +1290,14 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         // the deadline ends them (without one, a signal, or STUCK_AFTER for
         // a process that does not hold still).
         loop {
+            // Each back-off (its pause and scan) and each sample after it is
+            // timed on its own, so a crossing of the deadline is recorded
+            // once, under what crossed it.
+            let started = self.host.now();
             let waited = checker.back_off_once(self.host, self.deadline, back_off, &mut |line| {
                 (self.log)(&format!("{tier}: {shown}: {line}"));
             });
+            self.record_overrun("busy back-off", candidate, started, self.host.now());
             match waited {
                 // Settled (or a cause that stays now decides): check again.
                 Ok(false) => break,
