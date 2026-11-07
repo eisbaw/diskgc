@@ -3196,7 +3196,12 @@ the reclaim; the build then completes. Roots `/home/tester/src` (West:
 `/tmp`; Yocto: `src/yocto`; Bazel: `~/.cache/bazel`), `--min-free 100%`.
 The OpenWrt-like tree is OpenWrt's top-level layout made by hand (a real
 tree needs its feeds and toolchain downloads) with real package builds in
-`build_dir/target-x86_64_musl/`, as OpenWrt's include/*.mk lay them out.
+`build_dir/target-x86_64_musl/`, as OpenWrt's include/*.mk lay them out:
+the scenarios read OpenWrt v25.12.6's include/{package,host-build,cmake,
+meson}.mk (flake input `openwrt-src`, never run), check the
+`openwrt-build` rules, and give each out-of-source package build the
+stamps package.mk names (`.prepared_<hash>`, `.configured_<hash>`,
+`.built`).
 
 - `cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_build_in_flight_is_kept`:
   Ninja and Unix Makefiles builds (one at depth five) and one below a Git
@@ -3205,17 +3210,20 @@ tree needs its feeds and toolchain downloads) with real package builds in
   it are refused by the anchor (not planned); a build holding a checkout
   (FetchContent's `_deps/*-src`) is `contains_checkout`; a `cmake --build`
   held at a custom target is `in_use` (Make's `cwd`) and completes. In the
-  OpenWrt layout an in-source package build is never found, but a package
-  built in `openwrt-build` (`CMAKE_BINARY_SUBDIR`) is reclaimed: the
-  single-project match the liveness row records. CMake then configures and
-  builds the reclaimed outputs again.
+  OpenWrt layout an in-source package build is never found, and a package
+  built in `openwrt-build` (`CMAKE_BINARY_SUBDIR`) beside OpenWrt's stamps
+  is not planned (the nested-build guard, TASK-367), nor is a real CMake
+  build in cmake-js's layout, `napp/node_modules/addon/build` (cmake-js
+  itself is not in the image). CMake then configures and builds the
+  reclaimed outputs again.
 - `meson_build_anchored_real_meson_builds_reclaim_then_reconfigure_and_a_ninja_in_flight_is_kept`:
   builds in and below a checkout are reclaimed; Meson itself refuses an
   in-source build and a build directory around its source; a moved and a
   copied build are refused visibly (`unsupported_layout`, reported at their
   `meson-info/meson-info.json`); a build holding a checkout is kept; a
   Ninja held at a custom target is `in_use` (`cwd`). OpenWrt's meson.mk
-  builds every package in `openwrt-build`: reclaimed (recorded match).
+  builds every package in `openwrt-build`: beside OpenWrt's stamps, not
+  planned (TASK-367).
 - `autotools_build_anchored_real_configure_builds_reclaim_then_reconfigure_and_a_make_in_flight_is_kept`:
   `../configure` (`srcdir=..`), an absolute `configure` at depth five and a
   build below a checkout are reclaimed; in-source builds (OpenWrt's
@@ -3239,10 +3247,18 @@ tree needs its feeds and toolchain downloads) with real package builds in
   BR2_EXTERNAL=... diskgc_defconfig`, its local packages built) the output
   is never planned (TASK-354's fix): on a copy without its output, `make
   syncconfig` drops the tree's option from the top `.config`, as the test
-  shows. Cross-profile: `cmake-build-anchored` plans the CMake build in
-  `output/build/host-cmk-1.0/buildroot-build` (the layout of Buildroot's
-  cmake-package without in-source builds; made by a generic recipe running
-  real CMake, as host-cmake-package needs host-pkgconf from the network).
+  shows. The nested-build guard (TASK-367) on Buildroot's real package
+  directories: `host-cmk`, a real host-cmake-package with
+  `SUPPORTS_IN_SOURCE_BUILD = NO` (its host-pkgconf built from the pinned
+  source in the tree's `dl/`), and `host-msn`, real Meson run as
+  pkg-meson.mk runs it (a generic recipe: host-meson needs host-python3
+  from the network), each with `.stamp_configured` and `.stamp_built`
+  beside its `buildroot-build` (the test lists them). Neither build is
+  planned by `cmake-build-anchored` or `meson-build-anchored` with both
+  signals, with the stamps alone (`.br2-external.mk` moved away) or with
+  the output's marker alone (the stamps moved away); with neither, both
+  are (positive control). With `buildroot-build` moved away, `make
+  host-cmk-rebuild` fails, then rebuilds once it is back.
 - `yocto_tmpdir_anchored_real_bitbake_reclaim_then_rebuild_and_a_task_in_flight_is_kept`:
   `oe-init-build-env`, `bitbake-layers add-layer` and `bitbake -c
   diskgc_build mini` make `build/tmp`; it is reclaimed and BitBake makes it

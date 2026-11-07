@@ -2805,6 +2805,70 @@ GNU Autoconf 2.73 and only builds with a generated `Makefile` and a source
 external dependencies, local build-only edits or generated deliverables
 are recoverable.
 
+### Builds inside another build system's tree
+
+Mark, 2026-11-07 (TASK-367, option 1). `cmake-build-anchored`,
+`meson-build-anchored`, `autotools-build-anchored` and
+`west-build-anchored` (through the `cmake` anchor) never take a build
+directory inside a managed tree of another build system that diskgc
+recognises (below; the rest are under Not covered).
+Meta-build systems such as Buildroot, OpenWrt and Yocto build each
+upstream package with that package's own build system inside a tree
+they manage, and record each finished step in a stamp file beside it.
+Delete the inner build directory and the outer stamp still says
+"configured": that system's next rebuild of the package fails until the
+package is cleaned there (with Buildroot 2026.08.1, `make
+host-cmk-rebuild` fails once `buildroot-build` is gone).
+
+After the source anchor has accepted a candidate, the guard looks for
+three signals, and any one keeps the output as an anchor keeps any
+output it doubts (not a candidate, no skip reason):
+
+- **A stamp** in the build directory's parent or one of the three
+  directories above it, never above the bound root. Each of those
+  directories is listed: Buildroot's `.stamp_*`; OpenWrt's `.built`,
+  `.configured*` and `.prepared*` (a target package's carry a hash).
+  Four directories cover Buildroot 2026.08.1's deepest out-of-source
+  package build (`tensorflow-lite`, `SUBDIR = tensorflow/lite`, stamps
+  three up) and OpenWrt's (`openwrt-build` or `build`, stamps one up).
+- **A build root** that diskgc's own anchors recognise, anywhere above
+  the build directory up to `/`, looked up by name without following a
+  symlink: a Buildroot output (`.br2-external.mk`, in every output, `O=`
+  ones included), a Yocto TMPDIR (`saved_tmpdir`) or a Bazel output base
+  (`DO_NOT_BUILD_HERE`).
+- **A managed tree by name** anywhere on the build directory's path, read
+  from the path alone: npm's `node_modules`. cmake-js configures a native
+  addon in its package's `build/` by default (its documented `--out`; not
+  run here), with the package directory, its source, as parent; npm does
+  not build an installed package again, so the addon would stay missing
+  until `npm rebuild`.
+
+The names are data in one table
+(`crates/diskgc-core/src/fs_kind/source_anchor/nested.rs`). Verified:
+Buildroot's from package/pkg-generic.mk and from its real per-package
+directories in the container (`host-cmk`, a cmake-package, and
+`host-msn`, Meson run as pkg-meson.mk runs it); OpenWrt v25.12.6's from
+include/package.mk and include/host-build.mk, read but not run (its SDK
+needs the network); the build-root markers are the anchors' own; npm's
+from cmake-js's documentation, with a real CMake build in that layout in
+the container. The
+guard runs at discovery and again at every judgement, the locked one
+included; a stamp that appears after discovery keeps the output
+(`changed`). A directory on the way that cannot be reached, or one of
+the four that cannot be listed (or holds more than the entry limit), is
+a visible refusal of the candidate.
+
+Not covered: a meta-build system not in the table (dpkg-buildpackage,
+Spack, conda-build, Gentoo's Portage), and another package manager's
+tree (a build directory below a Python `.venv`, for one); a stamp more
+than four directories above the build directory, or above the bound
+root, outside any recognised build root (OpenWrt has none); a build
+root reached through a bind mount of a directory inside it (the climb
+follows the path, so the root's marker above the bind's source is not
+seen; stamps in the four directories still are). A stray stamp-like
+name (a `.built` file of the user's own in a parent) only keeps an
+output.
+
 ### Source-anchored build trees
 
 Status: development library only, a verified heuristic pending Mark's

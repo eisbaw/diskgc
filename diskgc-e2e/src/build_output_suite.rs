@@ -283,7 +283,69 @@ fn openwrt_like(ctx: &Ctx) -> Result<PathBuf, String> {
     ] {
         write(ctx, &format!("{SRC}/{rel}"), text.as_bytes())?;
     }
+    // The layout the scenarios build in is OpenWrt's own (TASK-367): its
+    // pinned make rules, read, never run.
+    for (file, rule) in [
+        (
+            "meson.mk",
+            "MESON_BUILD_DIR:=$(PKG_BUILD_DIR)/openwrt-build",
+        ),
+        (
+            "cmake.mk",
+            "CMAKE_BINARY_DIR = $(PKG_BUILD_DIR)$(if $(CMAKE_BINARY_SUBDIR),/$(CMAKE_BINARY_SUBDIR))",
+        ),
+    ] {
+        ensure!(
+            openwrt_rules(ctx, file)?.lines().any(|line| line == rule),
+            "OpenWrt's include/{file} no longer says {rule:?}: update the OpenWrt-like layout"
+        );
+    }
     Ok(src("openwrt/build_dir/target-x86_64_musl"))
+}
+
+/// One of OpenWrt v25.12.6's make rules (`include/FILE`).
+fn openwrt_rules(ctx: &Ctx, file: &str) -> Result<String, String> {
+    let path = ctx.bin_dir.join("openwrt-rules").join(file);
+    std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))
+}
+
+/// The stamp file `variable` names in `$(PKG_BUILD_DIR)` in OpenWrt's
+/// include/package.mk, as a build writes it: a name followed by a make
+/// expression (`.configured$(if $(DUMP),,_$(call confvar,...))`) gets a
+/// hash-shaped suffix, as it does outside `make DUMP=1`.
+fn openwrt_stamp(package_mk: &str, variable: &str) -> Result<String, String> {
+    const DIR: &str = "$(PKG_BUILD_DIR)/";
+    let value = package_mk
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix(variable))
+        .filter_map(|rest| rest.strip_prefix(":=").or_else(|| rest.strip_prefix('=')))
+        .find_map(|value| value.strip_prefix(DIR))
+        .ok_or_else(|| format!("include/package.mk sets no {variable} in {DIR}"))?;
+    Ok(match value.split_once("$(") {
+        Some((name, _)) => format!("{name}_68b329da9893e34099c7d8ad5cb9c940"),
+        None => value.to_owned(),
+    })
+}
+
+/// The stamps a completed OpenWrt target package build leaves in its
+/// `PKG_BUILD_DIR` `pkg` (prepared, configured, built), named by the pinned
+/// include/package.mk. Returns them.
+fn openwrt_stamps(ctx: &Ctx, pkg: &Path) -> Result<Vec<String>, String> {
+    let package_mk = openwrt_rules(ctx, "package.mk")?;
+    let mut stamps = Vec::new();
+    for variable in ["STAMP_PREPARED", "STAMP_CONFIGURED", "STAMP_BUILT"] {
+        let stamp = openwrt_stamp(&package_mk, variable)?;
+        let rel = pkg
+            .join(&stamp)
+            .strip_prefix(HOME)
+            .map_err(|_| format!("{} is not below {HOME}", pkg.display()))?
+            .display()
+            .to_string();
+        write(ctx, &rel, b"")?;
+        stamps.push(stamp);
+    }
+    info!("OpenWrt's stamps in {}: {stamps:?}", pkg.display());
+    Ok(stamps)
 }
 
 // ---- cmake-build-anchored --------------------------------------------------
@@ -353,9 +415,10 @@ fn runs(ctx: &Ctx, program: &Path) -> TestResult {
 /// `wrap/src`). Kept: a build holding a checkout (`contains_checkout`,
 /// FetchContent's layout) and a build in flight, held at a custom target
 /// (`in_use`: Make's working directory). In OpenWrt's layout an in-source
-/// package build is never found, but a package built in its
-/// `openwrt-build` subdirectory (`CMAKE_BINARY_SUBDIR`) is reclaimed: the
-/// single-project false positive this evidence records. CMake then
+/// package build is never found, and a package built in its
+/// `openwrt-build` subdirectory (`CMAKE_BINARY_SUBDIR`) beside OpenWrt's
+/// stamps is not planned (TASK-367, the nested-build guard), nor is an
+/// addon built in cmake-js's layout below `node_modules`. CMake then
 /// configures and builds the reclaimed outputs again.
 pub fn cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_build_in_flight_is_kept(
     ctx: &Ctx,
@@ -412,6 +475,13 @@ pub fn cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_bui
     let ow_sub = cmake_project(ctx, "openwrt/build_dir/target-x86_64_musl/cmsub-1.0")?;
     let ow_sub_build = ow_sub.join("openwrt-build");
     cmake_build(ctx, &ow_sub, &ow_sub_build, "Unix Makefiles")?;
+    openwrt_stamps(ctx, &ow_sub)?;
+    // cmake-js's layout: an addon configured in its package's build/ below
+    // npm's node_modules (its documented default `--out`; cmake-js itself
+    // is not in the image).
+    let addon = cmake_project(ctx, "napp/node_modules/addon")?;
+    let addon_build = addon.join("build");
+    cmake_build(ctx, &addon, &addon_build, "Unix Makefiles")?;
     let live = cmake_project(ctx, "live")?;
     let live_build = live.join("build");
     cmake_build(ctx, &live, &live_build, "Unix Makefiles")?;
@@ -423,14 +493,12 @@ pub fn cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_bui
         (repo_build.clone(), None),
         (fetch.clone(), Some("contains_checkout")),
         (live_build.clone(), Some("in_use")),
-        // The single-project false positive (OpenWrt's CMAKE_BINARY_SUBDIR).
-        (ow_sub_build.clone(), None),
     ];
     expect_floor(
         ctx,
         "cmake-build-anchored",
         SRC_ROOT,
-        &[&out, &deep_ok, &repo_build, &ow_sub_build],
+        &[&out, &deep_ok, &repo_build],
         &expected,
     )?;
 
@@ -466,8 +534,10 @@ pub fn cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_bui
         );
     }
     ensure!(
-        ow_insrc.join("CMakeCache.txt").is_file(),
-        "the in-source OpenWrt package build changed"
+        ow_insrc.join("CMakeCache.txt").is_file()
+            && ow_sub_build.join("CMakeCache.txt").is_file()
+            && addon_build.join("CMakeCache.txt").is_file(),
+        "an OpenWrt package build or the node_modules addon build changed"
     );
 
     cmake_build(ctx, &app, &out, "Ninja")?;
@@ -529,8 +599,9 @@ fn meson_build(ctx: &Ctx, source: &Path, build: &Path) -> TestResult {
 /// refused visibly: `unsupported_layout`, reported at that file. Kept: a build holding a checkout and a
 /// Ninja in flight held at a custom target (`in_use`, its working
 /// directory). OpenWrt's meson.mk builds every package in
-/// `PKG_BUILD_DIR/openwrt-build`: that build is reclaimed, the
-/// single-project false positive. Meson then sets up and builds again.
+/// `PKG_BUILD_DIR/openwrt-build`: beside OpenWrt's stamps that build is not
+/// planned (TASK-367, the nested-build guard). Meson then sets up and
+/// builds again.
 pub fn meson_build_anchored_real_meson_builds_reclaim_then_reconfigure_and_a_ninja_in_flight_is_kept(
     ctx: &Ctx,
 ) -> TestResult {
@@ -587,6 +658,7 @@ pub fn meson_build_anchored_real_meson_builds_reclaim_then_reconfigure_and_a_nin
     let ow_pkg = meson_project(ctx, "openwrt/build_dir/target-x86_64_musl/mspkg-1.0")?;
     let ow_build = ow_pkg.join("openwrt-build");
     meson_build(ctx, &ow_pkg, &ow_build)?;
+    openwrt_stamps(ctx, &ow_pkg)?;
     let live = meson_project(ctx, "live")?;
     let live_bld = live.join("bld");
     meson_build(ctx, &live, &live_bld)?;
@@ -606,14 +678,12 @@ pub fn meson_build_anchored_real_meson_builds_reclaim_then_reconfigure_and_a_nin
             src("moved-away/bld/meson-info/meson-info.json"),
             Some("unsupported_layout"),
         ),
-        // The single-project false positive (OpenWrt's meson.mk).
-        (ow_build.clone(), None),
     ];
     expect_floor(
         ctx,
         "meson-build-anchored",
         SRC_ROOT,
-        &[&bld, &repo_bld, &ow_build],
+        &[&bld, &repo_bld],
         &expected,
     )?;
 
@@ -640,7 +710,7 @@ pub fn meson_build_anchored_real_meson_builds_reclaim_then_reconfigure_and_a_nin
     })?;
     open_gate(ctx, "meson")?;
     build.expect_success()?;
-    for kept in [src("moved-away/bld"), copy.clone()] {
+    for kept in [src("moved-away/bld"), copy.clone(), ow_build.clone()] {
         ensure!(
             kept.join("build.ninja").is_file(),
             "{} lost its build.ninja",
@@ -930,13 +1000,31 @@ pub fn west_build_anchored_real_west_builds_reclaim_then_rebuild_and_a_build_in_
 
 const BR_EXT: &str = "br-ext";
 
-/// A br2-external tree (the user's own source) with two host packages built
-/// from local sources, `host-hello` (a generic package, selected by the
-/// tree's `diskgc_defconfig`) and `host-cmk` (real CMake, out of source in
-/// `buildroot-build`: the layout of Buildroot's cmake-package with
-/// `SUPPORTS_IN_SOURCE_BUILD = NO`, which itself needs host-pkgconf from
-/// the network).
+/// A br2-external tree (the user's own source) with three host packages
+/// built from local sources: `host-hello` (a generic package, selected by
+/// the tree's `diskgc_defconfig`), `host-cmk` (Buildroot's own
+/// cmake-package infrastructure with `SUPPORTS_IN_SOURCE_BUILD = NO`, so
+/// real CMake configures it in `buildroot-build`; it depends on
+/// host-pkgconf, whose pinned source goes into the tree's `dl/`) and
+/// `host-msn` (real Meson in `buildroot-build`, run as pkg-meson.mk runs
+/// it: its host-meson needs host-python3 from the network).
 fn br_external(ctx: &Ctx) -> TestResult {
+    let bin = bin(ctx)?;
+    let msn_mk = format!(
+        "HOST_MSN_VERSION = 1.0
+HOST_MSN_SITE = $(BR2_EXTERNAL_DISKGC_PATH)/src/msn
+HOST_MSN_SITE_METHOD = local
+define HOST_MSN_CONFIGURE_CMDS
+\trm -rf $(@D)/buildroot-build
+\tmkdir -p $(@D)/buildroot-build
+\tPATH={bin}:$$PATH {bin}/meson setup $(@D) $(@D)/buildroot-build
+endef
+define HOST_MSN_BUILD_CMDS
+\t{bin}/ninja -C $(@D)/buildroot-build
+endef
+$(eval $(host-generic-package))
+"
+    );
     let files: &[(&str, &str)] = &[
         (
             "external.desc",
@@ -967,16 +1055,14 @@ $(eval $(host-generic-package))
         ),
         (
             "package/cmk/cmk.mk",
-            "HOST_CMK_VERSION = 1.0
-HOST_CMK_SITE = $(BR2_EXTERNAL_DISKGC_PATH)/src/cmk
-HOST_CMK_SITE_METHOD = local
-define HOST_CMK_BUILD_CMDS
-\tcmake -S $(@D) -B $(@D)/buildroot-build -G 'Unix Makefiles'
-\tcmake --build $(@D)/buildroot-build
-endef
-$(eval $(host-generic-package))
+            "CMK_VERSION = 1.0
+CMK_SITE = $(BR2_EXTERNAL_DISKGC_PATH)/src/cmk
+CMK_SITE_METHOD = local
+CMK_SUPPORTS_IN_SOURCE_BUILD = NO
+$(eval $(host-cmake-package))
 ",
         ),
+        ("package/msn/msn.mk", &msn_mk),
     ];
     for (rel, text) in files {
         write(ctx, &format!("{SRC}/{BR_EXT}/{rel}"), text.as_bytes())?;
@@ -985,9 +1071,28 @@ $(eval $(host-generic-package))
     write(
         ctx,
         &format!("{SRC}/{BR_EXT}/src/cmk/CMakeLists.txt"),
-        b"cmake_minimum_required(VERSION 3.20)\nproject(cmk C)\nadd_executable(cmk main.c)\n",
+        b"cmake_minimum_required(VERSION 3.20)\nproject(cmk C)\nadd_executable(cmk main.c)\ninstall(TARGETS cmk)\n",
     )?;
     write(ctx, &format!("{SRC}/{BR_EXT}/src/cmk/main.c"), MAIN_C)?;
+    write(
+        ctx,
+        &format!("{SRC}/{BR_EXT}/src/msn/meson.build"),
+        b"project('msn', 'c')\nexecutable('msn', 'main.c')\n",
+    )?;
+    write(ctx, &format!("{SRC}/{BR_EXT}/src/msn/main.c"), MAIN_C)?;
+    ctx.home
+        .mkdirs(&format!("{SRC}/buildroot/dl/pkgconf"), 0o755, crate::TESTER)?;
+    tool(
+        ctx,
+        Path::new(HOME),
+        &[],
+        "/bin/cp",
+        &[
+            "-L",
+            &format!("{bin}/buildroot-dl-pkgconf-2.3.0.tar.xz"),
+            display(&src("buildroot/dl/pkgconf/pkgconf-2.3.0.tar.xz"))?,
+        ],
+    )?;
     Ok(())
 }
 
@@ -1071,9 +1176,7 @@ const HELD_CC: &[u8] = b"#!/bin/sh\ncase \"$*\" in *makedevs.c*) sh /home/tester
 /// packages built) the output is never planned: `.br2-external.mk` is
 /// Buildroot's only record of that tree, and without it the next `make`
 /// rewrites the top `.config` without the tree's options, which the test
-/// shows on a copy. `cmake-build-anchored` meanwhile plans the CMake build
-/// Buildroot's layout puts in `output/build/host-cmk-1.0/buildroot-build`
-/// (the recorded cross-profile match).
+/// shows on a copy. Then [`nested_builds_in_buildroot`] (TASK-367).
 pub fn buildroot_output_anchored_real_buildroot_reclaim_then_rebuild_and_a_build_in_flight_is_kept(
     ctx: &Ctx,
 ) -> TestResult {
@@ -1158,7 +1261,7 @@ pub fn buildroot_output_anchored_real_buildroot_reclaim_then_rebuild_and_a_build
     br_external(ctx)?;
     let external = format!("BR2_EXTERNAL={}", display(&src(BR_EXT))?);
     br_make(ctx, &top, &[&external, "diskgc_defconfig"])?;
-    br_make(ctx, &top, &["host-hello", "host-cmk"])?;
+    br_make(ctx, &top, &["host-hello", "host-cmk", "host-msn"])?;
     runs(ctx, &output.join("host/bin/hello"))?;
     let plan = dry_plan(ctx, &binary, &select(profile), SRC_ROOT, true)?;
     ensure!(
@@ -1183,21 +1286,135 @@ pub fn buildroot_output_anchored_real_buildroot_reclaim_then_rebuild_and_a_build
         !config.contains("BR2_PACKAGE_HOST_HELLO=y"),
         "Buildroot kept the external option without its output: update the anchor's reason"
     );
-    let cmk = output.join("build/host-cmk-1.0/buildroot-build");
-    let cmake_plan = dry_plan(
-        ctx,
-        &binary,
-        &select("cmake-build-anchored"),
-        SRC_ROOT,
-        true,
-    )?;
-    info!("cmake-build-anchored inside Buildroot's output: {cmake_plan:?}");
+    nested_builds_in_buildroot(ctx, &binary, &top, &output)
+}
+
+/// TASK-367, the nested-build guard, on Buildroot's real package
+/// directories: `host-cmk` (cmake-package) and `host-msn` (Meson), each
+/// with Buildroot's stamps beside its `buildroot-build`, inside the output.
+/// Neither build is planned by its profile with both signals, with the
+/// stamps alone (`.br2-external.mk` away) or with the output's marker
+/// alone (the stamps away); with neither, both are (the guard is what
+/// keeps them). Why: with `buildroot-build` gone and its stamps left,
+/// `make host-cmk-rebuild` fails.
+fn nested_builds_in_buildroot(ctx: &Ctx, binary: &Path, top: &Path, output: &Path) -> TestResult {
+    let packages = [
+        ("cmake-build-anchored", output.join("build/host-cmk-1.0")),
+        ("meson-build-anchored", output.join("build/host-msn-1.0")),
+    ];
+    let mut stamps = Vec::new();
+    for (_, pkg) in &packages {
+        let mut names: Vec<String> = std::fs::read_dir(pkg)
+            .map_err(|e| format!("list {}: {e}", pkg.display()))?
+            .map(|entry| entry.map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("list {}: {e}", pkg.display()))?;
+        names.retain(|name| name.starts_with('.'));
+        names.sort();
+        info!("Buildroot's dot files in {}: {names:?}", pkg.display());
+        for wanted in [".stamp_configured", ".stamp_built"] {
+            ensure!(
+                names.iter().any(|name| name == wanted),
+                "Buildroot wrote no {wanted} in {}: {names:?}",
+                pkg.display()
+            );
+        }
+        stamps.extend(
+            names
+                .into_iter()
+                .filter(|name| name.starts_with(".stamp_"))
+                .map(|name| pkg.join(name)),
+        );
+    }
     ensure!(
-        cmake_plan.contains(&(cmk.display().to_string(), None)),
-        "cmake-build-anchored did not plan {} in Buildroot's output: {cmake_plan:?}; the \
-         recorded cross-profile match changed: update docs/testing.md and the liveness row",
-        cmk.display()
+        packages[0]
+            .1
+            .join("buildroot-build/CMakeCache.txt")
+            .is_file()
+            && packages[1]
+                .1
+                .join("buildroot-build/meson-info/meson-info.json")
+                .is_file(),
+        "precondition: CMake and Meson configured no buildroot-build"
     );
+    let planned = |label: &str| -> Result<Vec<&'static str>, String> {
+        let mut planned = Vec::new();
+        for (profile, pkg) in &packages {
+            let plan = dry_plan(ctx, binary, &select(profile), SRC_ROOT, true)?;
+            info!("{profile} in Buildroot's output, {label}: {plan:?}");
+            if plan
+                .iter()
+                .any(|(c, _)| c == &pkg.join("buildroot-build").display().to_string())
+            {
+                planned.push(*profile);
+            }
+        }
+        Ok(planned)
+    };
+    let marker = output.join(".br2-external.mk");
+    let marker_away = src("br2-external.mk.away");
+    let stamps_away = src("stamps.away");
+    ctx.home
+        .mkdirs(&format!("{SRC}/stamps.away"), 0o755, crate::TESTER)?;
+    let away = |stamp: &Path| -> Result<PathBuf, String> {
+        let pkg = stamp
+            .parent()
+            .and_then(Path::file_name)
+            .ok_or_else(|| format!("{} has no package directory", stamp.display()))?;
+        let name = stamp
+            .file_name()
+            .ok_or_else(|| format!("{} has no name", stamp.display()))?;
+        Ok(stamps_away.join(format!(
+            "{}{}",
+            pkg.to_string_lossy(),
+            name.to_string_lossy()
+        )))
+    };
+
+    let both = planned("both signals")?;
+    ensure!(both.is_empty(), "planned with both signals: {both:?}");
+    mv(ctx, &marker, &marker_away)?;
+    let stamps_only = planned("stamps only")?;
+    for stamp in &stamps {
+        mv(ctx, stamp, &away(stamp)?)?;
+    }
+    let neither = planned("neither signal")?;
+    mv(ctx, &marker_away, &marker)?;
+    let root_only = planned("the output's marker only")?;
+    for stamp in &stamps {
+        mv(ctx, &away(stamp)?, stamp)?;
+    }
+    ensure!(
+        stamps_only.is_empty(),
+        "planned with Buildroot's stamps alone: {stamps_only:?}"
+    );
+    ensure!(
+        root_only.is_empty(),
+        "planned with the output's .br2-external.mk alone: {root_only:?}"
+    );
+    ensure!(
+        neither.len() == packages.len(),
+        "positive control: without either signal only {neither:?} planned"
+    );
+
+    // Buildroot's next rebuild of a package whose build directory is gone
+    // fails while its stamps say it is configured.
+    let cmk = &packages[0].1;
+    let build_away = src("cmk-build.away");
+    mv(ctx, &cmk.join("buildroot-build"), &build_away)?;
+    let env = br_env(ctx)?;
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let failed = tool_fails(
+        ctx,
+        top,
+        &env,
+        ctx.bin_dir.join("buildroot-tools/make"),
+        &["host-cmk-rebuild"],
+    )?;
+    info!("make host-cmk-rebuild without buildroot-build: {failed}");
+    mv(ctx, &build_away, &cmk.join("buildroot-build"))?;
+    br_make(ctx, top, &["host-cmk-rebuild"])?;
+    runs(ctx, &output.join("host/bin/cmk"))?;
     Ok(())
 }
 

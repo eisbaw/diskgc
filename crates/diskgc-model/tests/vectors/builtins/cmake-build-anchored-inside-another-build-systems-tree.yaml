@@ -1,0 +1,60 @@
+# TASK-367: cmake-build-anchored never takes a build directory inside
+# another build system's managed tree. Refused by (a), stamps in the
+# parent or up to three directories above it, never above the root:
+# Buildroot's .stamp_* (also three up, a package SUBDIR two deep) and
+# OpenWrt's .configured_<hash>, .built and .prepared_<hash>. Refused by
+# (b), a recognised build root anywhere above: a Buildroot output
+# (.br2-external.mk; the package directory has no stamps), a Yocto TMPDIR
+# (saved_tmpdir) above the second root, a Bazel output base
+# (DO_NOT_BUILD_HERE). Refused by (c), npm's node_modules on its path (a
+# cmake-js addon build). A standalone build stays eligible and is deleted.
+profile_vector: 1
+select: profile:cmake-build-anchored
+roots: [/home/tester/src, /home/tester/yocto/tmp/work]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/alone/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/alone/out: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/alone\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/src/pkgs/foo-1.0/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/pkgs/foo-1.0/.stamp_configured: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/pkgs/foo-1.0/.stamp_built: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/pkgs/foo-1.0/buildroot-build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/pkgs/foo-1.0\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/src/tfl-2.0/tensorflow/lite/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/tfl-2.0/.stamp_configured: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/tfl-2.0/tensorflow/lite/buildroot-build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/tfl-2.0/tensorflow/lite\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/src/ow/target/cm-1.0/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/ow/target/cm-1.0/.configured_68b329da9893e34099c7d8ad5cb9c940: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/ow/target/cm-1.0/openwrt-build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/ow/target/cm-1.0\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/src/ow/host/hcm-1.0/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/ow/host/hcm-1.0/.built: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/ow/host/hcm-1.0/openwrt-build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/ow/host/hcm-1.0\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/src/ow/target/prep-1.0/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/ow/target/prep-1.0/.prepared_d41d8cd98f00b204e9800998ecf8427e_: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/ow/target/prep-1.0/build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/ow/target/prep-1.0\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/src/napp/node_modules/@sc/addon/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/napp/node_modules/@sc/addon/build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/napp/node_modules/@sc/addon\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/src/br/output/.br2-external.mk: {content: "BR2_EXTERNAL ?=\n"}
+    /home/tester/src/br/output/build/bar-1.0/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/br/output/build/bar-1.0/buildroot-build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/br/output/build/bar-1.0\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/yocto/tmp/saved_tmpdir: {content: "/home/tester/yocto/tmp\n"}
+    /home/tester/yocto/tmp/work/core2-64/foo/1.0/foo-1.0/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/yocto/tmp/work/core2-64/foo/1.0/foo-1.0/build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/yocto/tmp/work/core2-64/foo/1.0/foo-1.0\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/src/bzl/_bazel_tester/0123/DO_NOT_BUILD_HERE: {content: "/home/tester/src/ws"}
+    /home/tester/src/bzl/_bazel_tester/0123/external/dep/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/bzl/_bazel_tester/0123/external/dep/build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/bzl/_bazel_tester/0123/external/dep\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+expect:
+  plan:
+    - {candidate: /home/tester/src/alone/out, source: /home/tester/src/alone}
+  reclaim_exit: 1
+  actions: [/home/tester/src/alone/out]
+  removed: [/home/tester/src/alone/out]
+  skipped: []
+  preserved: [/home/tester/src/alone/CMakeLists.txt, /home/tester/src/pkgs/foo-1.0/buildroot-build/a.o, /home/tester/src/tfl-2.0/tensorflow/lite/buildroot-build/a.o, /home/tester/src/ow/target/cm-1.0/openwrt-build/a.o, /home/tester/src/ow/host/hcm-1.0/openwrt-build/a.o, /home/tester/src/ow/target/prep-1.0/build/a.o, /home/tester/src/br/output/build/bar-1.0/buildroot-build/a.o, /home/tester/yocto/tmp/work/core2-64/foo/1.0/foo-1.0/build/a.o, /home/tester/src/bzl/_bazel_tester/0123/external/dep/build/a.o, /home/tester/src/napp/node_modules/@sc/addon/build/a.o]

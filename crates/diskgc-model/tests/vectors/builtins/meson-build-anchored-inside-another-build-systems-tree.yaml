@@ -1,0 +1,36 @@
+# TASK-367: meson-build-anchored never takes a build directory inside
+# another build system's managed tree: Buildroot's .stamp_configured and
+# OpenWrt's .built in the package directory (a), a Buildroot output above
+# a package directory without stamps (b). A standalone build is deleted.
+profile_vector: 1
+select: profile:meson-build-anchored
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/alone/meson.build: {content: "project('p')\n"}
+    /home/tester/src/alone/out: {.: {mtime: 2026-10-01T00:00:00Z}, build.ninja: {mtime: 2026-10-01T00:00:00Z}, meson-private: {.: {mtime: 2026-10-01T00:00:00Z}, coredata.dat: {mtime: 2026-10-01T00:00:00Z, content: coredata}}, meson-info: {.: {mtime: 2026-10-01T00:00:00Z}, meson-info.json: {mtime: 2026-10-01T00:00:00Z, content: "{\"directories\":{\"source\":\"/home/tester/src/alone\",\"build\":\"/home/tester/src/alone/out\",\"info\":\"/home/tester/src/alone/out/meson-info\"},\"error\":false}"}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/src/pkgs/pix-1.0/meson.build: {content: "project('p')\n"}
+    /home/tester/src/pkgs/pix-1.0/.stamp_configured: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/pkgs/pix-1.0/buildroot-build: {.: {mtime: 2026-10-01T00:00:00Z}, build.ninja: {mtime: 2026-10-01T00:00:00Z}, meson-private: {.: {mtime: 2026-10-01T00:00:00Z}, coredata.dat: {mtime: 2026-10-01T00:00:00Z, content: coredata}}, meson-info: {.: {mtime: 2026-10-01T00:00:00Z}, meson-info.json: {mtime: 2026-10-01T00:00:00Z, content: "{\"directories\":{\"source\":\"/home/tester/src/pkgs/pix-1.0\",\"build\":\"/home/tester/src/pkgs/pix-1.0/buildroot-build\",\"info\":\"/home/tester/src/pkgs/pix-1.0/buildroot-build/meson-info\"},\"error\":false}"}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/src/ow/target/ms-1.0/meson.build: {content: "project('p')\n"}
+    /home/tester/src/ow/target/ms-1.0/.built: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/ow/target/ms-1.0/openwrt-build: {.: {mtime: 2026-10-01T00:00:00Z}, build.ninja: {mtime: 2026-10-01T00:00:00Z}, meson-private: {.: {mtime: 2026-10-01T00:00:00Z}, coredata.dat: {mtime: 2026-10-01T00:00:00Z, content: coredata}}, meson-info: {.: {mtime: 2026-10-01T00:00:00Z}, meson-info.json: {mtime: 2026-10-01T00:00:00Z, content: "{\"directories\":{\"source\":\"/home/tester/src/ow/target/ms-1.0\",\"build\":\"/home/tester/src/ow/target/ms-1.0/openwrt-build\",\"info\":\"/home/tester/src/ow/target/ms-1.0/openwrt-build/meson-info\"},\"error\":false}"}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/src/br/output/.br2-external.mk: {content: "BR2_EXTERNAL ?=\n"}
+    /home/tester/src/br/output/build/bar-1.0/meson.build: {content: "project('p')\n"}
+    /home/tester/src/br/output/build/bar-1.0/buildroot-build: {.: {mtime: 2026-10-01T00:00:00Z}, build.ninja: {mtime: 2026-10-01T00:00:00Z}, meson-private: {.: {mtime: 2026-10-01T00:00:00Z}, coredata.dat: {mtime: 2026-10-01T00:00:00Z, content: coredata}}, meson-info: {.: {mtime: 2026-10-01T00:00:00Z}, meson-info.json: {mtime: 2026-10-01T00:00:00Z, content: "{\"directories\":{\"source\":\"/home/tester/src/br/output/build/bar-1.0\",\"build\":\"/home/tester/src/br/output/build/bar-1.0/buildroot-build\",\"info\":\"/home/tester/src/br/output/build/bar-1.0/buildroot-build/meson-info\"},\"error\":false}"}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+expect:
+  plan:
+    - {candidate: /home/tester/src/alone/out, source: /home/tester/src/alone}
+  reclaim_exit: 1
+  actions: [/home/tester/src/alone/out]
+  removed: [/home/tester/src/alone/out]
+  skipped: []
+  preserved: [/home/tester/src/alone/meson.build, /home/tester/src/pkgs/pix-1.0/buildroot-build/a.o, /home/tester/src/ow/target/ms-1.0/openwrt-build/a.o, /home/tester/src/br/output/build/bar-1.0/buildroot-build/a.o]

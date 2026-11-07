@@ -322,7 +322,11 @@
 
 # A narrower source-anchored recognizer for build output of any directory
 # name. It requires the cache's recorded source to be an ancestor outside
-# the candidate; a missing source cannot be rebuilt and is retained.
+# the candidate; a missing source cannot be rebuilt and is retained. Never
+# one inside another build system's tree (TASK-367): never released, so
+# cmake-, meson-, autotools- and west-build-anchored were narrowed under
+# their names (pending Mark's ruling, docs/reference.md, Built-in profile
+# library).
 - name: cmake-build-anchored
   category: c / c++
   description: Source-anchored CMake output of any name through depth five
@@ -337,7 +341,7 @@
     root: /home/mark/src
     match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
-  verified_with: CMake 4.4.3 (Ninja 1.13.2, GNU Make 4.4.1) builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); CMake 3.30.5 recorded CMAKE_HOME_DIRECTORY in host tracy builds, 2026-10-20
+  verified_with: CMake 4.4.3 (Ninja 1.13.2, GNU Make 4.4.1) builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); CMake 3.30.5 recorded CMAKE_HOME_DIRECTORY in host tracy builds, 2026-10-20; nested-build guard against Buildroot 2026.08.1 package directories and OpenWrt v25.12.6 make rules (TASK-367)
   liveness_class: verified-heuristic
 
 # Meson's generated metadata records both source and build paths. Only an
@@ -356,7 +360,7 @@
     root: /home/mark/src
     match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
-  verified_with: Meson 1.12.1 (Ninja 1.13.2) builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); Meson 1.7.0 in a disposable Debian 13 container, 2026-10-20
+  verified_with: Meson 1.12.1 (Ninja 1.13.2) builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); Meson 1.7.0 in a disposable Debian 13 container, 2026-10-20; nested-build guard against Buildroot 2026.08.1 package directories and OpenWrt v25.12.6 make rules (TASK-367)
   liveness_class: verified-heuristic
 
 # GNU Autoconf's generated config.status binds its build path to a source
@@ -376,7 +380,7 @@
     root: /home/mark/src
     match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
-  verified_with: GNU Autoconf 2.73 (GNU Make 4.4.1) configure builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354)
+  verified_with: GNU Autoconf 2.73 (GNU Make 4.4.1) configure builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); nested-build guard against Buildroot 2026.08.1 package directories and OpenWrt v25.12.6 make rules (TASK-367)
   liveness_class: verified-heuristic
 
 # ---- TASK-101: build trees anchored to a whole source tree (pending
@@ -559,7 +563,7 @@
     root: /home/mark/src
     match: [/home/mark/src/app/build, /home/mark/src/a/b/c/d/build]
     no_match: [/home/mark/src/a/b/c/d/e/build, /home/mark/src/app/build/zephyr]
-  verified_with: Zephyr 4.3.0 West 1.5.0 native_sim/native/64 builds with CMake 4.4.3 reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); source-anchor ModelHost vector 2026-10-20
+  verified_with: Zephyr 4.3.0 West 1.5.0 native_sim/native/64 builds with CMake 4.4.3 reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); source-anchor ModelHost vector 2026-10-20; nested-build guard against Buildroot 2026.08.1 package directories and OpenWrt v25.12.6 make rules (TASK-367)
   liveness_class: verified-heuristic
 
 - name: platformio-cache

@@ -1,0 +1,31 @@
+# TASK-367: a Buildroot stamp that appears beside a CMake build directory
+# after discovery, just before the candidate lock, keeps it: the locked
+# judgement's nested-build guard no longer accepts the source evidence
+# discovery recorded (`changed`). Found by QA's judge-only mutant.
+profile_vector: 1
+select: profile:cmake-build-anchored
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/pkgs/foo-1.0/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/pkgs/foo-1.0/buildroot-build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/pkgs/foo-1.0\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+  events:
+    - at: {op: flock, path: /home/tester/src/pkgs/foo-1.0/buildroot-build, nth: 1, when: before}
+      create: /home/tester/src/pkgs/foo-1.0/.stamp_configured
+expect:
+  plan:
+    - {candidate: /home/tester/src/pkgs/foo-1.0/buildroot-build, source: /home/tester/src/pkgs/foo-1.0}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/src/pkgs/foo-1.0/buildroot-build, reason: changed}
+  preserved: [/home/tester/src/pkgs/foo-1.0/buildroot-build/a.o]

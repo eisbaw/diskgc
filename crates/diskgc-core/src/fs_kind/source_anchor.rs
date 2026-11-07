@@ -19,6 +19,9 @@ use crate::resolve::{ResolveError, Resolved, Want, open_beneath, resolve_in};
 // output (Buildroot, Yocto, Bazel); pending Mark's admission.
 mod build_trees;
 use build_trees::{bazel, buildroot, yocto};
+// TASK-367: no CMake, Meson or Autotools build inside another build
+// system's managed tree.
+mod nested;
 
 const CMAKE_CACHE: &str = "CMakeCache.txt";
 const CMAKE_SOURCE_KEY: &[u8] = b"CMAKE_HOME_DIRECTORY:INTERNAL=";
@@ -145,7 +148,7 @@ pub(super) fn check_opened<H: Host>(
             "the reached candidate is not the one whose source was discovered",
         )));
     }
-    match kind {
+    let evidence = judged!(match kind {
         SourceAnchor::Cmake => cmake(host, root, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Meson => meson(host, root, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Autotools => {
@@ -154,7 +157,16 @@ pub(super) fn check_opened<H: Host>(
         SourceAnchor::Buildroot => buildroot(host, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Yocto => yocto(host, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Bazel => bazel(host, candidate, candidate_fd, mount_id, deadline),
+    });
+    // Another build system's package build is that system's to clean
+    // (TASK-367): kept like any output whose evidence is in doubt.
+    if evidence.is_some()
+        && nested::GUARDED.contains(&kind)
+        && judged!(nested::outer_build(host, root, candidate, deadline)).is_some()
+    {
+        return Ok(Ok(None));
     }
+    Ok(Ok(evidence))
 }
 
 /// One CMake candidate. `None` means its marker does not establish a
@@ -606,6 +618,22 @@ fn unreachable_build(
             at.display(),
             skip.detail
         ),
+    ))
+}
+
+/// The refusal of `candidate` when `at`, a directory checked for `what`,
+/// cannot be reached.
+fn unreachable_root_as(
+    candidate: &Path,
+    at: &Path,
+    what: &str,
+    error: ResolveError,
+) -> Result<Skip, crate::outcome::Stop> {
+    let skip = unreachable_root(at, error)?;
+    Ok(Skip::new(
+        skip.reason,
+        candidate.to_owned(),
+        format!("cannot check {} for {what}: {}", at.display(), skip.detail),
     ))
 }
 
