@@ -1516,8 +1516,8 @@ is `host`.
   reason and for an aggregated row: `busy` (no in-use scan stayed fresh
   for this candidate in its attempts, checked in full; or a scan that
   did not settle, because the process list kept growing, a process's own
-  reads did not hold still while it was exiting or changing, was waited
-  out for this
+  reads did not hold still while it was exiting or changing, or, for the
+  project contracts, its command line did not, was waited out for this
   candidate until the deadline, a signal, or the goal reached by someone
   else ended the waits, or it stopped a Cargo target part-way: a later
   run may judge it; since TASK-340 a busy host makes a tier back off,
@@ -1537,9 +1537,9 @@ is `host`.
   process, never `busy` (TASK-340). The dry run's plan does not carry it.
 - `skipped[].process_blockers` is `null` when the refusal cannot be
   attributed to an observed process, including flock contention, an
-  unsettled process scan, a process whose reads did not settle
-  (`unknown_cause: busy`, a busy host's; its detail names it, TASK-348;
-  once taken to be stuck it is `unreadable_process`
+  unsettled process scan, a process whose reads or command line did not
+  settle (`unknown_cause: busy`, a busy host's; its detail names it,
+  TASK-348, TASK-366; once taken to be stuck it is `unreadable_process`
   and named here) and grouped rows. Otherwise it is a nonempty array
   of `{pid: u32, command: string|null, evidence: string}`. `pid` and
   `command` are scan-time observations; an unreadable process can have a
@@ -3171,6 +3171,13 @@ line says it was reproduced.
   its deadline. Stale scans keep TASK-340's three in a row. 0.1.0: yes;
   it has the one retry (static reading; reproduced on this change's base
   in the model).
+- TASK-366: for the project contracts (`node-modules`, `python-venv`), a
+  process whose command line did not hold still to be read (exiting
+  while it was read) is a busy host's, waited out as above, no longer
+  "its command line could not be read, so it may name the project" for
+  every project of the run; a command line that cannot be read for a
+  lasting cause, or one stuck for 30 s, still keeps every project. 0.1.0:
+  no (it has no project contracts).
 
 **What it does.** One command frees space, a service keeps its index
 warm, two read-only ones explain it:
@@ -3491,7 +3498,7 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
   three attempts all see a stale scan is kept `in_use_unknown`, and after
   three in a row the tier backs off before each further check. A scan
   whose process list keeps growing (a fork storm), or that meets a
-  process whose reads
+  process whose reads (or, for the project contracts, whose command line)
   do not hold still (exiting or changing, such as a concurrent build's
   linker), is waited out for the candidate it was made for, which is then
   checked again ([safety.md](safety.md#in-use), Freshness, Busy host); a

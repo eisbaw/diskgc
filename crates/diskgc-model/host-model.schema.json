@@ -362,7 +362,7 @@
       ]
     },
     "CmdlineSpec": {
-      "description": "A process's command line, or `unreadable`.",
+      "description": "A process's command line, or `unreadable`, or `unsettled`.",
       "anyOf": [
         {
           "type": "array",
@@ -372,6 +372,9 @@
         },
         {
           "$ref": "#/$defs/UnreadableTag"
+        },
+        {
+          "$ref": "#/$defs/UnsettledTag"
         }
       ]
     },
@@ -1633,7 +1636,7 @@
       "type": "object",
       "properties": {
         "cmdline": {
-          "description": "Its command line (`/proc/<pid>/cmdline`), one string per argument;\ndefault `[exe]` (the executable's path, or nothing without one);\n`unreadable`: every read fails (`Failed`). Readable whatever\n`proc:` says, as on Linux; a zombie's reads empty.",
+          "description": "Its command line (`/proc/<pid>/cmdline`), one string per argument;\ndefault `[exe]` (the executable's path, or nothing without one);\n`unreadable`: every read fails (`Failed`); `unsettled`: every read\nends `Unsettled`, as `LinuxHost`'s does when no task gave it while\nlive (a process exiting while its command line is read, TASK-366),\nuntil an `exit` event. Readable whatever `proc:` says, as on Linux;\na zombie's reads empty.",
           "anyOf": [
             {
               "$ref": "#/$defs/CmdlineSpec"
@@ -1856,6 +1859,13 @@
       "type": "string",
       "enum": [
         "unreadable"
+      ]
+    },
+    "UnsettledTag": {
+      "description": "The word `unsettled`.",
+      "type": "string",
+      "enum": [
+        "unsettled"
       ]
     },
     "WallTime": {

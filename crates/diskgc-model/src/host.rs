@@ -69,7 +69,7 @@ use crate::spec::{GateSpec, HostModel, Op, PressureStep, ProcAccess, When};
 fn gate_refusal(op: &'static str, subject: &str) -> HostError {
     HostError::sandbox_gate(op, subject, "the host model's sandbox_gate is not open")
 }
-use crate::state::{Fault, Kind, Loc, Ref, State, WalkRules};
+use crate::state::{Cmdline, Fault, Kind, Loc, Ref, State, WalkRules};
 
 /// What [`Host::now`] reads when a run starts: a running machine's uptime,
 /// so code that subtracts from `now()` is not hidden by a zero origin.
@@ -2518,7 +2518,9 @@ impl Host for ModelHost {
     }
 
     /// The model's `cmdline`, whatever `proc:` says (world-readable on
-    /// Linux); a zombie's is empty; `unreadable` is `Failed`.
+    /// Linux); a zombie's is empty; `unreadable` is `Failed`, `unsettled`
+    /// is `Unsettled` (as `LinuxHost` says when no task gave it while
+    /// live).
     fn proc_cmdline(&self, pid: Pid) -> Result<Vec<OsString>, ProcError> {
         let path = PathBuf::from(format!("/proc/{pid}/cmdline"));
         let shown = path.display().to_string();
@@ -2534,8 +2536,18 @@ impl Host for ModelHost {
                 None => (Err(ProcError::Gone), None, "gone".to_owned()),
                 Some(proc) if proc.zombie => (Ok(Vec::new()), None, "empty (zombie)".to_owned()),
                 Some(proc) => match &proc.cmdline {
-                    Some(args) => (Ok(args.clone()), None, format!("{args:?}")),
-                    None => (
+                    Cmdline::Args(args) => (Ok(args.clone()), None, format!("{args:?}")),
+                    Cmdline::Unsettled => (
+                        Err(ProcError::Unsettled(HostError::invalid(
+                            "read",
+                            format!("process {pid}"),
+                            "no trustworthy read in 16 rounds: no listed task gave its command \
+                             line while live",
+                        ))),
+                        None,
+                        "unsettled".to_owned(),
+                    ),
+                    Cmdline::Unreadable => (
                         Err(ProcError::Failed(HostError::invalid(
                             "read",
                             &shown,

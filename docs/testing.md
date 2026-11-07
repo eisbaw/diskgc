@@ -635,8 +635,17 @@ Model scenarios required by [safety.md](safety.md) and
   cause (a `newgrp` shell) keeps a one-candidate tier and its plan at once
   without a back-off; a Cargo target the host turns busy on after its
   first part was deleted is recorded part-way, not run again (a run again
-  lost the first part's action from the report). Those of the waits failed on the stack's base (TASK-317 + TASK-348), and each
-  mechanism has a mutation that fails one (a wait for any cause, no stuck bound, no retry in the reclaim
+  lost the first part's action from the report). The project contracts'
+  command line (TASK-366, the
+  model's `cmdline: unsettled`: TASK-348's e2e run 1, a container process
+  exiting while it is read): a dry run and a reclaim of two `node-modules`
+  projects wait one back-off and take both, where the base kept both
+  `in_use`; one that never holds still, after four back-offs, and one that
+  cannot be read (`cmdline: unreadable`), at once, keep both `in_use`
+  naming it, in the reclaim and in a dry run (`busy_host.rs`). Those of
+  the waits failed on the stack's base (TASK-317 + TASK-348), and each
+  mechanism has a mutation that fails one (no busy note for the command
+  line, a wait for any cause, no stuck bound, no retry in the reclaim
   walk, no wait in a plan, the goal not sampled between waits, the busy
   flag at a tier timeout, the waits' overrun). Not pinned: that a scan in
   which a process held still restarts its 30 s (never restarting only
@@ -655,7 +664,8 @@ Model scenarios required by [safety.md](safety.md) and
   `a_live_task_that_showed_nothing_once_is_failed_not_unsettled` and the
   churn cases). Not in a container: a fork storm cannot be timed to
   diskgc's listings there (the kernel cases pin only that no unsettled
-  scan clears), nor can a process held mid-exit, and a process diskgc cannot inspect, which a
+  scan clears), nor can a process held mid-exit or one exiting while its
+  command line is read, and a process diskgc cannot inspect, which a
   container can make, does not back off. On a real kernel the waits run
   only when a run meets real churn (TASK-317's gate met it in the serial
   host-PID tail of `release_candidate_pip_cache_*`); no container test

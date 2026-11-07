@@ -938,8 +938,8 @@ pub struct Skip {
 pub enum UnknownCause {
     /// No in-use scan stayed fresh for the candidate in its attempts, or
     /// one did not settle (the process list kept growing, a process's own
-    /// reads did not hold still while it was exiting or changing, TASK-348)
-    /// and the waits for it (TASK-364) ended
+    /// reads or command line did not hold still while it was exiting or
+    /// changing, TASK-348, TASK-366) and the waits for it (TASK-364) ended
     /// first: the deadline, a signal, the goal reached by someone else, or
     /// a Cargo target stopped part-way. A busy host, and a later run may
     /// judge it. Stale ones three in a row make the tier back off, never

@@ -63,6 +63,17 @@ pub struct HeldObjects {
     /// link texts of its working directories, against which a relative
     /// argument is placed.
     pub argv: BTreeMap<Pid, Argv>,
+    /// The processes whose command line did not hold still to be read
+    /// ([`ProcError::Unsettled`]: exiting or changing while it was read),
+    /// with the read's error. A busy host's: the scan judges nothing until
+    /// they settle ([`super::Scan::blocked_by`], TASK-366), unless one stays
+    /// so for [`super::STUCK_AFTER`]. Their command line is kept above as
+    /// `Err`, as for any failed read, so a stuck one still keeps every
+    /// project it may name. Only the command line: an unread one keeps
+    /// every project, where a failed climb or mount table keeps only what
+    /// it could place (a project on that device, a file through a foreign
+    /// mount), so those stay as they were.
+    pub unsettled: BTreeMap<Pid, String>,
 }
 
 /// A process's command line (or why it could not be read) and the link
@@ -122,7 +133,15 @@ pub(crate) fn collect<H: Host>(
             Err(ProcError::Exhausted(e)) => {
                 return Err(ScanError::Failed(super::scan::with_descriptor_advice(e)));
             }
-            Err(e) => Some(Err(e.to_string())),
+            Err(e) => {
+                if let ProcError::Unsettled(_) = e {
+                    out.unsettled.insert(
+                        *pid,
+                        format!("its command line did not hold still to be read: {e}"),
+                    );
+                }
+                Some(Err(e.to_string()))
+            }
         };
         if let Some(argv) = argv {
             out.argv.insert(*pid, (argv, process.seen.cwds.clone()));

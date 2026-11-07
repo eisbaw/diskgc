@@ -96,7 +96,7 @@ pub const FRESH_RETRY_PAUSES: [Duration; FRESH_ATTEMPTS - 1] =
 
 /// One short pause before retrying a scan that could judge nothing because
 /// the host was busy ([`Scan::blocked_by`] says `busy`: its process list
-/// kept growing, or a process's reads did not hold still).
+/// kept growing, or a process's reads or command line did not hold still).
 /// The retry is a complete scan; neither scan can clear a candidate unless
 /// it settles. What outlasts it is waited out with [`BusyBackOff`]: by the
 /// reclaim walk before it checks the candidate again, by a plan's checker
@@ -779,7 +779,14 @@ impl Scan {
     /// other blocking process (`unreadable_process`) can stay so while it
     /// runs and decides first, since it keeps every candidate whether or
     /// not the other settles; so does one that has not held still for
-    /// [`STUCK_AFTER`] ([`Self::stuck`]).
+    /// [`STUCK_AFTER`] ([`Self::stuck`]). Last, a readable process whose
+    /// command line did not hold still for the project contracts
+    /// ([`held::HeldObjects::unsettled`], read only when a selected source
+    /// has one): busy too, since its
+    /// command line may name any project, and reading it again once it
+    /// settles tells (TASK-366); once stuck it no longer blocks the scan,
+    /// and its unread command line keeps every project instead
+    /// (`fs_kind::project`).
     pub fn blocked_by(&self) -> Option<(UnknownCause, String)> {
         if let Err(why) = &self.visibility {
             return Some((UnknownCause::IncompleteProcessList, why.clone()));
@@ -790,7 +797,17 @@ impl Scan {
         if let Some(why) = &self.unsettled {
             return Some((UnknownCause::Busy, why.clone()));
         }
-        let u = self.first_blocking_unreadable()?;
+        let Some(u) = self.first_blocking_unreadable() else {
+            return self.held_unsettled().map(|(pid, why)| {
+                (
+                    UnknownCause::Busy,
+                    format!(
+                        "pid {pid} ({}): {why}, so its command line may name any project",
+                        self.command(pid)
+                    ),
+                )
+            });
+        };
         let name = u
             .name
             .as_ref()
@@ -847,7 +864,22 @@ impl Scan {
             .iter()
             .filter(|u| u.excuse.is_none() && matches!(u.error, ProcError::Unsettled(_)))
             .map(|u| u.pid)
+            .chain(
+                self.held
+                    .iter()
+                    .flat_map(|held| held.unsettled.keys().copied()),
+            )
             .collect()
+    }
+
+    /// The first readable process (by pid) whose command line did not hold
+    /// still to be read and is not [`Self::stuck`], with the read's error.
+    fn held_unsettled(&self) -> Option<(Pid, &str)> {
+        self.held
+            .as_ref()?
+            .unsettled
+            .iter()
+            .find_map(|(pid, why)| (!self.stuck.contains_key(pid)).then_some((*pid, why.as_str())))
     }
 
     /// Whether this scan could judge nothing because the host was busy

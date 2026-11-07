@@ -1063,6 +1063,170 @@ fn a_lasting_cause_skips_a_single_candidate_without_waiting() {
     assert!(back_offs(&host).is_empty(), "{:?}", pauses(&host));
 }
 
+// TASK-366: the project contracts read every process's command line
+// (fs_kind/project.rs `argv_naming`). One that does not hold still to be
+// read (a process exiting while it is read) is a busy host's, waited out as
+// a scan that did not settle is; one that cannot be read for a lasting
+// cause still keeps every project it may name.
+
+/// Two idle Node projects `/home/tester/p` and `/home/tester/q`, each with
+/// its `node_modules`, a shell that uses neither, and process 950 (a
+/// container's, `node` from elsewhere) with `cmdline_950` as its command
+/// line, which uses neither; `events` are more event items.
+fn projects_model(cmdline_950: &str, events: &str) -> ModelHost {
+    let project = |name: &str| {
+        format!(
+            r#"  /home/tester/{name}:
+    .: {{mtime: 2026-08-16T03:00:00Z}}
+    package.json: {{content: "{{\"name\": \"{name}\", \"version\": \"1.0.0\"}}", mtime: 2026-08-16T03:00:00Z}}
+    src:
+      .: {{mtime: 2026-08-16T03:00:00Z}}
+      a.js: {{mtime: 2026-08-16T03:00:00Z}}
+    node_modules:
+      .: {{mtime: 2026-08-16T03:00:00Z}}
+      x:
+        .: {{mtime: 2026-08-16T03:00:00Z}}
+        i.js: {{size: 4K, mtime: 2026-08-16T03:00:00Z}}
+"#
+        )
+    };
+    host(&format!(
+        r#"host_model: 1
+clock: 2026-10-15T03:00:00Z
+mounts:
+  - {{id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}}
+  - {{id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}}
+tree:
+  /run/diskgc/lock: {{uid: 0, gid: 0}}
+  /usr/bin/bash: {{}}
+  /usr/bin/node: {{}}
+  /home/tester/.bash_history: {{size: 1K}}
+{}{}processes:
+  - {{pid: 900, exe: /usr/bin/bash, cwd: /home/tester, maps: [/usr/bin/bash], environ: ["HOME=/home/tester"], fds: [{{path: /usr/bin/bash}}, {{path: /home/tester/.bash_history}}]}}
+  - {{pid: 950, exe: /usr/bin/node, cwd: /, cmdline: {cmdline_950}, maps: [/usr/bin/node], environ: ["HOME=/root"], fds: [{{path: /usr/bin/node}}]}}
+events:
+{events}"#,
+        project("p"),
+        project("q"),
+    ))
+}
+
+/// The built-in `node-modules` profile below `/home/tester`.
+fn projects_request(timeout: Option<Duration>) -> Request {
+    let library = Library::builtin().unwrap_or_else(|e| panic!("{e}"));
+    Request {
+        path: PathBuf::from("/home"),
+        min_free: parse_size("100%").expect("a size"),
+        target_free: None,
+        timeout,
+        tally_budget: None,
+        watch: None,
+        tier: Tier::select(
+            "profile:node-modules",
+            &library,
+            Some(&["/home/tester".to_owned()]),
+            1000,
+        )
+        .unwrap_or_else(|e| panic!("{e}")),
+    }
+}
+
+fn node_modules(project: &str) -> PathBuf {
+    PathBuf::from(format!("/home/tester/{project}/node_modules"))
+}
+
+/// TASK-348's e2e run 1 in small (TASK-366): a container process, read in
+/// full by the scan, is exiting when its command line is read ("no listed
+/// task gave its command line while live"). That is a busy host: both
+/// projects wait for one back-off, the process is gone by then, and both
+/// `node_modules` are reclaimed; the dry run waits likewise and plans both
+/// eligible. On the stack's base its unread command line kept every project
+/// `in_use` ("its command line could not be read ..., so it may name the
+/// project"), in the reclaim and the plan.
+#[test]
+fn a_command_line_that_does_not_hold_still_is_waited_out_for_every_project() {
+    let exits = "  - {at: {elapsed: 1s}, exit: 950}\n";
+    let host = projects_model("unsettled", exits);
+    let (report, _) = dry_run(&host, &projects_request(Some(Duration::from_secs(120))));
+    assert_eq!(
+        plan_rows(&report),
+        [(node_modules("p"), None), (node_modules("q"), None)],
+        "{report:#?}"
+    );
+    assert_eq!(
+        back_offs(&host),
+        [Duration::from_secs(2)],
+        "{:?}",
+        pauses(&host)
+    );
+
+    let host = projects_model("unsettled", exits);
+    let (report, lines) = ensure(&host, &projects_request(Some(Duration::from_secs(120))));
+    assert!(report.skipped.is_empty(), "{report:#?}");
+    assert_eq!(
+        acted(&report),
+        [node_modules("p"), node_modules("q")],
+        "{report:#?}"
+    );
+    assert!(!exists(&host, &node_modules("p")));
+    assert!(!exists(&host, &node_modules("q")));
+    assert_eq!(
+        back_offs(&host),
+        [Duration::from_secs(2)],
+        "{:?}",
+        pauses(&host)
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("the host is too busy")
+            && l.contains("pid 950 (node): its command line did not hold still")),
+        "the wait names the process and its command line: {lines:#?}"
+    );
+}
+
+/// The guarantee kept: a command line that is never read is never taken to
+/// name nothing. One that never holds still (its process stuck in its
+/// exit) is waited out for [`STUCK_AFTER`], then keeps every project as an
+/// unread command line does (`in_use`, evidence `unreadable`, naming pid
+/// 950), with no further back-off; one that cannot be read for a lasting
+/// cause (`Failed`) keeps every project at once, without waiting. Nothing
+/// is deleted.
+#[test]
+fn an_unread_command_line_still_keeps_every_project() {
+    for (cmdline, waits) in [("unsettled", 4), ("unreadable", 0)] {
+        let host = projects_model(cmdline, "");
+        let (report, _) = ensure(&host, &projects_request(Some(Duration::from_secs(600))));
+        assert!(acted(&report).is_empty(), "{cmdline}: {report:#?}");
+        for project in ["p", "q"] {
+            assert!(exists(&host, &node_modules(project)), "{cmdline}");
+            let skip = report
+                .skipped
+                .iter()
+                .find(|s| s.candidate.as_ref() == Some(&node_modules(project)))
+                .unwrap_or_else(|| panic!("{cmdline}: {project} not kept: {report:#?}"));
+            assert_eq!(skip.reason, Reason::InUse, "{cmdline}: {skip:#?}");
+            assert!(
+                skip.detail
+                    .as_deref()
+                    .is_some_and(|d| d.contains("command line could not be read")),
+                "{cmdline}: {skip:#?}"
+            );
+            assert_eq!(
+                skip.process_blockers
+                    .as_deref()
+                    .map(|b| b.iter().map(|b| b.pid).collect::<Vec<_>>()),
+                Some(vec![950]),
+                "{cmdline}: {skip:#?}"
+            );
+        }
+        assert_eq!(
+            back_offs(&host).len(),
+            waits,
+            "{cmdline}: {:?}",
+            pauses(&host)
+        );
+    }
+}
+
 /// A Cargo target is reclaimed part by part, each part checked on its own
 /// scan. When the host turns busy after its first part was deleted (here
 /// pid 10's reads stop holding still once the first entry is unlinked, and
@@ -1247,4 +1411,23 @@ fn a_tier_timeout_during_a_busy_wait_names_the_busy_host() {
     assert!(error.message.contains("too busy"), "{error:?}");
     assert!(exists(&host, &candidate(1)));
     assert_eq!(acted(&report), [PathBuf::from("/tmp/o-1")], "{report:#?}");
+}
+
+/// A command line that never holds still, in a dry run: the plan waits
+/// four back-offs ([`STUCK_AFTER`]), then plans both projects `in_use`
+/// (an unread command line keeps every project), as the reclaim keeps
+/// them.
+#[test]
+fn a_stuck_command_line_keeps_every_project_in_a_dry_run() {
+    let host = projects_model("unsettled", "");
+    let (report, _) = dry_run(&host, &projects_request(Some(Duration::from_secs(600))));
+    assert_eq!(
+        plan_rows(&report),
+        [
+            (node_modules("p"), Some(Reason::InUse)),
+            (node_modules("q"), Some(Reason::InUse))
+        ],
+        "{report:#?}"
+    );
+    assert_eq!(back_offs(&host).len(), 4, "{:?}", pauses(&host));
 }

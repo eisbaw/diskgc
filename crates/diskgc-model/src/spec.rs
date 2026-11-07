@@ -695,8 +695,11 @@ pub struct ProcessSpec {
     pub zombie: bool,
     /// Its command line (`/proc/<pid>/cmdline`), one string per argument;
     /// default `[exe]` (the executable's path, or nothing without one);
-    /// `unreadable`: every read fails (`Failed`). Readable whatever
-    /// `proc:` says, as on Linux; a zombie's reads empty.
+    /// `unreadable`: every read fails (`Failed`); `unsettled`: every read
+    /// ends `Unsettled`, as `LinuxHost`'s does when no task gave it while
+    /// live (a process exiting while its command line is read, TASK-366),
+    /// until an `exit` event. Readable whatever `proc:` says, as on Linux;
+    /// a zombie's reads empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cmdline: Option<CmdlineSpec>,
     /// Path prefixes as its root and mount namespace see them, mapped to
@@ -708,12 +711,20 @@ pub struct ProcessSpec {
     pub view: BTreeMap<PathBuf, PathBuf>,
 }
 
-/// A process's command line, or `unreadable`.
+/// A process's command line, or `unreadable`, or `unsettled`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CmdlineSpec {
     Args(Vec<String>),
     Unreadable(UnreadableTag),
+    Unsettled(UnsettledTag),
+}
+
+/// The word `unsettled`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UnsettledTag {
+    Unsettled,
 }
 
 /// Which PID namespace diskgc runs in, as Owner PID's precondition and the

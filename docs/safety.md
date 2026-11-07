@@ -1339,8 +1339,8 @@ kept as above may answer: a use that starts after that scan is limit 5
 above.
 
 **Busy host:** a scan that judges nothing because the host is busy (its
-process list kept growing, a process's reads did not hold still) is
-retried once after
+process list kept growing, a process's reads did not hold still, or, for
+the project contracts, its command line did not) is retried once after
 20 ms (Every process, and only once settled, above). If the retry judges nothing either,
 the candidate is not given up (TASK-364): the reclaim walk, once the
 candidate's protocol has returned and released its locks (its `flock`, a
@@ -2527,7 +2527,16 @@ longest):
    more); a process that stays unreadable is already the in-use check's
    (`in_use_unknown`), which runs first; a held directory on one of the
    tree's devices whose climb failed retains (`in_use`), and so does a
-   process whose command line cannot be read (evidence `unreadable`).
+   process whose command line cannot be read (evidence `unreadable`). A
+   command line that only did not hold still to be read (the process
+   exiting or changing while it was read: `LinuxHost`'s "no listed task
+   gave its command line while live") is a busy host's:
+   the scan judges nothing until it settles (In use: Busy host), so one
+   exiting process no longer keeps every project of the run (TASK-366;
+   TASK-348's e2e run 1, a container process). Once it has not held still
+   for 30 s it is taken to be stuck, and its unread command line retains
+   every project as above: a command line that was not read never clears
+   one.
 
 The checkout guard keeps its default, `checkouts: refuse`: an editable
 install can put a real checkout under `.venv/src`. A symlinked

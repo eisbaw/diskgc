@@ -1001,10 +1001,17 @@ fn load_processes(state: &mut State, model: &HostModel) -> Result<(), LoadError>
                 nspid,
                 zombie: spec.zombie,
                 cmdline: match &spec.cmdline {
-                    None => Some(spec.exe.iter().map(|e| e.as_os_str().to_owned()).collect()),
-                    Some(crate::spec::CmdlineSpec::Unreadable(_)) => None,
+                    None => crate::state::Cmdline::Args(
+                        spec.exe.iter().map(|e| e.as_os_str().to_owned()).collect(),
+                    ),
+                    Some(crate::spec::CmdlineSpec::Unreadable(_)) => {
+                        crate::state::Cmdline::Unreadable
+                    }
+                    Some(crate::spec::CmdlineSpec::Unsettled(_)) => {
+                        crate::state::Cmdline::Unsettled
+                    }
                     Some(crate::spec::CmdlineSpec::Args(args)) => {
-                        Some(args.iter().map(Into::into).collect())
+                        crate::state::Cmdline::Args(args.iter().map(Into::into).collect())
                     }
                 },
                 view: view(&at, &spec.view)?,

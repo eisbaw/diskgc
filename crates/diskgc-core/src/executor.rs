@@ -1231,7 +1231,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
 
     /// After a candidate's reclaim ended (`outcome`): when a scan could
     /// judge nothing because the host was busy ([`Skip::busy_scan`]: its
-    /// process list kept growing, a process did not
+    /// process list kept growing, a process or its command line did not
     /// hold still), waits it out one back-off at a time
     /// ([`Checker::back_off_once`], growing with `back_off`, which stays
     /// with the candidate), sampling the space after each, and has it

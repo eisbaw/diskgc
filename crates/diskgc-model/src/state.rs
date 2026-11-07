@@ -399,11 +399,21 @@ pub struct Proc {
     pub nspid: Option<Vec<u32>>,
     /// Exited, not reaped (see `ProcessSpec::zombie`).
     pub zombie: bool,
-    /// Its command line (`None`: unreadable).
-    pub cmdline: Option<Vec<OsString>>,
+    /// Its command line.
+    pub cmdline: Cmdline,
     /// Its view's prefixes, mapped to the model's paths (see
     /// `ProcessSpec::view`).
     pub view: BTreeMap<PathBuf, PathBuf>,
+}
+
+/// A process's command line as `/proc/<pid>/cmdline` gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cmdline {
+    Args(Vec<OsString>),
+    /// Every read fails (`Failed`).
+    Unreadable,
+    /// Every read ends `Unsettled` (it does not hold still to be read).
+    Unsettled,
 }
 
 /// What reading a modelled `uid_map` gives (`None`: it does not exist).

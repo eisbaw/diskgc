@@ -208,7 +208,7 @@ fn pytest_facts_are_checked_and_answered() {
         &["processes[pid 7].view"],
     );
     let host = ModelHost::from_yaml(&tmp_yaml(
-        "processes:\n  - {pid: 7, exe: /tmp/a/f, proc: denied}\n  - {pid: 8, cmdline: unreadable}\n  - {pid: 9, cmdline: [python, -m, pytest], view: {/w: /tmp/a}}\n",
+        "processes:\n  - {pid: 7, exe: /tmp/a/f, proc: denied}\n  - {pid: 8, cmdline: unreadable}\n  - {pid: 9, cmdline: [python, -m, pytest], view: {/w: /tmp/a}}\n  - {pid: 11, cmdline: unsettled}\n",
     ))
     .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(
@@ -224,6 +224,11 @@ fn pytest_facts_are_checked_and_answered() {
         ["python", "-m", "pytest"]
     );
     assert_eq!(host.proc_cmdline(Pid(10)), Err(ProcError::Gone));
+    // TASK-366: a command line that does not hold still to be read.
+    assert!(matches!(
+        host.proc_cmdline(Pid(11)),
+        Err(ProcError::Unsettled(_))
+    ));
     let target = host.stat_path(Path::new("/tmp/a")).expect("/tmp/a");
     let chain = host
         .proc_root_lookup(Pid(9), Path::new("/w/../../w"), true)
