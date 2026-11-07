@@ -7,7 +7,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-05T07:04:00Z'
-updated_date: '2026-11-05T07:09:00Z'
+updated_date: '2026-11-07T09:43:00Z'
 labels:
   - dogfood
   - freshness
@@ -25,4 +25,6 @@ Dogfood 2026-11-05 07:08-08:03, release-candidate bd68931 (with TASK-340), syste
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-05 orchestrator: implementer in tmp/worktrees/t348 (branch t348-transient-unreadable, from master 1b52de8d).
+
+2026-11-07: cherry-picked onto the TASK-364 stack (c842655c, c24b9a89 on t364-busy-retry); merges with that stack's gate.
 <!-- SECTION:NOTES:END -->

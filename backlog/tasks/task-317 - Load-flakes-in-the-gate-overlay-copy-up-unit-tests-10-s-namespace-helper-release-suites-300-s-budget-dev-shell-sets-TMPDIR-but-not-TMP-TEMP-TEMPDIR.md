@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-02T13:27:00Z'
-updated_date: '2026-11-06T12:40:00Z'
+updated_date: '2026-11-07T09:44:00Z'
 labels:
   - test
   - flaky
@@ -28,4 +28,6 @@ From TASK-311's three just e2e runs (2026-11-02, host load 16-27 from another pr
 2026-11-06: the overlay copy-up unit test's 10 s namespace helper timed out in 2 of 4 TASK-365 gate runs (load ~36) and in TASK-359/337 runs; it now blocks gates regularly. Raise to a root fix next.
 
 2026-11-06 orchestrator: implementer in tmp/worktrees/t317 (branch t317-load-flakes, from master 27cfe20e).
+
+2026-11-07: fix a63812dd (overlay volatile). Its own gate: run 1 refused by the disk guard (10 GiB free); run 2 failed only release_candidate_pip_cache_* on TASK-364's bug (log tmp/worktrees/t317/tmp/t317-logs/final-e2e2.log). Gated with the TASK-364 stack.
 <!-- SECTION:NOTES:END -->
