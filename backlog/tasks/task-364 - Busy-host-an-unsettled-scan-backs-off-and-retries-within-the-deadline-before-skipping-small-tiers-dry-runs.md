@@ -3,10 +3,10 @@ id: TASK-364
 title: >-
   Busy host: an unsettled scan backs off and retries within the deadline before
   skipping (small tiers, dry runs)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-06T05:36:00Z'
-updated_date: '2026-11-07T09:43:00Z'
+updated_date: '2026-11-07T15:30:00Z'
 labels:
   - freshness
   - busy-host
@@ -27,4 +27,8 @@ TASK-363 investigation (t360 implementer, 2026-11-06; evidence tmp/evidence-t363
 From TASK-348 (d86ee975): classification now lives in the reader (ProcError::Unsettled -> blocked_by Busy; UnknownCause::stays() is the single rule). TRAP: InUse::rescan (the 20 ms retry) and reusable_at still key on the scan-level 'unsettled' field; key them on blocked_by() == Busy instead, or one exiting linker still defeats small tiers and dry runs. Also from TASK-348: a task stuck mid-exit holds a tier to its deadline; consider bounding (skip the rest after the same pid blocks K back-offs).
 
 2026-11-07 orchestrator: stacked branch t364-busy-retry in tmp/worktrees/t364 = master + TASK-317 (a63812dd) + TASK-348 (c842655c, c24b9a89) + TASK-364 + TASK-366, gated by ONE full e2e. Reason: TASK-317's gate failed on release_candidate_pip_cache_* (single-candidate tier, 'process list still growing ... 5 new', host load ~1, serial tail) -- this task's bug; TASK-348 waited on TASK-317; circular.
+
+Merged in the stack ending 8fd85e87d0df6a586c50afcc8f6d9d8dddf4d2df (2026-11-07).
+
+Open for Mark: ensure --dry-run on a busy host can now wait up to --timeout (default 10m) instead of answering at once. Follow-ups: stale-scan skips still wait only after 3 in a row; stuck tracker per tier; pin 'settled scan restarts the 30 s'; idle_age_seconds computed before waits; no container test stages churn on purpose.
 <!-- SECTION:NOTES:END -->

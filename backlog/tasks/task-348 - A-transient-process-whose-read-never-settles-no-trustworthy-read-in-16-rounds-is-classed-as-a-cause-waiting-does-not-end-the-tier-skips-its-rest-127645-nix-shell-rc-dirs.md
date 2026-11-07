@@ -4,10 +4,10 @@ title: >-
   A transient process whose read never settles ('no trustworthy read in 16
   rounds') is classed as a cause waiting does not end: the tier skips its rest
   (127,645 nix-shell-rc dirs)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-05T07:04:00Z'
-updated_date: '2026-11-07T09:43:00Z'
+updated_date: '2026-11-07T15:29:00Z'
 labels:
   - dogfood
   - freshness
@@ -27,4 +27,6 @@ Dogfood 2026-11-05 07:08-08:03, release-candidate bd68931 (with TASK-340), syste
 2026-11-05 orchestrator: implementer in tmp/worktrees/t348 (branch t348-transient-unreadable, from master 1b52de8d).
 
 2026-11-07: cherry-picked onto the TASK-364 stack (c842655c, c24b9a89 on t364-busy-retry); merges with that stack's gate.
+
+Merged in the stack ending 8fd85e87d0df6a586c50afcc8f6d9d8dddf4d2df (2026-11-07).
 <!-- SECTION:NOTES:END -->

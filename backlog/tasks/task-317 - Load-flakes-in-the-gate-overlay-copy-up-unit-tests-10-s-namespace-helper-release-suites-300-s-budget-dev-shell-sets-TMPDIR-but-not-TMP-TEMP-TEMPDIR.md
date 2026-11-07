@@ -3,10 +3,10 @@ id: TASK-317
 title: >-
   Load flakes in the gate: overlay copy-up unit test's 10 s namespace helper;
   release suites' 300 s budget; dev shell sets TMPDIR but not TMP/TEMP/TEMPDIR
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-02T13:27:00Z'
-updated_date: '2026-11-07T09:44:00Z'
+updated_date: '2026-11-07T15:29:00Z'
 labels:
   - test
   - flaky
@@ -30,4 +30,6 @@ From TASK-311's three just e2e runs (2026-11-02, host load 16-27 from another pr
 2026-11-06 orchestrator: implementer in tmp/worktrees/t317 (branch t317-load-flakes, from master 27cfe20e).
 
 2026-11-07: fix a63812dd (overlay volatile). Its own gate: run 1 refused by the disk guard (10 GiB free); run 2 failed only release_candidate_pip_cache_* on TASK-364's bug (log tmp/worktrees/t317/tmp/t317-logs/final-e2e2.log). Gated with the TASK-364 stack.
+
+Merged in the stack ending 8fd85e87d0df6a586c50afcc8f6d9d8dddf4d2df (2026-11-07).
 <!-- SECTION:NOTES:END -->

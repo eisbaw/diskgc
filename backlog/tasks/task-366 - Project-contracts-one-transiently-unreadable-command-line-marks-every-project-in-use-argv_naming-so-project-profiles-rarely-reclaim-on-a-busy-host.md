@@ -3,10 +3,10 @@ id: TASK-366
 title: >-
   Project contracts: one transiently unreadable command line marks every project
   in use (argv_naming), so project profiles rarely reclaim on a busy host
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-06T11:02:00Z'
-updated_date: '2026-11-07T09:43:00Z'
+updated_date: '2026-11-07T15:30:00Z'
 labels:
   - busy-host
   - project-contracts
@@ -24,4 +24,6 @@ TASK-348 e2e run 1 on bf1d954d (2026-11-06), raw logs tmp/worktrees/t348/tmp/t34
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-07: done in the TASK-364 stack (tmp/worktrees/t364).
+
+Merged in the stack ending 8fd85e87d0df6a586c50afcc8f6d9d8dddf4d2df (2026-11-07).
 <!-- SECTION:NOTES:END -->
