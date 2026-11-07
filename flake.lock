@@ -1,5 +1,39 @@
 {
   "nodes": {
+    "bitbake-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790687077,
+        "narHash": "sha256-jNhT/nSx0fcWL5iWH3/BjELm2A2TCU4iF0P8K3Kmq0o=",
+        "owner": "openembedded",
+        "repo": "bitbake",
+        "rev": "634f8dede6b9d71b5a6691499fd05a8678b46eae",
+        "type": "github"
+      },
+      "original": {
+        "owner": "openembedded",
+        "ref": "yocto-6.1",
+        "repo": "bitbake",
+        "type": "github"
+      }
+    },
+    "buildroot-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792682009,
+        "narHash": "sha256-WSWIsAR+Mr4CLO/XSR5udWD44NqoRpsmLQy9sDofVa4=",
+        "owner": "buildroot",
+        "repo": "buildroot",
+        "rev": "7fdeadb3b9f12f78e5fccca914d7fef47090ab9a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "buildroot",
+        "ref": "2026.08.1",
+        "repo": "buildroot",
+        "type": "github"
+      }
+    },
     "crane": {
       "locked": {
         "lastModified": 1791754810,
@@ -97,14 +131,34 @@
         "type": "github"
       }
     },
+    "oe-core-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790710303,
+        "narHash": "sha256-Ob/HjwFY9jqmL4Wam4QCQbQR1xbgwbAA+M32l+ynEyI=",
+        "owner": "openembedded",
+        "repo": "openembedded-core",
+        "rev": "419c1b0f1ed0e3ce22b1022061f763d007883121",
+        "type": "github"
+      },
+      "original": {
+        "owner": "openembedded",
+        "ref": "yocto-6.1",
+        "repo": "openembedded-core",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
+        "bitbake-src": "bitbake-src",
+        "buildroot-src": "buildroot-src",
         "crane": "crane",
         "nixpkgs": "nixpkgs",
         "nixpkgs515": "nixpkgs515",
         "nixpkgs58": "nixpkgs58",
         "nixpkgs68": "nixpkgs68",
         "nixpkgsNixUnderTest": "nixpkgsNixUnderTest",
+        "oe-core-src": "oe-core-src",
         "rust-overlay": "rust-overlay",
         "zephyr-src": "zephyr-src"
       }

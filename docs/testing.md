@@ -3163,12 +3163,135 @@ runs the same two library calls), the hub's xet transfer and `snapshot_download`
 dependencies and its automatic gc, and Nix's `tarball-cache` (v1) of
 older versions (matched on the development host, not made here).
 
+**Build-output family** (TASK-354, folding in TASK-331's container tests;
+diskgc-e2e `build_output_suite.rs`, Nix image only; each container gets
+the host's `/nix/store` read-only for the tools' closures). The CMake,
+Meson and Autotools scenarios run in the fast suite; Yocto, Buildroot,
+West, Bazel and the candidate catalog only in the full suite (in a whole
+fast run they took 185 s to over 300 s each, against its 300 s budget).
+The real build
+system configures and builds a tiny project in the container: CMake 4.4.3
+(Ninja 1.13.2, GNU Make 4.4.1), Meson 1.12.1, GNU Autoconf 2.73, West
+1.5.0 with Zephyr 4.3.0 (native_sim/native/64), Buildroot 2026.08.1,
+BitBake 2.20.0 with OpenEmbedded-Core yocto-6.1, and Bazel 7.6.0; each
+test first requires the version it names. The containers have no network,
+so: Buildroot runs `make defconfig` and builds host packages of a
+br2-external tree with `SITE_METHOD = local` (every real package needs a
+download); BitBake runs a layer's recipe with a local source to a task of
+its own after `do_unpack` (every default task after it needs native tools
+from the network), its sanity check writing `saved_tmpdir` and
+`abi_version` as in any build; Bazel builds a genrule in WORKSPACE mode
+(Bzlmod needs its registry). Buildroot and BitBake are copied into the
+home, as a user's clones are (BitBake 2.20 run from a read-only tree writes
+its parser tables into the working directory and then fails to import
+them). Those containers get what every distribution has and the image
+lacks: `/bin/sh` becomes bash (OE-Core's sanity check refuses busybox),
+`/usr/bin/env` is coreutils' (both tools' scripts start with
+`#!/usr/bin/env`) and `/usr/bin/file` file's (Buildroot's dependency check
+requires exactly that path); BitBake passes the Nix glibc's
+`LOCALE_ARCHIVE` to its server (`BB_ENV_PASSTHROUGH_ADDITIONS`). Every
+profile has a three-day floor and every build is made now: each scenario
+shows `not_idle` once, then reclaims with the sandbox clock advanced four
+days. Each live counterexample holds a build step (`ctl/hold.sh`) during
+the reclaim; the build then completes. Roots `/home/tester/src` (West:
+`/tmp`; Yocto: `src/yocto`; Bazel: `~/.cache/bazel`), `--min-free 100%`.
+The OpenWrt-like tree is OpenWrt's top-level layout made by hand (a real
+tree needs its feeds and toolchain downloads) with real package builds in
+`build_dir/target-x86_64_musl/`, as OpenWrt's include/*.mk lay them out.
+
+- `cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_build_in_flight_is_kept`:
+  Ninja and Unix Makefiles builds (one at depth five) and one below a Git
+  checkout are reclaimed; one at depth six and an in-source build are never
+  found; a build whose project moved away and one whose source lies inside
+  it are refused by the anchor (not planned); a build holding a checkout
+  (FetchContent's `_deps/*-src`) is `contains_checkout`; a `cmake --build`
+  held at a custom target is `in_use` (Make's `cwd`) and completes. In the
+  OpenWrt layout an in-source package build is never found, but a package
+  built in `openwrt-build` (`CMAKE_BINARY_SUBDIR`) is reclaimed: the
+  single-project match the liveness row records. CMake then configures and
+  builds the reclaimed outputs again.
+- `meson_build_anchored_real_meson_builds_reclaim_then_reconfigure_and_a_ninja_in_flight_is_kept`:
+  builds in and below a checkout are reclaimed; Meson itself refuses an
+  in-source build and a build directory around its source; a moved and a
+  copied build are refused visibly (`unsupported_layout`, reported at their
+  `meson-info/meson-info.json`); a build holding a checkout is kept; a
+  Ninja held at a custom target is `in_use` (`cwd`). OpenWrt's meson.mk
+  builds every package in `openwrt-build`: reclaimed (recorded match).
+- `autotools_build_anchored_real_configure_builds_reclaim_then_reconfigure_and_a_make_in_flight_is_kept`:
+  `../configure` (`srcdir=..`), an absolute `configure` at depth five and a
+  build below a checkout are reclaimed; in-source builds (OpenWrt's
+  default too) are never found; a moved and a copied build (`ac_pwd`) are
+  refused (not planned); a build holding a checkout is kept; a `make` held
+  in a rule is `in_use` (`cwd`). The builds configure and build again.
+- `west_build_anchored_real_west_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept`:
+  a West build is reclaimed, one whose application moved away is refused,
+  a `west build` held at a custom target is `in_use` (Ninja's `cwd`); `west
+  build` makes `zephyr.elf` again.
+- `buildroot_output_anchored_real_buildroot_reclaim_then_rebuild_and_a_build_in_flight_is_kept`:
+  Buildroot copied into a Git checkout below `src`; `make defconfig` and
+  `make host-makedevs` (its source is in Buildroot's tree) build
+  `output/`, which is reclaimed, and `make host-makedevs` builds it again.
+  Refused (not planned): an `O=` output (its `.config` is inside) and the
+  output while the top `.config` is away. `make host-makedevs-rebuild`
+  with its compiler held (`HOSTCC`, a wrapper) runs from the top
+  directory, so no process has its working directory in `output/`; its
+  processes' exported `BASE_DIR` keeps the output `in_use`
+  (`environment`), and it completes. With a br2-external tree (`make
+  BR2_EXTERNAL=... diskgc_defconfig`, its local packages built) the output
+  is never planned (TASK-354's fix): on a copy without its output, `make
+  syncconfig` drops the tree's option from the top `.config`, as the test
+  shows. Cross-profile: `cmake-build-anchored` plans the CMake build in
+  `output/build/host-cmk-1.0/buildroot-build` (the layout of Buildroot's
+  cmake-package without in-source builds; made by a generic recipe running
+  real CMake, as host-cmake-package needs host-pkgconf from the network).
+- `yocto_tmpdir_anchored_real_bitbake_reclaim_then_rebuild_and_a_task_in_flight_is_kept`:
+  `oe-init-build-env`, `bitbake-layers add-layer` and `bitbake -c
+  diskgc_build mini` make `build/tmp`; it is reclaimed and BitBake makes it
+  again. Refused (not planned): a copy of TMPDIR (`saved_tmpdir` names the
+  original), and TMPDIR while its `abi_version`, the layer or
+  `conf/local.conf` is away (TASK-331's TMPDIR without `abi_version`). A
+  task held in `do_diskgc_build` keeps TMPDIR: BitBake keeps a FIFO for
+  the task's messages in its `temp/` (`contains_ipc`, which the walk finds
+  before the in-use scan would see the task's working directory in
+  `tmp/work`); the task completes. Then BitBake's own Git fetcher
+  (a local repository, `protocol=file`) unpacks a clone into `tmp/work`:
+  TMPDIR is `contains_checkout` (the row's residual 3).
+- `bazel_output_base_anchored_real_bazel_reclaim_then_rebuild_and_a_live_server_is_kept`:
+  the output base of a plain workspace is reclaimed and Bazel builds again
+  into the same output base. A Git workspace's output base is
+  `contains_checkout` (TASK-331's question: the execroot links every
+  top-level entry of the workspace, `.git` included, and the guard counts
+  a symlink named `.git` as a checkout). An idle server and a build held
+  in a genrule keep theirs `in_use` (each server holds files there; the
+  held action runs under its server, not the client, with its working
+  directory in the execroot, which the test checks). The
+  install base and the repository cache are never planned. Of the output
+  bases of a workspace moved away and of one on another filesystem
+  (`/tmp`), the first is refused (not planned), the second visibly
+  (`other_fs`, reported at the workspace's path). In a container of its
+  own PID namespace the harness, its init, reaps each exited server so
+  `bazel shutdown` returns.
+- `candidate_catalog_build_output_family_matches_the_development_build`
+  (host PID namespace; full suite only, about five minutes alone): one fixture of all seven with an idle Bazel server;
+  per profile, past the floor, the candidate catalog plans exactly what the
+  development build does and reclaims exactly the reclaimable set; the
+  tools then build again.
+
+Not exercised for this family: a real Buildroot target build or Yocto
+image (both need downloads), Buildroot's own cmake-package and meson-package
+infrastructure, Bazel with Bzlmod, a remote cache or `--output_base`, West
+with sysbuild, Meson's other backends, Autotools layouts other than
+Autoconf's `config.status` plus `Makefile`, and a real OpenWrt tree. A Buildroot
+make held while it reads its makefiles (it runs the compiler then) names
+nothing in `output/`, the row's residual 4, seen while this scenario was
+written; the scenario holds the compile of the package's source instead.
+
 **The candidate catalog** (`diskgc-candidate-catalog` in the under-test
 bundle). The release-candidate package carries the real catalog only, and
 the PRD lets no other build lift the sandbox gate, so a profile awaiting
 admission cannot run through the gate-lifted package: the candidate list
-holds `node-modules` (held by Mark, 2026-11-06, TASK-365) and TASK-352's
-seven runtime caches. Instead the flake
+holds `node-modules` (held by Mark, 2026-11-06, TASK-365), TASK-352's
+seven runtime caches and TASK-354's seven build outputs. Instead the flake
 builds the release build's catalog code path (`release-catalog`: this
 version's release row, its commands, the user-profile refusal, the
 catalog's scope checks and narrowing) from a source copy whose
@@ -4045,7 +4168,9 @@ hangs; external CPU load can still use up a suite budget before every
 selected test starts. A suite's host-PID-namespace tests (Container
 setup) run after it, one at a time, by a deadline of their own: 20 s for
 each such test (`HOST_PID_TEST_ALLOWANCE`, about 1.5 times the slowest
-of them on a busy host), summed, from the end of the parallel phase.
+of them on a busy host) or a longer allowance a test is listed with
+(`HOST_PID_LONG_TESTS`: TASK-354's build-output candidate catalog, 480
+s, full suite), summed, from the end of the parallel phase.
 Each phase has its own bound because they share no time: under load from
 other work the parallel phase can end at its budget, and a tail counted
 against the same 300 s then ran out before its tests started (TASK-363,
@@ -4176,7 +4301,7 @@ consent `nix-store --gc`). The mutation runner keeps its own guard as well.
 |---|---|---|---|
 | `check` | 10 GiB | cold, in a new worktree (empty `tmp/target`): 11.29 GiB peak, -11.07 GiB after (987 s), but `tmp/target` grew by about 5 GiB (to 5.3 GiB): other builds on the host account for the rest | `just check` in the gate recipes |
 | `flake-check` | 6 GiB | `e2e-clippy` rebuilt on its cached dependency artifacts: 0.23 GiB peak (29 s); a cold Crane dependency build was not measured and is what the budget allows for | each `nix build` of a non-VM flake check |
-| `containers` | 17 GiB | a cold load of the base image (4.4 GiB kept) into a private Podman store: 12.70 GiB peak, -4.34 GiB after; `e2e-one` with the image loaded: 0.03 to 0.16 GiB peak; the first, which also built the changed runner: 1.57 GiB | each runner suite, `_e2e-debian`, `_e2e-docker`, the `e2e-one` recipes |
+| `containers` | 17 GiB | a cold load of the base image (4.4 GiB kept) into a private Podman store: 12.70 GiB peak, -4.34 GiB after; `e2e-one` with the image loaded: 0.03 to 0.16 GiB peak; the first, which also built the changed runner: 1.57 GiB. The base image is unchanged by TASK-354; its build-output tools (Bazel 7.6.0 with its JDK, Buildroot's and OE-Core's host tools, three source trees) add 0.84 GiB to the under-test bundle's store closure (2.6 GiB in all), fetched once by the runner's build, and its first `e2e-one` of those tests (also building the runner) peaked at 1.75 GiB | each runner suite, `_e2e-debian`, `_e2e-docker`, the `e2e-one` recipes |
 | `vm` | 8 GiB | `vm-historical-ctime` after its inputs were built: 0.51 GiB peak, -0.31 GiB after (86 s); the first VM check after a harness change builds those inputs too, as `vm-real-kernel` below did | each NixOS VM check, `e2e-vm-tally-pressure` |
 | `vm-real-kernel` | 8 GiB | cold, building the changed harness binaries and VM image first: 3.05 GiB peak, -2.82 GiB after (251 s) | `e2e-vm-real-kernel` |
 | `vm-cold-scale` | 8 GiB | not measured; the same 4 GiB guest disk as `vm-real-kernel` | `e2e-vm-cold-scale` |

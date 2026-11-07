@@ -2827,9 +2827,11 @@ unreadable path is a visible refusal.
   `.config` entry: Buildroot keeps `.config` in the source top for its
   default `O=output` and in the output for any other `O=`, where the
   configuration exists nowhere else. Its generated `.br2-external.mk`
-  must hold exactly one `BR2_EXTERNAL ?=` line; each tree it lists
-  (normalized, absolute, outside the output) must keep `external.desc`.
-  The parent must keep regular `Config.in` (identity), `Makefile`,
+  must hold exactly one `BR2_EXTERNAL ?=` line, and it must list no tree:
+  that file is Buildroot's only record of its br2-external trees, and once
+  it is gone the next `make` without `BR2_EXTERNAL=` rewrites the
+  top-level `.config` without their options, the user's configuration
+  (seen with Buildroot 2026.08.1, TASK-354). The parent must keep regular `Config.in` (identity), `Makefile`,
   `.config`, `package/Config.in` and `support/scripts/br2-external`.
 - **Yocto** (`yocto`). A TMPDIR of any name whose `saved_tmpdir` holds
   exactly its own path (OE-core writes it and refuses a moved TMPDIR) and

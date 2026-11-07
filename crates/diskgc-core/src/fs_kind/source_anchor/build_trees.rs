@@ -3,8 +3,9 @@
 //! Each reads only inert generated files, through the candidate fd, and
 //! never runs the tool. The tree the output would be rebuilt from must still
 //! hold its build description on the output's filesystem; the trees it also
-//! builds from (Buildroot externals, Yocto layers) must survive outside the
-//! output. Missing or ambiguous evidence keeps the output (`Ok(None)`); an
+//! builds from (Yocto layers) must survive outside the output, and a
+//! Buildroot output that names a br2-external tree, which only the output
+//! records, is kept. Missing or ambiguous evidence keeps the output (`Ok(None)`); an
 //! unsafe or unreadable path is a visible refusal. TASK-101, pending Mark's
 //! admission.
 
@@ -30,7 +31,6 @@ const BUILDROOT_TREE: &[&str] = &[
     "package/Config.in",
     "support/scripts/br2-external",
 ];
-const BR2_EXTERNAL_DESC: &str = "external.desc";
 
 /// OE-core's sanity check writes TMPDIR's own path here (meta/lib/oe/
 /// sanity.py) and refuses to build in a TMPDIR that moved.
@@ -90,16 +90,13 @@ pub(super) fn buildroot<H: Host>(
     let Some(externals) = br2_externals(&bytes) else {
         return Ok(Ok(None));
     };
-    for external in &externals {
-        if !judged!(survives(
-            host,
-            candidate,
-            external,
-            BR2_EXTERNAL_DESC,
-            deadline
-        )) {
-            return Ok(Ok(None));
-        }
+    // Buildroot records BR2_EXTERNAL only in this generated file. Once the
+    // output is gone, the next `make` without `BR2_EXTERNAL=` rewrites the
+    // top-level .config without any external tree's options: the user's
+    // configuration, lost (TASK-354, seen with Buildroot 2026.08.1). An
+    // output that names an external tree is kept.
+    if !externals.is_empty() {
+        return Ok(Ok(None));
     }
     let Some(top) = candidate.parent() else {
         return Ok(Ok(None));
@@ -447,7 +444,7 @@ fn evidence(
     })))
 }
 
-/// A tree the build also reads (a br2-external, a Yocto layer): outside the
+/// A tree the build also reads (a Yocto layer): outside the
 /// output, reached without symlinks, still holding regular `file`. It may
 /// lie outside the bound root and on another filesystem: it is only read.
 fn survives<H: Host>(

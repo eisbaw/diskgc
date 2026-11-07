@@ -337,7 +337,7 @@
     root: /home/mark/src
     match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
-  verified_with: CMake 3.30.5, recorded CMAKE_HOME_DIRECTORY and surviving CMakeLists.txt in host tracy builds, 2026-10-20
+  verified_with: CMake 4.4.3 (Ninja 1.13.2, GNU Make 4.4.1) builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); CMake 3.30.5 recorded CMAKE_HOME_DIRECTORY in host tracy builds, 2026-10-20
   liveness_class: verified-heuristic
 
 # Meson's generated metadata records both source and build paths. Only an
@@ -356,7 +356,7 @@
     root: /home/mark/src
     match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
-  verified_with: Meson 1.7.0 generated meson-info.json and coredata.dat in disposable Debian 13 container, 2026-10-20
+  verified_with: Meson 1.12.1 (Ninja 1.13.2) builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); Meson 1.7.0 in a disposable Debian 13 container, 2026-10-20
   liveness_class: verified-heuristic
 
 # GNU Autoconf's generated config.status binds its build path to a source
@@ -376,7 +376,7 @@
     root: /home/mark/src
     match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
-  verified_with: GNU Autoconf 2.73 generated config.status and Makefile in a disposable Nix test container, 2026-10-20
+  verified_with: GNU Autoconf 2.73 (GNU Make 4.4.1) configure builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354)
   liveness_class: verified-heuristic
 
 # ---- TASK-101: build trees anchored to a whole source tree (pending
@@ -399,7 +399,7 @@
     root: /home/mark/src
     match: [/home/mark/src/buildroot/output, /home/mark/src/a/b/c/buildroot/output]
     no_match: [/home/mark/src/buildroot/output/images, /home/mark/src/a/b/c/d/buildroot/output, /home/mark/src/buildroot/dl]
-  verified_with: Buildroot master Makefile (CONFIG_DIR for O=output) and support/scripts/br2-external (generated .br2-external.mk), sources read 2026-11-03
+  verified_with: Buildroot 2026.08.1 defconfig and local host packages, output/ reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); master sources read 2026-11-03
   liveness_class: verified-heuristic
 
 - name: yocto-tmpdir-anchored
@@ -416,7 +416,7 @@
     root: /home/mark/src
     match: [/home/mark/src/poky/build/tmp, /home/mark/src/a/b/c/build/tmp-glibc]
     no_match: [/home/mark/src/a/b/c/d/build/tmp]
-  verified_with: OpenEmbedded-Core master meta/lib/oe/sanity.py (saved_tmpdir, abi_version) and bblayers.conf.sample, sources read 2026-11-03
+  verified_with: BitBake 2.20.0 with OpenEmbedded-Core yocto-6.1 (a recipe task after do_unpack, offline), TMPDIR reclaimed and remade in a disposable Nix test container, 2026-11-07 (TASK-354); master sources read 2026-11-03
   liveness_class: verified-heuristic
 
 - name: bazel-output-base-anchored
@@ -435,7 +435,7 @@
     root: /home/mark/.cache/bazel
     match: [/home/mark/.cache/bazel/_bazel_mark/8f14e45fceea167a5a36dedd4bea2543]
     no_match: [/home/mark/.cache/bazel/_bazel_mark, /home/mark/.cache/bazel/_bazel_mark/cache, /home/mark/.cache/bazel/_bazel_mark/install, /home/mark/.cache/bazel/_bazel_mark/8f14e45fceea167a5a36dedd4bea2543/execroot, /home/mark/.cache/bazel/other/8f14e45fceea167a5a36dedd4bea2543]
-  verified_with: Bazel master BlazeWorkspace.java (DO_NOT_BUILD_HERE holds the workspace path), source read 2026-11-03
+  verified_with: Bazel 7.6.0 genrules (WORKSPACE mode), output bases reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); master BlazeWorkspace.java read 2026-11-03
   liveness_class: verified-heuristic
 # ---- end TASK-101
 
@@ -559,7 +559,7 @@
     root: /home/mark/src
     match: [/home/mark/src/app/build, /home/mark/src/a/b/c/d/build]
     no_match: [/home/mark/src/a/b/c/d/e/build, /home/mark/src/app/build/zephyr]
-  verified_with: Zephyr 4.3.0 West 1.5.0 native_sim/native/64 compiled build with CMake 4.4.3 in a disposable container; source-anchor ModelHost vector and guarded reclaim 2026-10-20
+  verified_with: Zephyr 4.3.0 West 1.5.0 native_sim/native/64 builds with CMake 4.4.3 reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); source-anchor ModelHost vector 2026-10-20
   liveness_class: verified-heuristic
 
 - name: platformio-cache

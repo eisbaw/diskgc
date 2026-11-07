@@ -28,6 +28,21 @@
       url = "github:zephyrproject-rtos/zephyr/v4.3.0";
       flake = false;
     };
+    # TASK-354: real Buildroot, OpenEmbedded-Core and BitBake trees for the
+    # build-output admission scenarios (diskgc-e2e/src/build_output_suite.rs).
+    # BitBake's tag is the one OE-Core's yocto-6.1 needs (BB_MIN_VERSION).
+    buildroot-src = {
+      url = "github:buildroot/buildroot/2026.08.1";
+      flake = false;
+    };
+    oe-core-src = {
+      url = "github:openembedded/openembedded-core/yocto-6.1";
+      flake = false;
+    };
+    bitbake-src = {
+      url = "github:openembedded/bitbake/yocto-6.1";
+      flake = false;
+    };
   };
 
   outputs =
@@ -41,6 +56,9 @@
       crane,
       rust-overlay,
       zephyr-src,
+      buildroot-src,
+      oe-core-src,
+      bitbake-src,
     }:
     let
       # diskgc is Linux-only. Only x86_64 is built and tested; another system
@@ -531,6 +549,34 @@
         west pyelftools pyyaml pykwalify jsonschema packaging
       ]);
 
+      # TASK-354: the host tools Buildroot's dependency check and OE-Core's
+      # HOSTTOOLS require (support/dependencies/dependencies.sh;
+      # meta/conf/bitbake.conf), each its own PATH in the build-output
+      # scenarios, so the image's busybox stays out of them. BitBake 2.20
+      # runs on Python 3.13 here (its yocto-6.1 release), and OE-Core's
+      # sanity check needs the en_US.UTF-8 locale.
+      buildOutputBaseTools = with pkgs; [
+        bashInteractive coreutils findutils diffutils gnused gnugrep gawk
+        gnutar gzip bzip2 xz zstd cpio unzip rsync wget file perl which
+        patch gnumake stdenv.cc binutils git util-linux
+      ];
+      buildrootTools = pkgs.buildEnv {
+        name = "diskgc-e2e-buildroot-tools";
+        paths = buildOutputBaseTools ++ [ pkgs.bc pkgs.cmake ];
+        pathsToLink = [ "/bin" ];
+      };
+      yoctoTools = pkgs.buildEnv {
+        name = "diskgc-e2e-yocto-tools";
+        paths = buildOutputBaseTools ++ (with pkgs; [
+          chrpath diffstat python313 rpcsvc-proto hostname glibc.bin lz4
+        ]);
+        pathsToLink = [ "/bin" ];
+      };
+      yoctoLocales = pkgs.glibcLocales.override {
+        allLocales = false;
+        locales = [ "en_US.UTF-8/UTF-8" ];
+      };
+
       # ---- Container e2e harness (docs/testing.md, Container setup) ----
 
       # The diskgc-e2e binaries: the in-container harness and tests, the
@@ -648,6 +694,18 @@
         ln -s ${pkgs.binutils}/bin/size $out/bin/size
         ln -s ${pkgs.binutils}/bin/strip $out/bin/strip
         ln -s ${pkgs.gnumake}/bin/make $out/bin/make
+        # TASK-354's build-output scenarios (diskgc-e2e/src/build_output_suite.rs)
+        # run these pinned tools and trees, reached through the store closure
+        # their containers mount read-only: Bazel 7, Buildroot, OE-Core and
+        # BitBake (copied into the container's home before use), and the
+        # host tools and locale Buildroot and BitBake require.
+        ln -s ${pkgs.bazel_7}/bin/bazel $out/bin/bazel
+        ln -s ${buildroot-src} $out/bin/buildroot-src
+        ln -s ${oe-core-src} $out/bin/oe-core-src
+        ln -s ${bitbake-src} $out/bin/bitbake-src
+        ln -s ${buildrootTools}/bin $out/bin/buildroot-tools
+        ln -s ${yoctoTools}/bin $out/bin/yocto-tools
+        ln -s ${yoctoLocales}/lib/locale/locale-archive $out/bin/yocto-locale-archive
       '';
 
       # Identical harness input with the release candidate as the default

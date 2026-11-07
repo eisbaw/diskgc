@@ -1,6 +1,7 @@
 //! The shared harness of the admission-evidence suites (docs/testing.md,
 //! Admission evidence): [`crate::project_tree_suite`] (TASK-350),
-//! [`crate::pkg_cache_suite`] (TASK-351) and the suites after them.
+//! [`crate::pkg_cache_suite`] (TASK-351) and the suites after them
+//! ([`crate::runtime_cache_suite`], [`crate::build_output_suite`]).
 //!
 //! Every artifact these suites judge is made by a real pinned tool run as
 //! tester ([`tool`], [`InFlight`]); the containers have no network, so a
@@ -950,6 +951,7 @@ pub(crate) fn candidate_list(ctx: &Ctx) -> Result<BTreeSet<String>, String> {
 const CANDIDATE_FAMILIES: &[&[&str]] = &[
     crate::project_tree_suite::FAMILY,
     crate::runtime_cache_suite::FAMILY,
+    crate::build_output_suite::FAMILY,
 ];
 
 /// docs/testing.md, Admission evidence (candidate catalog): checks the

@@ -765,6 +765,7 @@ fn test_mounts(name: &str, host_pid_namespace: bool) -> Vec<String> {
         || name == crate::suite::PACKAGING_TEST
         || crate::suite::MYPY_TESTS.contains(&name)
         || crate::suite::RUNTIME_CACHE_STORE_TESTS.contains(&name)
+        || crate::suite::BUILD_OUTPUT_STORE_TESTS.contains(&name)
     {
         extra.extend(["--volume".to_owned(), "/nix/store:/nix/store:ro".to_owned()]);
     }
@@ -960,6 +961,23 @@ fn schedule(tests: Vec<Listed>, host_pid: impl Fn(&Listed) -> bool) -> (Vec<List
 /// another runner; it is not a speed target.
 pub const HOST_PID_TEST_ALLOWANCE: Duration = Duration::from_secs(20);
 
+/// The host-PID-namespace tests that need more than
+/// [`HOST_PID_TEST_ALLOWANCE`], with their own allowance: about 1.5 times
+/// their time alone. TASK-354's candidate catalog builds every member of
+/// its family (West, Buildroot, BitBake, Bazel): 316 s alone (2026-11-07).
+pub const HOST_PID_LONG_TESTS: &[(&str, Duration)] = &[(
+    "candidate_catalog_build_output_family_matches_the_development_build",
+    Duration::from_secs(480),
+)];
+
+/// What test `name` adds to the host-PID tail's allowance.
+pub fn host_pid_allowance(name: &str) -> Duration {
+    HOST_PID_LONG_TESTS
+        .iter()
+        .find(|(long, _)| *long == name)
+        .map_or(HOST_PID_TEST_ALLOWANCE, |(_, allowance)| *allowance)
+}
+
 /// One phase of a suite run: how long it took and its own bound
 /// ([`verdict`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -973,7 +991,7 @@ pub struct Phase {
 /// their own `jobs` at a time, by `deadline` (the suite's budget from
 /// `started`, setup included); then the host-PID-namespace tests
 /// (`host_pid`) one at a time, by a deadline of their own:
-/// [`HOST_PID_TEST_ALLOWANCE`] for each, from the end of the parallel
+/// [`host_pid_allowance`] for each, from the end of the parallel
 /// phase. Each phase is bounded on its own, so neither can use up the
 /// other's time: under load from other work the parallel phase may end
 /// late, and the tail still gets its whole allowance (TASK-363). `run`
@@ -1009,8 +1027,10 @@ fn run_parallel(
         bound: Some(deadline.saturating_duration_since(started)),
     }];
     if !serial.is_empty() {
-        let allowance =
-            HOST_PID_TEST_ALLOWANCE.saturating_mul(u32::try_from(serial.len()).unwrap_or(u32::MAX));
+        let allowance: Duration = serial
+            .iter()
+            .map(|test| host_pid_allowance(&test.name))
+            .sum();
         info!(
             "running {} host-PID-namespace tests one at a time, with no other container of \
              this suite running, within {allowance:?}",
@@ -1351,6 +1371,24 @@ mod tests {
         let (parallel, serial) = schedule(tests, shared(true));
         assert!(parallel.is_empty());
         assert_eq!(serial.len(), 3);
+    }
+
+    /// TASK-354: a long host-PID test brings its own allowance, and only
+    /// host-PID-namespace tests have one.
+    #[test]
+    fn a_long_host_pid_test_brings_its_own_allowance() {
+        for (name, allowance) in HOST_PID_LONG_TESTS {
+            assert!(
+                crate::suite::HOST_PID_NAMESPACE_TESTS.contains(name),
+                "{name} has a host-PID allowance but is no host-PID-namespace test"
+            );
+            assert!(*allowance > HOST_PID_TEST_ALLOWANCE, "{name}");
+            assert_eq!(host_pid_allowance(name), *allowance);
+        }
+        assert_eq!(
+            host_pid_allowance("any_other_test"),
+            HOST_PID_TEST_ALLOWANCE
+        );
     }
 
     /// TASK-363: the tail starts only once every parallel test has ended,

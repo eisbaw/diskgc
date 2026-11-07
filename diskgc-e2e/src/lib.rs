@@ -43,6 +43,7 @@ pub mod admission;
 pub mod agent_journey;
 pub mod autotools_suite;
 pub mod browser_suite;
+pub mod build_output_suite;
 pub mod buildah_suite;
 pub mod cache_suite;
 pub mod cargo_harness;

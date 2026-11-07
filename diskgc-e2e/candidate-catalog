@@ -16,3 +16,12 @@ electron-download-cache
 huggingface-hub-repos
 cargo-registry-src
 nix-user-cache
+#
+# TASK-354's build-output family, awaiting Mark's decision:
+cmake-build-anchored
+meson-build-anchored
+autotools-build-anchored
+west-build-anchored
+buildroot-output-anchored
+yocto-tmpdir-anchored
+bazel-output-base-anchored

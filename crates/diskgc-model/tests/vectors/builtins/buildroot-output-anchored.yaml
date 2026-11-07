@@ -2,10 +2,12 @@
 # (TASK-101). Buildroot keeps .config in the source top for the default
 # O=output and in the output only for O= elsewhere (Makefile, CONFIG_DIR),
 # so an output holding .config is never a candidate. The generated
-# output/.br2-external.mk names the br2-external trees, which must survive
-# with their external.desc (support/scripts/br2-external, do_mk).
+# output/.br2-external.mk is the only record of the br2-external trees
+# (support/scripts/br2-external, do_mk): once it is gone, the next make
+# without BR2_EXTERNAL= drops their options from the top-level .config
+# (TASK-354), so an output naming any external tree is kept.
 #
-# b1: no external tree, reclaimed. b2: one surviving external, reclaimed.
+# b1: no external tree, reclaimed. b2: one surviving external, kept.
 # b3: in use (a make's cwd). b4: excluded by a negated profile. extgone: its
 # external tree is gone. outoftree: an output holding .config. noconfig:
 # the source .config is gone. notbr: a Config.in tree that is not
@@ -135,7 +137,6 @@ host:
 expect:
   plan:
     - {candidate: /home/tester/src/b1/output, source: /home/tester/src/b1}
-    - {candidate: /home/tester/src/b2/output, source: /home/tester/src/b2}
     - {candidate: /home/tester/src/b3/output, reason: in_use, source: /home/tester/src/b3}
     - {candidate: /home/tester/src/b4/output, reason: excluded, source: /home/tester/src/b4}
     - {candidate: /home/tester/src/checkout/output, reason: contains_checkout, source: /home/tester/src/checkout}
@@ -143,14 +144,13 @@ expect:
   dry_run_report:
     plan:
       - {candidate: /home/tester/src/b1/output, build_evidence: {marker: .br2-external.mk, source: /home/tester/src/b1, idle_age_seconds: 1220400}}
-      - {candidate: /home/tester/src/b2/output, build_evidence: {marker: .br2-external.mk, source: /home/tester/src/b2, idle_age_seconds: 1220400}}
       - {candidate: /home/tester/src/b3/output, build_evidence: {marker: .br2-external.mk, source: /home/tester/src/b3, idle_age_seconds: null}}
       - {candidate: /home/tester/src/b4/output, build_evidence: {marker: .br2-external.mk, source: /home/tester/src/b4, idle_age_seconds: null}}
       - {candidate: /home/tester/src/checkout/output, build_evidence: {marker: .br2-external.mk, source: /home/tester/src/checkout, idle_age_seconds: null}}
       - {candidate: /home/tester/src/fresh/output, build_evidence: {marker: .br2-external.mk, source: /home/tester/src/fresh, idle_age_seconds: null}}
   reclaim_exit: 1
-  actions: [/home/tester/src/b1/output, /home/tester/src/b2/output]
-  removed: [/home/tester/src/b1/output, /home/tester/src/b2/output]
+  actions: [/home/tester/src/b1/output]
+  removed: [/home/tester/src/b1/output]
   skipped:
     - {candidate: /home/tester/src/b3/output, reason: in_use, process_blockers: [{pid: 901, evidence: cwd}]}
     - {candidate: /home/tester/src/b4/output, reason: excluded}
@@ -159,6 +159,7 @@ expect:
   preserved:
     - /home/tester/src/b1/.config
     - /home/tester/src/ext1/external.desc
+    - /home/tester/src/b2/output/build/a.o
     - /home/tester/src/b3/output/build/a.o
     - /home/tester/src/b4/output/build/a.o
     - /home/tester/src/extgone/output/build/precious

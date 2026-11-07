@@ -178,12 +178,52 @@ pub fn anchored_west_build_keeps_unrebuildable_outputs(ctx: &Ctx) -> TestResult 
 /// disposable container. Both the source and all generated output live on its
 /// scratch tmpfs; the immutable Zephyr source and tools come from the Nix store.
 fn west_build(ctx: &Ctx, project: &str) -> TestResult {
+    west_build_with(ctx, project, "")
+}
+
+/// The arguments and environment of `west build` for `project` (below the
+/// scratch mount), as [`west_build_with`] runs it.
+pub(crate) fn west_invocation(
+    ctx: &Ctx,
+    project: &str,
+) -> (Vec<String>, Vec<(&'static str, String)>) {
+    let source = ctx.scratch.path(project);
+    let args = vec![
+        "build".to_owned(),
+        // The 32-bit native_sim variant needs multilib headers, which are
+        // intentionally absent from this pinned x86_64 container closure.
+        "-b".to_owned(),
+        "native_sim/native/64".to_owned(),
+        "-s".to_owned(),
+        source.display().to_string(),
+        "-d".to_owned(),
+        source.join("build").display().to_string(),
+    ];
+    let env = vec![
+        ("PATH", format!("{}:/bin", ctx.bin_dir.display())),
+        ("HOME", "/home/tester".to_owned()),
+        ("LANG", "C.UTF-8".to_owned()),
+        (
+            "ZEPHYR_BASE",
+            ctx.scratch.path("zephyr").display().to_string(),
+        ),
+        ("ZEPHYR_TOOLCHAIN_VARIANT", "host/gnu".to_owned()),
+    ];
+    (args, env)
+}
+
+/// [`west_build`] of an application whose CMakeLists.txt ends with `extra`
+/// (TASK-354 adds a step its live build is held at).
+pub(crate) fn west_build_with(ctx: &Ctx, project: &str, extra: &str) -> TestResult {
     let source = ctx.scratch.mkdirs(project, 0o700, TESTER)?;
     ctx.scratch
         .mkdirs(&format!("{project}/src"), 0o700, TESTER)?;
     ctx.scratch.write_file(
         &format!("{project}/CMakeLists.txt"),
-        b"cmake_minimum_required(VERSION 3.20.0)\nfind_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})\nproject(diskgc_west_fixture)\ntarget_sources(app PRIVATE src/main.c)\n",
+        format!(
+            "cmake_minimum_required(VERSION 3.20.0)\nfind_package(Zephyr REQUIRED HINTS $ENV{{ZEPHYR_BASE}})\nproject(diskgc_west_fixture)\ntarget_sources(app PRIVATE src/main.c)\n{extra}"
+        )
+        .as_bytes(),
         0o600,
         TESTER,
     )?;
@@ -196,20 +236,12 @@ fn west_build(ctx: &Ctx, project: &str) -> TestResult {
     ctx.scratch
         .write_file(&format!("{project}/prj.conf"), b"\n", 0o600, TESTER)?;
     let output = source.join("build");
+    let (args, env) = west_invocation(ctx, project);
     let result = Command::new(ctx.bin_dir.join("west"))
         .current_dir(&source)
-        // The 32-bit native_sim variant needs multilib headers, which are
-        // intentionally absent from this pinned x86_64 container closure.
-        .args(["build", "-b", "native_sim/native/64", "-s"])
-        .arg(&source)
-        .arg("-d")
-        .arg(&output)
+        .args(&args)
         .env_clear()
-        .env("PATH", format!("{}:/bin", ctx.bin_dir.display()))
-        .env("HOME", "/home/tester")
-        .env("LANG", "C.UTF-8")
-        .env("ZEPHYR_BASE", ctx.scratch.path("zephyr"))
-        .env("ZEPHYR_TOOLCHAIN_VARIANT", "host/gnu")
+        .envs(env)
         .uid(TESTER.uid)
         .gid(TESTER.gid)
         .output()
@@ -247,6 +279,16 @@ fn west_build(ctx: &Ctx, project: &str) -> TestResult {
 /// genuine build after its source file disappears. The no-idle-floor variant
 /// proves deletion only for the rebuildable output on the container kernel.
 pub fn west_generated_output_uses_surviving_source_anchor(ctx: &Ctx) -> TestResult {
+    west_workspace(ctx)?;
+    west_build(ctx, "west-app")?;
+    west_build(ctx, "west-missing")?;
+    west_anchor_scenario(ctx)
+}
+
+/// A West workspace on the scratch mount whose manifest is the pinned
+/// Zephyr tree, bound read-only at `zephyr`, so West and Zephyr's own CMake
+/// find it offline.
+pub(crate) fn west_workspace(ctx: &Ctx) -> TestResult {
     // West requires workspace metadata before it loads Zephyr's build command.
     // Point a local, network-isolated workspace at the exact flake-pinned
     // Zephyr tree; West itself generates all build output below each app.
@@ -275,8 +317,10 @@ pub fn west_generated_output_uses_surviving_source_anchor(ctx: &Ctx) -> TestResu
         zephyr.display()
     );
     ctx.home.mkdirs(".cache", 0o700, TESTER)?;
-    west_build(ctx, "west-app")?;
-    west_build(ctx, "west-missing")?;
+    Ok(())
+}
+
+fn west_anchor_scenario(ctx: &Ctx) -> TestResult {
     ctx.scratch.remove_file("west-missing/CMakeLists.txt")?;
     ctx.home.write_file(
         "diskgc.yaml",

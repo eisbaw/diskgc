@@ -38,14 +38,14 @@ use crate::snapshot::{self, Skip};
 use crate::under_test::{self, Ledger, Run};
 use crate::{OTHER, ROOT, TESTER, UNDER_TEST_BIN_DIR, ensure, exit, info};
 use crate::{
-    agent_journey, autotools_suite, browser_suite, buildah_suite, cache_suite, cargo_race_suite,
-    cargo_reclaim_suite, cargo_suite, cli_contract_suite, cli_runtime_suite, differential_suite,
-    docker_suite, docker_vector_suite, driver_suite, embedded_suite, engine_suite, ensure_suite,
-    fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite, laptop_tmp_journey,
-    lifecycle_suite, meson_suite, nix_gc_suite, owner_pid_suite, packaging_suite, pkg_cache_suite,
-    profile_vector_suite, project_cache_suite, project_tree_suite, pytest_contract_suite,
-    release_suite, runtime_cache_suite, scale_suite, signal_suite, stdout_suite, survey_suite,
-    temp_safety_suite, watch_suite,
+    agent_journey, autotools_suite, browser_suite, build_output_suite, buildah_suite, cache_suite,
+    cargo_race_suite, cargo_reclaim_suite, cargo_suite, cli_contract_suite, cli_runtime_suite,
+    differential_suite, docker_suite, docker_vector_suite, driver_suite, embedded_suite,
+    engine_suite, ensure_suite, fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite,
+    laptop_tmp_journey, lifecycle_suite, meson_suite, nix_gc_suite, owner_pid_suite,
+    packaging_suite, pkg_cache_suite, profile_vector_suite, project_cache_suite,
+    project_tree_suite, pytest_contract_suite, release_suite, runtime_cache_suite, scale_suite,
+    signal_suite, stdout_suite, survey_suite, temp_safety_suite, watch_suite,
 };
 
 /// Which gate runs a test.
@@ -286,6 +286,38 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
     (
         "candidate_catalog_runtime_cache_family_matches_the_development_build",
         "needs every runtime-cache tool from the Nix image and the Nix store",
+    ),
+    (
+        "cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_build_in_flight_is_kept",
+        "needs the pinned build system and host tools from the Nix store",
+    ),
+    (
+        "meson_build_anchored_real_meson_builds_reclaim_then_reconfigure_and_a_ninja_in_flight_is_kept",
+        "needs the pinned build system and host tools from the Nix store",
+    ),
+    (
+        "autotools_build_anchored_real_configure_builds_reclaim_then_reconfigure_and_a_make_in_flight_is_kept",
+        "needs the pinned build system and host tools from the Nix store",
+    ),
+    (
+        "west_build_anchored_real_west_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept",
+        "needs the pinned build system and host tools from the Nix store",
+    ),
+    (
+        "buildroot_output_anchored_real_buildroot_reclaim_then_rebuild_and_a_build_in_flight_is_kept",
+        "needs the pinned build system and host tools from the Nix store",
+    ),
+    (
+        "yocto_tmpdir_anchored_real_bitbake_reclaim_then_rebuild_and_a_task_in_flight_is_kept",
+        "needs the pinned build system and host tools from the Nix store",
+    ),
+    (
+        "bazel_output_base_anchored_real_bazel_reclaim_then_rebuild_and_a_live_server_is_kept",
+        "needs the pinned build system and host tools from the Nix store",
+    ),
+    (
+        "candidate_catalog_build_output_family_matches_the_development_build",
+        "needs the pinned build system and host tools from the Nix store",
     ),
     ("pip_cache_cleaner", "needs the pinned pip in the Nix image"),
     ("uv_cache_cleaner", "needs the pinned uv in the Nix image"),
@@ -540,6 +572,8 @@ pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
     "release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes",
     // TASK-352: the runtime-cache family through the candidate-catalog build.
     "candidate_catalog_runtime_cache_family_matches_the_development_build",
+    // TASK-354: the build-output family through the candidate-catalog build.
+    "candidate_catalog_build_output_family_matches_the_development_build",
 ];
 
 /// The one test whose container receives the pinned Buildah closure.
@@ -573,8 +607,68 @@ pub static RUNTIME_CACHE_STORE_TESTS: &[&str] = &[
     "candidate_catalog_runtime_cache_family_matches_the_development_build",
 ];
 
+/// TASK-354's build-output tests: CMake, Meson, Autoconf, West, Bazel,
+/// Buildroot, OE-Core, BitBake and their host tools are links of the
+/// under-test bundle into the host store, mounted read-only.
+pub static BUILD_OUTPUT_STORE_TESTS: &[&str] = &[
+    "cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_build_in_flight_is_kept",
+    "meson_build_anchored_real_meson_builds_reclaim_then_reconfigure_and_a_ninja_in_flight_is_kept",
+    "autotools_build_anchored_real_configure_builds_reclaim_then_reconfigure_and_a_make_in_flight_is_kept",
+    "west_build_anchored_real_west_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept",
+    "buildroot_output_anchored_real_buildroot_reclaim_then_rebuild_and_a_build_in_flight_is_kept",
+    "yocto_tmpdir_anchored_real_bitbake_reclaim_then_rebuild_and_a_task_in_flight_is_kept",
+    "bazel_output_base_anchored_real_bazel_reclaim_then_rebuild_and_a_live_server_is_kept",
+    "candidate_catalog_build_output_family_matches_the_development_build",
+];
+
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
 pub static TESTS: &[Test] = &[
+    // TASK-354's build-output tests. Yocto, Buildroot, West and Bazel run
+    // only in the full suite: in a whole fast run (2026-11-07) they took
+    // 185 s to over 300 s each, Yocto timing out though it started first
+    // (150 s alone). The other three stay fast (under 50 s there).
+    Test {
+        name: "yocto_tmpdir_anchored_real_bitbake_reclaim_then_rebuild_and_a_task_in_flight_is_kept",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: build_output_suite::yocto_tmpdir_anchored_real_bitbake_reclaim_then_rebuild_and_a_task_in_flight_is_kept,
+    },
+    Test {
+        name: "buildroot_output_anchored_real_buildroot_reclaim_then_rebuild_and_a_build_in_flight_is_kept",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: build_output_suite::buildroot_output_anchored_real_buildroot_reclaim_then_rebuild_and_a_build_in_flight_is_kept,
+    },
+    Test {
+        name: "west_build_anchored_real_west_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: build_output_suite::west_build_anchored_real_west_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept,
+    },
+    Test {
+        name: "bazel_output_base_anchored_real_bazel_reclaim_then_rebuild_and_a_live_server_is_kept",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: build_output_suite::bazel_output_base_anchored_real_bazel_reclaim_then_rebuild_and_a_live_server_is_kept,
+    },
+    Test {
+        name: "cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_build_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: build_output_suite::cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_build_in_flight_is_kept,
+    },
+    Test {
+        name: "autotools_build_anchored_real_configure_builds_reclaim_then_reconfigure_and_a_make_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: build_output_suite::autotools_build_anchored_real_configure_builds_reclaim_then_reconfigure_and_a_make_in_flight_is_kept,
+    },
+    Test {
+        name: "meson_build_anchored_real_meson_builds_reclaim_then_reconfigure_and_a_ninja_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: build_output_suite::meson_build_anchored_real_meson_builds_reclaim_then_reconfigure_and_a_ninja_in_flight_is_kept,
+    },
     Test {
         name: "ensure_refuses_symlinked_path_without_mutation",
         tier: Tier::Fast,
@@ -1619,6 +1713,14 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: runtime_cache_suite::candidate_catalog_runtime_cache_family_matches_the_development_build,
+    },
+    // About five minutes alone, in the host's PID namespace (one at a
+    // time): beyond the fast suite's budget.
+    Test {
+        name: "candidate_catalog_build_output_family_matches_the_development_build",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: build_output_suite::candidate_catalog_build_output_family_matches_the_development_build,
     },
     Test {
         name: "anchored_west_build_keeps_unrebuildable_outputs",
