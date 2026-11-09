@@ -7,6 +7,14 @@ publish = false
 # Fuzzers are built with nightly and stay outside the product workspace.
 [workspace]
 
+# Same dev profile as the root Cargo.toml (TASK-371): `just check` runs the
+# seeds test here, which also links every fuzz target, into the shared
+# tmp/target. `cargo fuzz run` builds release and is unaffected.
+[profile.dev]
+debug = false
+strip = "debuginfo"
+incremental = false
+
 [package.metadata]
 cargo-fuzz = true
 

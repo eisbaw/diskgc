@@ -11,6 +11,16 @@
 [profile.release]
 overflow-checks = true
 
+# Same dev profile as the root Cargo.toml (TASK-371). No gate builds this
+# project in the dev shell (the flake builds release), but an ad-hoc run of
+# its pure unit tests (`cargo test --manifest-path diskgc-e2e/Cargo.toml
+# --lib`) or an editor's check does, into the shared tmp/target, and Cargo's
+# default dev profile left a 199 MiB test binary there.
+[profile.dev]
+debug = false
+strip = "debuginfo"
+incremental = false
+
 [package]
 name = "diskgc-e2e"
 version = "0.0.0"

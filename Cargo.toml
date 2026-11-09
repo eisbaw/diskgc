@@ -49,13 +49,18 @@ toml_edit = { version = "=0.25.17", default-features = false, features = ["parse
 proptest = "1"
 getrandom = "0.4"
 
-# Line tables are enough for backtraces and keep incremental builds and
-# target/ small; dependencies carry no debug info at all.
+# Disk over rebuild speed and debuggers (TASK-371; docs/testing.md,
+# Development scratch): no incremental state and no debug info, and the linker
+# strips std's prebuilt debug info from every test and binary. Panic
+# messages keep file:line (compiled in, not debug info); backtraces keep
+# function names but lose file:line. Environment overrides: an edit-heavy
+# session, CARGO_INCREMENTAL=1; a debugger, CARGO_PROFILE_DEV_DEBUG=true
+# CARGO_PROFILE_DEV_STRIP=none. diskgc-e2e/Cargo.toml and fuzz/Cargo.toml
+# repeat this section: separate workspaces sharing tmp/target.
 [profile.dev]
-debug = "line-tables-only"
-
-[profile.dev.package."*"]
 debug = false
+strip = "debuginfo"
+incremental = false
 
 # The flake builds the shipped binary and runs workspace tests with the
 # release profile. A deletion tool must detect integer overflow there too.

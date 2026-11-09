@@ -4017,6 +4017,17 @@ Nix store objects, container-private `/tmp`, rootless
 container storage and the small `.gcroots/` symlinks have their own required
 locations. The product's host `/tmp` profiles are unaffected.
 
+The dev profile of all three Cargo projects (the workspace, `diskgc-e2e`,
+`fuzz`) keeps no incremental state and no debug info (`[profile.dev]` in
+each `Cargo.toml`, TASK-371). The flake builds release and is unaffected;
+the mutation containers already set `CARGO_INCREMENTAL=0`. Panic messages
+and proptest failures still name `file:line`; `RUST_BACKTRACE=1` frames
+name functions only. The cost is a several times slower rebuild after an
+edit (Disk budgets, `check` row). Export `CARGO_INCREMENTAL=1` for an
+edit-heavy session (its `incremental/` stays in `tmp/target` afterwards),
+and `CARGO_PROFILE_DEV_DEBUG=true CARGO_PROFILE_DEV_STRIP=none` for a
+debugger.
+
 On 2026-10-22, the legacy `/tmp/diskgc*` inventory contained 503 entries:
 88 registered Git worktrees, 96 other directories and 319 files. Sixty of
 the registered worktrees had tracked or untracked changes; 28 were clean.
@@ -4299,7 +4310,7 @@ consent `nix-store --gc`). The mutation runner keeps its own guard as well.
 
 | Stage | Budget | Measured (2026-11-02, this laptop; other work ran alongside) | Lines |
 |---|---|---|---|
-| `check` | 10 GiB | cold, in a new worktree (empty `tmp/target`): 11.29 GiB peak, -11.07 GiB after (987 s), but `tmp/target` grew by about 5 GiB (to 5.3 GiB): other builds on the host account for the rest | `just check` in the gate recipes |
+| `check` | 10 GiB | cold, in a new worktree (empty `tmp/target`): 11.29 GiB peak, -11.07 GiB after (987 s), but `tmp/target` grew by about 5 GiB (to 5.3 GiB): other builds on the host account for the rest. With the TASK-371 dev profile (2026-11-07, not through `disk_stage.py`), a cold `just check` leaves `tmp/target` at 1.9 GiB instead of 6.0 GiB; one edit to `diskgc-core` then rebuilds `cargo test --workspace --no-run` in 90 s, against 18 s and 1.6 GiB of `incremental/` with `CARGO_INCREMENTAL=1` (one run each, load average about 20) | `just check` in the gate recipes |
 | `flake-check` | 6 GiB | `e2e-clippy` rebuilt on its cached dependency artifacts: 0.23 GiB peak (29 s); a cold Crane dependency build was not measured and is what the budget allows for | each `nix build` of a non-VM flake check |
 | `containers` | 17 GiB | a cold load of the base image (4.4 GiB kept) into a private Podman store: 12.70 GiB peak, -4.34 GiB after; `e2e-one` with the image loaded: 0.03 to 0.16 GiB peak; the first, which also built the changed runner: 1.57 GiB. The base image is unchanged by TASK-354; its build-output tools (Bazel 7.6.0 with its JDK, Buildroot's and OE-Core's host tools, three source trees) add 0.84 GiB to the under-test bundle's store closure (2.6 GiB in all), fetched once by the runner's build, and its first `e2e-one` of those tests (also building the runner) peaked at 1.75 GiB | each runner suite, `_e2e-debian`, `_e2e-docker`, the `e2e-one` recipes |
 | `vm` | 8 GiB | `vm-historical-ctime` after its inputs were built: 0.51 GiB peak, -0.31 GiB after (86 s); the first VM check after a harness change builds those inputs too, as `vm-real-kernel` below did | each NixOS VM check, `e2e-vm-tally-pressure` |
