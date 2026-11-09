@@ -15,8 +15,14 @@
 //! pruned the same way:
 //!
 //! - **Stamps** ([`OuterBuild::stamps`]) in the build directory's parent or
-//!   a directory above it: at most [`STAMP_LEVELS`] directories, none above
-//!   the bound root. Each is listed, since some stamp names carry a hash.
+//!   a directory above it: at most [`STAMP_LEVELS`] directories above the
+//!   build directory or above any build directory it lies in (a directory
+//!   holding a guarded anchor's marker, [`BUILD_MARKERS`]), none above the
+//!   outermost root of its discovery that holds its root (`stamp_root`).
+//!   Each is listed, since some stamp names carry a hash. So a build nested
+//!   in a vetoed one is vetoed too, whatever root, profile or order found
+//!   it (TASK-367, Codex's review: the same function of the path wherever
+//!   it is asked, no state shared between walks).
 //! - **Build roots** ([`OuterBuild::root_marker`]): a directory anywhere
 //!   above the build directory, up to `/`, that holds the marker of a
 //!   build tree diskgc's own anchors recognise (`build_trees`), looked up
@@ -30,7 +36,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use super::build_trees::{BAZEL_MARKER, BUILDROOT_MARKER, YOCTO_MARKER, entry};
-use super::unreachable_root_as;
+use super::{AUTOTOOLS_STATUS, CMAKE_CACHE, MESON_CORE_DATA, unreachable_root_as};
 use crate::engine::{DEFAULT_MAX_ENTRIES, Reason, Skip};
 use crate::fs_kind::discover::check_deadline;
 use crate::fs_kind::judge::skip_or_stop;
@@ -112,11 +118,17 @@ pub(super) const OUTER_BUILDS: &[OuterBuild] = &[
 /// (`openwrt-build`, `build`) one.
 pub(super) const STAMP_LEVELS: usize = 4;
 
+/// What makes a directory a build directory of a guarded anchor, by the
+/// file its anchor reads: CMake's (West's too), Meson's, Autoconf's. A
+/// directory holding one, of any type, widens the stamp climb to the four
+/// directories above it.
+const BUILD_MARKERS: &[&str] = &[CMAKE_CACHE, MESON_CORE_DATA, AUTOTOOLS_STATUS];
+
 /// Why `candidate`, a build directory found below `root`, lies inside
 /// another build system's managed tree; `None` when no signal says so.
 pub(super) fn outer_build<H: Host>(
     host: &H,
-    root: &Path,
+    stamp_root: &Path,
     candidate: &Path,
     deadline: Option<MonoTime>,
 ) -> Judged<Option<String>> {
@@ -133,6 +145,9 @@ pub(super) fn outer_build<H: Host>(
             )));
         }
     };
+    // Stamps count up to this level (0: the parent): the candidate's four,
+    // widened past every build directory it lies in.
+    let mut reach = STAMP_LEVELS - 1;
     for (level, dir_path) in candidate.ancestors().skip(1).enumerate() {
         check_deadline(host, deadline, dir_path)?;
         let dir = match resolve_in(host, &mounts, dir_path, Want::Directory) {
@@ -168,7 +183,28 @@ pub(super) fn outer_build<H: Host>(
                 ))));
             }
         }
-        if level >= STAMP_LEVELS || !dir_path.starts_with(root) {
+        if !dir_path.starts_with(stamp_root) {
+            continue;
+        }
+        if level + STAMP_LEVELS > reach {
+            for marker in BUILD_MARKERS {
+                if judged!(entry(
+                    host,
+                    candidate,
+                    &dir.fd,
+                    dir_path,
+                    dir.mount.id,
+                    marker,
+                    deadline
+                ))
+                .is_some()
+                {
+                    reach = level + STAMP_LEVELS;
+                    break;
+                }
+            }
+        }
+        if level > reach {
             continue;
         }
         let names = match host.read_dir(&dir.fd, DEFAULT_MAX_ENTRIES) {

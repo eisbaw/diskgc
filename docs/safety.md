@@ -2837,12 +2837,16 @@ An output whose anchor finds no evidence at all is still entered, as
 any other directory:
 
 - **A stamp** in the build directory's parent or one of the three
-  directories above it, never above the bound root. Each of those
-  directories is listed: Buildroot's `.stamp_*`; OpenWrt's `.built`,
-  `.configured*` and `.prepared*` (a target package's carry a hash).
-  Four directories cover Buildroot 2026.08.1's deepest out-of-source
-  package build (`tensorflow-lite`, `SUBDIR = tensorflow/lite`, stamps
-  three up) and OpenWrt's (`openwrt-build` or `build`, stamps one up).
+  directories above it, and in the four above every build directory it
+  lies in (a directory holding `CMakeCache.txt`,
+  `meson-private/coredata.dat` or `config.status`), never above the
+  outermost root of its selection that holds its root (its *stamp
+  root*). Each of those directories is listed: Buildroot's `.stamp_*`;
+  OpenWrt's `.built`, `.configured*` and `.prepared*` (a target
+  package's carry a hash). Four directories cover Buildroot 2026.08.1's
+  deepest out-of-source package build (`tensorflow-lite`, `SUBDIR =
+  tensorflow/lite`, stamps three up) and OpenWrt's (`openwrt-build` or
+  `build`, stamps one up).
 - **A build root** that diskgc's own anchors recognise, anywhere above
   the build directory up to `/`, looked up by name without following a
   symlink: a Buildroot output (`.br2-external.mk`, in every output, `O=`
@@ -2869,17 +2873,33 @@ included; a stamp that appears after discovery keeps the output
 (`changed`). A directory on the way that cannot be reached, or one of
 the four that cannot be listed (or holds more than the entry limit), is
 a visible refusal of the candidate, which is not entered either (vector
-`cmake-build-anchored-undecided-guard-prunes-its-subtree`). The pruning
-is per source: a vetoed CMake build is not entered by
-`cmake-build-anchored`'s discovery, while another profile's discovery
-(a Meson build nested in it) judges its own candidates, each with its
-own climb.
+`cmake-build-anchored-undecided-guard-prunes-its-subtree`).
+
+The verdict is a function of the candidate's path and its selection's
+roots, the same wherever it is asked, so a build nested in a vetoed one
+is vetoed too however it is reached (Codex's second review, TASK-367):
+by a second root of the selection that starts inside the vetoed build,
+or reaches it again, since both roots' climbs are bounded by the same
+stamp root; by another profile of a union (a Meson build inside a
+vetoed CMake build), since its climb widens past the CMake build's
+marker; in any order of roots, terms or tally sources. The tally lists
+one root at a time, each bounded by its selection's stamp root, so the
+index holds no vetoed build either; `survey` reports none. Vectors:
+`cmake-build-anchored-nested-root-inside-a-vetoed-build`,
+`cmake-or-meson-union-meson-build-inside-a-vetoed-cmake-build`,
+`cmake-build-anchored-vetoed-build-reached-again-from-a-nested-root`
+(each also under the 0.2 catalog).
 
 Not covered: a meta-build system not in the table (dpkg-buildpackage,
 Spack, conda-build, Gentoo's Portage), and another package manager's
 tree (a build directory below a Python `.venv`, for one); a stamp more
-than four directories above the build directory, or above the bound
-root, outside any recognised build root (OpenWrt has none); a build
+than four directories above the build directory and every build
+directory it lies in. Above the stamp root nothing is listed: a
+selection whose only root lies inside an outer tree (only
+`R/pkg/out/a`, when the stamps are in `R`) cannot see those stamps, so
+the guard cannot apply there unless a recognised build root lies above
+(OpenWrt has none), and neither can a selection of other roots whose
+tier never names `R`; a
 root reached through a bind mount of a directory inside it (the climb
 follows the path, so the root's marker above the bind's source is not
 seen; stamps in the four directories still are). A stray stamp-like

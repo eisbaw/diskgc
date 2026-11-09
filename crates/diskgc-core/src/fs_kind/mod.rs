@@ -47,7 +47,8 @@ pub use command::{
     run_command_checked,
 };
 pub use discover::{
-    Beneath, DiscoverCursor, Discovery, Found, Stepped, discover, discover_beneath, discover_union,
+    Beneath, DiscoverCursor, Discovery, Found, Stepped, discover, discover_beneath,
+    discover_rooted, discover_union, stamp_root,
 };
 pub use judge::{Judge, Reached, Tally, Walked};
 pub(crate) use liveness::contract_scan_floor;

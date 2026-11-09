@@ -506,6 +506,7 @@ impl Judge<'_> {
                 source_anchor::AnchorCheck::new(
                     kind,
                     &found.root,
+                    &found.stamp_root,
                     &found.path,
                     found.identity,
                     deadline
@@ -519,6 +520,7 @@ impl Judge<'_> {
                 source_anchor::AnchorCheck::new(
                     kind,
                     &found.root,
+                    &found.stamp_root,
                     &found.path,
                     found.identity,
                     deadline

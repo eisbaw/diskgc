@@ -1282,3 +1282,61 @@ profiles:
         );
     }
 }
+
+/// TASK-367 (Codex's second review): survey reports what the reclaim
+/// would take, so a build the nested-build guard vetoes, and an old build
+/// nested in it whatever root or profile reaches it, is no candidate row,
+/// eligible or not. `.built` in the root vetoes the recently changed CMake
+/// build `pkg/out`; below it an old CMake build (its source `out/a`) and an
+/// old Meson build (`out/a/b/inner`, its source `out/a` too) lie past
+/// their own four directories; the roots are the root and `out/a`. The
+/// positive control: a standalone old CMake build is an eligible row.
+#[test]
+fn survey_reports_no_build_inside_a_vetoed_one_as_a_candidate() {
+    let src = "/home/tester/src";
+    let cmake = |source: &str, mtime: &str| {
+        format!(
+            "{{.: {{mtime: {mtime}}}, CMakeCache.txt: {{mtime: {mtime}, content: \"CMAKE_HOME_DIRECTORY:INTERNAL={source}\\n\"}}, CMakeFiles: {{.: {{mtime: {mtime}}}}}, a.o: {{mtime: {mtime}, size: 8K}}}}"
+        )
+    };
+    let inner = format!("{src}/pkg/out/a/b/inner");
+    let meson_info = format!(
+        "{{\\\"directories\\\":{{\\\"source\\\":\\\"{src}/pkg/out/a\\\",\\\"build\\\":\\\"{inner}\\\",\\\"info\\\":\\\"{inner}/meson-info\\\"}},\\\"error\\\":false}}"
+    );
+    let old = "2026-10-01T00:00:00Z";
+    let extra = format!(
+        "  {src}/.built: {{mtime: {old}}}\n  {src}/pkg/CMakeLists.txt: {{content: \"project(p)\\n\"}}\n  {src}/pkg/out: {}\n  {src}/pkg/out/a/CMakeLists.txt: {{content: \"project(q)\\n\"}}\n  {src}/pkg/out/a/meson.build: {{content: \"project('q')\\n\"}}\n  {src}/pkg/out/a/cm: {}\n  {inner}: {{.: {{mtime: {old}}}, build.ninja: {{mtime: {old}}}, meson-private: {{.: {{mtime: {old}}}, coredata.dat: {{mtime: {old}, content: coredata}}}}, meson-info: {{.: {{mtime: {old}}}, meson-info.json: {{mtime: {old}, content: \"{meson_info}\"}}}}, a.o: {{mtime: {old}, size: 8K}}}}\n  /home/tester/alone/CMakeLists.txt: {{content: \"project(s)\\n\"}}\n  /home/tester/alone/out: {}\n",
+        cmake(&format!("{src}/pkg"), "2026-10-15T02:00:00Z"),
+        cmake(&format!("{src}/pkg/out/a"), old),
+        cmake("/home/tester/alone", old),
+    );
+    let host = host(&laptop_tmp(&extra));
+    let mut options = options(
+        &["/home/tester"],
+        Some("profile:cmake-build-anchored || profile:meson-build-anchored"),
+    );
+    options.roots = vec![
+        src.to_owned(),
+        format!("{src}/pkg/out/a"),
+        "/home/tester/alone".to_owned(),
+    ];
+    let value = json(&run(&host, &options, None));
+    let rows = value["paths"][0]["candidates"].as_array().expect("rows");
+    let named: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r["candidate"].as_str())
+        .collect();
+    for vetoed in [
+        format!("{src}/pkg/out"),
+        format!("{src}/pkg/out/a/cm"),
+        inner.clone(),
+    ] {
+        assert!(!named.contains(&vetoed.as_str()), "{vetoed}: {value}");
+    }
+    let alone = rows
+        .iter()
+        .find(|r| r["candidate"] == "/home/tester/alone/out")
+        .unwrap_or_else(|| panic!("positive control: no row for the standalone build: {value}"));
+    assert_eq!(alone["eligible"], true, "{alone}");
+    assert_read_only(&host);
+}

@@ -23,13 +23,13 @@ use build_trees::{bazel, buildroot, yocto};
 // system's managed tree.
 mod nested;
 
-const CMAKE_CACHE: &str = "CMakeCache.txt";
+pub(super) const CMAKE_CACHE: &str = "CMakeCache.txt";
 const CMAKE_SOURCE_KEY: &[u8] = b"CMAKE_HOME_DIRECTORY:INTERNAL=";
 const MAX_CMAKE_CACHE_BYTES: u64 = 2 * 1024 * 1024;
 const MESON_INFO: &str = "meson-info/meson-info.json";
-const MESON_CORE_DATA: &str = "meson-private/coredata.dat";
+pub(super) const MESON_CORE_DATA: &str = "meson-private/coredata.dat";
 const MAX_MESON_INFO_BYTES: u64 = 1024 * 1024;
-const AUTOTOOLS_STATUS: &str = "config.status";
+pub(super) const AUTOTOOLS_STATUS: &str = "config.status";
 const MAX_AUTOTOOLS_STATUS_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Deserialize into structs so duplicate `directories`, `source` or `build`
@@ -92,6 +92,9 @@ impl Anchored {
 pub(super) struct AnchorCheck<'a> {
     kind: SourceAnchor,
     root: &'a Path,
+    /// The bound of the nested-build guard's stamp climb (TASK-367):
+    /// [`super::Found::stamp_root`].
+    stamp_root: &'a Path,
     candidate: &'a Path,
     expected: Identity,
     deadline: Option<MonoTime>,
@@ -101,6 +104,7 @@ impl<'a> AnchorCheck<'a> {
     pub(super) fn new(
         kind: SourceAnchor,
         root: &'a Path,
+        stamp_root: &'a Path,
         candidate: &'a Path,
         expected: Identity,
         deadline: Option<MonoTime>,
@@ -108,6 +112,7 @@ impl<'a> AnchorCheck<'a> {
         Self {
             kind,
             root,
+            stamp_root,
             candidate,
             expected,
             deadline,
@@ -160,6 +165,7 @@ pub(super) fn check_opened<H: Host>(
     let AnchorCheck {
         kind,
         root,
+        stamp_root,
         candidate,
         expected,
         deadline,
@@ -194,7 +200,7 @@ pub(super) fn check_opened<H: Host>(
     // Another build system's package build is that system's to clean
     // (TASK-367): never a candidate, nor anything below it.
     if nested::GUARDED.contains(&kind) {
-        match nested::outer_build(host, root, candidate, deadline)? {
+        match nested::outer_build(host, stamp_root, candidate, deadline)? {
             Ok(None) => {}
             Ok(Some(_)) => return Ok(Ok(Anchored::Vetoed(None))),
             Err(skip) => return Ok(Ok(Anchored::Vetoed(Some(skip)))),
