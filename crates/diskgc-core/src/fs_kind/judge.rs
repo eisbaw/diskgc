@@ -500,7 +500,7 @@ impl Judge<'_> {
             return Ok(Ok(None));
         };
         let name = file_name(found)?;
-        let evidence = if let Some(fd) = opened_candidate {
+        let anchored = if let Some(fd) = opened_candidate {
             judged!(source_anchor::check_opened(
                 host,
                 source_anchor::AnchorCheck::new(
@@ -526,6 +526,10 @@ impl Judge<'_> {
                 parent,
                 name,
             ))
+        };
+        let evidence = match anchored.evidence() {
+            Ok(evidence) => evidence,
+            Err(skip) => return Ok(Err(skip)),
         };
         if evidence.as_ref() != found.source_evidence.as_ref() {
             return Ok(Err(Skip::new(

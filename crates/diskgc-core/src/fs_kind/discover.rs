@@ -1038,8 +1038,15 @@ impl<H: Host> Walk<'_, H> {
                 dir,
                 name,
             )? {
-                Ok(Some(evidence)) => Some(evidence),
-                Ok(None) => return Ok(false),
+                Ok(source_anchor::Anchored::Evidence(evidence)) => Some(evidence),
+                Ok(source_anchor::Anchored::NoEvidence) => return Ok(false),
+                // Inside another build system's tree (TASK-367): neither
+                // a candidate nor entered, so a build nested in it is not
+                // one either; a guard that could not decide is refused.
+                Ok(source_anchor::Anchored::Vetoed(refused)) => {
+                    self.out.refused.extend(refused);
+                    return Ok(true);
+                }
                 Err(skip) => {
                     self.out.refused.push(skip);
                     return Ok(false);

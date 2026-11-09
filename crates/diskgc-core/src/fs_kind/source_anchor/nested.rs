@@ -8,9 +8,11 @@
 //! saying "configured" or "built", and the outer system's next build fails
 //! until the package is cleaned there.
 //!
-//! Three signals, data below; any keeps the output (`Ok(None)`, as any
-//! anchor keeps an output it doubts), and an ancestor that cannot be
-//! reached or read is a visible refusal:
+//! Three signals, data below; any vetoes the output (`Anchored::Vetoed`:
+//! not a candidate, and discovery does not enter it, since a build nested
+//! in it is in the same tree though its own climb may not reach a stamp),
+//! and an ancestor that cannot be reached or read is a visible refusal,
+//! pruned the same way:
 //!
 //! - **Stamps** ([`OuterBuild::stamps`]) in the build directory's parent or
 //!   a directory above it: at most [`STAMP_LEVELS`] directories, none above

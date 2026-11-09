@@ -56,6 +56,36 @@ pub struct SourceEvidence {
     pub source_file: Identity,
 }
 
+/// What an anchor says of a candidate directory.
+#[derive(Debug)]
+pub(super) enum Anchored {
+    /// Its recorded source survives: a candidate.
+    Evidence(SourceEvidence),
+    /// No evidence that it is a rebuildable output: not a candidate, and
+    /// discovery may look below it as below any other directory.
+    NoEvidence,
+    /// A build directory inside another build system's managed tree, or
+    /// one the nested-build guard could not clear (`Some`: the visible
+    /// refusal), TASK-367. Not a candidate, and nothing below it is: a
+    /// build nested in it lies in the same tree, though its own climb may
+    /// not reach the signal (a stamp past the four directories), so
+    /// discovery does not enter it.
+    Vetoed(Option<Skip>),
+}
+
+impl Anchored {
+    /// For a judgement, which compares with what discovery recorded: a
+    /// veto is no evidence (`changed` there), and a guard that could not
+    /// decide is its own refusal.
+    pub(super) fn evidence(self) -> Result<Option<SourceEvidence>, Skip> {
+        match self {
+            Self::Evidence(evidence) => Ok(Some(evidence)),
+            Self::NoEvidence | Self::Vetoed(None) => Ok(None),
+            Self::Vetoed(Some(skip)) => Err(skip),
+        }
+    }
+}
+
 /// Evidence the caller expects from a particular candidate. Discovery and
 /// locked judgement use the same values and differ only in how they reach it.
 #[derive(Clone, Copy)]
@@ -90,7 +120,7 @@ pub(super) fn check<H: Host>(
     request: AnchorCheck<'_>,
     parent: &Resolved<H::Fd>,
     name: &OsStr,
-) -> Judged<Option<SourceEvidence>> {
+) -> Judged<Anchored> {
     let AnchorCheck {
         candidate,
         expected,
@@ -126,7 +156,7 @@ pub(super) fn check_opened<H: Host>(
     request: AnchorCheck<'_>,
     candidate_fd: &H::Fd,
     mount_id: u64,
-) -> Judged<Option<SourceEvidence>> {
+) -> Judged<Anchored> {
     let AnchorCheck {
         kind,
         root,
@@ -158,15 +188,19 @@ pub(super) fn check_opened<H: Host>(
         SourceAnchor::Yocto => yocto(host, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Bazel => bazel(host, candidate, candidate_fd, mount_id, deadline),
     });
+    let Some(evidence) = evidence else {
+        return Ok(Ok(Anchored::NoEvidence));
+    };
     // Another build system's package build is that system's to clean
-    // (TASK-367): kept like any output whose evidence is in doubt.
-    if evidence.is_some()
-        && nested::GUARDED.contains(&kind)
-        && judged!(nested::outer_build(host, root, candidate, deadline)).is_some()
-    {
-        return Ok(Ok(None));
+    // (TASK-367): never a candidate, nor anything below it.
+    if nested::GUARDED.contains(&kind) {
+        match nested::outer_build(host, root, candidate, deadline)? {
+            Ok(None) => {}
+            Ok(Some(_)) => return Ok(Ok(Anchored::Vetoed(None))),
+            Err(skip) => return Ok(Ok(Anchored::Vetoed(Some(skip)))),
+        }
     }
-    Ok(Ok(evidence))
+    Ok(Ok(Anchored::Evidence(evidence)))
 }
 
 /// One CMake candidate. `None` means its marker does not establish a

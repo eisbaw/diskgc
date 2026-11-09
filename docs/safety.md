@@ -2827,8 +2827,14 @@ package is cleaned there (with Buildroot 2026.08.1, `make
 host-cmk-rebuild` fails once `buildroot-build` is gone).
 
 After the source anchor has accepted a candidate, the guard looks for
-three signals, and any one keeps the output as an anchor keeps any
-output it doubts (not a candidate, no skip reason):
+three signals. Any one keeps the output (not a candidate, no skip
+reason), and discovery does not enter it: a build nested in it lies in
+the same tree although its own climb may not reach the signal (a stamp
+past the four directories), so it is not a candidate either (Codex's
+counterexample, vector
+`cmake-build-anchored-old-build-below-a-vetoed-active-one-survives`).
+An output whose anchor finds no evidence at all is still entered, as
+any other directory:
 
 - **A stamp** in the build directory's parent or one of the three
   directories above it, never above the bound root. Each of those
@@ -2862,7 +2868,12 @@ guard runs at discovery and again at every judgement, the locked one
 included; a stamp that appears after discovery keeps the output
 (`changed`). A directory on the way that cannot be reached, or one of
 the four that cannot be listed (or holds more than the entry limit), is
-a visible refusal of the candidate.
+a visible refusal of the candidate, which is not entered either (vector
+`cmake-build-anchored-undecided-guard-prunes-its-subtree`). The pruning
+is per source: a vetoed CMake build is not entered by
+`cmake-build-anchored`'s discovery, while another profile's discovery
+(a Meson build nested in it) judges its own candidates, each with its
+own climb.
 
 Not covered: a meta-build system not in the table (dpkg-buildpackage,
 Spack, conda-build, Gentoo's Portage), and another package manager's
