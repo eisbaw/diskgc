@@ -1,0 +1,37 @@
+# TASK-367, Codex's third review, case 4 (a union keeps a veto's
+# protections): `profile:cmake-build-anchored || profile:pytest-tmp`. An
+# old pytest session that is also a valid CMake output (its source the
+# pytest-of-tester directory) holds a Git checkout, with `.built` beside
+# it. Without the guard both terms find it and cmake's `checkouts: refuse`
+# keeps it (contains_checkout); with the guard dropping cmake's term,
+# pytest-tmp (`checkouts: allow`) deleted it. A term's veto keeps the
+# object for the whole union: it stays. pytest-1, a plain old session, is
+# reclaimed (positive control).
+profile_vector: 1
+select: profile:cmake-build-anchored || profile:pytest-tmp
+roots: [/tmp]
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /tmp/nix-shell.AB: {.: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeLists.txt: {mtime: 2026-10-01T00:00:00Z, content: "project(p)\n"}, .built: {mtime: 2026-10-01T00:00:00Z}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-0: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/tmp/nix-shell.AB/pytest-of-tester\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, old.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}, test_repo0: {.: {mtime: 2026-10-01T00:00:00Z}, .git: {.: {mtime: 2026-10-01T00:00:00Z}, HEAD: {mtime: 2026-10-01T00:00:00Z}}}}
+    /tmp/nix-shell.AB/pytest-of-tester/pytest-1: {.: {mtime: 2026-10-01T00:00:00Z}, test_a0: {.: {mtime: 2026-10-01T00:00:00Z}, f: {mtime: 2026-10-01T00:00:00Z}}}
+  processes:
+    - {pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
+expect:
+  plan:
+    - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-1}
+  reclaim_exit: 1
+  actions: [/tmp/nix-shell.AB/pytest-of-tester/pytest-1]
+  removed: [/tmp/nix-shell.AB/pytest-of-tester/pytest-1]
+  skipped: []
+  preserved: [/tmp/nix-shell.AB/pytest-of-tester/pytest-0/old.o, /tmp/nix-shell.AB/pytest-of-tester/pytest-0/test_repo0/.git/HEAD]

@@ -12,7 +12,7 @@ use crate::host::{DevIno, Host, MonoTime, Timestamp};
 use crate::inuse::{BusyBackOff, Checker, PlanScan};
 use crate::profile::{Action, IdleWindow};
 use crate::report::{BuildEvidence, PlanEntry, Report, RunTerm, Status};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -1100,9 +1100,11 @@ pub(super) fn discover_fs_union<H: Host>(
     let mut candidates: Vec<FsUnionCandidate> = Vec::new();
     let mut by_inode: HashMap<DevIno, usize> = HashMap::new();
     let mut refused = Vec::new();
+    let mut vetoed: HashSet<DevIno> = HashSet::new();
     for (source_index, source) in sources.iter().enumerate() {
         let (discovery, stopped) =
             fs_kind::discover_union(host, source.roots, source.find, deadline);
+        vetoed.extend(discovery.vetoed.iter().copied());
         for found in discovery.guard_candidates {
             merge_fs_union_found(
                 &mut candidates,
@@ -1137,10 +1139,19 @@ pub(super) fn discover_fs_union<H: Host>(
             );
         }
         if let Some(stop) = stopped {
+            candidates.retain(|candidate| !vetoed.contains(&candidate.identity.id));
             return (candidates, refused, Some(stop));
         }
     }
-    candidates.retain(|candidate| !candidate.invalid && !candidate.found_by.is_empty());
+    // A term's nested-build veto (TASK-367) keeps the object for the whole
+    // union: without the guard that term would have found it and brought
+    // its own protections (a refused checkout, a retention guard), which
+    // the other terms must not lose.
+    candidates.retain(|candidate| {
+        !candidate.invalid
+            && !candidate.found_by.is_empty()
+            && !vetoed.contains(&candidate.identity.id)
+    });
     (candidates, refused, None)
 }
 

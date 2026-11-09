@@ -76,8 +76,6 @@ pub fn run<H: Host>(host: &H, seconds: u64, roots: &[String], emit: &mut dyn FnM
                 &Where::default(),
                 0,
             ))),
-            // A probe's plain `*` source: no source anchor, no guard.
-            stamp_root: None,
         })
         .collect();
     let mut state = TallyState::new(Index::new(BUDGET_BYTES));

@@ -14,15 +14,12 @@
 //! and an ancestor that cannot be reached or read is a visible refusal,
 //! pruned the same way:
 //!
-//! - **Stamps** ([`OuterBuild::stamps`]) in the build directory's parent or
-//!   a directory above it: at most [`STAMP_LEVELS`] directories above the
-//!   build directory or above any build directory it lies in (a directory
-//!   holding a guarded anchor's marker, [`BUILD_MARKERS`]), none above the
-//!   outermost root of its discovery that holds its root (`stamp_root`).
-//!   Each is listed, since some stamp names carry a hash. So a build nested
-//!   in a vetoed one is vetoed too, whatever root, profile or order found
-//!   it (TASK-367, Codex's review: the same function of the path wherever
-//!   it is asked, no state shared between walks).
+//! - **Stamps** ([`OuterBuild::stamps`]) in the build directory's parent and
+//!   the three directories above it, and in the four directories above
+//!   every build directory it lies in (a directory holding a guarded
+//!   anchor's marker, [`BUILD_MARKERS`]), whatever roots, `PATH` or
+//!   profiles the run has. Each is listed, since some stamp names carry a
+//!   hash.
 //! - **Build roots** ([`OuterBuild::root_marker`]): a directory anywhere
 //!   above the build directory, up to `/`, that holds the marker of a
 //!   build tree diskgc's own anchors recognise (`build_trees`), looked up
@@ -31,6 +28,11 @@
 //!   that name anywhere on the build directory's path (npm's
 //!   `node_modules`, where cmake-js builds a native addon in the package's
 //!   `build/`), read from the path alone.
+//!
+//! The verdict is a function of the candidate's path alone (TASK-367,
+//! Codex's reviews): no root, `PATH`, filesystem filter, union term or
+//! order of discovery changes it, so a build nested in a vetoed one is
+//! vetoed by its own climb, and the guard can only add protection.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -128,7 +130,6 @@ const BUILD_MARKERS: &[&str] = &[CMAKE_CACHE, MESON_CORE_DATA, AUTOTOOLS_STATUS]
 /// another build system's managed tree; `None` when no signal says so.
 pub(super) fn outer_build<H: Host>(
     host: &H,
-    stamp_root: &Path,
     candidate: &Path,
     deadline: Option<MonoTime>,
 ) -> Judged<Option<String>> {
@@ -182,9 +183,6 @@ pub(super) fn outer_build<H: Host>(
                     outer.system
                 ))));
             }
-        }
-        if !dir_path.starts_with(stamp_root) {
-            continue;
         }
         if level + STAMP_LEVELS > reach {
             for marker in BUILD_MARKERS {

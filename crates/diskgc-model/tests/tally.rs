@@ -85,7 +85,6 @@ fn source(profile: &str, root: &str) -> TallySource {
             &Where::default(),
             1000,
         ))),
-        stamp_root: None,
     }
 }
 
@@ -1033,7 +1032,6 @@ fn two_level(profile: &str) -> TallySource {
             &Where::default(),
             1000,
         ))),
-        stamp_root: None,
     }
 }
 
@@ -1278,7 +1276,6 @@ fn a_recount_never_counts_a_single_as_a_block_member_too() {
             &Where::default(),
             1000,
         ))),
-        stamp_root: None,
     };
     let a = two_level("a");
     for source in [&one, &a] {
@@ -1306,7 +1303,6 @@ fn cargo_source(root: &str) -> TallySource {
     TallySource {
         finder: finder("cargo-target", root),
         find: SourceFind::CargoTarget,
-        stamp_root: None,
     }
 }
 

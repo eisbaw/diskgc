@@ -2839,9 +2839,9 @@ any other directory:
 - **A stamp** in the build directory's parent or one of the three
   directories above it, and in the four above every build directory it
   lies in (a directory holding `CMakeCache.txt`,
-  `meson-private/coredata.dat` or `config.status`), never above the
-  outermost root of its selection that holds its root (its *stamp
-  root*). Each of those directories is listed: Buildroot's `.stamp_*`;
+  `meson-private/coredata.dat` or `config.status`), whatever the roots:
+  directories above a root are listed too. Each of those directories is
+  listed: Buildroot's `.stamp_*`;
   OpenWrt's `.built`, `.configured*` and `.prepared*` (a target
   package's carry a hash). Four directories cover Buildroot 2026.08.1's
   deepest out-of-source package build (`tensorflow-lite`, `SUBDIR =
@@ -2875,36 +2875,54 @@ the four that cannot be listed (or holds more than the entry limit), is
 a visible refusal of the candidate, which is not entered either (vector
 `cmake-build-anchored-undecided-guard-prunes-its-subtree`).
 
-The verdict is a function of the candidate's path and its selection's
-roots, the same wherever it is asked, so a build nested in a vetoed one
-is vetoed too however it is reached (Codex's second review, TASK-367):
-by a second root of the selection that starts inside the vetoed build,
-or reaches it again, since both roots' climbs are bounded by the same
-stamp root; by another profile of a union (a Meson build inside a
-vetoed CMake build), since its climb widens past the CMake build's
-marker; in any order of roots, terms or tally sources. The tally lists
-one root at a time, each bounded by its selection's stamp root, so the
-index holds no vetoed build either; `survey` reports none. Vectors:
+**The guard only adds protection** (Mark, 2026-11-09, after Codex's
+second and third reviews of TASK-367). Its verdict is a function of the
+candidate's path alone: no root, no `PATH`, no filesystem filter of
+preflight, no union term, no tally source and no order of discovery
+changes it. So a build nested in a vetoed one is vetoed by its own climb
+however it is reached: from a second root that starts inside the
+vetoed build or reaches it again, from a root on another filesystem
+than the stamp's directory, through another profile of a union (a Meson
+build inside a vetoed CMake build: the climb widens past the CMake
+build's marker), from a narrower `survey` `PATH`, through the index.
+And a union keeps an object a guarded term vetoed whatever its other
+terms say: without the guard that term would have found it and brought
+its own protections (a refused checkout, a retention guard), which the
+other terms must not lose (a pytest session that is also a CMake build
+holding a Git checkout stays, as it did as `contains_checkout` without
+the guard). Vectors (each also under the 0.2 catalog):
 `cmake-build-anchored-nested-root-inside-a-vetoed-build`,
 `cmake-or-meson-union-meson-build-inside-a-vetoed-cmake-build`,
-`cmake-build-anchored-vetoed-build-reached-again-from-a-nested-root`
-(each also under the 0.2 catalog).
+`cmake-build-anchored-vetoed-build-reached-again-from-a-nested-root`,
+`cmake-build-anchored-stamp-above-a-root-on-another-filesystem`,
+`cmake-or-nix-shell-rc-union-stamp-at-the-other-terms-root`,
+`cmake-or-pytest-tmp-union-keeps-a-vetoed-session-holding-a-checkout`;
+survey tests `survey_reports_no_build_inside_a_vetoed_one_as_a_candidate`
+and `a_narrower_survey_path_does_not_report_a_vetoed_build`. The
+property test `crates/diskgc-model/tests/guard_props.rs` checks it over
+generated trees, root sets (nested, overlapping, on another
+filesystem), unions, catalogs, `PATH`s and the index on or off: what
+the dry run plans and `survey` reports eligible with the guard's
+signals is a subset of the same without them, the reclaim removes
+nothing below no candidate the run without them planned or took, and
+no build the guard's rule covers (computed independently of diskgc's
+code) is taken, planned or reported eligible.
 
 Not covered: a meta-build system not in the table (dpkg-buildpackage,
 Spack, conda-build, Gentoo's Portage), and another package manager's
 tree (a build directory below a Python `.venv`, for one); a stamp more
 than four directories above the build directory and every build
-directory it lies in. Above the stamp root nothing is listed: a
-selection whose only root lies inside an outer tree (only
-`R/pkg/out/a`, when the stamps are in `R`) cannot see those stamps, so
-the guard cannot apply there unless a recognised build root lies above
-(OpenWrt has none), and neither can a selection of other roots whose
-tier never names `R`; a
-root reached through a bind mount of a directory inside it (the climb
-follows the path, so the root's marker above the bind's source is not
-seen; stamps in the four directories still are). A stray stamp-like
-name (a `.built` file of the user's own in a parent) only keeps an
-output.
+directory it lies in; a build tree reached through a bind mount of a
+directory inside it (the climb follows the path, so the root's marker
+above the bind's source is not seen; stamps in the four directories
+still are). Another profile's candidate that holds a vetoed build (a
+pytest session holding one) is that profile's to judge: the guard keeps
+the build from the four build profiles, and from a union that includes
+them, not from a profile whose candidate merely contains it. Since the
+climb lists directories above the roots, a directory there that cannot
+be listed, or holds more than the entry limit, refuses the builds below
+it (visibly). A stray stamp-like name (a `.built` file of the user's
+own in a parent) only keeps an output.
 
 ### Source-anchored build trees
 

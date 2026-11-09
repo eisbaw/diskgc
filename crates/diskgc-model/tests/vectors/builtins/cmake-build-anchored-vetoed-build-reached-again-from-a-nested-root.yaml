@@ -3,8 +3,8 @@
 # build; roots R and R/pkg. Before the guard, R found `out` (kept:
 # keep_marker) and R/pkg met it again as a duplicate. With the guard R
 # vetoed it without recording it, and R/pkg, whose bound hid both the
-# stamp and the keep marker, deleted it. Bounded by the outermost root
-# (R), the second root's guard vetoes it as the first did.
+# stamp and the keep marker, deleted it. The climb does not stop at a
+# root: the second root's guard vetoes it as the first did.
 profile_vector: 1
 select: profile:cmake-build-anchored
 roots: [/home/tester/src, /home/tester/src/pkg]

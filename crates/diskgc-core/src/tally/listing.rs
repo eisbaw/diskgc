@@ -17,7 +17,7 @@
 //! not evicted either, and the reclaim walk's own discovery finds it.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::cargo_target;
 use crate::engine::{self, Seen, Work};
@@ -40,12 +40,6 @@ pub enum SourceFind {
 pub struct TallySource {
     pub finder: Finder,
     pub find: SourceFind,
-    /// The outermost root of the source's selection that holds the
-    /// finder's root, when another than it (`None`: the root itself): the
-    /// nested-build guard's stamp bound (TASK-367,
-    /// [`fs_kind::Found::stamp_root`]), so the index lists what the
-    /// reclaim's discovery of every root finds.
-    pub stamp_root: Option<Box<Path>>,
 }
 
 /// A candidate a listing found, as the index takes it.
@@ -82,13 +76,7 @@ pub fn list<H: Host>(
     let mut found: Vec<(PathBuf, engine::Identity, Seen, MonoTime)> = Vec::new();
     match &source.find {
         SourceFind::Fs(find) => {
-            let (discovery, stopped) = fs_kind::discover_rooted(
-                host,
-                &roots[0],
-                source.stamp_root.as_deref(),
-                find,
-                deadline,
-            );
+            let (discovery, stopped) = fs_kind::discover(host, &roots, find, deadline);
             let read_all = discovery.nothing_refused_but_storage();
             for (path, candidate) in discovery.candidates {
                 match candidate {
@@ -218,13 +206,7 @@ impl ListingCursor {
     pub fn new(source: &TallySource, now: MonoTime) -> Self {
         let root = source.finder.root.to_path_buf();
         let walk = match &source.find {
-            SourceFind::Fs(_) => {
-                let mut cursor = fs_kind::DiscoverCursor::new(root, false);
-                if let Some(stamp_root) = &source.stamp_root {
-                    cursor.set_stamp_root(stamp_root.to_path_buf());
-                }
-                Walker::Fs(cursor)
-            }
+            SourceFind::Fs(_) => Walker::Fs(fs_kind::DiscoverCursor::new(root, false)),
             SourceFind::CargoTarget => Walker::Cargo(cargo_target::DiscoverCursor::new(root)),
         };
         Self {

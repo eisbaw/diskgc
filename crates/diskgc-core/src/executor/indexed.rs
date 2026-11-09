@@ -166,9 +166,6 @@ fn sync_tiers<'t>(tiers: impl IntoIterator<Item = &'t Tier>) -> Vec<SyncTier> {
                     .map(|root| TallySource {
                         finder: finder(tier, root),
                         find: SourceFind::Fs(find.clone()),
-                        stamp_root: Some(fs_kind::stamp_root(&tier.roots, root))
-                            .filter(|outer| outer != root)
-                            .map(PathBuf::into_boxed_path),
                     })
                     .collect(),
                 order: tier.order,

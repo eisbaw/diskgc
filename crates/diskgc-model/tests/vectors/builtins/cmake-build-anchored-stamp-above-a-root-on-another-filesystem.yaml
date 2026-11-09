@@ -1,0 +1,33 @@
+# TASK-367, Codex's third review, case 1 (preflight): roots R and R/pkg,
+# R/pkg a filesystem of its own, the PATH. `.built` in R; R/pkg/out an
+# old CMake build. Preflight leaves out R (another filesystem than the
+# PATH's), and a guard bounded by the remaining roots missed the stamp:
+# `out` was deleted. The climb is a function of the path alone, whatever
+# roots preflight keeps: `out` stays.
+profile_vector: 1
+select: profile:cmake-build-anchored
+roots: [/home/tester/src, /home/tester/src/pkg]
+path: /home/tester/src/pkg
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /home/tester/src/pkg, fs: ext4, dev: "254:3", size: 10G, parent: 2}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/.built: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/pkg/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/pkg/out: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/pkg\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, old.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+expect:
+  # Preflight's own row for the root on another filesystem.
+  plan:
+    - {candidate: /home/tester/src, reason: other_fs}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/src, reason: other_fs}
+  preserved: [/home/tester/src/pkg/out/old.o]

@@ -69,11 +69,6 @@ pub struct Found {
     /// rule of the checkout guard and the keep markers count from here
     /// down, and the reclaim reaches it again from here.
     pub root: PathBuf,
-    /// The outermost root of its discovery that holds `root` (`root`
-    /// itself when none other does): the bound of the nested-build
-    /// guard's stamp climb (TASK-367), so that a root nested in another
-    /// sees what the outer one sees.
-    pub stamp_root: PathBuf,
     /// Its path: the root and the names that led to it.
     pub path: PathBuf,
     /// Its identity when found (`statx`, not followed). Reached again, it
@@ -104,6 +99,10 @@ pub struct Discovery {
     /// Structural matches of a guarding union source, recorded before
     /// source-owned evidence or anchors decide action admission.
     pub guard_candidates: Vec<Found>,
+    /// Objects the nested-build guard vetoed or could not clear (TASK-367),
+    /// by identity: never candidates, not entered, and kept by a union
+    /// whatever its other terms say (the guard only adds protection).
+    pub vetoed: Vec<DevIno>,
     /// Roots and directories on the way that could not be read or must not
     /// be (a missing root, a root on a network filesystem or reached through
     /// a symlink, an unreadable directory, a candidate whose own `where`
@@ -159,27 +158,7 @@ pub fn discover<H: Host>(
     deadline: Option<MonoTime>,
 ) -> (Discovery, Option<Stop>) {
     let mut out = Discovery::default();
-    let stopped = discover_into(host, roots, find, deadline, false, None, None, &mut out).err();
-    (out, stopped)
-}
-
-/// [`discover`] of the one `root`, its nested-build guard bounded by
-/// `stamp_root` (an outer root of the same selection; `None`: `root`), as
-/// a discovery of all its selection's roots bounds it there
-/// ([`Found::stamp_root`]): the tally's listing of one root.
-pub fn discover_rooted<H: Host>(
-    host: &H,
-    root: &Path,
-    stamp_root: Option<&Path>,
-    find: &Find,
-    deadline: Option<MonoTime>,
-) -> (Discovery, Option<Stop>) {
-    let mut out = Discovery::default();
-    let roots = [root.to_owned()];
-    let stopped = discover_into(
-        host, &roots, find, deadline, false, None, stamp_root, &mut out,
-    )
-    .err();
+    let stopped = discover_into(host, roots, find, deadline, false, None, &mut out).err();
     (out, stopped)
 }
 
@@ -237,7 +216,6 @@ pub fn discover_beneath<H: Host>(
         deadline,
         false,
         Some((at, scope)),
-        None,
         &mut out,
     )
     .err();
@@ -277,14 +255,12 @@ pub fn discover_union<H: Host>(
         deadline,
         find.has_retention_guard(),
         None,
-        None,
         &mut out,
     )
     .err();
     (out, stopped)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn discover_into<H: Host>(
     host: &H,
     roots: &[PathBuf],
@@ -292,7 +268,6 @@ fn discover_into<H: Host>(
     deadline: Option<MonoTime>,
     record_structural: bool,
     restrict: Option<(&Path, Beneath)>,
-    stamp_override: Option<&Path>,
     out: &mut Discovery,
 ) -> Result<(), Stop> {
     let mounts = host.mountinfo().map_err(|error| Stop::Failed {
@@ -337,7 +312,6 @@ fn discover_into<H: Host>(
             continue;
         }
         let mut cursor = DiscoverCursor::new(root.to_owned(), record_structural);
-        cursor.stamp_root = stamp_override.map_or_else(|| stamp_root(roots, root), Path::to_owned);
         if let Some((at, scope)) = restrict {
             // Resolved and judged above like every root; walked only when
             // it holds `at` or (a subtree) lies below it.
@@ -369,18 +343,6 @@ fn discover_into<H: Host>(
     // A walk whose last step crossed the deadline is not complete.
     check_deadline(host, deadline, roots.first().map_or(Path::new("/"), |r| r))?;
     Ok(())
-}
-
-/// The outermost of `roots` that holds `root` by path (`root` itself when
-/// none other does): [`Found::stamp_root`]. A root reached only through
-/// another spelling (a bind mount) is not related to it: the guard's
-/// documented bind-mount limit.
-pub fn stamp_root(roots: &[PathBuf], root: &Path) -> PathBuf {
-    roots
-        .iter()
-        .filter(|outer| root.starts_with(outer))
-        .min_by_key(|outer| outer.components().count())
-        .map_or_else(|| root.to_owned(), Clone::clone)
 }
 
 /// A root inside systemd's PrivateTmp (`why`): `unsafe_path`, a
@@ -459,10 +421,6 @@ pub enum Stepped {
 #[derive(Debug, Clone)]
 pub struct DiscoverCursor {
     root: PathBuf,
-    /// See [`Found::stamp_root`]; `root` for a cursor of its own (the
-    /// tally's: an index never decides, the reclaim discovers again with
-    /// every root of its selection).
-    stamp_root: PathBuf,
     record_structural: bool,
     /// The root's identity, once reached.
     root_id: Option<DevIno>,
@@ -485,7 +443,6 @@ impl DiscoverCursor {
     /// A discovery of `root` (absolute, `{uid}` replaced) by `find`.
     pub fn new(root: PathBuf, record_structural: bool) -> Self {
         Self {
-            stamp_root: root.clone(),
             root,
             record_structural,
             root_id: None,
@@ -500,12 +457,6 @@ impl DiscoverCursor {
 
     pub fn root(&self) -> &Path {
         &self.root
-    }
-
-    /// Bounds the nested-build guard's stamp climb by `stamp_root`, an
-    /// outer root of the same selection ([`Found::stamp_root`]).
-    pub fn set_stamp_root(&mut self, stamp_root: PathBuf) {
-        self.stamp_root = stamp_root;
     }
 
     /// An upper bound of the heap the cursor owns, as the index counts its
@@ -688,7 +639,6 @@ impl DiscoverCursor {
     ) -> Result<Stepped, Stop> {
         assert_eq!(open.len(), self.frames.len(), "a frame per open directory");
         let root = self.root.clone();
-        let stamp_root = self.stamp_root.clone();
         let mut seen = std::mem::take(&mut self.seen);
         let result = (|| -> Result<Stepped, Stop> {
             loop {
@@ -699,7 +649,6 @@ impl DiscoverCursor {
                 let mut walk = Walk {
                     host,
                     root: &root,
-                    stamp_root: &stamp_root,
                     find,
                     mounts,
                     deadline,
@@ -801,8 +750,6 @@ struct Walk<'a, H: Host> {
     host: &'a H,
     /// The root being walked.
     root: &'a Path,
-    /// See [`Found::stamp_root`].
-    stamp_root: &'a Path,
     find: &'a Find,
     mounts: &'a [MountEntry],
     deadline: Option<MonoTime>,
@@ -1064,7 +1011,6 @@ impl<H: Host> Walk<'_, H> {
         if self.record_structural {
             self.out.guard_candidates.push(Found {
                 root: self.root.to_owned(),
-                stamp_root: self.stamp_root.to_owned(),
                 path: at.to_owned(),
                 identity,
                 space: crate::places::space_at(self.host, &dir.mount, &dir.fd),
@@ -1092,14 +1038,7 @@ impl<H: Host> Walk<'_, H> {
         let source_evidence = if let Some(kind) = self.find.source_anchor {
             match source_anchor::check(
                 self.host,
-                source_anchor::AnchorCheck::new(
-                    kind,
-                    self.root,
-                    self.stamp_root,
-                    at,
-                    identity,
-                    self.deadline,
-                ),
+                source_anchor::AnchorCheck::new(kind, self.root, at, identity, self.deadline),
                 dir,
                 name,
             )? {
@@ -1110,6 +1049,7 @@ impl<H: Host> Walk<'_, H> {
                 // one either; a guard that could not decide is refused.
                 Ok(source_anchor::Anchored::Vetoed(refused)) => {
                     self.out.refused.extend(refused);
+                    self.out.vetoed.push(identity.id);
                     return Ok(true);
                 }
                 Err(skip) => {
@@ -1140,7 +1080,6 @@ impl<H: Host> Walk<'_, H> {
             at.to_owned(),
             Ok(Found {
                 root: self.root.to_owned(),
-                stamp_root: self.stamp_root.to_owned(),
                 path: at.to_owned(),
                 identity,
                 space: crate::places::space_at(self.host, &dir.mount, &dir.fd),

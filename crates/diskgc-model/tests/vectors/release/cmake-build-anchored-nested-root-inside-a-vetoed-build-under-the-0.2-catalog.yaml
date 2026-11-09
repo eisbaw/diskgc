@@ -3,8 +3,8 @@
 # build (vetoed: the stamp one directory above its parent, not entered);
 # R/pkg/out/a holds the source of an old CMake build `inner`. The second
 # root starts inside the vetoed `out`, and its own bound used to hide the
-# stamp: `inner` was deleted. The stamp climb is bounded by the outermost
-# root of the selection that holds the root (R): `inner` is vetoed too.
+# stamp: `inner` was deleted. The climb does not stop at a root (the
+# verdict is a function of the path): `inner` is vetoed too.
 profile_vector: 1
 catalog: release-0.2
 select: profile:cmake-build-anchored

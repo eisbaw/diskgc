@@ -92,9 +92,6 @@ impl Anchored {
 pub(super) struct AnchorCheck<'a> {
     kind: SourceAnchor,
     root: &'a Path,
-    /// The bound of the nested-build guard's stamp climb (TASK-367):
-    /// [`super::Found::stamp_root`].
-    stamp_root: &'a Path,
     candidate: &'a Path,
     expected: Identity,
     deadline: Option<MonoTime>,
@@ -104,7 +101,6 @@ impl<'a> AnchorCheck<'a> {
     pub(super) fn new(
         kind: SourceAnchor,
         root: &'a Path,
-        stamp_root: &'a Path,
         candidate: &'a Path,
         expected: Identity,
         deadline: Option<MonoTime>,
@@ -112,7 +108,6 @@ impl<'a> AnchorCheck<'a> {
         Self {
             kind,
             root,
-            stamp_root,
             candidate,
             expected,
             deadline,
@@ -165,7 +160,6 @@ pub(super) fn check_opened<H: Host>(
     let AnchorCheck {
         kind,
         root,
-        stamp_root,
         candidate,
         expected,
         deadline,
@@ -200,7 +194,7 @@ pub(super) fn check_opened<H: Host>(
     // Another build system's package build is that system's to clean
     // (TASK-367): never a candidate, nor anything below it.
     if nested::GUARDED.contains(&kind) {
-        match nested::outer_build(host, stamp_root, candidate, deadline)? {
+        match nested::outer_build(host, candidate, deadline)? {
             Ok(None) => {}
             Ok(Some(_)) => return Ok(Ok(Anchored::Vetoed(None))),
             Err(skip) => return Ok(Ok(Anchored::Vetoed(Some(skip)))),

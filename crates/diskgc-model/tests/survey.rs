@@ -1340,3 +1340,37 @@ fn survey_reports_no_build_inside_a_vetoed_one_as_a_candidate() {
     assert_eq!(alone["eligible"], true, "{alone}");
     assert_read_only(&host);
 }
+
+/// TASK-367, Codex's third review, case 3: a survey of two PATHs, the
+/// tree's top and a directory below it, with roots `R` and `R/pkg` and a
+/// stamp in `R`. Survey plans each PATH with the roots below it, so the
+/// narrower PATH saw only `R/pkg`, and a guard bounded by the roots
+/// reported the vetoed build eligible there. The guard's climb is a
+/// function of the path alone: no PATH reports it.
+#[test]
+fn a_narrower_survey_path_does_not_report_a_vetoed_build() {
+    let src = "/home/tester/src";
+    let old = "2026-10-01T00:00:00Z";
+    let extra = format!(
+        "  {src}/.built: {{mtime: {old}}}\n  {src}/pkg/CMakeLists.txt: {{content: \"project(p)\\n\"}}\n  {src}/pkg/out: {{.: {{mtime: {old}}}, CMakeCache.txt: {{mtime: {old}, content: \"CMAKE_HOME_DIRECTORY:INTERNAL={src}/pkg\\n\"}}, CMakeFiles: {{.: {{mtime: {old}}}}}, a.o: {{mtime: {old}, size: 8K}}}}\n"
+    );
+    let host = host(&laptop_tmp(&extra));
+    let mut options = options(
+        &[src, &format!("{src}/pkg")],
+        Some("profile:cmake-build-anchored"),
+    );
+    options.roots = vec![src.to_owned(), format!("{src}/pkg")];
+    let value = json(&run(&host, &options, None));
+    let paths = value["paths"].as_array().expect("paths");
+    assert_eq!(paths.len(), 2, "{value}");
+    for path in paths {
+        let rows = path["candidates"].as_array().expect("rows");
+        assert!(
+            rows.iter()
+                .all(|r| r["candidate"] != format!("{src}/pkg/out").as_str()),
+            "{}: reports the vetoed build: {path}",
+            path["path"]
+        );
+    }
+    assert_read_only(&host);
+}

@@ -85,8 +85,23 @@ pub struct ProfileVector {
     /// binary cannot set, so `too_many_entries` fits in a small model.
     #[serde(default)]
     pub entry_budget: Option<usize>,
+    /// `--no-index`: plan and reclaim without the index.
+    #[serde(default)]
+    pub no_index: bool,
     pub host: HostModel,
     pub expect: Expected,
+}
+
+/// What a vector's runs did, for a property that compares two runs
+/// ([`ProfileVector::outcomes`]) instead of an expectation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Outcomes {
+    /// The dry run's plan entries without a skip reason.
+    pub eligible: BTreeSet<PathBuf>,
+    /// The reclaim's actions.
+    pub actions: BTreeSet<PathBuf>,
+    /// Of the paths asked about, those the reclaim left absent.
+    pub removed: BTreeSet<PathBuf>,
 }
 
 /// [`Catalog`], as a vector names it.
@@ -328,7 +343,7 @@ impl ProfileVector {
             roots: self.roots.clone(),
             dry_run,
             allow_root: self.allow_root,
-            no_index: false,
+            no_index: self.no_index,
             path: self.path.clone(),
             test_entry_budget: self.entry_budget,
         })
@@ -774,6 +789,35 @@ impl ProfileVector {
 
     pub fn expected_preserved(&self) -> &[PathBuf] {
         &self.expect.preserved
+    }
+
+    /// A dry run and a reclaim of the vector, each on a fresh copy of its
+    /// host, with the built-in library; `paths` are the paths to report
+    /// absent after the reclaim. Its `expect` is not consulted.
+    pub fn outcomes(&self, paths: &[PathBuf]) -> Result<Outcomes, String> {
+        let builtins = self.builtins()?;
+        let planning = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
+        let dry_run = self.run(&planning, true, &builtins)?;
+        let reclaiming = ModelHost::new(&self.host).map_err(|e| e.to_string())?;
+        let reclaim = self.run(&reclaiming, false, &builtins)?;
+        Ok(Outcomes {
+            eligible: dry_run
+                .plan
+                .iter()
+                .filter(|entry| entry.reason.is_none())
+                .filter_map(|entry| entry.candidate.clone())
+                .collect(),
+            actions: reclaim
+                .actions
+                .iter()
+                .map(|action| action.candidate.clone())
+                .collect(),
+            removed: paths
+                .iter()
+                .filter(|path| reclaiming.stat_path(path).is_none())
+                .cloned()
+                .collect(),
+        })
     }
 
     /// The one profile of a `profile:` vector.
