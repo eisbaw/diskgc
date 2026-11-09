@@ -338,18 +338,28 @@ fn each_rule_refuses_its_edit() {
     Descriptor::parse(&embedded().to_string()).expect("the real file");
 }
 
-/// The reclaiming-watch decision (TASK-276) is one row's data: adding
-/// `watch` to a release's commands is all it takes, and the phrase the
-/// binary refuses and helps with follows.
+/// 0.2 runs a reclaiming `watch` and keeps `watch --tally-only` (Mark,
+/// 2026-11-05, TASK-276: "Reclaiming watch in 0.2"; TASK-362), with both
+/// unit templates, and still no `survey`. Reverting the row to
+/// tally-only fails here, in the binary's help test
+/// (`the_help_follows_the_rows_commands_and_files`), in the module's
+/// evaluation (`release-candidate-runs-reclaiming-watch`) and in the release suite
+/// (`release_candidate_watch_*`).
 #[test]
-fn allowing_a_reclaiming_watch_is_a_one_row_change() {
-    let mut value = embedded();
-    value["releases"]["0.2"]["commands"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!("watch"));
-    let edited = Descriptor::parse(&value.to_string()).expect("still valid");
-    let row = &edited.releases["0.2"];
-    assert!(row.allows(Command::Watch));
+fn the_0_2_row_runs_a_reclaiming_watch_and_tally_only() {
+    let row = release("0.2").expect("0.2");
+    assert_eq!(
+        row.commands,
+        [
+            Command::Ensure,
+            Command::Watch,
+            Command::WatchTallyOnly,
+            Command::Check,
+            Command::Profiles
+        ]
+    );
+    assert!(!row.allows(Command::Survey));
     assert_eq!(row.commands_phrase(), "ensure, watch, check and profiles");
+    let units = &descriptor().expect("descriptor").watch_units;
+    assert!(!units.is_empty() && units.iter().all(|u| row.ships.contains(u)));
 }

@@ -26,10 +26,13 @@ In use).
   `lib/systemd/system/diskgc-watch@.service`: the `watch` service
   templates, one instance per filesystem (`reference.md`, Watch as a
   systemd service). The first lines of `RELEASE-NOTES.md` say which
-  `watch` this package runs. Where it runs none that reclaims (0.2 so far
-  runs only `watch --tally-only`, which keeps the index warm and never
-  deletes), an instance's `DISKGC_WATCH_ARGS` needs `--tally-only`, and a
-  reclaiming instance exits 2 at start.
+  `watch` this package runs: 0.2 runs a reclaiming one (below
+  `--min-free` it reclaims as `ensure` does, up to `--target-free`) and
+  `--tally-only`, which keeps the index warm and never deletes. The
+  thresholds go in the instance's `DISKGC_WATCH_ARGS`; a dry run with
+  `ensure --dry-run` and the same `--min-free` shows what a cycle would
+  take. On NixOS, use the flake's `nixosModules.default` at this
+  release's tag instead (`RELEASE-NOTES.md`, Install).
 - `share/doc/diskgc/`: this README; `RELEASE-NOTES.md` (what this version
   does, install, known limits, the JSON contract); `reference.md` (commands,
   exit codes, JSON output, configuration, profiles); `safety.md` (every

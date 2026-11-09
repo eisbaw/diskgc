@@ -19,7 +19,7 @@ binary gives `ensure` `--dry-run` and `watch` `--tally-only`, also where
 the command line or the configuration is refused before anything runs;
 the reclaiming forms of those refusals run in containers (for example
 `invalid_config_never_falls_back_or_reclaims`,
-`release_candidate_refuses_a_reclaiming_watch`). `tools/host_reclaim_scan.py`
+`release_candidate_watch_refuses_user_profiles_and_unshipped_builtins`). `tools/host_reclaim_scan.py`
 (`just check`) enforces this: it reads the host test sources (the Rust
 tests, benches and examples of the workspace and the fuzz project, and
 `tools/test_*.py`; not `diskgc-e2e`, which runs only in Nix builds and
@@ -2800,10 +2800,9 @@ filesystem, processes and mounts from the developer's system.
 
 **Not covered end-to-end (for now):** deletion on xfs and on network
 filesystems (an NFS server and client in a VM is TASK-314), and a
-reclaiming `watch` under a live systemd (no release package runs one
-until TASK-276 decides; the NixOS VM test of Deployment units, below,
-runs the development package's `--tally-only` instances, and its
-reclaiming one exits 2 at the sandbox gate). Deletion on btrfs,
+reclaiming `watch` as root (`--allow-root`; Deployment units, 6). A
+reclaiming `watch` under a live systemd runs from the release candidate
+in Deployment units, 5 and 6. Deletion on btrfs,
 bcachefs and ext4 runs only in the `vm-real-kernel` scenarios above,
 on that check's one kernel: ext4 on the guest's disk and on loop
 devices, btrfs and bcachefs on loop devices; ext4 and xfs as separate
@@ -3386,20 +3385,28 @@ more than the flake already builds.
    alone on its own example, with its message (a system-scope user
    typo and a system instance with no checked configuration included).
    With `packages.release-candidate`'s unstamped build as the package, a
-   system and a user `tallyOnly` instance evaluate with no failed
-   assertion, its templates present; a reclaiming instance fails the
-   evaluation while its release row does not run a reclaiming `watch`, as
-   do a package whose `passthru.diskgcBuild` lacks the templates and one
-   without it, and a mode flag in `extraArgs` (hidden as `--config`'s
-   value, and in `--flag=value` form) (TASK-289).
+   system and a user `tallyOnly` instance and a system and a user
+   reclaiming one evaluate with no failed assertion, its templates
+   present (TASK-362: its row runs a reclaiming `watch`, pinned); a
+   reclaiming instance would fail the evaluation where a release row
+   does not run a reclaiming `watch`, as do a package whose
+   `passthru.diskgcBuild` lacks the templates and one without it, and a
+   mode flag in `extraArgs` (hidden as `--config`'s value, and in
+   `--flag=value` form) (TASK-289). The module's default package is the
+   flake's choice by version (`module-default-package`).
    The drop-ins, staged on the packaged templates, pass
    `systemd-analyze verify` (2) with no output, and the checked
    configurations build. An invalid `settings` fails the derivation
    `/etc/diskgc/config.yaml` comes from, with `diskgc check`'s message
-   (`testers.testBuildFailure`).
+   (`testers.testBuildFailure`); with the release candidate as the
+   package, so does a valid one with a user profile and a tier of a
+   built-in 0.2 does not ship, each named in the release's message
+   (TASK-362: the build-time check is the release's catalog).
 5. **NixOS VM test** (`vm-nixos-module`, one `nixosTest` flake check,
    like `vm-release-tmp-reclaim` but run by `just e2e-full`, not
-   `just e2e`), with the development package. A first
+   `just e2e`), with the release candidate's unstamped build as the
+   module's package (TASK-362), the package 0.2 ships the module with. A
+   first
    `switch-to-configuration` from a system without diskgc provisions
    `/run/diskgc/lock`, starts the system instances and, by reloading the
    lingering user's manager, the user instances; it exits 0, or 4
@@ -3411,8 +3418,9 @@ more than the flake already builds.
    instances on one filesystem, one is active and the other exits 2
    (`NRestarts=0`, naming the other watch's single-writer lock), as do a
    root instance without `--allow-root` (naming it), an `allowRoot`
-   instance whose capability set lacks `CAP_SYS_PTRACE` (naming it) and
-   a reclaiming user instance (naming the sandbox gate); `systemctl show`
+   instance whose capability set lacks `CAP_SYS_PTRACE` (naming it), and
+   the development package's own binary run as the user (a reclaiming
+   `watch` naming the sandbox gate); `systemctl show`
    reports the shipped hardening properties, root's four capabilities,
    and none of the "no" and "fatal" rows of the hardening table
    (`ProtectProc`,
@@ -3423,13 +3431,93 @@ more than the flake already builds.
    stop and the restarted instance starts from it; SIGHUP stops an
    instance cleanly (its own log line), which restarts after 30 s
    (`NRestarts=1`) and reads its edited configuration afresh (here an
-   invalid one: exit 2). Not shown: that the runner's `ensure` starts
-   from that snapshot (a dry run plans without the index, and the
-   sandbox gate refuses a reclaiming `ensure` before it loads one), and,
-   with a release package that includes `watch` only (none exists yet),
-   that a reclaiming instance keeps a candidate a process holds and
-   deletes an unheld one, as the user and as an `allowRoot` instance
-   with its capability set, which is what proves that set.
+   invalid one: exit 2). A
+   reclaiming user instance (`minFree = "40%"`, `targetFree = "50%"`)
+   on an ext4 of its own: after real pytest runs make eight
+   `.pytest_cache` directories of 8 MiB, a fill below `--min-free` makes
+   one cycle (`met`) that deletes the oldest unheld caches in order up to
+   `--target-free` and no further (one deletion fewer would not have
+   reached it), keeps the oldest, which a process of the user holds
+   open (`in_use`), and leaves the rest. Not shown: an `allowRoot`
+   instance that reclaims, which is what would prove its capability set,
+   and the runner's `ensure` starting from the watcher's snapshot (its
+   configuration's one tier is a Cargo one, which the index does not
+   hold).
+6. **The release package's units under a live systemd**
+   (`vm-release-watch`, `just e2e-vm-release-watch`, an `e2e-full`
+   stage; TASK-362; about 8 minutes on 2026-11-07). No module: the
+   package's files installed as
+   [reference.md](reference.md#watch-as-a-systemd-service) tells a
+   generic-Linux user, the binary at `/usr/local/bin/diskgc`, the user
+   template copied by the user into `~/.config/systemd/user`, the system
+   template by root, environment files and configurations as documented.
+   Two deviations, both NixOS's read-only `/etc`: the system template and
+   its `User=` drop-in go to `/run/systemd/system` (the file compared
+   byte for byte with the package's), and the tmpfiles rule is
+   provisioned at boot from the package. Each instance watches a small
+   ext4 of its own, with real pytest caches of 8 MiB made a second apart
+   (so `oldest` is creation order); the user runs 1,000 idle processes
+   (a desktop's share; every scan reads them), and the user instance's
+   configuration has a `ccache` group before its pytest caches, whose
+   cleaner is a stand-in on the instance's `PATH` (its environment file)
+   that waits while the test holds it. Every `met` cycle is checked the
+   same way: the held cache kept, the pytest caches it deleted taken
+   oldest first (any it passed over kept with a reason in its record),
+   and stopped at `--target-free` (one deletion fewer would not have
+   reached it).
+   - the user instance does nothing above `--min-free`; under a fork
+     storm of the user (twelve loops starting processes) begun before
+     its start, the background tally's pressure brake engages before its
+     first batch (the start's sizing, 30,000 files in one cache, is due)
+     and releases after the storm;
+   - a fill below `--min-free` makes one `met` cycle, the oldest cache
+     held open by a process of the user (`in_use`); a fill between the
+     thresholds makes no record and deletes nothing;
+   - a busy host during a cycle (the storm again: beside the idle
+     processes listings keep finding new ones, so the scan is
+     unsettled): the cycle logs at least one busy back-off instead of
+     giving its candidate up, and once the storm ends a cycle reclaims
+     (`met`; one the storm held to its deadline before it is allowed).
+     How long the scans stay unsettled is the guest's and the host's
+     timing, so nothing more is asserted: in one run the cycle's scan
+     settled within seconds, in another, under host load, it was held
+     to its deadline. An `ensure` beside it is not asserted either: its
+     exit 75 beside a cycle holding the lock is the container test's
+     (`release_candidate_watch_and_ensure_take_turns_through_the_host_lock`);
+   - a concurrent `ensure` of the user's `ccache` cache, whose cleaner
+     holds the host lock it inherited, and a fill: the cycle waits for
+     the lock to its `--timeout` (1 minute) and ends `lock_timeout`,
+     `retry`, attempt 1, 60 s; released, the cleaner empties the cache
+     and the `ensure` ends exit 1 (at `100%`), and the next cycle starts
+     55 to 75 s after the last ended and reclaims (`met`);
+   - the cycle's own cleaner held past the cycle's `--timeout`: the
+     cycle ends `deadline` (`retry`, attempt 1), the cleaner stopped
+     before it emptied the cache, the later pytest group not run; once
+     released, the next cycle starts 55 to 75 s later and reclaims;
+   - SIGHUP: diskgc's own stop line, exit 0 (`ExecMainStatus=0`,
+     `Result=success` while the restart waits), a restart after 30 s
+     (`Restart=always`, `NRestarts=1`, a new main PID) that starts from
+     the snapshot; an environment file with an unknown flag, then SIGHUP:
+     the restart exits 2 and the unit stays failed (`NRestarts=2`,
+     `RestartPreventExitStatus=2`) with diskgc's message in the journal
+     (found by its pid: a process that exits at once can lose its unit
+     field to a journald race, so `systemctl status` did not always show
+     it);
+   - the system instance, as `runner` through a `User=` drop-in, with
+     an empty capability set, reclaims its fill to `--target-free`;
+     `systemctl stop` ends it with exit 0 (`inactive`, `Result=success`,
+     not restarted) and its snapshot lands in runner's state directory.
+   Every record and journal is saved under the check's `$out/evidence`.
+   How the busy host was made: a fork storm alone, and one or two
+   processes whose thread listing kept changing, let every scan settle on
+   a guest of about a hundred processes (one that never holds still is
+   anyway taken to be stuck after 30 s, so it cannot hold a cycle to a
+   1-minute deadline); 1,500 idle processes made even a quiet cycle's
+   scans slower than the 1 s freshness bound under host load. The test
+   fails, never passes vacuously, when the busy back-off is not logged.
+   Not shown: a root instance that reclaims; `nix-garbage` or a real
+   package-manager cleaner run by a `watch` cycle in a VM; a watcher over
+   days (memory: TASK-134).
 
 ## Cargo toolchains under test
 
@@ -4048,10 +4136,11 @@ snapshot, not proof that a path is safe to move.
 | `scratch-tally` | Project and legacy scratch sizes, changes, free space and warnings | before every backlog implementation task |
 | `check` | fmt, clippy, unit, planner, model tests, property tests (few cases), profile golden sets, in the dev shell | constantly; seconds |
 | `e2e` | `check` plus fast Nix-image tests, the `e2e-one` retention check, candidate 0.1 artifact probes on Nix and Debian, the native Docker smoke, a profile-vector replay under Docker Engine, and the four-vector QEMU guest check | before every commit (the gate); each ordinary runner has a 5-minute budget including setup, and its host-PID-namespace tests a serial tail with an allowance of its own (deadlines below) |
-| `e2e-full` | every Nix-image test, then the Debian and native Docker suites, the four-vector QEMU guest check, and the cold ext4 scale VM check | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
+| `e2e-full` | every Nix-image test, then the Debian and native Docker suites, the four-vector QEMU guest check, the NixOS module and release `watch` VM checks, and the cold ext4 scale VM check | at the end of every wave, in CI on every push, and before any task labelled `irreversible` is marked done; runner deadlines guard against hangs |
 | `e2e-debian` | `check` plus every test but the Nix-only ones on the Debian image (Container setup: Images) | with changes to the static binary's behaviour on a non-Nix machine, the image, or the descriptor; a 15-minute deadline only guards against hangs |
 | `e2e-docker` | `check` plus Docker-only tests in the pinned native dind image | with changes to Docker fixtures or Docker kinds |
 | `e2e-one NAME` | one container test, keeping the container on failure | while working on one |
+| `e2e-vm-release-watch` | the release package's units and reclaiming `watch` under systemd in a NixOS VM (Deployment units, 6); an `e2e-full` stage | with changes to `watch`, the units, the release row or the walk's back-off and busy-host rules |
 | `e2e-images [--apply] [--grace-hours H]` | the e2e images' Podman tags this checkout's flake no longer uses and no worktree used in the last 24 h; `--apply` removes them (every gate recipe does, at its end) | to see or force what the gates prune |
 | `e2e-kept [--drop] [--legacy]` | the containers failed `e2e-one` runs kept; `--drop` removes this checkout's | when done inspecting one |
 | `e2e-gcroots [--apply] [CHECKOUT]` | a checkout's `.gcroots/` links no recipe builds any more; `--apply` drops them (every gate recipe does, for its own checkout) | after renaming or retiring a runner |
@@ -4369,6 +4458,66 @@ the host's and other walk containers' processes (which is when slots
 matter), and container root, being the invoking user, could signal the
 user's host processes: `reset.sh` signals a holder only while its pid
 still has the start time recorded when it was started.
+
+### Watch dogfood on a laptop
+
+The one reclaiming run on a developer's own machine, an exception to
+the rule that none runs there (CLAUDE.md, Test isolation), and only when
+Mark asks for that run: his go is recorded in TASK-362's notes before
+step 4, or nothing past step 3 runs. His rule for host dogfood: a dry run
+first, every time, a release-catalog package, never a gated build or a
+gate workaround. It
+follows the release candidate's reclaiming `watch` from its dry run to a
+service (TASK-362). The candidate built from master is a development
+version: the dogfood is Mark's go for this host, not a deployment.
+
+1. **Build and name it.** `nix build -o tmp/rc .#release-candidate`;
+   record `tmp/rc/bin/diskgc --version`, its `sha256sum`, the commit,
+   `uname -r`, the load (`uptime`), and `df -B1 --output=avail,size PATH`
+   for the watched `PATH`. Keep everything under `tmp/dogfood/`.
+2. **A narrow configuration**, `tmp/dogfood/watch.yaml`, with tiers this
+   host's earlier dogfood already reviewed (for example
+   `profile:nix-shell-rc && filter:idle-1d` and `profile:pytest-tmp &&
+   filter:idle-1d` for `/tmp`, or `profile:pytest-cache` with `roots:`
+   on one project directory); `tmp/rc/bin/diskgc check --config
+   tmp/dogfood/watch.yaml`.
+3. **Thresholds that make one bounded cycle.** With `A` the available
+   bytes now (measured again right before steps 4 and 6, and the
+   thresholds recomputed: other work moves it): `--min-free` = `A + 1G` and `--target-free` = `A + 2G`, so
+   the first sample starts one cycle that stops after about 2 GiB.
+4. **Dry run first**, with the same configuration, thresholds and a long
+   deadline: `tmp/rc/bin/diskgc ensure --dry-run --json --config
+   tmp/dogfood/watch.yaml --min-free MIN --target-free TARGET --timeout
+   30m PATH > tmp/dogfood/dry.json 2> tmp/dogfood/dry.log`; exit 0.
+   Read the plan: every eligible row's profile and tier expected, the
+   kept rows' reasons sensible. Stop here on anything unexpected.
+5. **Read-only watch**: `tmp/rc/bin/diskgc watch --tally-only --config
+   tmp/dogfood/watch.yaml --min-free MIN PATH` in a terminal for a few
+   minutes, then Ctrl-C (exit 0): its start line, the snapshot written,
+   pressure-brake lines if any; nothing deleted.
+6. **One reclaiming cycle in the foreground**: `tmp/rc/bin/diskgc watch
+   --json --config tmp/dogfood/watch.yaml --min-free MIN --target-free
+   TARGET --interval 10s --timeout 30m PATH > tmp/dogfood/watch.jsonl
+   2> tmp/dogfood/watch.log`. After the first record, Ctrl-C (exit 0,
+   "stopping on SIGINT"). Check: the record's `status` (`met`, or
+   `exhausted` with the reason), every `actions[].candidate` among the
+   dry run's eligible rows, no `errors`, available space after at or
+   above `TARGET` when `met`.
+7. **As a service**, the user template as
+   [reference.md](reference.md#watch-as-a-systemd-service) installs it,
+   with a user drop-in that points `ExecStart=` at the absolute store path
+   `$(readlink -f tmp/rc)/bin/diskgc` (reset it with an empty
+   `ExecStart=` first; on NixOS there is no `/usr/local/bin`), thresholds below `A` this time (`--min-free` =
+   `A - 5G`, `--target-free` = `A - 2G`: quiet until the disk fills)
+   and `--json`; `systemctl --user daemon-reload`, `start` the instance,
+   leave it for a working day, then read `journalctl --user -u
+   diskgc-watch@INSTANCE` (cycles, back-offs, busy-host waits) and
+   `systemctl --user stop` it (exit 0, `inactive`).
+8. **Record** each step's command, exit code, the environment of step 1
+   and what the records show in TASK-362's notes; keep `tmp/dogfood/`
+   until the notes are written. A deletion outside the dry run's
+   eligible rows, an exit other than 0 at a stop, or an error record
+   stops the dogfood and is a finding.
 
 ### Profiling a walk
 

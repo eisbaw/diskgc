@@ -111,6 +111,10 @@ e2e-vm-tally-pressure: _gcroot-dev
 e2e-vm-cold-scale: _gcroot-dev
     python3 tools/disk_stage.py vm-cold-scale nix build -L --no-link .#checks.x86_64-linux.vm-cold-scale
 
+# The release package's reclaiming watch under systemd: units, fills, busy host, lock, deadline.
+e2e-vm-release-watch: _gcroot-dev
+    python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-release-watch
+
 # Loop devices, btrfs, idmapped, hidepid, udisks and overlay rules on a real guest kernel.
 e2e-vm-real-kernel: _gcroot-dev
     python3 tools/disk_stage.py vm-real-kernel nix build -L --no-link .#checks.x86_64-linux.vm-real-kernel
@@ -147,6 +151,7 @@ e2e-full: _gcroot-dev
     python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-5-8
     python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-pidfd-linux-6-8
     python3 tools/disk_stage.py vm nix build -L --no-link .#checks.x86_64-linux.vm-nixos-module
+    just e2e-vm-release-watch
     just e2e-vm-cold-scale
     just e2e-vm-real-kernel
     just _e2e-cleanup

@@ -1,13 +1,22 @@
 # The NixOS module in a booted guest (docs/testing.md, Deployment units,
-# 5), with the development package: tally-only instances run, reclaiming
-# and refused ones exit 2 and stay failed. Nothing is deleted: the sandbox
-# gate refuses deletion in a VM, which is not a test container.
+# 5), with the release candidate as its package, the package 0.2 ships the
+# module with (TASK-362): a reclaiming user instance reclaims a filled
+# filesystem down to its --target-free and keeps a held candidate,
+# tally-only instances run, refused ones exit 2 and stay failed. The
+# development package's sandbox gate is shown on its own binary.
+# Everything destructive happens inside this disposable guest.
 #
 # The base system has no diskgc; the `diskgc` specialisation enables the
 # module, so switching to it is a first switch.
-# `package` is the unstamped test build (flake.nix, mkDiskgc): the guest
-# stays cached across commits that change no source.
-{ pkgs, module, package }:
+# `package` and `devPackage` are the unstamped test builds (flake.nix,
+# mkDiskgc, mkReleasePackage): the guest stays cached across commits that
+# change no source.
+{
+  pkgs,
+  module,
+  package,
+  devPackage,
+}:
 let
   policy = roots: {
     version = 1;
@@ -24,6 +33,22 @@ let
       }
     ];
   };
+  # 0.2's pytest-cache: a project-tree cache that needs no idle time.
+  pytestCaches = roots: {
+    version = 1;
+    groups = [
+      {
+        name = "caches";
+        tiers = [
+          {
+            name = "pytest-caches";
+            select = "profile:pytest-cache";
+            inherit roots;
+          }
+        ];
+      }
+    ];
+  };
 in
 pkgs.testers.nixosTest {
   name = "diskgc-nixos-module";
@@ -33,8 +58,18 @@ pkgs.testers.nixosTest {
     {
       imports = [ module ];
       virtualisation.memorySize = 1536;
-      # /tmp is a filesystem of its own, so mark's two user instances
-      # watch different filesystems (one watcher per filesystem and user).
+      # mark's reclaiming instance watches a small ext4 of its own.
+      virtualisation.emptyDiskImages = [ 256 ];
+      virtualisation.fileSystems."/srv/mark" = {
+        device = "/dev/vdb";
+        fsType = "ext4";
+        autoFormat = true;
+      };
+      environment.systemPackages = [
+        pkgs.python3
+        pkgs.python3Packages.pytest
+      ];
+      # /tmp a tmpfs, as on many laptops; no instance watches it.
       boot.tmp.useTmpfs = true;
       users.users.mark = {
         isNormalUser = true;
@@ -44,6 +79,10 @@ pkgs.testers.nixosTest {
       systemd.tmpfiles.rules = [
         "d /home/mark/src 0755 mark users -"
         "d /home/runner/src 0755 runner users -"
+        # mark's reclaiming instance's filesystem and root (a supplied
+        # root must exist at start, or the instance exits 2).
+        "z /srv/mark 0755 mark users -"
+        "d /srv/mark/src 0755 mark users -"
       ];
 
       specialisation.diskgc.configuration = {
@@ -52,8 +91,7 @@ pkgs.testers.nixosTest {
           inherit package;
           settings = policy [ "/home/runner/src" ];
           instances = {
-            # The laptop owner's watcher; tally-only, since the development
-            # package refuses to reclaim here.
+            # The laptop owner's warm index of /home (tally-only).
             home = {
               user = "mark";
               path = "/home";
@@ -68,14 +106,19 @@ pkgs.testers.nixosTest {
               tallyOnly = true;
               settings = policy [ "/home/mark/src" ];
             };
-            # A reclaiming instance on the development package: exit 2,
-            # naming the sandbox gate.
+            # The laptop owner's reclaiming watcher (0.2), on a
+            # filesystem of its own: a fill below 40 % reclaims to 50 %.
             reclaim = {
               user = "mark";
-              path = "/tmp";
-              minFree = "1M";
-              targetFree = "2M";
-              settings = policy [ "/home/mark/src" ];
+              path = "/srv/mark";
+              minFree = "40%";
+              targetFree = "50%";
+              extraArgs = [
+                "--interval"
+                "2s"
+                "--json"
+              ];
+              settings = pytestCaches [ "/srv/mark/src" ];
             };
             # The CI operator's warm index.
             runner = {
@@ -120,5 +163,7 @@ pkgs.testers.nixosTest {
       };
     };
 
-  testScript = builtins.readFile ./vm-test.py;
+  testScript = ''
+    DEV = "${devPackage}"
+  '' + builtins.readFile ./vm-test.py;
 }

@@ -1385,14 +1385,16 @@ Decisions (Mark), before the RC commit:
 
 - [ ] **Scope** (TASK-276). Is 0.2 the descriptor's provisional `0.2`
   row (`crates/diskgc-core/src/releases.json`), with or without a
-  reclaiming `watch`, and with which catalog (Mark admitted
+  reclaiming `watch` (Mark, 2026-11-05: with; the row runs it, TASK-362),
+  and with which catalog (Mark admitted
   `nix-garbage` to it, 2026-11-04, TASK-335, five project-tree
   sources, 2026-11-05, TASK-359, `node-modules` held out, 2026-11-06,
   TASK-365, and four lock-safe package-manager
   cleaners with their exact commands, 2026-11-05, TASK-360, Jest left out
   after review); does the
   NixOS module
-  ship? Recorded in TASK-276's notes; the row, the PRD's Scope and the
+  ship (Mark, 2026-11-06: yes; at the tag its default package is the
+  release's, NixOS module above)? Recorded in TASK-276's notes; the row, the PRD's Scope and the
   draft notes then follow it. A `/tmp` built-in new to the catalog
   first needs its producer's lifecycle verified and a live-session
   counterexample tested ([safety.md](safety.md#producer-liveness)).
@@ -1416,8 +1418,10 @@ Decisions (Mark), before the RC commit:
   sources and ran the deletion path asynchronously, blocking only on a
   found hole (TASK-67, ruling of 2026-10-25).
 - [ ] **Contract review** (proposed, pending Mark) of what 0.2 adds to
-  the CLI contract (PRD, Irreversibility map): `watch --tally-only`'s
-  flags, exit codes and lock paths, the snapshot's paths, the `nix-store`
+  the CLI contract (PRD, Irreversibility map): `watch`'s flags in both
+  modes, its exit codes, its JSON lines (the record's `watch` block and
+  back-off classes) and lock paths, the snapshot's paths, the NixOS
+  module's options, the `nix-store`
   kind's report (its action, its skip reasons, `changed` among them, and
   its errors; TASK-335), the built-in-only profile field
   `empty_checkout_markers` and its key in `profiles` JSON (TASK-360), and
@@ -1481,12 +1485,13 @@ Evidence on the RC commit:
   note says what the walk could not show. Key: `install-walk:`, with
   the dump directory.
 - [ ] **Shipped units under a live systemd.** The artifact's `watch`
-  templates run under systemd as PID 1 (a VM): a `--tally-only`
-  instance starts and writes its snapshot, a reclaiming instance (if
-  the row refuses it) exits 2 and is not restarted
-  (`RestartPreventExitStatus=2`). The NixOS VM test runs the
-  development package's instances only (testing.md, Deployment units).
-  Key: `units:`.
+  templates run under systemd as PID 1, installed from the package's
+  files (`nix develop -c just e2e-vm-release-watch`, an `e2e-full`
+  stage: the reclaiming user and system instances, fills, a busy host,
+  `lock_timeout`, `deadline`, restarts; testing.md, Deployment units),
+  and through the NixOS module with the artifact as its package
+  (`vm-nixos-module`, an `e2e-full` stage), read from that run. Key:
+  `units:`.
 - [ ] **Done tasks reconciled.** The Done tasks on 0.2's surfaces with
   unticked acceptance criteria (TASK-316's list: the index, tally,
   snapshot, `watch` and units tasks) are each ticked with proof,
@@ -1759,7 +1764,7 @@ TASK-263).
 | Option | Type | Default | Meaning |
 |---|---|---|---|
 | `enable` | bool | `false` | the package on `PATH` (agents and hooks call `ensure`), its tmpfiles rule for the host lock (`systemd.tmpfiles.packages`) and both templates (`systemd.packages`) |
-| `package` | package | the flake's `packages.default` | a reclaiming instance needs a release package whose release runs a reclaiming `watch` (none does yet; asserted, below): a development package refuses to delete outside test containers, so the instance exits 2 naming the sandbox gate and stays failed. `tallyOnly` instances work with the development package, and the module accepts `packages.release-candidate` too; a candidate built from master is a development version for disposable test environments only, not for deployment (PRD, Safety boundaries). |
+| `package` | package | by the flake's version: a release version's (the RC commit and its tag) `packages.release-candidate`, else `packages.default` | a reclaiming instance needs a release package whose release runs a reclaiming `watch` (asserted, below); 0.2's does (TASK-362). The development package refuses to delete outside test containers, so a reclaiming instance on it exits 2 naming the sandbox gate and stays failed; its `tallyOnly` instances work. So the module a release ships (the flake at its tag) runs that release's package by default, and one taken from master (a `-dev` version) the gated development package; a `release-candidate` built from master is a development version for disposable test environments only, not for deployment (PRD, Safety boundaries). The switch is the version alone: a commit with a plain version that is not its tag (`just release-verify` fails there) defaults to the gate-lifted package too, so take the module from the tag. |
 | `settings` | null or YAML value | `null` | rendered to `/etc/diskgc/config.yaml` and checked at build time |
 | `instances` | attribute set of instances | `{}` | one `watch` each |
 
@@ -1911,9 +1916,9 @@ Not covered by Mark's decisions; each is the simplest sound option found.
    capabilities, which exits 2.
 6. Root instances get the four-capability bounding set above, and
    `--allow-root` refuses to start without `CAP_SYS_PTRACE`. The set is
-   unproved until a release package that includes `watch` runs an
-   `allowRoot` reclaim (the module's VM test shows only that it is
-   applied and that the refusal works).
+   unproved until an `allowRoot` instance reclaims in a test (the release
+   package runs a reclaiming `watch` since 0.2, TASK-362; the module's VM
+   test shows only that the set is applied and that the refusal works).
 7. `RestartSec=30s`, `KillMode=mixed`, `TimeoutStopSec=30s`, no
    `ExecReload=`.
 8. State stays in `User=`'s home (no `StateDirectory=`); system units pin

@@ -957,7 +957,9 @@ fn schedule(tests: Vec<Listed>, host_pid: impl Fn(&Listed) -> bool) -> (Vec<List
 /// ([`run_parallel`]): its own bound, separate from the parallel phase's
 /// budget. The slowest of them took 12.5 s in a fast suite on a busy host
 /// (2026-11-06); about 1.5 times that, and the allowance is their sum, so a
-/// slow one borrows from the others. It guards a hang and a lock held by
+/// slow one borrows from the others (TASK-362's
+/// `release_candidate_watch_and_ensure_take_turns_through_the_host_lock`
+/// took 15.3 s alone, 2026-11-07, and borrows so). It guards a hang and a lock held by
 /// another runner; it is not a speed target.
 pub const HOST_PID_TEST_ALLOWANCE: Duration = Duration::from_secs(20);
 
@@ -1578,12 +1580,15 @@ mod tests {
                 "release_candidate_pytest_cache_reclaim_then_a_live_session_rewrites_it",
                 "release_candidate_python_pycache_reclaim_then_a_live_importer_recompiles",
                 "release_candidate_python_venv_keeps_projects_inside_the_30_day_floor",
-                "release_candidate_refuses_a_reclaiming_watch",
                 "release_candidate_refuses_in_its_own_pid_namespace",
                 "release_candidate_rejects_docker_command_and_arbitrary_delete_policy",
                 "release_candidate_runs_watch_tally_only",
                 // TASK-360: on the Nix image only.
                 "release_candidate_uv_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+                // TASK-362.
+                "release_candidate_watch_and_ensure_take_turns_through_the_host_lock",
+                "release_candidate_watch_reclaims_to_target_keeps_in_use_and_stops_on_sighup",
+                "release_candidate_watch_refuses_user_profiles_and_unshipped_builtins",
             ],
             "the candidate suite lost or gained a probe"
         );

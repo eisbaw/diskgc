@@ -108,7 +108,8 @@
       # commit in `diskgc --version`; a release version never does
       # (crates/diskgc/src/main.rs, version_line; docs/reference.md,
       # `diskgc --version`; docs/architecture.md, Release procedure).
-      isDevVersion = lib.hasInfix "-" version;
+      isDevVersionOf = v: lib.hasInfix "-" v;
+      isDevVersion = isDevVersionOf version;
       # The commit the shipped packages are built from: a dirty tree has
       # only dirtyShortRev ("<rev>-dirty", the base commit), a source
       # without Git (a tarball, a path: input) neither.
@@ -1270,6 +1271,12 @@
         release = diskgcReleaseTested;
         versionLine = testedVersionLine;
       };
+      # TASK-362: the release package's reclaiming watch under a live
+      # systemd, installed from its files as on generic Linux.
+      vmReleaseWatch = import ./diskgc-e2e/vm-release-watch.nix {
+        inherit pkgs;
+        release = diskgcReleaseTested;
+      };
       vmColdScale = import ./diskgc-e2e/vm-cold-scale.nix {
         inherit pkgs;
         image = e2eVmImage;
@@ -1333,6 +1340,7 @@
         vm-tally-pressure = vmTallyPressure;
         vm-real-kernel = vmRealKernel;
         vm-release-tmp-reclaim = vmReleaseTmpReclaim;
+        vm-release-watch = vmReleaseWatch;
         vm-old-kernel-pidfd = vmOldKernelPidfd;
         vm-pidfd-linux-6-1 = vmPidfdLinux61;
         vm-pidfd-linux-6-12 = vmPidfdLinux612;
@@ -1342,12 +1350,22 @@
         vm-nixos-module = vmNixosModule;
       };
       # The NixOS module (docs/architecture.md, NixOS module). Its default
-      # package is the development package of the evaluating system.
+      # package follows the version, like `diskgc --version`: a release
+      # version (the RC commit and its tag, v0.2.0 onwards) defaults to that
+      # release's package (packages.release-candidate, which the tag makes
+      # the release), so the module a release ships runs its reclaiming
+      # watch; a development version (master, 0.2.0-dev) to the gated
+      # development package, so a module taken from master never deletes
+      # outside test containers by default (TASK-362).
+      moduleDefaultAttrFor = v: if isDevVersionOf v then "default" else "release-candidate";
+      moduleDefaultAttr = moduleDefaultAttrFor version;
+      moduleDefaultPackage = self.packages.${system}.${moduleDefaultAttr};
       nixosModule = import ./packaging/nixos/module.nix {
         defaultPackage =
           p:
-          self.packages.${p.stdenv.hostPlatform.system}.default
+          self.packages.${p.stdenv.hostPlatform.system}.${moduleDefaultAttr}
             or (throw "diskgc: no package for ${p.stdenv.hostPlatform.system}; only ${system} is built");
+        defaultPackageText = "diskgc.packages.\${system}.${moduleDefaultAttr}";
       };
       # Its checks: evaluation and the build-time check (no VM), and one
       # NixOS VM test, run by `just e2e-full` only (docs/testing.md,
@@ -1357,13 +1375,17 @@
         inherit pkgs lib nixpkgs systemdVerify;
         module = nixosModule;
         package = diskgcTested;
-        defaultPackage = diskgc;
+        defaultPackage = moduleDefaultPackage;
+        inherit moduleDefaultAttrFor;
         releasePackage = diskgcReleaseTested;
       };
+      # The module VM runs the release candidate, the package 0.2 ships the
+      # module with (TASK-362); the development package only for its gate.
       vmNixosModule = import ./packaging/nixos/vm-test.nix {
         inherit pkgs;
         module = nixosModule;
-        package = diskgcTested;
+        package = diskgcReleaseTested;
+        devPackage = diskgcTested;
       };
     in
     {

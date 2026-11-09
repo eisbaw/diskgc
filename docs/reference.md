@@ -670,17 +670,18 @@ profile library](#built-in-profile-library)) ship the two templates of
 `lib/systemd/system/diskgc-watch@.service`, whose `ExecStart` runs
 `/usr/local/bin/diskgc`.
 
-**Which package.** A reclaiming instance needs a release package that
-runs a reclaiming `watch`; none does yet. The `release-candidate`
-package runs only `watch --tally-only` while TASK-276 is open: a
-reclaiming instance exits 2 at start and stays failed. The development
-package refuses
-to delete outside test containers
+**Which package.** A reclaiming instance needs a release package: 0.2
+runs a reclaiming `watch` and `watch --tally-only` (Mark, 2026-11-05,
+TASK-276; TASK-362), with the 0.2 catalog only, as its `ensure`
+([Built-in profile library](#built-in-profile-library)). The
+development package refuses to delete outside test containers
 ([safety.md](safety.md#pre-release-sandbox-gate)): its reclaiming
 `watch` exits 2 at start naming the sandbox gate, and the unit stays
-failed. Outside test containers it supports only `--tally-only`
-instances (Tally only), such as the CI runner's below. The steps are
-the same for both.
+failed; outside test containers it supports only `--tally-only`
+instances (Tally only), such as the CI runner's below. A
+`release-candidate` package built from master is a development version
+for disposable test environments only (PRD, Safety boundaries). The
+steps are the same for every package.
 
 Install once, as root, from the package:
 
@@ -2557,22 +2558,18 @@ combines it with `diskgc-linux/release-without-sandbox-gate` for
 disposable-container testing; it is not approved for deployment. It is a
 release only when built from that release's tag; built from master it is a
 development version of release 0.2's row (`diskgc 0.2.0-dev (COMMIT)`),
-for disposable test containers only. The 0.2 row is provisional: while no
-release decision covers a reclaiming `watch` (TASK-276), it runs `watch
---tally-only` only, and a reclaiming `watch` exits 2 before it looks at
-the machine ("a reclaiming `watch` is not in diskgc VERSION yet; its
-commands are ensure, watch --tally-only, check and profiles"), as every
-`watch` did in 0.1.0; its `--help` shows only the commands it runs, and
-its package ships the two `watch` unit templates for `--tally-only`
-instances. Adding `watch` to the row's commands is the code switch (the
-binary, the packages, the NixOS module and the tests follow the row);
-the prose that names TASK-276 or says no package runs a reclaiming
-`watch` follows by hand: `rg 'TASK-276|none does yet' docs packaging
-diskgc-e2e crates` lists it (this paragraph, Watch as a systemd service,
-the release notes' status and Not in the release catalog,
-architecture.md's NixOS module `package` row, the release suite's
-refusal test, the module checks' reclaiming case). The development build
-keeps a
+for disposable test containers only. The 0.2 row runs `ensure`, a
+reclaiming `watch` and `watch --tally-only`, `check` and `profiles`
+(Mark, 2026-11-05, TASK-276: "Reclaiming watch in 0.2"; TASK-362), and
+refuses `survey` (exit 2 before it looks at the machine, naming the
+commands it has); its `--help` shows only the commands it runs, and its
+package ships the two `watch` unit templates. Its `watch`, in either
+mode, loads the configuration and `--select` through the same narrowing
+as its `ensure`: the 0.2 catalog below, no user profile or override,
+and a built-in it does not ship refused at start (exit 2). A row that
+runs only `watch --tally-only` would refuse a reclaiming one the same
+way ("a reclaiming `watch` is not in diskgc VERSION yet; its commands
+are ..."); 0.1.0 refused every `watch`. The development build keeps a
 reclaiming `watch`, behind the sandbox gate. The 0.2 row's catalog is
 builtin.yaml's label `0.2` (`catalog: "0.2"`): 0.1's built-ins, which
 list both labels, plus `nix-garbage` (Mark, 2026-11-04, TASK-335), five
@@ -2933,8 +2930,9 @@ package itself.
 
 ### Release notes (next release, draft)
 
-**Status: draft** for the release after 0.1.0, whose scope is not decided
-(TASK-276). This describes the `release-candidate` package as master
+**Status: draft** for 0.2, whose scope Mark decided in TASK-276 (the
+descriptor's 0.2 row with a reclaiming `watch`, 2026-11-05; the NixOS
+module, 2026-11-06). This describes the `release-candidate` package as master
 builds it ([Built-in profile library](#built-in-profile-library)): the
 package ships this section as `RELEASE-NOTES.md`, under a header that
 lists what it runs and installs. 0.1.0's own notes are frozen at its tag
@@ -3109,9 +3107,12 @@ line says it was reproduced.
   not a tagged release (`diskgc 0.2.0-dev (COMMIT)`). 0.1.0: not
   affected; it is the tag and prints `diskgc 0.1.0`.
 - TASK-289: the package ships the two `watch` unit templates (Install,
-  item 5) for `watch --tally-only` instances, and `--help` shows only the
-  commands this package runs. 0.1.0: not affected; it ran no `watch` and
-  shipped no templates.
+  item 5), and `--help` shows only the commands this package runs.
+  0.1.0: not affected; it ran no `watch` and shipped no templates.
+- TASK-362: the package runs `watch`, reclaiming and `--tally-only`
+  (What it does; its limits under Known limits), and the flake's NixOS
+  module ships with it (Install, item 6). 0.1.0: not affected; it ran no
+  `watch` and had no module.
 - TASK-335: the catalog adds `nix-garbage`, a garbage collection of the
   system Nix store (What it does; its limits under Known limits). 0.1.0:
   not affected; it shipped no Nix kind.
@@ -3179,8 +3180,8 @@ line says it was reproduced.
   lasting cause, or one stuck for 30 s, still keeps every project. 0.1.0:
   no (it has no project contracts).
 
-**What it does.** One command frees space, a service keeps its index
-warm, two read-only ones explain it:
+**What it does.** One command frees space once, a service keeps it
+free, two read-only ones explain it:
 
 - `diskgc ensure --min-free SIZE PATH` brings the filesystem of `PATH` up
   to a free-space goal, once, and exits with a code a CI pre-job hook or
@@ -3192,8 +3193,20 @@ warm, two read-only ones explain it:
   synchronous tally, bounded by `--tally-budget`) and saves that index as
   a snapshot in the user's state directory, which its next run starts
   from; `--no-index` neither reads nor writes it ([`ensure`](#ensure)).
-  `diskgc watch --tally-only PATH` keeps the snapshot warm as a service
-  and never deletes ([Tally only](#tally-only); Install, item 5).
+- `diskgc watch --min-free SIZE --target-free SIZE PATH` (new in 0.2) is
+  the long-running form of `ensure`, run as a service (Install, items 5
+  and 6): it samples `PATH`'s filesystem every `--interval` (default
+  `10s`), and when available space falls below `--min-free` it runs one
+  reclaim cycle, the same walk with the same checks as `ensure`, up to
+  `--target-free`; between the two it deletes nothing. Each cycle has its
+  own cooperative `--timeout` (default `10m`) and backs off after a cycle
+  that ends below `--min-free` (a minute, doubling, after one the host
+  may recover from; 15 minutes after one that took everything it could).
+  A background tally at idle priority keeps its index warm and writes the
+  snapshot `ensure` starts from. It stops on SIGTERM, SIGINT or SIGHUP
+  with exit 0; with `--json` it writes one JSON line per cycle
+  ([`watch`](#watch)). `diskgc watch --tally-only PATH` only keeps the
+  snapshot warm and never deletes ([Tally only](#tally-only)).
 - `diskgc check` validates a configuration without touching the machine;
   `diskgc profiles list|show|test` shows the built-in catalog.
 - The catalog is thirteen sources and the seven idle filters (`idle-1h` to
@@ -3272,10 +3285,25 @@ warm, two read-only ones explain it:
 5. `lib/systemd/user/diskgc-watch@.service` and
    `lib/systemd/system/diskgc-watch@.service`, the `watch` unit
    templates, one instance per filesystem
-   ([Watch as a systemd service](#watch-as-a-systemd-service)). Where this
-   package runs no reclaiming `watch` (its header says), an instance's
-   environment file needs `--tally-only` (`DISKGC_WATCH_ARGS=--tally-only
-   --min-free 50G`); a reclaiming one exits 2 at start and stays failed.
+   ([Watch as a systemd service](#watch-as-a-systemd-service)): the
+   thresholds go in the instance's environment file
+   (`DISKGC_WATCH_ARGS=--min-free 30G --target-free 60G`; a CI runner's
+   warm index, `--tally-only --min-free 50G`). The user template needs
+   no root; the system template needs the host lock (item 2) and a
+   `User=` drop-in. `Restart=always` restarts an instance 30 s after any
+   end but `systemctl stop` (a SIGHUP applies an edited configuration
+   that way), except exit 2, a refusal at start, which stays failed;
+   diskgc's message is in the journal (`systemctl status` usually shows
+   it; a process that exits at once can lose its unit field to a
+   journald race, measured in the VM test).
+6. On NixOS, the flake's `nixosModules.default` (`services.diskgc`) at
+   this release's tag, whose default `package` is this package: it
+   renders the configuration, checks it with this binary's `diskgc check`
+   when the system is built (so a profile or tier 0.2 refuses fails the
+   build), provisions the host lock and starts the instances (its
+   options: the source tree's docs/architecture.md, NixOS module). From
+   master the
+   module's default is the development package, which does not delete.
 
 Start with a dry run (`diskgc ensure --dry-run --min-free 50G PATH`); it
 reads only and lists what a reclaim would take and why the rest is kept.
@@ -3483,6 +3511,30 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
 - **`ccache`.** The next compiles miss and run the compiler again (time).
   Both `~/.cache/ccache` and `~/.ccache` are found. Remote or secondary
   storage was not tested.
+- **`watch`.** It protects against running out only as fast as it
+  samples and reclaims: a burst that writes more than the gap below
+  `--min-free` within one `--interval` plus the slowest tier fills the
+  disk anyway, so leave that gap above write rate × (interval + slowest
+  tier). It reads its configuration once: an edit takes effect at a
+  restart (`systemctl restart`, or a SIGHUP under `Restart=always`, 30 s
+  later). One `watch` per filesystem and state directory: a second exits
+  2. A cycle on a busy host waits holding the host lock (the background
+  tally paused) until the host settles or the cycle's `--timeout`; an
+  `ensure` meanwhile waits for the lock and can exit 75, and a cycle
+  waiting behind another reclaim for longer than its `--timeout` ends
+  `lock_timeout`; either ends in a `retry` back-off of 1, 2, 4, 8 minutes
+  (at most 15), so the next cycle comes later, not sooner. After a cycle
+  that took everything it could (`exhausted`), the next waits 15 minutes,
+  or until available space falls by `max(1 GiB, 1 %)` more (tentative
+  constants: [The reclaim cycle](#the-reclaim-cycle)). Percentages
+  are resolved against the filesystem's size at start. The background
+  tally's pressure brake needs the kernel's PSI and reacts to its
+  10-second average; it does not limit the reclaim itself, which runs at
+  the unit's priority. A failed write of a `--json` record ends `watch`
+  with exit 3 (the unit restarts it). Not shown by a test yet: a
+  root instance (`--allow-root`) that reclaims (its capability set is
+  only checked to be applied), a `watch` cycle running the Nix GC, and a
+  watcher's memory over days (TASK-134).
 - **Deadlines are cooperative.** `--timeout` is checked between
   operations; one filesystem operation blocked in the kernel (a dead
   network mount, a slow disk) overruns it, and the overrun is reported
@@ -3526,15 +3578,18 @@ string; `--select` runs are named `select`; `find.roots` is always a
 list, with `find.backend` beside it. Scripts match `status`, `cause`,
 `reason` and the exit code; message text and human output may change.
 `index` is still always `null` (0.1.0 had no index; this package has
-one, and the report's `index` block is still to come, TASK-244). The
+one, and the report's `index` block is still to come, TASK-244).
+`watch`'s JSON lines (one `ensure`-shaped record per cycle, plus its
+`watch` block: [Watch JSON lines](#watch-json-lines)), its exit codes and
+the module's options are new in 0.2, and their contract review is
+pending (Mark). The
 command-action and
 Docker parts of the profile schema stay provisional until the v1
 release review (task-49); the `nix-store` profile shape is final
 ([Profiles](#profiles)). `just docs-vs-binary BIN` runs what this
 reference documents against a build and reports any drift.
 
-**Not in the release catalog.** A reclaiming `watch` and `survey` (both
-exit 2; `watch --tally-only` runs), the Docker kinds, every command action
+**Not in the release catalog.** `survey` (exit 2), the Docker kinds, every command action
 but the four caches' cleaners (`npm-cache`, `go-build-cache`, `yarn-cache`,
 `platformio-cache` and `jest-cache` stay out, TASK-360; each one's reason
 is in its row of [Liveness contracts](#liveness-contracts)), user profiles and overrides, `ipc: live-only` in `ensure`, and every other
@@ -3548,7 +3603,9 @@ Evidence for the candidate package, and what it does not cover:
 
 | Candidate deployment question | Evidence and current limit |
 |---|---|
-| Package contents | The actual `release-candidate` derivation passes the static ELF and installed-file check (the binary is byte-identical to its compile; the file list is exactly its release row's, each copy byte for byte; the notes' header and `--help`'s `watch` lines follow the row); its tmpfiles rule and example config are exercised in disposable Nix and Debian containers, and its `watch --tally-only` starts, writes its snapshot, stops on SIGTERM with exit 0 and deletes nothing there. Its unit templates are checked by `systemd-analyze verify` only as the development package's (byte-identical sources) and in the module's drop-in verification; no live `systemd` runs them from this package. |
+| Package contents | The actual `release-candidate` derivation passes the static ELF and installed-file check (the binary is byte-identical to its compile; the file list is exactly its release row's, each copy byte for byte; the notes' header and `--help`'s `watch` lines follow the row); its tmpfiles rule and example config are exercised in disposable Nix and Debian containers, and its `watch --tally-only` starts, writes its snapshot, stops on SIGTERM with exit 0 and deletes nothing there. Its unit templates are checked by `systemd-analyze verify` as the development package's (byte-identical sources) and in the module's drop-in verification, and run under a live `systemd` (below). |
+| Reclaiming `watch` | In disposable containers sharing the host's PID namespace, the packaged binary's `watch` reclaims `pytest-cache` candidates below `--min-free` up to `--target-free` and stops there, keeps one a process holds open (`in_use`), writes no record between the thresholds, backs off `hold` after an `exhausted` cycle, and stops on SIGHUP and SIGINT with exit 0; its cycle and an `ensure` take turns through the host lock (the `ensure` exits 75 `lock_timeout` while the cycle's cleaner holds it; a cycle waiting behind an `ensure` ends `interrupted` at SIGTERM); a user profile or a built-in 0.2 does not ship is refused at start. In a NixOS VM (`vm-release-watch`), the package's files installed as the generic-Linux steps say: the user template as the user, the system template with a `User=` drop-in, each watching a small ext4 that a fill drives below `--min-free`; each instance reclaims real pytest caches up to `--target-free`, the user instance keeping one a process holds; the background tally brakes under a fork storm; a cycle on a busy host (a fork storm beside 1,000 idle processes of the user) waits it out instead of giving its candidate up, then reclaims; a cycle behind an `ensure` whose cleaner holds the lock ends `lock_timeout`, one whose own cleaner outlasts its `--timeout` ends `deadline`, and each is followed one minute later by a cycle that reclaims; SIGHUP restarts the user instance after 30 s from its snapshot, an exit 2 is not restarted, and `systemctl stop` ends the system instance with exit 0. Not shown: an `--allow-root` instance that reclaims, `nix-garbage` or a cleaner in a `watch` cycle on a VM, a watcher over days. |
+| NixOS module | With this package as `services.diskgc.package`, the module's build-time check refuses a user profile and a built-in 0.2 does not ship (the system build fails: `nixos-module-bad-config`); in a NixOS VM (`vm-nixos-module`), a reclaiming user instance reclaims a filled filesystem to its `--target-free` and keeps a held cache, and tally-only, root and refused instances behave as on the development package. |
 | Cargo operator journey | Those containers run the packaged, gate-lifted binary against real Cargo targets: dry run, busy-lock preservation, eligible deletion judged by the filesystem oracle, and a successful rebuild. Default and explicit `checkouts: allow`, and explicit `checkouts: refuse`, are checked on vendored checkout content. |
 | Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp`, `nix-garbage`, `pytest-cache`, `python-pycache`, `mypy-cache`, `python-venv`, `node-compile-cache`, `pip-cache`, `uv-cache`, `pnpm-store`, `ccache` and the seven idle filters. Excluded built-ins (the other five cleaners and `node-modules` among them) and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
 | Package-manager caches | In disposable Nix containers sharing the host's PID namespace, with the pinned real tools (pip 26.1.2, uv 0.13.0, pnpm 12.9.0, ccache 4.14.1) and a registry the test serves, the packaged binary runs the development build's scenarios: the tool fills its cache, a dry run plans exactly it with the profile's command and no lookalike or cache at a non-default place, a reclaim under the deletion oracle runs the cleaner, and the tool fetches or builds again; a run held in flight is kept `in_use` (uv, pnpm) or survives the cleaner (pip, ccache; each also held after its cache lookup, so that it only writes afterwards); for `uv-cache`, dry runs with a `.git` directory, a non-empty `.git` file, an empty `.git` elsewhere and a checkout-shaped `.git` below `git-v0` keep the cache. Not run through the package: for uv and pnpm, the tool's own cleaner run directly against the install in flight and its lock wait (the release variants stop at diskgc's `in_use` verdict); the missing-tool and any-version-on-`PATH` scenario (development build only); a real `git` dependency in a uv cache (no network, no git in the image). |

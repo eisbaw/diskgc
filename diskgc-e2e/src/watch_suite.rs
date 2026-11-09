@@ -505,7 +505,7 @@ fn alive(pid: i32) -> bool {
 
 /// Whether some other process holds the host lock: a non-blocking
 /// exclusive `flock` on it fails with `EWOULDBLOCK`.
-fn host_lock_held_elsewhere() -> Result<bool, String> {
+pub(crate) fn host_lock_held_elsewhere() -> Result<bool, String> {
     let lock =
         fs::File::open(crate::suite::HOST_LOCK).map_err(|e| format!("open the host lock: {e}"))?;
     match rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive) {

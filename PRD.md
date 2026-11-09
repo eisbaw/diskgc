@@ -247,9 +247,10 @@ with an admissible liveness contract), as a
 static binary with a tmpfiles drop-in and an example config. It ships only
 with the Cargo race tests, the journeys for its users and the contract
 review green; `watch`, the index, `survey`, Docker, Nix and command actions
-come later. **0.2**'s scope is Mark's open decision (TASK-276): the
-release descriptor holds a provisional row for it, and whether 0.2 is
-that row, with or without a reclaiming `watch`, is not decided. Its
+come later. **0.2** is the release descriptor's `0.2` row (Mark,
+TASK-276): `ensure`, a reclaiming `watch` and `watch --tally-only`
+(2026-11-05), `check` and `profiles`, with the catalog Mark admitted,
+the two `watch` unit templates, and the NixOS module (2026-11-06). Its
 release criteria are one checked list
 ([architecture.md](docs/architecture.md#02-release-criteria)).
 **v1** is the full scope below. ("v1" names the product

@@ -35,7 +35,7 @@ echo 'DISKGC_WATCH_ARGS=--min-free 30G --target-free 60G' > ~/.config/diskgc/wat
 systemctl --user enable --now "diskgc-watch@$(systemd-escape --path /home).service"
 ```
 
-No package runs a reclaiming `watch` yet: the 0.2 candidate runs `watch --tally-only`, which keeps the index warm and deletes nothing.
+0.2 runs a reclaiming `watch`: below `--min-free` it reclaims as `ensure` does, up to `--target-free`, and deletes nothing in between. On NixOS, the flake's `nixosModules.default` (`services.diskgc`) at a release tag runs that release's package and checks its configuration at build time ([module](docs/architecture.md#nixos-module)); from master it runs the gated development package, which does not delete.
 
 ## A dry run of /tmp
 

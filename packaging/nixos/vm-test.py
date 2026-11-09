@@ -1,5 +1,11 @@
-# Driver script of vm-nixos-module (vm-test.nix). Unit names are the
-# escaped watched paths: /home/runner -> home-runner, / -> -.
+# Driver script of vm-nixos-module (vm-test.nix), after the prelude that
+# defines DEV (the development package). Unit names are the escaped
+# watched paths: /home/runner -> home-runner, / -> -.
+import json
+import shlex
+import time
+
+MIB = 1 << 20
 
 def show(unit, props, user=None):
     """systemctl show values of UNIT, empty ones included, as a dict
@@ -139,11 +145,69 @@ with subtest("the first switch starts the lingering user's instances; one per fi
     print(env)
     assert "/run/current-system/sw/bin" in env, env
 
-with subtest("a reclaiming user instance on the development package exits 2"):
-    wait_failed_exit_2("diskgc-watch@tmp.service", user="mark")
-    log = journal("diskgc-watch@tmp.service", user=True)
-    print(log)
-    assert "sandbox" in log, log
+with subtest("the development package refuses a reclaiming watch here (sandbox gate)"):
+    status, out = machine.execute(
+        f"su - mark -c '{DEV}/bin/diskgc watch --min-free 1M --target-free 2M /tmp' 2>&1"
+    )
+    print(out)
+    assert status == 2 and "sandbox" in out, (status, out)
+
+
+def records(unit, user=False):
+    lines = journal(unit, user=user).splitlines()
+    return [json.loads(l) for l in lines if l.startswith("{") and '"watch":' in l]
+
+
+with subtest("mark's reclaiming instance: a fill reclaims to --target-free, keeps a held cache"):
+    unit = "diskgc-watch@srv-mark.service"
+    got = show(unit, ["ActiveState", "MainPID"], user="mark")
+    assert got["ActiveState"] == "active", got
+    caches = []
+    for i in range(8):
+        name = f"/srv/mark/src/p-{i:02}"
+        machine.succeed(
+            "su - mark -c " + shlex.quote(
+                f"mkdir -p {name} && cd {name}"
+                " && printf 'def test_ok():\\n    assert True\\n' > test_ok.py"
+                " && pytest -q >/dev/null && mkdir -p .pytest_cache/v/cache"
+                " && fallocate -l 8M .pytest_cache/v/cache/pad"
+            )
+        )
+        caches.append(f"{name}/.pytest_cache")
+        time.sleep(1)
+    machine.succeed(
+        "systemd-run --uid=mark --unit=holder /run/current-system/sw/bin/python3 -c "
+        + shlex.quote(f"import time; f = open('{caches[0]}/v/cache/pad', 'rb'); time.sleep(10**6)")
+    )
+    machine.wait_until_succeeds(
+        f"ls -l /proc/$(systemctl show -p MainPID --value holder)/fd | grep -q {caches[0]}"
+    )
+    blocks, size, free = machine.succeed("stat -f -c '%b %S %a' /srv/mark").split()
+    total = int(blocks) * int(size)
+    minimum, target = total * 40 // 100, total * 50 // 100
+    avail = int(free) * int(size)
+    assert avail > minimum + 3 * MIB, (avail, minimum)
+    assert records(unit, user=True) == [], "a cycle above --min-free"
+    machine.succeed(
+        "su - mark -c " + shlex.quote(f"fallocate -l {avail - (minimum - 3 * MIB)} /srv/mark/fill")
+    )
+    machine.wait_until_succeeds(
+        f"journalctl -o cat _SYSTEMD_USER_UNIT={unit} | grep -q '\"watch\":'", timeout=120
+    )
+    first = records(unit, user=True)[0]
+    print(json.dumps(first, indent=1))
+    assert first["status"] == "met" and first["watch"]["cycle"] == 1, first
+    taken = sorted(a["candidate"] for a in first["actions"])
+    assert taken and taken == caches[1 : 1 + len(taken)] and len(taken) < 7, taken
+    held = [s["reason"] for s in first["skipped"] if s["candidate"] == caches[0]]
+    assert held == ["in_use"], first["skipped"]
+    after = int(machine.succeed("stat -f -c '%a %S' /srv/mark").split()[0]) * int(size)
+    # Stopped at the goal: one deletion fewer would not have reached it.
+    smallest = min(a["avail_delta_bytes"] for a in first["actions"])
+    assert target <= after and after - smallest < target, (after, smallest, target)
+    for cache in caches[1 + len(taken) :] + [caches[0]]:
+        machine.succeed(f"test -d {cache}")
+    machine.succeed("systemctl stop holder")
 
 with subtest("the tally-only snapshot lands in the runner's state directory"):
     machine.succeed("systemctl stop diskgc-watch@home-runner.service")
@@ -156,9 +220,10 @@ with subtest("the tally-only snapshot lands in the runner's state directory"):
         " | grep -q 'index: started from snapshot'"
     )
     # The restarted watcher started from it (above). Whether the runner's
-    # own ensure does cannot be shown here: a dry run plans without the
-    # index, and the development package's sandbox gate refuses a
-    # reclaiming ensure before it loads one.
+    # own ensure does is not shown here: this configuration's only tier is
+    # a Cargo one, and the index holds fs tiers only (a Cargo tier is
+    # discovered afresh by every run), so neither reads the snapshot's
+    # units for it.
 
 with subtest("SIGHUP restarts an instance, which reads its configuration afresh"):
     # An edited (here: invalid) configuration takes effect at the restart:

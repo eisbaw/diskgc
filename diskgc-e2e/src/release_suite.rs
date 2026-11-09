@@ -366,61 +366,6 @@ pub fn candidate_rejects_docker_command_and_arbitrary_delete_policy(ctx: &Ctx) -
     Ok(())
 }
 
-/// TASK-276 open: the gate-lifted candidate refuses a reclaiming `watch`
-/// (exit 2, in text and under `--json`) before it looks at the machine.
-/// PATH does not exist, so a candidate without the refusal fails here on
-/// its own startup error, not the refusal's message, instead of running
-/// as a service until the budget.
-pub fn candidate_refuses_a_reclaiming_watch(ctx: &Ctx) -> TestResult {
-    ctx.scratch.mkdirs("release-watch/target", 0o700, TESTER)?;
-    let keep = ctx.scratch.write_file(
-        "release-watch/target/keep",
-        b"a refused watch must preserve this",
-        0o600,
-        TESTER,
-    )?;
-    let roots = ctx.scratch.path("release-watch");
-    let roots = roots
-        .to_str()
-        .ok_or_else(|| format!("non-UTF-8 path {}", roots.display()))?;
-    let want = "a reclaiming `watch` is not in diskgc ";
-    let watch = [
-        "watch",
-        "--min-free",
-        "1G",
-        "--target-free",
-        "2G",
-        "--select",
-        "profile:cargo-target",
-        "--roots",
-        roots,
-        "/nonexistent-release-watch",
-    ];
-    let refused = run(ctx, &watch, 2)?;
-    ensure!(
-        refused.stdout.is_empty()
-            && refused
-                .stderr
-                .starts_with(&format!("diskgc: error: {want}")),
-        "reclaiming watch was not refused as such: {refused:?}"
-    );
-    let mut with_json = watch.to_vec();
-    with_json.push("--json");
-    let refused = run(ctx, &with_json, 2)?;
-    let error: Value = serde_json::from_str(&refused.stdout)
-        .map_err(|e| format!("parse refusal: {e}: {}", refused.stdout))?;
-    ensure!(
-        error["status"] == "usage_error"
-            && error["errors"][0]["cause"] == "usage"
-            && error["errors"][0]["message"]
-                .as_str()
-                .is_some_and(|m| m.starts_with(want)),
-        "reclaiming watch --json was not refused as such: {error}"
-    );
-    ensure!(keep.exists(), "a refused watch mutated the fixture");
-    Ok(())
-}
-
 /// TASK-289: the gate-lifted candidate runs `watch --tally-only` (its
 /// release row's command, which its package ships unit templates for): it
 /// starts, tallies a Cargo target, stops on SIGTERM with exit 0, writes

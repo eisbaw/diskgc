@@ -1254,7 +1254,9 @@ fn finish(report: &Report, json: bool) -> ExitCode {
 }
 
 /// What `build` says to `command`, which it does not run: a reclaiming
-/// `watch` where only `watch --tally-only` runs (TASK-276), or any other.
+/// `watch` where only `watch --tally-only` runs (no row does since 0.2
+/// added a reclaiming one, TASK-362; kept for a row that might), or any
+/// other.
 fn not_in_build(command: Command, build: &Build) -> String {
     let what = if command == Command::Watch && build.allows(Command::WatchTallyOnly) {
         "a reclaiming `watch`".to_owned()
@@ -1942,8 +1944,11 @@ mod tests {
     }
 
     /// What the binary prints for a refused command (the release suite's
-    /// `release_candidate_refuses_a_reclaiming_watch` runs this build's, in
-    /// a container: TASK-282 keeps reclaiming argv off the host).
+    /// `release_candidate_watch_refuses_user_profiles_and_unshipped_builtins`
+    /// and the reclaiming forms run in a container: TASK-282 keeps
+    /// reclaiming argv off the host). No row runs `watch --tally-only`
+    /// alone since 0.2 (TASK-362), so that refusal is shown on an edited
+    /// row.
     #[test]
     fn a_refusal_names_the_rows_commands() {
         let [development, v01, _] = rows();
@@ -2029,8 +2034,15 @@ mod tests {
         assert!(v01.contains("a README and the release notes"), "{v01}");
 
         // This version's release: its watch lines are exactly what its row
-        // allows (TASK-276 decides whether a reclaiming one is added).
+        // allows; 0.2 runs a reclaiming one beside --tally-only (Mark,
+        // 2026-11-05, TASK-276; TASK-362), so a row reverted to tally-only
+        // fails here.
         let (_, rel) = help_of(&this_release);
+        assert!(
+            this_release.allows(Command::Watch) && this_release.allows(Command::WatchTallyOnly),
+            "{this_release:?}"
+        );
+        assert!(rel.contains("(`survey` is not in it yet)"), "{rel}");
         assert_eq!(
             rel.contains(reclaim_line),
             this_release.allows(Command::Watch),

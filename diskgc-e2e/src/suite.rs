@@ -44,8 +44,9 @@ use crate::{
     engine_suite, ensure_suite, fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite,
     laptop_tmp_journey, lifecycle_suite, meson_suite, nix_gc_suite, owner_pid_suite,
     packaging_suite, pkg_cache_suite, profile_vector_suite, project_cache_suite,
-    project_tree_suite, pytest_contract_suite, release_suite, runtime_cache_suite, scale_suite,
-    signal_suite, stdout_suite, survey_suite, temp_safety_suite, watch_suite,
+    project_tree_suite, pytest_contract_suite, release_suite, release_watch_suite,
+    runtime_cache_suite, scale_suite, signal_suite, stdout_suite, survey_suite, temp_safety_suite,
+    watch_suite,
 };
 
 /// Which gate runs a test.
@@ -574,6 +575,9 @@ pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
     "candidate_catalog_runtime_cache_family_matches_the_development_build",
     // TASK-354: the build-output family through the candidate-catalog build.
     "candidate_catalog_build_output_family_matches_the_development_build",
+    // TASK-362: the release candidate's reclaiming watch.
+    "release_candidate_watch_reclaims_to_target_keeps_in_use_and_stops_on_sighup",
+    "release_candidate_watch_and_ensure_take_turns_through_the_host_lock",
 ];
 
 /// The one test whose container receives the pinned Buildah closure.
@@ -1495,11 +1499,24 @@ pub static TESTS: &[Test] = &[
         expect: Expect::Pass,
         run: release_suite::candidate_rejects_docker_command_and_arbitrary_delete_policy,
     },
+    // TASK-362: 0.2's reclaiming watch through the release candidate.
     Test {
-        name: "release_candidate_refuses_a_reclaiming_watch",
+        name: "release_candidate_watch_refuses_user_profiles_and_unshipped_builtins",
         tier: Tier::Fast,
         expect: Expect::Pass,
-        run: release_suite::candidate_refuses_a_reclaiming_watch,
+        run: release_watch_suite::release_candidate_watch_refuses_user_profiles_and_unshipped_builtins,
+    },
+    Test {
+        name: "release_candidate_watch_reclaims_to_target_keeps_in_use_and_stops_on_sighup",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: release_watch_suite::release_candidate_watch_reclaims_to_target_keeps_in_use_and_stops_on_sighup,
+    },
+    Test {
+        name: "release_candidate_watch_and_ensure_take_turns_through_the_host_lock",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: release_watch_suite::release_candidate_watch_and_ensure_take_turns_through_the_host_lock,
     },
     Test {
         name: "release_candidate_runs_watch_tally_only",
