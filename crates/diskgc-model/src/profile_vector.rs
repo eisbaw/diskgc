@@ -102,6 +102,8 @@ pub struct Outcomes {
     pub actions: BTreeSet<PathBuf>,
     /// Of the paths asked about, those the reclaim left absent.
     pub removed: BTreeSet<PathBuf>,
+    /// Every event of the host fired during the reclaim.
+    pub reclaim_events_fired: bool,
 }
 
 /// [`Catalog`], as a vector names it.
@@ -817,6 +819,7 @@ impl ProfileVector {
                 .filter(|path| reclaiming.stat_path(path).is_none())
                 .cloned()
                 .collect(),
+            reclaim_events_fired: reclaiming.unfired_events().is_empty(),
         })
     }
 

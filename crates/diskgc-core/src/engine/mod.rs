@@ -929,6 +929,12 @@ pub struct Skip {
     /// the candidate's own (a check slower than the freshness bound). Not
     /// in the report.
     pub(crate) busy_scan: bool,
+    /// The nested-build guard vetoed the candidate, or could not clear it,
+    /// at a judgement after discovery (TASK-367): the candidate's verdict
+    /// for every term of a union, as discovery's veto is
+    /// ([`crate::fs_kind::Discovery::vetoed`]), so another term never takes
+    /// what the guard keeps. Not in the report.
+    pub(crate) nested_build_veto: bool,
 }
 
 /// Why an `in_use_unknown` candidate could not be judged: a stable report
@@ -1092,7 +1098,14 @@ impl Skip {
             unknown_cause: None,
             measured_bytes: None,
             busy_scan: false,
+            nested_build_veto: false,
         }
+    }
+
+    /// This refusal is the nested-build guard's ([`Skip::nested_build_veto`]).
+    pub(crate) fn nested_build_veto(mut self) -> Self {
+        self.nested_build_veto = true;
+        self
     }
 
     /// This refusal came after a complete walk that measured `bytes`

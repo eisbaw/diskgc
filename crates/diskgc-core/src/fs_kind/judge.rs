@@ -527,7 +527,7 @@ impl Judge<'_> {
                 name,
             ))
         };
-        let evidence = match anchored.evidence() {
+        let evidence = match anchored.evidence(&found.path) {
             Ok(evidence) => evidence,
             Err(skip) => return Ok(Err(skip)),
         };

@@ -1552,6 +1552,17 @@ pub(super) fn plan_fs_union<H: Host>(
                     first_skip = Some((*index, found.path.as_path(), skip));
                     break;
                 }
+                // The nested-build guard's veto at this judgement keeps the
+                // candidate for the whole union, as discovery's does
+                // (TASK-367): a term admitted before it does not take it.
+                Ok(TermVerdict::Refused(skip)) if skip.nested_build_veto => {
+                    first_skip = Some((*index, found.path.as_path(), skip));
+                    selected = None;
+                    selected_record = None;
+                    admitted.clear();
+                    checkout_marker = None;
+                    break;
+                }
                 Ok(TermVerdict::Refused(skip)) => {
                     first_skip.get_or_insert((*index, found.path.as_path(), skip));
                 }

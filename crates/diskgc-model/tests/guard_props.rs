@@ -7,7 +7,9 @@
 //! output), generated root sets (nested, overlapping, one on a filesystem
 //! of its own, either one the `PATH`), unions of a guarded profile with
 //! other profiles (Meson, Autotools, `nix-shell-rc`, `pytest-tmp`), both
-//! catalogs and the index on or off:
+//! catalogs, the index on or off, and the stamp present from the start or
+//! made by a host event during the run (Codex's fourth review: after
+//! discovery, after the lock, during the locked walk):
 //!
 //! 1. **Only adds protection.** What the dry run plans eligible and what
 //!    `survey` reports eligible are each a subset of the same on the same
@@ -74,6 +76,19 @@ enum Root {
     OutA,
 }
 
+/// When the stamp exists: in the tree from the start, or made by a host
+/// event during the run (Codex's fourth review): (a) after discovery,
+/// before a judgement's anchor read (CMakeCache.txt's second read); (b)
+/// right after the candidate lock; (c) during the locked contents walk
+/// (after the build's second listing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Made {
+    Before,
+    AfterDiscovery,
+    AfterLock,
+    DuringWalk,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Union {
     Cmake,
@@ -90,6 +105,7 @@ struct Scenario {
     pkg: &'static str,
     out: &'static str,
     stamp: Option<(StampAt, &'static str)>,
+    made: Made,
     br_marker: bool,
     out_recent: bool,
     nested: Nested,
@@ -219,20 +235,21 @@ impl Scenario {
         let top = self.top;
         let pkg = self.pkg_path();
         let out = self.out_path();
-        if signals {
-            if let Some((at, name)) = self.stamp {
-                let dir = if at == StampAt::Top {
-                    top.to_owned()
-                } else {
-                    pkg.clone()
-                };
-                lines.push(format!("    {dir}/{name}: {{mtime: {OLD}}}"));
-            }
-            if self.br_marker {
-                lines.push(format!(
-                    "    {top}/.br2-external.mk: {{mtime: {OLD}, content: \"BR2_EXTERNAL ?=\\n\"}}"
-                ));
-            }
+        if signals
+            && self.made == Made::Before
+            && let Some((at, name)) = self.stamp
+        {
+            let dir = if at == StampAt::Top {
+                top.to_owned()
+            } else {
+                pkg.clone()
+            };
+            lines.push(format!("    {dir}/{name}: {{mtime: {OLD}}}"));
+        }
+        if signals && self.br_marker {
+            lines.push(format!(
+                "    {top}/.br2-external.mk: {{mtime: {OLD}, content: \"BR2_EXTERNAL ?=\\n\"}}"
+            ));
         }
         if self.keep_at_top {
             lines.push(format!("    {top}/.diskgc-keep: {{mtime: {OLD}}}"));
@@ -336,10 +353,40 @@ impl Scenario {
         }
         let (tree, paths) = self.tree(signals);
         let yaml = format!(
-            "host_model: 1\nclock: 2026-10-15T03:00:00Z\nmounts:\n{}\ntree:\n{tree}\nprocesses:\n    - {{pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{{path: /usr/bin/bash}}]}}\n",
-            mounts.join("\n")
+            "host_model: 1\nclock: 2026-10-15T03:00:00Z\nmounts:\n{}\ntree:\n{tree}\nprocesses:\n    - {{pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{{path: /usr/bin/bash}}]}}\n{}",
+            mounts.join("\n"),
+            if signals {
+                self.events()
+            } else {
+                String::new()
+            },
         );
         (yaml, paths)
+    }
+
+    /// The host event that makes the stamp during the run, if any.
+    fn events(&self) -> String {
+        let Some((at, name)) = self.stamp else {
+            return String::new();
+        };
+        let dir = if at == StampAt::Top {
+            self.top.to_owned()
+        } else {
+            self.pkg_path()
+        };
+        let out = self.out_path();
+        let trigger = match self.made {
+            Made::Before => return String::new(),
+            Made::AfterDiscovery => {
+                format!("{{op: read_head, path: {out}/CMakeCache.txt, nth: 2, when: before}}")
+            }
+            Made::AfterLock => format!("{{op: flock, path: {out}, nth: 1, when: after}}"),
+            // The build's third listing: in the cases without the index
+            // the locked walk's (after the tally's and the ordering walk's),
+            // so after the locked anchor check and its guard.
+            Made::DuringWalk => format!("{{op: read_dir, path: {out}, nth: 3, when: after}}"),
+        };
+        format!("events:\n    - at: {trigger}\n      create: {dir}/{name}\n")
     }
 
     fn vector(&self, signals: bool) -> (String, Vec<PathBuf>) {
@@ -375,6 +422,8 @@ impl Scenario {
 /// What one tree came to: the reclaim, the dry run and the survey.
 #[derive(Debug)]
 struct Seen {
+    /// Whether the reclaim's events fired (a runtime stamp was made).
+    fired: bool,
     removed: BTreeSet<PathBuf>,
     actions: BTreeSet<PathBuf>,
     eligible: BTreeSet<PathBuf>,
@@ -419,6 +468,7 @@ fn seen(scenario: &Scenario, signals: bool) -> Result<Seen, String> {
         .filter_map(|row| row["candidate"].as_str().map(PathBuf::from))
         .collect();
     Ok(Seen {
+        fired: outcomes.reclaim_events_fired,
         removed: outcomes.removed,
         actions: outcomes.actions,
         eligible: outcomes.eligible,
@@ -440,6 +490,12 @@ fn scenario() -> impl Strategy<Value = Scenario> {
             prop_oneof![Just(".built"), Just(".stamp_built"), Just(".configured_68b3"), Just(".prepared")],
         )
             .prop_map(Some),
+    ];
+    let made = prop_oneof![
+        3 => Just(Made::Before),
+        1 => Just(Made::AfterDiscovery),
+        1 => Just(Made::AfterLock),
+        1 => Just(Made::DuringWalk),
     ];
     let nested = prop_oneof![
         Just(Nested::None),
@@ -477,12 +533,14 @@ fn scenario() -> impl Strategy<Value = Scenario> {
             any::<bool>(),
             any::<bool>(),
         ),
+        made,
     )
         .prop_map(
             |(
                 ((top, pkg, out), stamp, br_marker, out_recent, nested),
                 (git_in_out, keep_at_top, roots, other_fs, path_at_pkg),
                 (union, no_index, release, survey_top, survey_pkg),
+                made,
             )| {
                 // nix-shell-rc and pytest-tmp have /tmp roots of their own.
                 let union = match union {
@@ -494,6 +552,7 @@ fn scenario() -> impl Strategy<Value = Scenario> {
                     pkg,
                     out,
                     stamp,
+                    made,
                     br_marker,
                     out_recent,
                     nested,
@@ -512,9 +571,9 @@ fn scenario() -> impl Strategy<Value = Scenario> {
         )
 }
 
-/// Both properties for one scenario; `Ok(true)` when the run without the
-/// guard's signals removed something (the properties were not vacuous).
-fn check(scenario: &Scenario) -> Result<bool, TestCaseError> {
+/// Both properties for one scenario, and what the run without the
+/// guard's signals did ([`Vacuity`]).
+fn check(scenario: &Scenario) -> Result<Vacuity, TestCaseError> {
     let on = seen(scenario, true).map_err(TestCaseError::fail)?;
     let off = seen(scenario, false).map_err(TestCaseError::fail)?;
     let fail = |what: &str, detail: String| {
@@ -560,12 +619,32 @@ fn check(scenario: &Scenario) -> Result<bool, TestCaseError> {
     // the run takes, plans or reports eligible (another profile's
     // candidate holding it, a pytest session, is judged by that profile:
     // docs/safety.md, Not covered).
-    for covered in scenario.covered() {
+    // A stamp made during the run guards only what is judged after it: in
+    // the reclaim, once the event fired, the build whose judgement or lock
+    // the event is tied to (`out`; a nested build may have gone before,
+    // and the plans can precede it).
+    let runtime = scenario.made != Made::Before && scenario.stamp.is_some();
+    let covered: BTreeSet<PathBuf> = if !runtime || scenario.br_marker {
+        scenario.covered()
+    } else if on.fired {
+        let out = PathBuf::from(scenario.out_path());
+        scenario
+            .covered()
+            .into_iter()
+            .filter(|c| *c == out)
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    for covered in covered {
         for (what, set) in [
             ("taken", &on.actions),
             ("planned eligible", &on.eligible),
             ("surveyed eligible", &on.surveyed),
         ] {
+            if runtime && what != "taken" && !scenario.br_marker {
+                continue;
+            }
             if set.contains(&covered) {
                 return Err(fail(
                     "a build the guard's rule covers was not protected",
@@ -574,7 +653,18 @@ fn check(scenario: &Scenario) -> Result<bool, TestCaseError> {
             }
         }
     }
-    Ok(!off.removed.is_empty())
+    Ok(Vacuity {
+        removed: !off.removed.is_empty(),
+        surveyed: !off.surveyed.is_empty(),
+    })
+}
+
+/// What the run without the guard's signals did: the properties are not
+/// vacuous when it removes something and `survey` reports something
+/// eligible.
+struct Vacuity {
+    removed: bool,
+    surveyed: bool,
 }
 
 #[test]
@@ -584,14 +674,22 @@ fn the_nested_build_guard_only_adds_protection() {
         ..ProptestConfig::default()
     });
     let removing = std::cell::Cell::new(0u32);
+    let surveying = std::cell::Cell::new(0u32);
     if let Err(error) = runner.run(&scenario(), |scenario| {
-        if check(&scenario)? {
-            removing.set(removing.get() + 1);
-        }
+        let vacuity = check(&scenario)?;
+        removing.set(removing.get() + u32::from(vacuity.removed));
+        surveying.set(surveying.get() + u32::from(vacuity.surveyed));
         Ok(())
     }) {
         panic!("{error}");
     }
+    // Not vacuous: without the signals survey reports builds eligible.
+    assert!(
+        surveying.get() * 4 >= cases(),
+        "only {} of {} cases surveyed anything eligible without the guard's signals",
+        surveying.get(),
+        cases()
+    );
     // Not vacuous: without the signals the reclaims do delete.
     assert!(
         removing.get() * 4 >= cases(),
@@ -610,6 +708,7 @@ fn codex_third_review_cases_hold_both_properties() {
         pkg: "pkg",
         out: "out",
         stamp: Some((StampAt::Top, ".built")),
+        made: Made::Before,
         br_marker: false,
         out_recent: false,
         nested: Nested::None,
@@ -665,13 +764,79 @@ fn codex_third_review_cases_hold_both_properties() {
             };
             let catalog = if release { "0.2" } else { "development" };
             match check(&scenario) {
-                // Case 3 compares surveys only; the others reclaim.
-                Ok(removed) if removed || n == 2 => {}
+                // Case 3 compares surveys; the others reclaim.
+                Ok(v) if (n == 2 && v.surveyed) || (n != 2 && v.removed) => {}
                 Ok(_) => failed.push(format!(
-                    "case {} ({catalog}): vacuous, nothing removed without the guard",
+                    "case {} ({catalog}): vacuous, nothing removed or surveyed without the guard",
                     n + 1
                 )),
                 Err(e) => failed.push(format!("case {} ({catalog}): {e}", n + 1)),
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+}
+
+/// Codex's fourth review: stamps made during the run, (a) after discovery,
+/// (b) right after the lock, (c) during the locked walk, each for
+/// cmake-build-anchored alone and in a union with pytest-tmp (the session
+/// a CMake build too, with and without a Git checkout), both catalogs,
+/// without the index (so the reclaim judges the candidate itself, not a
+/// re-match).
+#[test]
+fn codex_fourth_review_runtime_stamps_hold_both_properties() {
+    let alone = Scenario {
+        top: "/home/tester/w",
+        pkg: "pkg",
+        out: "out",
+        stamp: Some((StampAt::Top, ".built")),
+        made: Made::Before,
+        br_marker: false,
+        out_recent: false,
+        nested: Nested::None,
+        git_in_out: false,
+        keep_at_top: false,
+        roots: vec![Root::Top],
+        other_fs: false,
+        path_at_pkg: false,
+        union: Union::Cmake,
+        no_index: true,
+        release: false,
+        survey_top: true,
+        survey_pkg: false,
+    };
+    let union = Scenario {
+        top: "/tmp",
+        pkg: "nix-shell.AB/pytest-of-tester",
+        out: "pytest-0",
+        stamp: Some((StampAt::Pkg, ".built")),
+        union: Union::PytestTmp,
+        ..alone.clone()
+    };
+    let mut failed = Vec::new();
+    for made in [Made::AfterDiscovery, Made::AfterLock, Made::DuringWalk] {
+        for (shape, base) in [
+            ("alone", &alone),
+            ("union", &union),
+            (
+                "union with a checkout",
+                &Scenario {
+                    git_in_out: true,
+                    ..union.clone()
+                },
+            ),
+        ] {
+            for release in [false, true] {
+                let scenario = Scenario {
+                    made,
+                    release,
+                    ..base.clone()
+                };
+                match check(&scenario) {
+                    Ok(v) if v.removed => {}
+                    Ok(_) => failed.push(format!("{made:?} {shape} (release {release}): vacuous")),
+                    Err(e) => failed.push(format!("{made:?} {shape} (release {release}): {e}")),
+                }
             }
         }
     }

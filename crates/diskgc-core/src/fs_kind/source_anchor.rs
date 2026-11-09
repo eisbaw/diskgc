@@ -74,14 +74,21 @@ pub(super) enum Anchored {
 }
 
 impl Anchored {
-    /// For a judgement, which compares with what discovery recorded: a
-    /// veto is no evidence (`changed` there), and a guard that could not
-    /// decide is its own refusal.
-    pub(super) fn evidence(self) -> Result<Option<SourceEvidence>, Skip> {
+    /// For a judgement, which compares with what discovery recorded. A
+    /// veto, or a guard that could not decide, is a refusal marked
+    /// [`Skip::nested_build_veto`]: the candidate's verdict for every term
+    /// of a union, whatever discovery saw (TASK-367, Codex's fourth review).
+    pub(super) fn evidence(self, candidate: &Path) -> Result<Option<SourceEvidence>, Skip> {
         match self {
             Self::Evidence(evidence) => Ok(Some(evidence)),
-            Self::NoEvidence | Self::Vetoed(None) => Ok(None),
-            Self::Vetoed(Some(skip)) => Err(skip),
+            Self::NoEvidence => Ok(None),
+            Self::Vetoed(None) => Err(Skip::new(
+                Reason::Changed,
+                candidate.to_owned(),
+                "now inside another build system's tree: the nested-build guard keeps it",
+            )
+            .nested_build_veto()),
+            Self::Vetoed(Some(skip)) => Err(skip.nested_build_veto()),
         }
     }
 }
@@ -201,6 +208,34 @@ pub(super) fn check_opened<H: Host>(
         }
     }
     Ok(Ok(Anchored::Evidence(evidence)))
+}
+
+/// The nested-build guard once more on a candidate of `kind` (none: no
+/// anchor), right before it is deleted (TASK-367, Codex's fourth review):
+/// a stamp made during the locked walk keeps it. A refusal is marked
+/// [`Skip::nested_build_veto`]. The window after this check is the
+/// documented check-to-delete limit.
+pub(super) fn guard_again<H: Host>(
+    host: &H,
+    kind: Option<SourceAnchor>,
+    candidate: &Path,
+    deadline: Option<MonoTime>,
+) -> Judged<()> {
+    if !kind.is_some_and(|kind| nested::GUARDED.contains(&kind)) {
+        return Ok(Ok(()));
+    }
+    match nested::outer_build(host, candidate, deadline)? {
+        Ok(None) => Ok(Ok(())),
+        Ok(Some(why)) => Ok(Err(Skip::new(
+            Reason::Changed,
+            candidate.to_owned(),
+            format!(
+                "now inside another build system's tree ({why}): the nested-build guard keeps it"
+            ),
+        )
+        .nested_build_veto())),
+        Err(skip) => Ok(Err(skip.nested_build_veto())),
+    }
 }
 
 /// One CMake candidate. `None` means its marker does not establish a

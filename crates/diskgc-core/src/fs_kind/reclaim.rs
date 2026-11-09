@@ -393,6 +393,12 @@ fn protocol<H: Delete>(
             deadline,
         )? {
             Ok(walked) => walked,
+            // The nested-build guard's veto under the lock keeps the
+            // candidate for every term (TASK-367).
+            Err(skip) if skip.nested_build_veto => {
+                done.selected = Some(index);
+                return Err(skip.into());
+            }
             Err(skip) => {
                 first_skip.get_or_insert(skip);
                 continue;
@@ -516,6 +522,22 @@ fn protocol<H: Delete>(
             {
                 done.selected = Some(guard_index);
                 return Err(NotDeleted::Skipped(skip));
+            }
+            // The nested-build guard of every admitted term once more: a
+            // stamp made during the locked walk keeps the candidate
+            // (TASK-367, Codex's fourth review).
+            for (admitted_at, alternative) in admitted_index.iter().zip(&admitted) {
+                if let Err(skip) = super::source_anchor::guard_again(
+                    host,
+                    alternative.judge.find.source_anchor,
+                    &alternative.found.path,
+                    deadline,
+                )
+                .map_err(NotDeleted::Stopped)?
+                {
+                    done.selected = Some(*admitted_at);
+                    return Err(NotDeleted::Skipped(skip));
+                }
             }
             // The checks above can take a while (the policy may scan other
             // trees): the path once more as the last check before the

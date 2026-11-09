@@ -2868,12 +2868,24 @@ include/package.mk and include/host-build.mk, read but not run (its SDK
 needs the network); the build-root markers are the anchors' own; npm's
 from cmake-js's documentation, with a real CMake build in that layout in
 the container. The
-guard runs at discovery and again at every judgement, the locked one
-included; a stamp that appears after discovery keeps the output
-(`changed`). A directory on the way that cannot be reached, or one of
-the four that cannot be listed (or holds more than the entry limit), is
-a visible refusal of the candidate, which is not entered either (vector
-`cmake-build-anchored-undecided-guard-prunes-its-subtree`).
+guard runs at discovery, again at every judgement (the plan's, the
+tally's, the locked one) and, for every admitted guarded term, once more
+in the last checks right before the delete (Codex's fourth review); a
+stamp that appears after discovery keeps the output (`changed`). A
+directory on the way that cannot be reached, or one of the four that
+cannot be listed (or holds more than the entry limit), is a visible
+refusal of the candidate, which is not entered either (vector
+`cmake-build-anchored-undecided-guard-prunes-its-subtree`). A veto or
+an undecided guard at any of these judgements is the candidate's verdict
+for every term of a union (`changed`, or the guard's own reason), never
+only its own term's refusal: another term never takes what the guard
+keeps. The window after the last check, the delete itself, is the
+check-to-delete limit (Deletion). Vectors (each also under the 0.2
+catalog): `cmake-build-anchored-stamp-before-the-judgements-anchor-read`,
+`cmake-build-anchored-stamp-after-the-lock`,
+`cmake-build-anchored-stamp-during-the-locked-walk`, their
+`cmake-or-pytest-tmp-...-keeps-the-union` counterparts, and
+`cmake-or-pytest-tmp-undecided-guard-at-judgement-keeps-the-union`.
 
 **The guard only adds protection** (Mark, 2026-11-09, after Codex's
 second and third reviews of TASK-367). Its verdict is a function of the
@@ -2901,7 +2913,9 @@ survey tests `survey_reports_no_build_inside_a_vetoed_one_as_a_candidate`
 and `a_narrower_survey_path_does_not_report_a_vetoed_build`. The
 property test `crates/diskgc-model/tests/guard_props.rs` checks it over
 generated trees, root sets (nested, overlapping, on another
-filesystem), unions, catalogs, `PATH`s and the index on or off: what
+filesystem), unions, catalogs, `PATH`s, the index on or off and stamps
+made during the run (after discovery, after the lock, during the locked
+walk): what
 the dry run plans and `survey` reports eligible with the guard's
 signals is a subset of the same without them, the reclaim removes
 nothing below no candidate the run without them planned or took, and

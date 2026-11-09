@@ -1,0 +1,35 @@
+# Under the 0.2 release catalog (TASK-370). TASK-367, Codex's fourth review, (c) for cmake-build-anchored alone: a
+# stamp made during the locked contents walk, after the locked anchor
+# check and its guard (right after the build's third listing: the tally's,
+# the plan-order walk's, the locked walk's). The final pre-delete recheck
+# runs the guard again (`changed`); before the fix only the path was
+# rechecked and the stamped build was deleted. The dry run plans it.
+profile_vector: 1
+catalog: release-0.2
+select: profile:cmake-build-anchored
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+no_index: true
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/pkg/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/pkg/out: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/pkg\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+  events:
+    - at: {op: read_dir, path: /home/tester/src/pkg/out, nth: 3, when: after}
+      create: /home/tester/src/.built
+expect:
+  plan:
+    - {candidate: /home/tester/src/pkg/out, source: /home/tester/src/pkg}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/src/pkg/out, reason: changed}
+  preserved: [/home/tester/src/pkg/out/a.o]
