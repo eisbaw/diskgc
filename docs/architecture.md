@@ -1391,7 +1391,8 @@ Decisions (Mark), before the RC commit:
   sources, 2026-11-05, TASK-359, `node-modules` held out, 2026-11-06,
   TASK-365, and four lock-safe package-manager
   cleaners with their exact commands, 2026-11-05, TASK-360, Jest left out
-  after review); does the
+  after review, and three runtime caches and four source-anchored build
+  outputs, 2026-11-07, TASK-370); does the
   NixOS module
   ship (Mark, 2026-11-06: yes; at the tag its default package is the
   release's, NixOS module above)? Recorded in TASK-276's notes; the row, the PRD's Scope and the

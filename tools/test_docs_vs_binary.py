@@ -176,6 +176,16 @@ class ReferenceShapeTests(unittest.TestCase):
         self.assertFalse(cleaners & catalogs["0.1"])
         excluded = {"npm-cache", "go-build-cache", "yarn-cache", "platformio-cache", "jest-cache"}
         self.assertFalse(excluded & set().union(*catalogs.values()))
+        # TASK-370: and three runtime caches and four source-anchored
+        # builds, not the rest of their families.
+        admitted = {"go-mod-cache", "bun-cache", "nix-user-cache", "cmake-build-anchored",
+                    "meson-build-anchored", "autotools-build-anchored", "west-build-anchored"}
+        self.assertLessEqual(admitted, catalogs["0.2"])
+        self.assertFalse(admitted & catalogs["0.1"])
+        held = {"huggingface-hub-repos", "electron-download-cache", "node-gyp-headers",
+                "cargo-registry-src", "buildroot-output-anchored", "yocto-tmpdir-anchored",
+                "bazel-output-base-anchored"}
+        self.assertFalse(held & set().union(*catalogs.values()))
         for members in catalogs.values():
             self.assertLessEqual(members, sources)
         self.assertNotIn("docker-dangling", set().union(*catalogs.values()))

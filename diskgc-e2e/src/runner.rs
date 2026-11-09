@@ -1562,16 +1562,23 @@ mod tests {
         assert_eq!(
             selected,
             [
+                // TASK-370: on the Nix image only.
+                "release_candidate_build_outputs_keep_builds_inside_the_3_day_floor",
+                "release_candidate_bun_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
                 "release_candidate_cargo_busy_then_reclaims_real_target",
                 "release_candidate_catalog_refuses_every_excluded_builtin",
                 // TASK-360: on the Nix image only.
                 "release_candidate_ccache_reclaim_then_recompile_and_a_compile_in_flight_completes",
                 "release_candidate_checkout_policy_accepts_only_admitted_builtin",
                 "release_candidate_files_work_in_container",
+                // TASK-370: on the Nix image only.
+                "release_candidate_go_mod_cache_reclaim_then_redownload_and_a_build_in_flight_is_kept",
                 // TASK-359: on the Nix image only.
                 "release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept",
                 // TASK-335: on the Nix GC image only.
                 "release_candidate_nix_garbage_dry_run_then_bounded_gc",
+                // TASK-370: on the Nix image only.
+                "release_candidate_nix_user_cache_reclaim_then_refetch_and_a_fetch_in_flight_is_kept",
                 // TASK-359: on the Nix image only.
                 "release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles",
                 // TASK-360: on the Nix image only.

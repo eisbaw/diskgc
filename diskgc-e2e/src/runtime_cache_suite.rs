@@ -101,14 +101,17 @@ fn select(profile: &str) -> String {
 /// A dry run and a reclaim of one profile below tester's home with the
 /// development build.
 fn reclaim(ctx: &Ctx, profile: &str, expected: &Expected) -> Result<Value, String> {
-    dry_run_then_reclaim(
-        ctx,
-        &ctx.diskgc(),
-        &select(profile),
-        Some(HOME),
-        HOME,
-        expected,
-    )
+    reclaim_with(ctx, &ctx.diskgc(), profile, expected)
+}
+
+/// [`reclaim`] with `binary` (the release candidate's, TASK-370).
+fn reclaim_with(
+    ctx: &Ctx,
+    binary: &Path,
+    profile: &str,
+    expected: &Expected,
+) -> Result<Value, String> {
+    dry_run_then_reclaim(ctx, binary, &select(profile), Some(HOME), HOME, expected)
 }
 
 /// The one entry of `dir` (a tool-named directory such as Cargo's
@@ -220,6 +223,19 @@ fn go_module_files(cache: &Path) -> Result<usize, String> {
 pub fn go_mod_cache_real_go_downloads_reclaim_then_redownload_and_a_build_in_flight_is_kept(
     ctx: &Ctx,
 ) -> TestResult {
+    go_mod_scenario(ctx, &ctx.diskgc())
+}
+
+/// TASK-370: [`go_mod_cache_real_go_downloads_reclaim_then_redownload_and_a_build_in_flight_is_kept`] through the gate-lifted release-candidate
+/// package, whose 0.2 catalog holds `go-mod-cache`.
+pub fn release_candidate_go_mod_cache_reclaim_then_redownload_and_a_build_in_flight_is_kept(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "go-mod-cache")?;
+    go_mod_scenario(ctx, &binary)
+}
+
+fn go_mod_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     versions(ctx, &[(GO, &["version"], "go1.26.8 ")])?;
     control_dir(ctx)?;
     go_fixture(ctx)?;
@@ -236,7 +252,7 @@ pub fn go_mod_cache_real_go_downloads_reclaim_then_redownload_and_a_build_in_fli
         lookalike(ctx, "go/pkg/mod.old")?,
     ];
 
-    reclaim(ctx, "go-mod-cache", &vec![(cache.clone(), None)])?;
+    reclaim_with(ctx, binary, "go-mod-cache", &vec![(cache.clone(), None)])?;
     ensure!(
         go_module_files(&alt)? == alt_files,
         "the GOMODCACHE cache changed"
@@ -286,7 +302,12 @@ pub fn go_mod_cache_real_go_downloads_reclaim_then_redownload_and_a_build_in_fli
         "precondition: the build in flight holds files or working directories in the module \
          cache ({held:?}, {cwds:?}); update the scenario"
     );
-    let reclaimed = reclaim(ctx, "go-mod-cache", &vec![(cache.clone(), Some("in_use"))])?;
+    let reclaimed = reclaim_with(
+        ctx,
+        binary,
+        "go-mod-cache",
+        &vec![(cache.clone(), Some("in_use"))],
+    )?;
     expect_used_by(&reclaimed, &cache, &build, &["environment"], &|u| {
         u == "GOMODCACHE=/home/tester/go/pkg/mod"
     })?;
@@ -360,6 +381,19 @@ fn node_loads(ctx: &Ctx, project: &Path, dep: &str) -> TestResult {
 pub fn bun_cache_real_bun_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept(
     ctx: &Ctx,
 ) -> TestResult {
+    bun_scenario(ctx, &ctx.diskgc())
+}
+
+/// TASK-370: [`bun_cache_real_bun_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept`] through the gate-lifted release-candidate
+/// package, whose 0.2 catalog holds `bun-cache`.
+pub fn release_candidate_bun_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "bun-cache")?;
+    bun_scenario(ctx, &binary)
+}
+
+fn bun_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     versions(
         ctx,
         &[(bun(ctx).to_str().ok_or("bun")?, &["--version"], "1.4.2")],
@@ -400,8 +434,9 @@ pub fn bun_cache_real_bun_installs_reclaim_then_refetch_and_an_install_in_flight
         lookalike(ctx, ".bun/install/cache-old")?,
     ];
 
-    reclaim(
+    reclaim_with(
         ctx,
+        binary,
         "bun-cache",
         &vec![(cache.clone(), None), (second.clone(), None)],
     )?;
@@ -440,8 +475,9 @@ pub fn bun_cache_real_bun_installs_reclaim_then_refetch_and_an_install_in_flight
         &["install"],
     )?;
     registry.wait_gated(&mut install)?;
-    let reclaimed = reclaim(
+    let reclaimed = reclaim_with(
         ctx,
+        binary,
         "bun-cache",
         &vec![(cache.clone(), Some("in_use")), (second.clone(), None)],
     )?;
@@ -1782,6 +1818,19 @@ fn nix_caches(cache: &Path) -> Result<Vec<PathBuf>, String> {
 pub fn nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_flight_is_kept(
     ctx: &Ctx,
 ) -> TestResult {
+    nix_user_scenario(ctx, &ctx.diskgc())
+}
+
+/// TASK-370: [`nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_flight_is_kept`] through the gate-lifted release-candidate
+/// package, whose 0.2 catalog holds `nix-user-cache`.
+pub fn release_candidate_nix_user_cache_reclaim_then_refetch_and_a_fetch_in_flight_is_kept(
+    ctx: &Ctx,
+) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "nix-user-cache")?;
+    nix_user_scenario(ctx, &binary)
+}
+
+fn nix_user_scenario(ctx: &Ctx, binary: &Path) -> TestResult {
     versions(ctx, &[(NIX, &["--version"], "2.34.9")])?;
     control_dir(ctx)?;
     let _registry = Registry::start(ctx, "nix/live.git/objects/")?;
@@ -1819,7 +1868,7 @@ pub fn nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_fligh
     ];
 
     let expected: Expected = caches.iter().map(|c| (c.clone(), None)).collect();
-    reclaim(ctx, "nix-user-cache", &expected)?;
+    reclaim_with(ctx, binary, "nix-user-cache", &expected)?;
     ensure!(
         nix_caches(&alt)? == alt_caches,
         "the other XDG_CACHE_HOME's caches changed"
@@ -1865,8 +1914,9 @@ pub fn nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_fligh
     )?;
     wait_file(&mut fetch, &home(&format!("{CTL}/gate.hit")))?;
     let gitv3 = cache.join("gitv3");
-    let reclaimed = reclaim(
+    let reclaimed = reclaim_with(
         ctx,
+        binary,
         "nix-user-cache",
         &caches
             .iter()

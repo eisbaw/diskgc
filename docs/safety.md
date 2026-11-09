@@ -1820,10 +1820,16 @@ contract class, recorded in the
   recorded as "admitted by mark-emulator for Mark, DATE", and Mark may veto
   it (TASK-122). Two points are open, not decided here: whether such an
   admission needs Mark's own ratification before its source enters a
-  `releases:` catalog (of the twelve admitted on 2026-10-24 only
-  `mypy-cache` is in one, 0.2, ratified by Mark on 2026-11-05, TASK-359),
-  and the container tests of those twelve, each row's "Container
-  test: pending (TASK-137)" unless it names its tests.
+  `releases:` catalog (of the twelve admitted on 2026-10-24, eight are
+  in 0.2 by Mark's own decision: `mypy-cache`, ratified on 2026-11-05,
+  TASK-359, and `go-mod-cache`, `bun-cache`, `nix-user-cache`,
+  `cmake-build-anchored`, `meson-build-anchored`,
+  `autotools-build-anchored` and `west-build-anchored` on 2026-11-07,
+  TASK-370; that this also ratifies the two mark-emulator exceptions
+  above, hand-placed files in build directories and unserved upstream
+  copies, is a reading of his decision, not his words, to confirm), and
+  the container tests of those twelve, each row's "Container test:
+  pending (TASK-137)" unless it names its tests.
 - **tolerant** and **delegated**: as in the table above, verified per tool.
   A delegated cleaner enters a release only with its exact command listed
   in that release's row ([Command actions](#command-actions), In a

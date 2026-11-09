@@ -1678,9 +1678,10 @@ mod tests {
     /// version's row of the release descriptor, and this
     /// list is the second key a widening of the catalog must turn (with
     /// TASK-65's sign-off for `/tmp`, Mark's admission of `nix-garbage` for
-    /// 0.2, TASK-335, of five project-tree sources, TASK-359, and of four
-    /// delegated cleaners, TASK-360; `node-modules` held, TASK-365), not a
-    /// stale copy to derive away.
+    /// 0.2, TASK-335, of five project-tree sources, TASK-359, of four
+    /// delegated cleaners, TASK-360, and of three runtime caches and four
+    /// source-anchored builds, TASK-370; `node-modules` held, TASK-365),
+    /// not a stale copy to derive away.
     #[test]
     fn release_catalog_keeps_only_its_admitted_built_ins_on_every_listing_surface() {
         let row = release::release_of_version(env!("CARGO_PKG_VERSION")).expect("this release");
@@ -1694,8 +1695,12 @@ mod tests {
         assert_eq!(
             names,
             [
+                "autotools-build-anchored",
+                "bun-cache",
                 "cargo-target",
                 "ccache",
+                "cmake-build-anchored",
+                "go-mod-cache",
                 "idle-10d",
                 "idle-1d",
                 "idle-1h",
@@ -1703,9 +1708,11 @@ mod tests {
                 "idle-30d",
                 "idle-3d",
                 "idle-7d",
+                "meson-build-anchored",
                 "mypy-cache",
                 "nix-garbage",
                 "nix-shell-rc",
+                "nix-user-cache",
                 "node-compile-cache",
                 "pip-cache",
                 "pnpm-store",
@@ -1713,7 +1720,8 @@ mod tests {
                 "pytest-tmp",
                 "python-pycache",
                 "python-venv",
-                "uv-cache"
+                "uv-cache",
+                "west-build-anchored"
             ]
         );
         for surface in [
@@ -1725,7 +1733,7 @@ mod tests {
             }
             for excluded in [
                 "docker-build-cache",
-                "bun-cache",
+                "cargo-registry-src",
                 "npm-cache",
                 "node-modules",
                 "go-build-cache",
@@ -1737,7 +1745,7 @@ mod tests {
         }
         for excluded in [
             "docker-build-cache",
-            "bun-cache",
+            "cargo-registry-src",
             "npm-cache",
             "node-modules",
             "go-build-cache",
@@ -1795,13 +1803,24 @@ mod tests {
         for name in ["pip-cache", "uv-cache", "pnpm-store", "ccache"] {
             Tier::select(&format!("profile:{name}"), &library, Some(&roots), 1000).expect(name);
         }
+        for name in [
+            "go-mod-cache",
+            "bun-cache",
+            "nix-user-cache",
+            "cmake-build-anchored",
+            "meson-build-anchored",
+            "autotools-build-anchored",
+            "west-build-anchored",
+        ] {
+            Tier::select(&format!("profile:{name}"), &library, Some(&roots), 1000).expect(name);
+        }
     }
 
     #[cfg(feature = "release-catalog")]
     #[test]
     fn opt_in_binary_uses_the_narrowed_library_for_help_and_select() {
         let library = builtin_library().expect("binary catalog");
-        assert_eq!(library.profiles().count(), 20);
+        assert_eq!(library.profiles().count(), 27);
         assert!(library.get("nix-garbage").is_some());
         assert!(library.get("python-venv").is_some());
         assert!(library.get("uv-cache").is_some());

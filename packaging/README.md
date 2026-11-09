@@ -7,8 +7,13 @@ nix-shell runs in `/tmp`, the dead paths of a multi-user Nix store
 (through the system Nix daemon's own garbage collector), and in the
 project trees you name, pytest, Python bytecode and mypy caches and
 Python virtual environments idle for 30 days, plus Node's compile cache
-in `/tmp`, and the pip, uv, pnpm and ccache
-caches, emptied by each tool's own cleaner. `ensure` brings one filesystem up to a free-space
+in `/tmp`, the pip, uv, pnpm and ccache
+caches, emptied by each tool's own cleaner, Go's module cache, Bun's
+install cache and Nix's user caches, and CMake, Meson, Autotools and
+West build directories idle for three days whose source still exists
+(not one in a Buildroot, OpenWrt or Yocto package build, a Bazel output
+base or npm's `node_modules`; other build systems' trees are not
+recognised, see the release notes' Known limits). `ensure` brings one filesystem up to a free-space
 goal once and exits with a code a CI hook or an agent script can branch on.
 Unlike age-only cleanup (`find -mtime +N -delete`, systemd-tmpfiles age
 rules), diskgc deletes only when free space is short, and checks every

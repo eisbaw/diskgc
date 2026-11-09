@@ -996,6 +996,108 @@ pub fn west_build_anchored_real_west_builds_reclaim_then_rebuild_and_a_build_in_
     Ok(())
 }
 
+// ---- through the release candidate ----------------------------------------
+
+/// The keep side of the three-day floor through the gate-lifted
+/// release-candidate package (TASK-370), which reads no sandbox clock
+/// offset: each of `builds` (profile, root, build) is planned reclaimable
+/// by the gated development package with the clock past the floor (the
+/// positive control: nothing but the floor keeps it), then kept `not_idle`
+/// by the release candidate with the same offset installed, which deletes
+/// nothing.
+fn release_keeps_inside_the_floor(
+    ctx: &Ctx,
+    binary: &Path,
+    builds: &[(&str, &str, PathBuf)],
+) -> TestResult {
+    let development = crate::release_suite::binary_path(ctx, "diskgc-development");
+    for (profile, root, build) in builds {
+        let control = dry_plan(ctx, &development, &select(profile), root, true)?;
+        ensure!(
+            control == vec![(build.display().to_string(), None)],
+            "positive control: the development package past the floor planned {control:?} for \
+             {profile}, expected only {}",
+            build.display()
+        );
+        reclaim_past_floor(
+            ctx,
+            binary,
+            profile,
+            root,
+            &vec![(build.clone(), Some("not_idle"))],
+        )?;
+    }
+    Ok(())
+}
+
+/// TASK-370 (docs/testing.md, Admission evidence): `cmake-build-anchored`,
+/// `meson-build-anchored` and `autotools-build-anchored` through the
+/// gate-lifted release-candidate package, whose 0.2 catalog holds them; the
+/// keep side of the floor only ([`release_keeps_inside_the_floor`]). Real
+/// CMake, Meson and Autoconf builds made now are kept `not_idle`; a CMake
+/// package build in OpenWrt's layout beside package.mk's stamps is planned
+/// by neither package (TASK-367's guard). Their reclaims past the floor ran
+/// the development build and the gated candidate catalog.
+pub fn release_candidate_build_outputs_keep_builds_inside_the_3_day_floor(ctx: &Ctx) -> TestResult {
+    let mut binary = PathBuf::new();
+    for profile in [
+        "cmake-build-anchored",
+        "meson-build-anchored",
+        "autotools-build-anchored",
+    ] {
+        binary = crate::release_suite::release_candidate_with(ctx, profile)?;
+    }
+    control(ctx)?;
+    let cmake = cmake_project(ctx, "rc-cm")?;
+    cmake_build(ctx, &cmake, &cmake.join("out"), "Ninja")?;
+    let meson = meson_project(ctx, "rc-ms")?;
+    meson_build(ctx, &meson, &meson.join("bld"))?;
+    let autotools = autotools_project(ctx, "rc-at")?;
+    autotools_build(ctx, &autotools.join("build"), "../configure")?;
+    openwrt_like(ctx)?;
+    let ow = cmake_project(ctx, "openwrt/build_dir/target-x86_64_musl/rc-cmsub-1.0")?;
+    cmake_build(ctx, &ow, &ow.join("openwrt-build"), "Unix Makefiles")?;
+    openwrt_stamps(ctx, &ow)?;
+    release_keeps_inside_the_floor(
+        ctx,
+        &binary,
+        &[
+            ("cmake-build-anchored", SRC_ROOT, cmake.join("out")),
+            ("meson-build-anchored", SRC_ROOT, meson.join("bld")),
+            (
+                "autotools-build-anchored",
+                SRC_ROOT,
+                autotools.join("build"),
+            ),
+        ],
+    )?;
+    ensure!(
+        ow.join("openwrt-build/CMakeCache.txt").is_file(),
+        "the OpenWrt package build changed"
+    );
+    Ok(())
+}
+
+/// TASK-370: `west-build-anchored` through the gate-lifted
+/// release-candidate package, the keep side of the floor only
+/// ([`release_keeps_inside_the_floor`]): a real West build made now is kept
+/// `not_idle`. Full suite only, like the West scenario.
+pub fn release_candidate_west_build_keeps_a_build_inside_the_3_day_floor(ctx: &Ctx) -> TestResult {
+    let binary = crate::release_suite::release_candidate_with(ctx, "west-build-anchored")?;
+    control(ctx)?;
+    west_workspace(ctx)?;
+    west_build_with(ctx, "west-app", "")?;
+    release_keeps_inside_the_floor(
+        ctx,
+        &binary,
+        &[(
+            "west-build-anchored",
+            WEST_ROOT,
+            ctx.scratch.path("west-app/build"),
+        )],
+    )
+}
+
 // ---- buildroot-output-anchored ---------------------------------------------
 
 const BR_EXT: &str = "br-ext";

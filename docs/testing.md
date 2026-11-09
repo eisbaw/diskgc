@@ -3154,6 +3154,16 @@ failure its liveness row names, then a successful retry. Roots
   (`go-mod-cache` alone: its `make_writable` delete cannot share a
   selection with plain deletes); the tools then fill their caches again.
 
+Through the gate-lifted release-candidate package (TASK-370: Mark
+admitted `go-mod-cache`, `bun-cache` and `nix-user-cache` to 0.2,
+2026-11-07), the three scenarios above run with that binary (host PID
+namespace, Nix image; fast suite and the Nix release runner), live
+counterexamples and `make_writable` included:
+`release_candidate_go_mod_cache_reclaim_then_redownload_and_a_build_in_flight_is_kept`,
+`release_candidate_bun_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept`
+and
+`release_candidate_nix_user_cache_reclaim_then_refetch_and_a_fetch_in_flight_is_kept`.
+
 Not exercised for this family: Go's `go mod download` and workspace
 modes, Bun's other install backends (`--backend=symlink`, the residual of
 its row), node-gyp's `--nodedir` and Windows `node.lib`, Electron's own
@@ -3292,9 +3302,26 @@ stamps package.mk names (`.prepared_<hash>`, `.configured_<hash>`,
   development build does and reclaims exactly the reclaimable set; the
   tools then build again.
 
+Through the gate-lifted release-candidate package (TASK-370: Mark
+admitted the cmake, meson, autotools and west profiles to 0.2,
+2026-11-07), only the keep side of the three-day floor runs, as for
+`python-venv`: that package reads no clock offset, and the ctime the idle
+check reads cannot be set back.
+`release_candidate_build_outputs_keep_builds_inside_the_3_day_floor`
+(fast suite and the Nix release runner): real CMake, Meson and Autoconf
+builds made now are planned reclaimable by the gated development package
+past the floor (the positive control), then kept `not_idle` by the
+release candidate with the same offset installed, which deletes nothing;
+a CMake build in the OpenWrt-like layout beside package.mk's stamps is
+planned by neither. `release_candidate_west_build_keeps_a_build_inside_the_3_day_floor`
+does the same for a West build, in the full suite only (the release
+runner runs fast-tier tests). Their reclaims past the floor ran the
+development build and the gated candidate-catalog build (the release catalog code path with the clock offset) only.
+
 Not exercised for this family: a real Buildroot target build or Yocto
-image (both need downloads), Buildroot's own cmake-package and meson-package
-infrastructure, Bazel with Bzlmod, a remote cache or `--output_base`, West
+image (both need downloads), Buildroot's meson-package infrastructure
+(host-meson needs host-python3 from the network; its layout runs in the
+Buildroot scenario, cmake-package's for real), Bazel with Bzlmod, a remote cache or `--output_base`, West
 with sysbuild, Meson's other backends, Autotools layouts other than
 Autoconf's `config.status` plus `Makefile`, and a real OpenWrt tree. A Buildroot
 make held while it reads its makefiles (it runs the compiler then) names
@@ -3306,7 +3333,8 @@ bundle). The release-candidate package carries the real catalog only, and
 the PRD lets no other build lift the sandbox gate, so a profile awaiting
 admission cannot run through the gate-lifted package: the candidate list
 holds `node-modules` (held by Mark, 2026-11-06, TASK-365), TASK-352's
-seven runtime caches and TASK-354's seven build outputs. Instead the flake
+four runtime caches and TASK-354's three build trees that Mark did not
+admit (TASK-370 took the other seven into the real 0.2 catalog). Instead the flake
 builds the release build's catalog code path (`release-catalog`: this
 version's release row, its commands, the user-profile refusal, the
 catalog's scope checks and narrowing) from a source copy whose

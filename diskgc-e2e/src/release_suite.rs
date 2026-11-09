@@ -20,7 +20,8 @@ use crate::{TESTER, ensure};
 // contract, and the idle filters), plus nix-garbage (Mark, 2026-11-04,
 // TASK-335), five project-tree sources (Mark, 2026-11-05, TASK-359) and
 // four package-manager cleaners (Mark, 2026-11-05, TASK-360: "only the
-// lock-safe five", less jest-cache after review).
+// lock-safe five", less jest-cache after review), three runtime caches and
+// four source-anchored build outputs (Mark, 2026-11-07, TASK-370).
 const ADMITTED: &[&str] = &[
     "cargo-target",
     "nix-garbage",
@@ -35,6 +36,13 @@ const ADMITTED: &[&str] = &[
     "uv-cache",
     "pnpm-store",
     "ccache",
+    "go-mod-cache",
+    "bun-cache",
+    "nix-user-cache",
+    "cmake-build-anchored",
+    "meson-build-anchored",
+    "autotools-build-anchored",
+    "west-build-anchored",
     "idle-1h",
     "idle-1d",
     "idle-2d",
@@ -53,12 +61,6 @@ const EXCLUDED: &[&str] = &[
     // TASK-93, pending Mark's admission: development library only.
     "podman-dangling",
     "podman-unreferenced",
-    "nix-user-cache",
-    "bun-cache",
-    "go-mod-cache",
-    "cmake-build-anchored",
-    "meson-build-anchored",
-    "autotools-build-anchored",
     // TASK-360: the delegated cleaners left out of 0.2 (a run in flight
     // fails their cleaner, or a named residual; TASK-351, and Jest's
     // perf-cache counterexample).
@@ -66,7 +68,6 @@ const EXCLUDED: &[&str] = &[
     "npm-cache",
     "yarn-cache",
     "jest-cache",
-    "west-build-anchored",
     "platformio-cache",
     "brave-browser-cache",
     "chrome-browser-cache",
