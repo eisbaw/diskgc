@@ -2873,8 +2873,13 @@ link guards; `Judge::version_where` in the code), so it is asked where
 they are: at each term's judgement, and in the union-wide retention pass
 over every term that found the candidate, in the plan, in the reclaim's
 tally (a candidate it refuses is not queued), before the candidate lock,
-under it, and as the last check before the delete or the command (the
-only check after the locked walk). A veto there is `changed`; a build
+under it, and as the last retention check before the delete or the
+command (the only one after the locked walk; the identity, keep-marker
+and storage rechecks of the locked protocol still follow it, and none of
+them reads stamps). The guard's last pass reads each directory once: a
+stamp or an ancestor's build marker created in a directory that pass has
+already read is not seen, the same check-to-act window as one created
+during the delete. A veto there is `changed`; a build
 marker, a directory on the way or one of the four that cannot be read
 (or holds more than the entry limit) is the guard's own visible refusal
 (`unreadable`, `too_many_entries`, ...), never "no build" or "no stamp".
@@ -2972,7 +2977,12 @@ vetoed build deeper inside (a pytest session holding one), or that lies
 inside one but is no build (a plain pytest session below a vetoed CMake
 build: `pytest-1`, the positive control of vector
 `cmake-or-pytest-tmp-session-build-below-a-vetoed-build-is-kept`), is
-that profile's to judge, as without the guard. Since the
+that profile's to judge, as without the guard. The same holds for a
+guarded profile's own candidate: a CMake build that is not itself inside
+a stamped tree is taken whole, with any stamped package build deeper
+inside it (the eligibility walk does not ask the guard of descendants).
+The stamps go with it, so no outer build system is left believing a
+deleted package is built, which is the harm the guard exists for. Since the
 climb lists directories above the roots, a directory there that cannot
 be listed, or holds more than the entry limit, refuses the builds below
 it (visibly). A stray stamp-like name (a `.built` file of the user's
