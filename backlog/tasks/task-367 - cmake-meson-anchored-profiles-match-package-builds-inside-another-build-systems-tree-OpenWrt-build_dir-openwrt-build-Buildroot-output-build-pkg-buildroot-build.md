@@ -4,10 +4,10 @@ title: >-
   cmake/meson anchored profiles match package builds inside another build
   system's tree (OpenWrt build_dir/*/openwrt-build, Buildroot
   output/build/<pkg>/buildroot-build)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-07T15:33:00Z'
-updated_date: '2026-11-07T17:30:00Z'
+updated_date: '2026-11-10T15:27:00Z'
 labels:
   - profiles
   - admission
@@ -26,4 +26,6 @@ TASK-354 finding 1 (2026-11-07): cmake-build-anchored and meson-build-anchored m
 
 <!-- SECTION:NOTES:BEGIN -->
 Mark 2026-11-07 chose option 1: a GENERAL nested-build guard -- cmake/meson never take a build dir inside another build system's managed tree, detected by (a) stamp files in the parent (.stamp_* / .built / .configured* / .prepared*, verified against real trees) and (b) nesting under a build root diskgc already recognises (Buildroot output/, Yocto TMPDIR, ...); then admit cmake/meson. Discussed as: meta-build systems (Buildroot, OpenWrt, Yocto, dpkg-buildpackage, Spack, conda-build) build each upstream package with its own build system inside a tree they manage and track progress with stamps; deleting the inner build dir leaves the outer stamp saying 'built'.
+
+2026-11-10 merged to master in ce284125 (local, not pushed). Guard consolidated in fbed4618; gates: just check exit 0, just e2e exit 0 on fbed4618; Codex round 6 found no single-fault bypass; docs follow-up af720377; hardening TASK-372, TASK-373.
 <!-- SECTION:NOTES:END -->

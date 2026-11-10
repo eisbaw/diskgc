@@ -3,10 +3,10 @@ id: TASK-370
 title: >-
   Admit seven profiles to 0.2: go-mod-cache, bun-cache, nix-user-cache,
   autotools-, west-, cmake-, meson-build-anchored
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-07T17:30:00Z'
-updated_date: '2026-11-07T17:30:00Z'
+updated_date: '2026-11-10T15:27:00Z'
 labels:
   - admission
   - release
@@ -25,4 +25,6 @@ Mark 2026-11-07 answers: runtime caches 'go-mod, bun, nix-user'; build outputs '
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-07: implementer in tmp/worktrees/t370 (branch t370-admit-seven), together with TASK-367 (guard first).
+
+2026-11-10 merged to master in ce284125 (local, not pushed). Guard consolidated in fbed4618; gates: just check exit 0, just e2e exit 0 on fbed4618; Codex round 6 found no single-fault bypass; docs follow-up af720377; hardening TASK-372, TASK-373.
 <!-- SECTION:NOTES:END -->
