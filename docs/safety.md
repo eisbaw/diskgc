@@ -664,13 +664,78 @@ Immediately before acting, diskgc walks the candidate's whole tree
   candidate, a FUSE view, a bind exposing a hard link under a protected
   pattern). So the table read just before the enumeration is kept with
   the tier's matches, and every check of a delete action reads the table
-  once and judges with it; when it differs in anything from the kept one,
-  every `protect` and negated match is enumerated again and judged on a
-  table read after that. A check that enumerated them all keeps them with
-  its own instant and table, so one mount event costs one enumeration
-  more, not one per later candidate; one that enumerated only `protect`
-  again (a match gone) keeps the old instant and table, which the negated
-  matches are as old as.
+  once and judges with it; when it differs from the kept one in a way
+  that may change what the enumeration finds (below), every `protect`
+  and negated match is enumerated again and judged on a table read after
+  that. A check that enumerated them all keeps them with its own instant
+  and table, so one mount event costs one enumeration more, not one per
+  later candidate; one that enumerated only `protect` again (a match
+  gone) keeps the old instant, which the negated matches are as old as. A
+  check whose table differs in no such way keeps it as the matches'
+  table (they answer for it as for the old one), so the next check
+  compares with it.
+
+  **Which table differences count** (TASK-300; before it, any difference
+  did, and a host whose containers, snaps or portals mount and unmount
+  enumerated every protected tree again per candidate). The verdict
+  itself is always judged on the table just read; the kept matches are
+  only a list of paths, resolved and placed afresh at every check, so a
+  stale list matters only by lacking a match the enumeration would find
+  now. The enumeration reads the table only through questions about
+  paths and places it derives from the roots of every `protect` source
+  and every term's negated sources: the mount a path is on and the mounts
+  on its way (the mount screen, the covered-mount check), the mount points
+  at, inside or directly in a directory (a mount point is a name the
+  container storage probe sees), the mounts attached at or inside a
+  place, and every directory above a root's place that some mount shows,
+  with the paths showing it (the container storage probe of directories
+  above a root). Those paths are a root, what lies below it, its
+  ancestors, and those views. A difference is a mount gone, a mount come,
+  or a mount whose line changed with the same id and device (a mount's
+  filesystem never changes): its point or root field moved with a rename
+  of a directory above it (TASK-294: no mount event comes with it), a
+  `mount --move`, a remount. Lines of one id with another device are a
+  mount gone and another come. The scope of the questions in a table is
+  the roots' places, the place of every mount at or below a root, and, to
+  a fixed point, every mount of a reached device whose root field
+  overlaps a reached place (one showing it, a directory above it or a
+  part of it elsewhere), with the places its point is attached at down
+  its parent chain, and the paths through those mounts of every reached
+  place. A changed mount is apart from that scope when no mount is
+  attached on it; its point is not directly in a root, one of those
+  paths or a directory above one (so a mount directly in `/` always
+  counts, and a mount of the scope never is apart: its point starts its
+  own views); where its point is on its parent mount lies not at or
+  inside a root's place; and, for a line that changed, no directory below
+  its parent's root field is above both that place and a reached place,
+  and no directory is above both its own root field and a reached place
+  below the root fields of the scope's mounts showing that place (a
+  rename of such a directory would move both; one at or above those root
+  fields would change one of their lines, a difference judged on its
+  own). A mount of a reached device whose root field is not an absolute
+  path counts too: the container storage probe refuses a root then. Such a mount takes no part in any question: adding or removing it
+  leaves every answer and the scope as they were. When every difference
+  of the two tables is apart from its own table's scope, and the mounts
+  both list keep their lines and their order, the enumeration finds the
+  same matches under either table; anything else, including a table that
+  cannot be placed, an id listed twice or a reordering, enumerates again.
+  `protect` and `!profile:` sources are bound without their `where`, so
+  nothing in their enumeration reads a path outside that scope (a source
+  anchor or the nested-build guard would; the check asserts there is
+  none). Propagation fields are not read: a propagation change alone was
+  no difference before either, and what it propagates arrives as mounts
+  of its own. What this does not change: a filesystem change that no
+  table line reflects (a rename with no mount below it) is seen by
+  neither rule; the old one, refreshing on any difference, could catch
+  such a change by coincidence when an unrelated mount event happened in
+  the same window, and no longer does; nor is a rename seen when the one
+  mount whose line showed it is unmounted in the same window (its line is
+  then gone, no line shows the rename). Tested by
+  `places::relevance` (the questions, as a property against random
+  tables, renames, moves and remounts), `tests/fs_reclaim.rs`
+  `container_mount_churn_far_from_the_protect_roots_enumerates_nothing_again`
+  and the `vectors/config/protect-*` vectors named in
+  [testing.md](testing.md).
 
   Limits (delete actions): a
   tag made on the candidate's path after its last check, or an ancestor

@@ -1,0 +1,18 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b3398914be409bc7d680eced5cdb533c1d1c8acc0a38e759f198cb94b7a527cd # shrinks to specs = [], roots = [[0]], edits = [Add(Spec { point: [0], dev: 1, root: [] })]
+cc ff4e3ed8c5f5a39734938247efedd45902bd35c7a8d6ea1c9a89f1cffe470e0f # shrinks to specs = [Spec { point: [2, 0, 0], dev: 1, root: [] }, Spec { point: [2], dev: 1, root: [0] }, Spec { point: [1, 1], dev: 2, root: [] }, Spec { point: [2, 0, 1], dev: 2, root: [] }], roots = [[0, 1]], edits = [Move(4232787543987874007, [1, 0])]
+cc 9639191e0f8ebeeff0c4084d4350ed57deb29c7094733a997ed0f0dac3029e9d # shrinks to specs = [Spec { point: [0], dev: 2, root: [] }, Spec { point: [0, 0], dev: 2, root: [] }, Spec { point: [1, 1], dev: 2, root: [] }, Spec { point: [0, 0], dev: 2, root: [] }], roots = [[1]], edits = [Move(1666199345031491447, [0, 0, 1])]
+cc 9b09e072abfd7bedd61f17f76b4208fde94ad2d0123aba25fdf90b5cdf4480f2 # shrinks to specs = [Spec { point: [0, 0], dev: 1, root: [] }, Spec { point: [0], dev: 5, root: [1] }, Spec { point: [2], dev: 5, root: [] }, Spec { point: [0, 1, 0], dev: 2, root: [] }, Spec { point: [0, 1], dev: 1, root: [1] }], roots = [[2]], edits = [Remount(12351399774942272998)]
+cc a4a61eba1ca42929140207c93a67af5a126089052998f085d45c17b1f219a8c7 # shrinks to specs = [Spec { point: [0, 1], dev: 1, root: [] }, Spec { point: [1], dev: 2, root: [] }], roots = [[1]], edits = [Add(Spec { point: [0, 0], dev: 3, root: [] })]
+cc e6a5730d695dea4278fd3dbd39fce2f9ea3382349ae59f61b9120f2933bccab3 # shrinks to specs = [Spec { point: [2], dev: 3, root: [2, 0] }], roots = [[2]], edits = [Rename { dev: 3, from: [2], to: [0] }]
+cc 472f3d8f49c66894600c8e0f3c7278febec0ec1ab0375b9e4181a7d292fa0af2 # shrinks to specs = [Spec { point: [0, 0], dev: 1, root: [2, 2], odd_root: false }, Spec { point: [0], dev: 1, root: [0], odd_root: false }], roots = [[2, 0]], edits = [Rename { dev: 1, from: [2], to: [0] }]
+cc 5610f8784f5982169e73aed46c252afdb79ef8d5c2a2e1072d774a996321c4e7 # shrinks to specs = [Spec { point: [1, 2], dev: 2, root: [], odd_root: false }, Spec { point: [1], dev: 4, root: [], odd_root: false }, Spec { point: [0, 0], dev: 2, root: [], odd_root: false }, Spec { point: [2, 0], dev: 1, root: [0], odd_root: false }], roots = [[1]], edits = [Move(4621567637959062458, [1, 2, 0])]
+cc 27945e1b870dd21bbaf89044dc347226ebca3bdb243fec1387d4062b267fe22b # shrinks to specs = [Spec { point: [1, 2], dev: 2, root: [], odd_root: false }, Spec { point: [1], dev: 2, root: [], odd_root: false }, Spec { point: [2], dev: 1, root: [], odd_root: false }], roots = [[2]], edits = [Remove(7658887630441887051)]
+cc 635b85e7fda73a4c669a1234445d5b13bd3375a9c168ef4431918c05961bef1a # shrinks to specs = [Spec { point: [1, 1, 0], dev: 1, root: [2], odd_root: false }], roots = [[1, 0]], edits = [Rename { dev: 1, from: [1], to: [0] }]
+cc edad5faefec7ab9088684c37a57125f6435a7299c575d4ac2cd64587532744f2 # shrinks to specs = [], roots = [[1]], edits = [Add(Spec { point: [0, 0], dev: 1, root: [], odd_root: true })]
+cc c386d2f7de1abeda1ae988a7a4a7dc94c3827672c276b7af0065a465f2c3e002 # shrinks to specs = [Spec { point: [2, 1], dev: 1, root: [], odd_root: false }, Spec { point: [0], dev: 2, root: [], odd_root: false }, Spec { point: [2, 2], dev: 1, root: [], odd_root: false }], roots = [[0]], edits = [Remove(9991874259527542946)]

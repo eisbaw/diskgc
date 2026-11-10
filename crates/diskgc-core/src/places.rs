@@ -28,7 +28,9 @@ use std::path::{Path, PathBuf};
 use crate::host::{Dev, MountEntry};
 use crate::resolve::Unsafe;
 
+pub mod relevance;
 pub mod space;
+pub use relevance::unchanged_for;
 pub use space::{
     BLOCK_EXT_MAJOR, DEVICE_NOT_UNIQUE, LOOP_MAJOR, OVERLAY, STACKED_ON_DIRECTORIES, Space,
     WriteGuard, may_be_on_loop, may_show_other_owners, on_loop, same_space, shared_space, space_at,

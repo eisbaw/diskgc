@@ -1,0 +1,47 @@
+# TASK-300. A tmpfs mounted at `/srv/m`, far from everything, is moved
+# (`mount --move`) to `/src/keep-m` under the candidate's lock: its id,
+# device and root stay, its point and parent change. `protect` matches
+# `/src/keep-*`, so the move changes what the root's enumeration finds: the
+# check enumerates again, meets a match that is a mount point (which
+# cannot be proved apart from anything, `contains_mount`), and the run
+# stops with nothing deleted.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: cruft
+      find: {roots: [/work], paths: [cruft], type: dir}
+      action: delete
+      examples: {match: [/work/cruft]}
+    - name: keep
+      find: {roots: [/src], paths: ["keep-*"], type: dir}
+      action: delete
+      examples: {match: [/src/keep-a]}
+  protect: [keep]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: "profile:cruft"}
+path: /work
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /srv/m, fs: tmpfs, dev: "0:78", size: 1G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /src/keep-m: {.: {}}
+    /srv/m: {.: {}}
+    /work/cruft: {.: {mtime: 2026-10-01T00:00:00Z}, blob: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+  events:
+    - {at: {op: flock, path: /work/cruft, when: after}, move_mount: {id: 2, to: /src/keep-m}}
+expect:
+  plan: [{candidate: /work/cruft}]
+  reclaim_exit: 3
+  errors: [{cause: host, contains: "protect recheck"}]
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/work/cruft/blob]

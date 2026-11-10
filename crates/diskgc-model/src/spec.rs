@@ -915,6 +915,14 @@ pub struct EventSpec {
     /// FUSE mount appearing in a candidate while diskgc works).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount: Option<MountEventSpec>,
+    /// The mount with this id is unmounted (no mount may be on it): a
+    /// container's overlay going away while diskgc works (TASK-300).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmount: Option<u64>,
+    /// A mount is moved to another existing directory (`mount --move`):
+    /// its id, device and root stay; its point and parent change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_mount: Option<MoveMountSpec>,
     /// The space other writers use on a mount's filesystem changes (its
     /// `other_used`): available space falls or rises without a file of the
     /// model changing (`watch`'s scripted curve).
@@ -949,6 +957,14 @@ pub struct OtherUsedSpec {
 pub enum ModelSignal {
     Int,
     Term,
+}
+
+/// A mount, by id, and the existing directory it is moved onto.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MoveMountSpec {
+    pub id: u64,
+    pub to: PathBuf,
 }
 
 /// A mount an event makes on the existing directory `at`, on the mount that

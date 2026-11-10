@@ -627,6 +627,59 @@ pub(super) enum Refresh {
     Always,
 }
 
+/// Where a `protect` / `!profile:` judgement is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Check {
+    /// As discovery, the index's queue or the dry run's plan takes a
+    /// candidate: a first screen, judged again later.
+    Screen,
+    /// Immediately before the kind's protocol, without its lock.
+    BeforeReclaim,
+    /// Under the candidate's lock: before the walk, after it, before a
+    /// command. `stale`: the tier's matches may be stale
+    /// ([`super::tier_policy::DeletePolicy`]; only a delete action asks).
+    UnderLock { stale: bool },
+}
+
+/// What the tier's action removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Acts {
+    /// Only entries its eligibility walk listed (`delete`, the Cargo
+    /// protocol).
+    OnWalkedEntries,
+    /// Whatever it finds when it runs (a command, a prune).
+    OnWhatItFinds,
+}
+
+/// The one rule of when a judgement enumerates the matches again
+/// (docs/safety.md, Not protected, not excluded), beyond a match that
+/// cannot be proven any more ([`Refresh::OnError`], always): before an
+/// action that acts on what it finds (under its lock nothing enumerated
+/// earlier is consulted at all: [`policy_skip`]), and under the lock of
+/// one that unlinks only walked entries when the tier's matches may be
+/// stale.
+pub(super) fn refresh(check: Check, acts: Acts) -> Refresh {
+    match (check, acts) {
+        (Check::Screen, _)
+        | (Check::BeforeReclaim, Acts::OnWalkedEntries)
+        | (Check::UnderLock { stale: false }, Acts::OnWalkedEntries) => Refresh::OnError,
+        (Check::BeforeReclaim | Check::UnderLock { .. }, Acts::OnWhatItFinds)
+        | (Check::UnderLock { stale: true }, Acts::OnWalkedEntries) => Refresh::Always,
+    }
+}
+
+/// Whether a judgement goes on to matches enumerated now, given its
+/// verdict on the enumerated ones: not when they show an overlap (a match
+/// gone since says nothing against it), always when they cannot settle it
+/// (an error), and when they show none only under [`Refresh::Always`].
+pub(super) fn enumerates_again<V: Verdict>(verdict: &Result<V, String>, refresh: Refresh) -> bool {
+    match verdict {
+        Ok(found) if found.overlaps() => false,
+        Ok(_) => refresh == Refresh::Always,
+        Err(_) => true,
+    }
+}
+
 /// A verdict a match set gives: an overlap settles it, whatever matches
 /// were enumerated since.
 pub(super) trait Verdict {
@@ -659,9 +712,9 @@ pub(super) fn judge<M: ?Sized, O: std::borrow::Borrow<M>, V: Verdict>(
     verdict: impl Fn(&M) -> Result<V, String>,
     enumerate: impl FnOnce() -> Result<O, String>,
 ) -> Result<(V, Option<O>), String> {
-    match verdict(enumerated) {
-        Ok(found) if found.overlaps() || refresh == Refresh::OnError => return Ok((found, None)),
-        Ok(_) | Err(_) => {}
+    let cached = verdict(enumerated);
+    if !enumerates_again(&cached, refresh) {
+        return cached.map(|found| (found, None));
     }
     let fresh = enumerate()?;
     let found = verdict(fresh.borrow())?;
@@ -762,6 +815,8 @@ pub(super) fn policy_skip<H: Host>(
     deadline: Option<MonoTime>,
     path: &Path,
 ) -> Result<Option<Skip>, Stop> {
+    // [`refresh`]: a command's check under its lock enumerates every
+    // match again, consulting nothing enumerated earlier.
     let protected = scan_protections(host, protections, deadline)
         .map_err(|error| policy_failed(path, "protect recheck", error))?;
     if let Some(skip) = protected_verdict(host, &protected, deadline, path)? {

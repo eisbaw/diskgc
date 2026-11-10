@@ -522,7 +522,9 @@ How the format reads (the schema documents every key):
   size}`: a fresh filesystem mounted on an existing directory, e.g. a FUSE
   mount appearing in a candidate; with `bind_of: <mount id>` and optional
   `bind_root`, a bind of that mount's filesystem, an overlay's included,
-  whose `fs` and `dev` must be the ones it shows). `remove` is `rm -r`: every entry below is unlinked, and an
+  whose `fs` and `dev` must be the ones it shows), `unmount` (a mount id;
+  no mount may be on it), `move_mount` (`{id, to}`: `mount --move` onto an
+  existing directory; id, device and root field stay). `remove` is `rm -r`: every entry below is unlinked, and an
   object still open keeps only itself. An event that never fires fails the
   test.
 - **Clock:** virtual; it moves only by `sleep`, `flock_wait` (which jumps
@@ -701,6 +703,22 @@ Model scenarios required by [safety.md](safety.md) and
   enumeration, keeps the candidate `protected` (TASK-285:
   `vectors/config/protect-rename-above-a-bind-source`,
   `vectors/config/protect-cargo-tag-above-a-bind-source`);
+  which mount table differences make a check enumerate again
+  (TASK-300; safety.md, Which table differences count): mounts that
+  come, go or move far from every root (a container's overlay, its
+  network namespace) enumerate nothing again and change no verdict,
+  one made directly in a root's parent does
+  (`tests/fs_reclaim.rs`
+  `container_mount_churn_far_from_the_protect_roots_enumerates_nothing_again`);
+  a bind mounted above a root, a mount moved into one, and a rename
+  above a root seen only through an unrelated mount's moved point keep
+  the candidate or stop the run
+  (`vectors/config/protect-bind-mounted-above-a-protect-root`,
+  `protect-mount-moved-into-a-protect-root`,
+  `protect-rename-above-a-root-seen-by-an-unrelated-mount`); and, as a
+  property over random tables, binds, renames, moves and remounts,
+  whenever a difference is judged not to count, every table question
+  the enumeration asks answers alike (`places::relevance` unit tests);
   with any match, a candidate or match on an `overlay` mount is an error
   and a reclaim through it deletes nothing
   (`an_overlay_on_either_side_cannot_prove_no_overlap`,

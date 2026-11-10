@@ -18,12 +18,12 @@ use std::time::Duration;
 
 use super::prune_backend::BackendKind;
 use super::{
-    CandidateQueue, FsUnionSourceRef, Measured, NegatedKind, NegatedSource, NotesOncePerRun,
-    Protection, Refresh, Request, SourceKind, Tier, bounded_tier_timeout, deadline_of,
+    Acts, CandidateQueue, Check, FsUnionSourceRef, Measured, NegatedKind, NegatedSource,
+    NotesOncePerRun, Protection, Request, SourceKind, Tier, bounded_tier_timeout, deadline_of,
     deadline_passed, discover, excluded, final_sample, held, is_misconfigured,
     is_misconfigured_source, judge_negated, judge_protect, measure_failure, measure_until,
     misconfigured_roots, nothing_searched, oldest_first, other_fs, preflight_roots,
-    record_deadline_overrun, record_error, roots_text, rules, run_error, safety_error,
+    record_deadline_overrun, record_error, refresh, roots_text, rules, run_error, safety_error,
     say_lock_readiness, stop_error, timed_report, usage,
 };
 
@@ -188,7 +188,7 @@ fn dry_run_inner<H: Host>(
                     &protection,
                     &candidate,
                     deadline,
-                    Refresh::OnError,
+                    refresh(Check::Screen, Acts::OnWalkedEntries),
                 ) {
                     Ok((protected, _)) => protected,
                     Err(error) => {
@@ -372,7 +372,7 @@ fn dry_run_inner<H: Host>(
             &protection,
             &candidate,
             deadline,
-            Refresh::OnError,
+            refresh(Check::Screen, Acts::OnWalkedEntries),
         );
         record_deadline_overrun(host, &mut report, deadline, started, "protect", &candidate);
         let protected = match overlap {
@@ -775,7 +775,7 @@ pub(super) fn plan_cargo<H: Host>(
                     &negated_matches,
                     &target.path,
                     deadline,
-                    Refresh::OnError,
+                    refresh(Check::Screen, Acts::OnWalkedEntries),
                 ) {
                     Ok((excluded, fresh)) => {
                         if let Some(fresh) = fresh {
@@ -1457,7 +1457,7 @@ pub(super) fn plan_fs_union<H: Host>(
                 &negated_matches[*index],
                 &found.path,
                 deadline,
-                Refresh::OnError,
+                refresh(Check::Screen, Acts::OnWalkedEntries),
             ) {
                 Ok((excluded, fresh)) => {
                     if let Some(fresh) = fresh {

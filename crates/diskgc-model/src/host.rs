@@ -837,6 +837,8 @@ impl Inner {
                 Ok(())
             }
             Action::Mount(spec) => state.mount_on(spec),
+            Action::Unmount(id) => state.unmount(*id),
+            Action::MoveMount(spec) => state.move_mount(spec.id, &spec.to),
             Action::OtherUsed { mount, bytes } => {
                 state.set_other_used(*mount, *bytes);
                 Ok(())
