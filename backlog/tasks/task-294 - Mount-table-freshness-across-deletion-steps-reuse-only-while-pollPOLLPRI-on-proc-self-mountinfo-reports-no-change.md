@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-01T09:06:00Z'
-updated_date: '2026-11-10T12:20:00Z'
+updated_date: '2026-11-10T17:52:00Z'
 labels:
   - safety
   - performance
@@ -25,4 +25,6 @@ From the TASK-292 review (mped, 2026-11-01). After TASK-292 the reclaim main thr
 
 <!-- SECTION:NOTES:BEGIN -->
 Mark 2026-11-10 ('do all first four', TASK-334 step 3): go for the recommended rule, reuse only while a zero-timeout poll(POLLPRI/POLLERR) on the held /proc/self/mountinfo reports no change; no time-based window. The protocol change in safety.md goes with it.
+
+2026-11-10 recon (no code): the poll rule is NOT exact. Verified on kernel 7.2.9 in unshare -rm and in mounts_poll/touch_mnt_namespace source: a rename of a directory holding a mount point, or of a bind source, changes the mount point/root fields of /proc/self/mountinfo with no poll event (also, from source only: a deleted bind source, a superblock remount from another namespace). diskgc relies on those fields (contains_mount by path and place, systemd-private root refusal, protect translation, hidepid/upperdir). A cached table would miss a mount renamed into a candidate until an unrelated mount event: an unbounded window, the property the time-based window was rejected for; through a non-recursive bind nothing else catches it (TASK-290 partial deletion). Also: poll consumes the event (not level), reading does not clear it, only poll-then-read is safe, the event belongs to the open file description. Not implemented. Exact alternative: one read per protocol step shared by all consumers at that step, including the nested-build guard's per-term reads. Measured gain of any variant: <0.5% laptop, 13-36% of the container floor. Awaiting Mark's ruling; probes in the session scratchpad (probe.py, probe2.py).
 <!-- SECTION:NOTES:END -->
