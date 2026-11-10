@@ -964,6 +964,54 @@ impl State {
         Ok(())
     }
 
+    /// Unmounts mount `id`, which must exist and hold no mount.
+    pub fn unmount(&mut self, id: u64) -> Result<(), Fault> {
+        let index = self
+            .mounts
+            .iter()
+            .position(|m| m.id == id && m.on.is_some())
+            .ok_or_else(|| Fault::Model(format!("unmount: no mount {id} (or the root)")))?;
+        if self.mounts.iter().any(|m| m.parent == Some(id)) {
+            return Err(Fault::Model(format!("unmount: a mount is on mount {id}")));
+        }
+        self.mounts.remove(index);
+        Ok(())
+    }
+
+    /// Moves mount `id` onto the existing directory `to` (`mount --move`):
+    /// not onto itself or a mount on it, which the model refuses.
+    pub fn move_mount(&mut self, id: u64, to: &Path) -> Result<(), Fault> {
+        let on = self.lookup(to)?;
+        if self.inode(on).entries().is_none() {
+            return Err(Fault::Model(format!(
+                "move_mount: {} is not a directory",
+                to.display()
+            )));
+        }
+        let mut below = Some(on.mnt);
+        while let Some(mnt) = below {
+            if mnt == id {
+                return Err(Fault::Model(format!(
+                    "move_mount: {} is on mount {id}",
+                    to.display()
+                )));
+            }
+            below = self
+                .mounts
+                .iter()
+                .find(|m| m.id == mnt)
+                .and_then(|m| m.parent);
+        }
+        let mount = self
+            .mounts
+            .iter_mut()
+            .find(|m| m.id == id && m.on.is_some())
+            .ok_or_else(|| Fault::Model(format!("move_mount: no mount {id} (or the root)")))?;
+        mount.on = Some(on);
+        mount.parent = Some(on.mnt);
+        Ok(())
+    }
+
     pub fn mountinfo(&self) -> Vec<MountEntry> {
         self.mounts
             .iter()

@@ -689,6 +689,17 @@
             }
           ]
         },
+        "move_mount": {
+          "description": "A mount is moved to another existing directory (`mount --move`):\nits id, device and root stay; its point and parent change.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MoveMountSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "open": {
           "description": "A process opens a file.",
           "anyOf": [
@@ -753,6 +764,15 @@
               "type": "null"
             }
           ]
+        },
+        "unmount": {
+          "description": "The mount with this id is unmounted (no mount may be on it): a\ncontainer's overlay going away while diskgc works (TASK-300).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false,
@@ -1271,6 +1291,25 @@
         "fs",
         "dev",
         "size"
+      ]
+    },
+    "MoveMountSpec": {
+      "description": "A mount, by id, and the existing directory it is moved onto.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "to"
       ]
     },
     "NixGcSpec": {

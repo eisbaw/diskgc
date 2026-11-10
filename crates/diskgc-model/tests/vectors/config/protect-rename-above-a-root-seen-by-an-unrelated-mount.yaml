@@ -1,0 +1,50 @@
+# TASK-300 (TASK-294's recon: a rename moves mount points with no mount
+# event). `protect` matches files `/home/u/src/keep-*`; `/home/u` does not
+# exist when enumerated (no match). `/home/x/src/keep-f` has a second name,
+# `/tmp/keep-f`, which the tier selects. A tmpfs is mounted at
+# `/home/x/deep/m`, far from the root and the candidate. As the reclaim
+# first opens the candidate (a file: no candidate lock), `/home/x` is
+# renamed to `/home/u`: the root now holds the
+# match `/home/u/src/keep-f`, the same file as the candidate. Only the
+# tmpfs's line shows the rename (its mount point moved, its id and device
+# stay), and the renamed directory is above both its point and the root:
+# the check enumerates again and the candidate is `protected` (identity).
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: tmp-keep
+      find: {roots: [/tmp], paths: ["keep-*"], type: file}
+      action: delete
+      examples: {match: [/tmp/keep-a]}
+    - name: keep
+      find: {roots: [/home/u/src], paths: ["keep-*"], type: file}
+      action: delete
+      examples: {match: [/home/u/src/keep-a]}
+  protect: [keep]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: "profile:tmp-keep"}
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home/x/deep/m, fs: tmpfs, dev: "0:77", size: 1G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/x/src/keep-f: {size: 4K, mtime: 2026-10-01T00:00:00Z}
+    /home/x/deep/m: {.: {}}
+    /tmp/keep-f: {link: /home/x/src/keep-f}
+  events:
+    - {at: {op: openat2, path: /tmp/keep-f, when: after}, rename: {from: /home/x, to: /home/u}}
+expect:
+  plan: [{candidate: /tmp/keep-f}]
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: [{candidate: /tmp/keep-f, reason: protected}]
+  preserved: [/tmp/keep-f, /home/u/src/keep-f]

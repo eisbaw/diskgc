@@ -122,6 +122,8 @@ pub enum Action {
     Fail(Errno),
     /// A new filesystem mounted on a directory.
     Mount(crate::spec::MountEventSpec),
+    Unmount(u64),
+    MoveMount(crate::spec::MoveMountSpec),
     /// A mount's filesystem's `other_used` (by mount id) changes.
     OtherUsed {
         mount: u64,
@@ -1317,10 +1319,21 @@ fn action(state: &State, spec: &EventSpec, forked: &BTreeSet<u32>) -> Result<Act
         if m.id == 0 || state.mounts.iter().any(|existing| existing.id == m.id) {
             return Err(format!("mount id {} is 0 or taken", m.id));
         }
-        if state.fss.contains_key(&m.dev.0) {
+        // A bind shows a mounted filesystem's device (checked when it is made).
+        if m.bind_of.is_none() && state.fss.contains_key(&m.dev.0) {
             return Err(format!("device {} is mounted already", m.dev.0));
         }
         actions.push(Action::Mount(m.clone()));
+    }
+    if let Some(id) = spec.unmount {
+        if id == 0 {
+            return Err("unmount: mount id 0".to_owned());
+        }
+        actions.push(Action::Unmount(id));
+    }
+    if let Some(m) = &spec.move_mount {
+        path(&m.to)?;
+        actions.push(Action::MoveMount(m.clone()));
     }
     if let Some(o) = &spec.other_used {
         let mount = state

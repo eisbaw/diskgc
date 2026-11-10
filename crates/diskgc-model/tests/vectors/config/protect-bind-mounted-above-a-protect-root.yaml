@@ -1,0 +1,47 @@
+# TASK-300. `protect` matches `/data/src/keep-*`; `/data/src` is an empty
+# directory of `/` when enumerated. `/alias` binds `/src/keep-w/sub` of
+# the filesystem at `/y`; the tier selects `/alias/cruft`. Under the
+# candidate's lock a bind of `/y`'s filesystem is mounted at `/data`, above
+# the protect root: `/data/src/keep-w` is now a match, and the candidate
+# lies inside it by place, while its path, identity and times stay. A
+# mount above a root changes what the root's enumeration finds: the check
+# enumerates again and the candidate is `protected`.
+profile_vector: 1
+config: |
+  version: 1
+  profiles:
+    - name: alias-cruft
+      find: {roots: [/alias], paths: [cruft], type: dir}
+      action: delete
+      examples: {match: [/alias/cruft]}
+    - name: keep
+      find: {roots: [/data/src], paths: ["keep-*"], type: dir}
+      action: delete
+      examples: {match: [/data/src/keep-a]}
+  protect: [keep]
+  groups:
+    - name: g
+      tiers:
+        - {name: t, select: "profile:alias-cruft"}
+path: /alias
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /y, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+    - {id: 3, at: /alias, fs: ext4, dev: "254:2", size: 10G, parent: 1, bind_of: 2, bind_root: /src/keep-w/sub}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /data/src: {.: {}}
+    /y/src/keep-w/sub/cruft: {.: {mtime: 2026-10-01T00:00:00Z}, blob: {size: 4K, mtime: 2026-10-01T00:00:00Z}}
+  events:
+    - {at: {op: flock, path: /alias/cruft, when: after}, mount: {id: 4, at: /data, fs: ext4, dev: "254:2", size: 10G, bind_of: 2}}
+expect:
+  plan: [{candidate: /alias/cruft}]
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: [{candidate: /alias/cruft, reason: protected}]
+  preserved: [/y/src/keep-w/sub/cruft/blob]

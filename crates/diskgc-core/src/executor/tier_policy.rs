@@ -3,16 +3,18 @@
 //! (TASK-200, TASK-268 review, TASK-285). Which changes make a check
 //! enumerate again, why (the TASK-184 cost of enumerating per candidate),
 //! and what the cached set cannot see are in docs/safety.md (Filesystem
-//! candidates, Not protected, not excluded); [`DeletePolicy::skip`] is the
-//! one place that decides. Command actions run code that may touch anything
-//! in the candidate, walked or not: they keep the full recheck
+//! candidates, Not protected, not excluded); when is
+//! [`super::policy::refresh`]'s rule, and [`DeletePolicy::skip`] applies it
+//! under the lock. Command actions run code that may touch anything in the
+//! candidate, walked or not: they keep the full recheck
 //! (`super::policy_skip`).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::policy::{
-    NegatedMatches, excluded_by_in, overlaps_checked_in, policy_failed, tagged_ancestor,
+    Acts, Check, NegatedMatches, enumerates_again, excluded_by_in, overlaps_checked_in,
+    policy_failed, refresh, tagged_ancestor,
 };
 use super::{
     NegatedKind, NegatedSource, ProtectedKind, ProtectedSource, scan_negated, scan_protections,
@@ -20,6 +22,7 @@ use super::{
 use crate::engine::{Reason, Skip};
 use crate::host::{Host, MonoTime, MountEntry, Timestamp};
 use crate::outcome::{PolicyAt, Stop};
+use crate::places;
 
 /// How far before the enumeration a change's recorded time may lie and
 /// still count as made after it began. A filesystem records a change at or
@@ -49,7 +52,9 @@ impl Instant {
 }
 
 /// The run's `protect` matches, when their enumeration began and the mount
-/// table read just before it. The instant and the table are the horizon of
+/// table read just before it, or the latest table proven to answer their
+/// enumeration alike ([`DeletePolicy::skip`]). The instant and the table
+/// are the horizon of
 /// the tier's cached matches, `protect`'s and the negated sources' (which
 /// are enumerated after these): what changed since then may have changed a
 /// verdict ([`DeletePolicy::skip`]).
@@ -114,13 +119,15 @@ impl DeletePolicy<'_> {
     /// be proven any more (a `cargo clean` of a protected target says
     /// nothing about this candidate), and whenever the cached matches may be
     /// stale: after the walk, a change it saw made since they were
-    /// enumerated (or cannot tell); at any check, a mount table other than
-    /// the one read before the enumeration (TASK-285 and its review: a
-    /// rename above a bind's source, a bind or overlay mounted at a
-    /// protected root, which no time or identity of the candidate shows),
-    /// or a `CACHEDIR.TAG` on its way down ([`tagged_ancestor`]). Then every
-    /// match is enumerated again and kept with the new horizon. Uncertain
-    /// discovery or identity stops the run.
+    /// enumerated (or cannot tell); at any check, a mount table that may
+    /// answer the enumeration otherwise than the one the matches were
+    /// enumerated (or last proven) for ([`Self::mounts_unchanged`], TASK-300;
+    /// TASK-285 and its review: a rename above a bind's source, a bind or
+    /// overlay mounted at a protected root, which no time or identity of the
+    /// candidate shows), or a `CACHEDIR.TAG` on its way down
+    /// ([`tagged_ancestor`]). When that is decided is [`refresh`]'s rule
+    /// ([`Check::UnderLock`]). Then every match is enumerated again and kept
+    /// with the new horizon. Uncertain discovery or identity stops the run.
     pub fn skip<H: Host>(
         &mut self,
         host: &H,
@@ -145,13 +152,23 @@ impl DeletePolicy<'_> {
                 format!("cannot read mountinfo: {error}"),
             )
         })?;
-        let stale = match at {
+        // Staleness is read before the verdicts, in this order, as the
+        // checks always have: the walk's times, the mount table, the tags.
+        let changed = match at {
             PolicyAt::AfterWalk { newest_change } => {
                 changed_since(self.protection.enumerated, started, newest_change)
             }
-            _ => false,
-        } || mounts != self.protection.mounts
-            || self.tag_on_the_way(host, &mounts, path);
+            PolicyAt::BeforeWalk => false,
+        };
+        let moved = !self.mounts_unchanged(&mounts);
+        let stale = changed || moved || self.tag_on_the_way(host, &mounts, path);
+        if !moved {
+            // The matches answer for this table as for the one they were
+            // proven for: it becomes their table, so the next check
+            // compares against it (one change judged once, not again at
+            // every later candidate).
+            self.protection.mounts.clone_from(&mounts);
+        }
         let protected =
             overlaps_checked_in(host, &mounts, path, &self.protection.matches, deadline);
         if matches!(protected, Ok(true)) {
@@ -171,7 +188,14 @@ impl DeletePolicy<'_> {
         if let Ok(Some(profile)) = &excluded {
             return Ok(Some(excluded_skip(path, profile)));
         }
-        if !stale && protected.is_ok() && excluded.is_ok() {
+        // Neither overlaps: an error of either, or the rule, sends the
+        // check on to matches enumerated now.
+        let cached: Result<bool, String> = match (&protected, &excluded) {
+            (Ok(_), Ok(_)) => Ok(false),
+            (Err(error), _) | (_, Err(error)) => Err(error.clone()),
+        };
+        let refresh = refresh(Check::UnderLock { stale }, Acts::OnWalkedEntries);
+        if !enumerates_again(&cached, refresh) {
             return Ok(None);
         }
         if stale {
@@ -247,6 +271,53 @@ impl DeletePolicy<'_> {
             *kept = fresh;
         }
         Ok(())
+    }
+
+    /// Whether the mount table `mounts` answers every question the
+    /// enumeration of the tier's matches asks of it as the table they were
+    /// enumerated (or last proven) for does ([`places::unchanged_for`], from
+    /// every `protect` root and every term's negated roots; docs/safety.md,
+    /// Not protected, not excluded). Only the roots bound what is
+    /// enumerated: `protect` and `!profile:` sources are bound without
+    /// their `where` (no source anchor, no nested-build guard reads a path
+    /// elsewhere), which this asserts.
+    fn mounts_unchanged(&self, mounts: &[MountEntry]) -> bool {
+        if self.protection.mounts == mounts {
+            return true;
+        }
+        let rootless =
+            |find: &crate::fs_kind::Find| find.source_anchor.is_none() && !find.nested_build_guard;
+        for source in self.protections {
+            if let ProtectedKind::Fs(find) = &source.kind {
+                assert!(
+                    rootless(find),
+                    "protect `{}` is bound without its where",
+                    source.profile
+                );
+            }
+        }
+        for source in self.negated.iter().flat_map(|term| term.iter()) {
+            if let NegatedKind::Fs(find) = &source.source {
+                assert!(
+                    rootless(find),
+                    "!profile:{} is bound without its where",
+                    source.profile
+                );
+            }
+        }
+        let roots: Vec<&Path> = self
+            .protections
+            .iter()
+            .flat_map(|source| &source.roots)
+            .chain(
+                self.negated
+                    .iter()
+                    .flat_map(|term| term.iter())
+                    .flat_map(|source| &source.roots),
+            )
+            .map(PathBuf::as_path)
+            .collect();
+        places::unchanged_for(&self.protection.mounts, mounts, &roots)
     }
 
     /// [`tagged_ancestor`] for the Cargo sources of `protect` and of this

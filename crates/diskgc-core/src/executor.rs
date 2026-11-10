@@ -72,7 +72,7 @@ use plan::{
 // The overlap verdict alone, public so the model tests can pin what it
 // must refuse whatever discovery would hand it (a covered mount).
 pub use policy::overlaps_checked;
-use policy::{Refresh, judge_negated, judge_protect, policy_skip, scan_protections};
+use policy::{Acts, Check, judge_negated, judge_protect, policy_skip, refresh, scan_protections};
 use preflight::{
     Measured, measure_failure, measure_until, nothing_searched, preflight_roots, roots_text,
     say_lock_readiness,
@@ -1134,11 +1134,16 @@ impl<H: Delete> Reclaim<'_, '_, H> {
         // the walk ([`DeletePolicy`]): enumerating them here too would only
         // repeat the tier's enumeration per candidate. A command or Docker
         // prune acts on what it finds when it runs.
-        let refresh = if at == ProtectAt::FirstScreen || self.unlinks_only_walked_entries() {
-            Refresh::OnError
-        } else {
-            Refresh::Always
+        let check = match at {
+            ProtectAt::FirstScreen => Check::Screen,
+            ProtectAt::BeforeReclaim => Check::BeforeReclaim,
         };
+        let acts = if self.unlinks_only_walked_entries() {
+            Acts::OnWalkedEntries
+        } else {
+            Acts::OnWhatItFinds
+        };
+        let refresh = refresh(check, acts);
         let (protected, fresh) = judge_protect(
             self.host,
             &self.tier.protections,
@@ -1772,7 +1777,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 &negated_matches,
                 &target.path,
                 self.deadline,
-                Refresh::OnError,
+                refresh(Check::Screen, Acts::OnWalkedEntries),
             );
             self.record_overrun("exclude", &target.path, started, self.host.now());
             if self.past_deadline() {
@@ -2413,7 +2418,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                     &negated_matches[*index],
                     &found.path,
                     self.deadline,
-                    Refresh::OnError,
+                    refresh(Check::Screen, Acts::OnWalkedEntries),
                 );
                 self.record_overrun("exclude", &found.path, started, self.host.now());
                 if self.past_deadline() {

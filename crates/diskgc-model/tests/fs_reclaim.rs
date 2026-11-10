@@ -4149,3 +4149,74 @@ protect: [keep-x]
         "lookups of /keep/x: {mounted} with the mount, {quiet} without"
     );
 }
+
+/// TASK-300: mounts that come, go or move far from every `protect` root
+/// between candidates (a container's overlay, its network namespace, an
+/// overlay remounted under a reused id and device, as Docker churns)
+/// cannot change what the enumeration finds: no check enumerates again
+/// (the root is listed once per enumeration, so its listings count them),
+/// and the verdicts are the quiet run's. The same churn with one mount
+/// made directly in the root's parent directory (a name the container
+/// storage probe sees) enumerates again, once.
+#[test]
+fn container_mount_churn_far_from_the_protect_roots_enumerates_nothing_again() {
+    let tree = format!(
+        "  /tmp/a: {}\n  /tmp/b: {}\n  /tmp/c: {}\n  /keep/x1: {{.: {{}}}}\n  \
+         /var/lib/docker/overlay2/a/merged: {{.: {{}}}}\n  /var/lib/docker/overlay2/b/merged: {{.: {{}}}}\n  \
+         /run/docker/netns/x: {{.: {{}}}}\n  /srv: {{.: {{}}}}\n",
+        old_dir("1M"),
+        old_dir("1M"),
+        old_dir("1M")
+    );
+    let churn = "events:\n  \
+        - {at: {op: flock, path: /tmp/a, when: after}, mount: {id: 70, at: /var/lib/docker/overlay2/a/merged, fs: overlay-like, dev: \"0:70\", size: 1G}}\n  \
+        - {at: {op: flock, path: /tmp/a, when: after}, mount: {id: 71, at: /run/docker/netns/x, fs: nsfs, dev: \"0:4\", size: 1G}}\n  \
+        - {at: {op: flock, path: /tmp/b, when: after}, unmount: 70}\n  \
+        - {at: {op: flock, path: /tmp/b, when: after}, move_mount: {id: 71, to: /var/lib/docker/overlay2/b/merged}}\n";
+    let near = "events:\n  \
+        - {at: {op: flock, path: /tmp/a, when: after}, mount: {id: 70, at: /var/lib/docker/overlay2/a/merged, fs: overlay-like, dev: \"0:70\", size: 1G}}\n  \
+        - {at: {op: flock, path: /tmp/b, when: after}, mount: {id: 72, at: /srv, fs: tmpfs, dev: \"0:72\", size: 1G}}\n";
+    let protect = || {
+        let config = diskgc_core::config::parse(
+            Path::new("/tmp/protect.yaml"),
+            br#"version: 1
+profiles:
+  - name: keep-x
+    find: {roots: [/keep], paths: ["x*"], type: dir}
+    action: delete
+    examples: {match: [/keep/x1]}
+protect: [keep-x]
+"#,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        executor::bind_protections(&config, 1000, false).unwrap_or_else(|e| panic!("{e}"))
+    };
+    let enumerations = |host: &ModelHost| {
+        calls(host, Op::ReadDir)
+            .iter()
+            .filter(|call| call.path.as_deref() == Some(Path::new("/keep")))
+            .count()
+    };
+    let run = |events: &str| {
+        let host = host(&yaml("", &tree, events));
+        let mut request = request("profile:anything", &["/tmp"], "/tmp", "100%");
+        request.tier.protections = protect();
+        let report = ensure(&host, &request);
+        assert!(host.unfired_events().is_empty());
+        assert!(report.errors.is_empty(), "{report:#?}");
+        assert_eq!(
+            actions(&report),
+            ["/tmp/a", "/tmp/b", "/tmp/c"],
+            "{report:#?}"
+        );
+        enumerations(&host)
+    };
+    let quiet = run("");
+    assert!(quiet >= 1, "the root is listed by the enumeration");
+    assert_eq!(run(churn), quiet, "listings of /keep with far churn");
+    assert_eq!(
+        run(near),
+        quiet + 1,
+        "listings of /keep with a mount at /srv"
+    );
+}
