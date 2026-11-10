@@ -117,6 +117,9 @@
   liveness_class: tolerant
   releases: ["0.2"]
 
+# nix-user-cache, bun-cache and go-mod-cache are in the 0.2 catalog (Mark,
+# 2026-11-07, TASK-370: "go-mod, bun, nix-user"), their residuals as named
+# in docs/reference.md, Liveness contracts.
 - name: nix-user-cache
   category: nix
   description: Nix user git, tarball and evaluation cache entries below a supplied home root
@@ -130,6 +133,7 @@
     no_match: [/home/mark/.cache/nix, /home/mark/.cache/nix/gitv2, /home/mark/.cache/nix/fetcher-cache-v1, /home/mark/.cache/nix/eval-cache]
   verified_with: Nix 2.34.8, observed user cache layout 2026-10-19; Nix 2.34.9 in the container tests (TASK-352)
   liveness_class: verified-heuristic
+  releases: ["0.2"]
 
 - name: bun-cache
   category: python / js
@@ -144,6 +148,7 @@
     no_match: [/home/mark/.cache/.bun/install, /home/mark/.bun/install, /home/mark/.cache/.bun/install/cache/pkg]
   verified_with: Bun 1.3.3 default and BUN_INSTALL_CACHE_DIR, 2026-10-20; Bun 1.4.2 in the container tests (TASK-352)
   liveness_class: verified-heuristic
+  releases: ["0.2"]
 
 - name: go-mod-cache
   category: caches
@@ -158,6 +163,7 @@
     no_match: [/home/mark/go/pkg, /home/mark/go/pkg/mod/cache]
   verified_with: Go 1.26.7, go env GOMODCACHE on 2026-10-20; Go 1.26.8 in the container tests (TASK-352)
   liveness_class: verified-heuristic
+  releases: ["0.2"]
 
 # TASK-40 language and package caches below a supplied home root. Verified
 # heuristics pending Mark's admission (docs/reference.md, Liveness
@@ -322,7 +328,12 @@
 
 # A narrower source-anchored recognizer for build output of any directory
 # name. It requires the cache's recorded source to be an ancestor outside
-# the candidate; a missing source cannot be rebuilt and is retained.
+# the candidate; a missing source cannot be rebuilt and is retained. Never
+# one inside another build system's tree (TASK-367): never released, so
+# cmake-, meson-, autotools- and west-build-anchored were narrowed under
+# their names (pending Mark's ruling, docs/reference.md, Built-in profile
+# library). All four are in the 0.2 catalog (Mark, 2026-11-07, TASK-370:
+# "autotools, west", and cmake/meson once TASK-367's guard landed).
 - name: cmake-build-anchored
   category: c / c++
   description: Source-anchored CMake output of any name through depth five
@@ -337,8 +348,9 @@
     root: /home/mark/src
     match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
-  verified_with: CMake 4.4.3 (Ninja 1.13.2, GNU Make 4.4.1) builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); CMake 3.30.5 recorded CMAKE_HOME_DIRECTORY in host tracy builds, 2026-10-20
+  verified_with: CMake 4.4.3 (Ninja 1.13.2, GNU Make 4.4.1) builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); CMake 3.30.5 recorded CMAKE_HOME_DIRECTORY in host tracy builds, 2026-10-20; nested-build guard against Buildroot 2026.08.1 package directories and OpenWrt v25.12.6 make rules (TASK-367)
   liveness_class: verified-heuristic
+  releases: ["0.2"]
 
 # Meson's generated metadata records both source and build paths. Only an
 # output nested beneath its source is accepted; a copied output is refused.
@@ -356,8 +368,9 @@
     root: /home/mark/src
     match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
-  verified_with: Meson 1.12.1 (Ninja 1.13.2) builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); Meson 1.7.0 in a disposable Debian 13 container, 2026-10-20
+  verified_with: Meson 1.12.1 (Ninja 1.13.2) builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); Meson 1.7.0 in a disposable Debian 13 container, 2026-10-20; nested-build guard against Buildroot 2026.08.1 package directories and OpenWrt v25.12.6 make rules (TASK-367)
   liveness_class: verified-heuristic
+  releases: ["0.2"]
 
 # GNU Autoconf's generated config.status binds its build path to a source
 # ancestor. Only out-of-source Makefile builds with surviving configure.ac
@@ -376,8 +389,9 @@
     root: /home/mark/src
     match: [/home/mark/src/app/output, /home/mark/src/app/sub/other-name]
     no_match: [/home/mark/src/app/sub/a/b/c/deeper]
-  verified_with: GNU Autoconf 2.73 (GNU Make 4.4.1) configure builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354)
+  verified_with: GNU Autoconf 2.73 (GNU Make 4.4.1) configure builds reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); nested-build guard against Buildroot 2026.08.1 package directories and OpenWrt v25.12.6 make rules (TASK-367)
   liveness_class: verified-heuristic
+  releases: ["0.2"]
 
 # ---- TASK-101: build trees anchored to a whole source tree (pending
 # Mark's admission; development library only, in no release catalog).
@@ -559,8 +573,9 @@
     root: /home/mark/src
     match: [/home/mark/src/app/build, /home/mark/src/a/b/c/d/build]
     no_match: [/home/mark/src/a/b/c/d/e/build, /home/mark/src/app/build/zephyr]
-  verified_with: Zephyr 4.3.0 West 1.5.0 native_sim/native/64 builds with CMake 4.4.3 reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); source-anchor ModelHost vector 2026-10-20
+  verified_with: Zephyr 4.3.0 West 1.5.0 native_sim/native/64 builds with CMake 4.4.3 reclaimed and rebuilt in a disposable Nix test container, 2026-11-07 (TASK-354); source-anchor ModelHost vector 2026-10-20; nested-build guard against Buildroot 2026.08.1 package directories and OpenWrt v25.12.6 make rules (TASK-367)
   liveness_class: verified-heuristic
+  releases: ["0.2"]
 
 - name: platformio-cache
   category: embedded

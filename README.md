@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Rust](https://img.shields.io/badge/built_with-Rust-b7410e?logo=rust)](Cargo.toml) [![Nix flake](https://img.shields.io/badge/Nix-flake-5277c3?logo=nixos&logoColor=white)](flake.nix) [![for agents and CI hooks](https://img.shields.io/badge/for-agents_%C2%B7_CI_hooks-6f42c1)](#for-agents-and-ci-hooks)
 
-**diskgc brings a Linux filesystem up to a free-space goal by deleting rebuildable cache that, as far as it can tell, nothing is using.** Cargo `target/` directories, the `/tmp` leftovers of ended pytest and nix-shell sessions, and (from 0.2) dead Nix store paths and, in the project trees you name, pytest, Python bytecode and mypy caches, idle Python virtual environments and Node's compile cache, plus the pip, uv, pnpm and ccache caches through each tool's own cleaner: it takes them only when space runs short.
+**diskgc brings a Linux filesystem up to a free-space goal by deleting rebuildable cache that, as far as it can tell, nothing is using.** Cargo `target/` directories, the `/tmp` leftovers of ended pytest and nix-shell sessions, and (from 0.2) dead Nix store paths and, in the project trees you name, pytest, Python bytecode and mypy caches, idle Python virtual environments and Node's compile cache, plus the pip, uv, pnpm and ccache caches through each tool's own cleaner, Go's module cache, Bun's and Nix's user caches, and CMake, Meson, Autotools and West build directories idle for three days whose source still exists: it takes them only when space runs short.
 
 Unattended builds and coding agents fill disks overnight, and a full disk stops every job. Age-based cleanup (`find -mtime +N -delete`, systemd-tmpfiles age rules) runs by the clock, not when space is short, and checks no open files or sockets. diskgc checks each candidate on the live filesystem just before it acts:
 
@@ -35,7 +35,7 @@ echo 'DISKGC_WATCH_ARGS=--min-free 30G --target-free 60G' > ~/.config/diskgc/wat
 systemctl --user enable --now "diskgc-watch@$(systemd-escape --path /home).service"
 ```
 
-No package runs a reclaiming `watch` yet: the 0.2 candidate runs `watch --tally-only`, which keeps the index warm and deletes nothing.
+0.2 runs a reclaiming `watch`: below `--min-free` it reclaims as `ensure` does, up to `--target-free`, and deletes nothing in between. On NixOS, the flake's `nixosModules.default` (`services.diskgc`) at a release tag runs that release's package and checks its configuration at build time ([module](docs/architecture.md#nixos-module)); from master it runs the gated development package, which does not delete.
 
 ## A dry run of /tmp
 

@@ -1,0 +1,34 @@
+# TASK-367: the nested-build guard cannot list the build directory's parent
+# (EACCES once, on the dry run's judgement, the third listing of it after
+# discovery's and discovery's guard, which only drops a vetoed build from
+# the report): a visible refusal (`unreadable`), never "no stamp". In the
+# reclaim the third listing is the index walk's discovery of the build
+# again, whose guard only drops a vetoed build from the report: the build
+# stays a candidate, its judgement lists the parent again, finds no stamp
+# and it is deleted. Found by QA's mutant that read a listing error as no
+# stamp.
+profile_vector: 1
+select: profile:cmake-build-anchored
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/pkgs/foo-1.0/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/pkgs/foo-1.0/buildroot-build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/pkgs/foo-1.0\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+  events:
+    - {at: {op: read_dir, path: /home/tester/src/pkgs/foo-1.0, nth: 3, when: before}, fail: EACCES}
+expect:
+  plan:
+    - {candidate: /home/tester/src/pkgs/foo-1.0/buildroot-build, reason: unreadable, source: /home/tester/src/pkgs/foo-1.0}
+  reclaim_exit: 1
+  actions: [/home/tester/src/pkgs/foo-1.0/buildroot-build]
+  removed: [/home/tester/src/pkgs/foo-1.0/buildroot-build]
+  skipped: []
+  preserved: [/home/tester/src/pkgs/foo-1.0/CMakeLists.txt]

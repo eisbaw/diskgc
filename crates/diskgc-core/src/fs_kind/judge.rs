@@ -150,7 +150,7 @@ impl Judge<'_> {
         mounts: &[MountEntry],
         deadline: Option<MonoTime>,
     ) -> Judged<()> {
-        if !self.find.has_retention_guard() {
+        if !self.find.retains() {
             return Ok(Ok(()));
         }
         let reached = judged!(self.approach(host, found, mounts, deadline));
@@ -271,6 +271,15 @@ impl Judge<'_> {
         found: &Found,
         deadline: Option<MonoTime>,
     ) -> Judged<()> {
+        // The selection's nested-build guard (TASK-367): first, as it reads
+        // only the candidate's path and the directories above it.
+        if self.find.nested_build_guard {
+            judged!(source_anchor::nested_build_veto(
+                host,
+                &found.path,
+                deadline
+            ));
+        }
         for link in &self.find.protect_links {
             judged!(protect_link(
                 host,

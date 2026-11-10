@@ -20,7 +20,8 @@ use crate::{TESTER, ensure};
 // contract, and the idle filters), plus nix-garbage (Mark, 2026-11-04,
 // TASK-335), five project-tree sources (Mark, 2026-11-05, TASK-359) and
 // four package-manager cleaners (Mark, 2026-11-05, TASK-360: "only the
-// lock-safe five", less jest-cache after review).
+// lock-safe five", less jest-cache after review), three runtime caches and
+// four source-anchored build outputs (Mark, 2026-11-07, TASK-370).
 const ADMITTED: &[&str] = &[
     "cargo-target",
     "nix-garbage",
@@ -35,6 +36,13 @@ const ADMITTED: &[&str] = &[
     "uv-cache",
     "pnpm-store",
     "ccache",
+    "go-mod-cache",
+    "bun-cache",
+    "nix-user-cache",
+    "cmake-build-anchored",
+    "meson-build-anchored",
+    "autotools-build-anchored",
+    "west-build-anchored",
     "idle-1h",
     "idle-1d",
     "idle-2d",
@@ -53,12 +61,6 @@ const EXCLUDED: &[&str] = &[
     // TASK-93, pending Mark's admission: development library only.
     "podman-dangling",
     "podman-unreferenced",
-    "nix-user-cache",
-    "bun-cache",
-    "go-mod-cache",
-    "cmake-build-anchored",
-    "meson-build-anchored",
-    "autotools-build-anchored",
     // TASK-360: the delegated cleaners left out of 0.2 (a run in flight
     // fails their cleaner, or a named residual; TASK-351, and Jest's
     // perf-cache counterexample).
@@ -66,7 +68,6 @@ const EXCLUDED: &[&str] = &[
     "npm-cache",
     "yarn-cache",
     "jest-cache",
-    "west-build-anchored",
     "platformio-cache",
     "brave-browser-cache",
     "chrome-browser-cache",
@@ -363,61 +364,6 @@ pub fn candidate_rejects_docker_command_and_arbitrary_delete_policy(ctx: &Ctx) -
         docker_spy.exists() && command_spy.exists(),
         "spy fixture disappeared"
     );
-    Ok(())
-}
-
-/// TASK-276 open: the gate-lifted candidate refuses a reclaiming `watch`
-/// (exit 2, in text and under `--json`) before it looks at the machine.
-/// PATH does not exist, so a candidate without the refusal fails here on
-/// its own startup error, not the refusal's message, instead of running
-/// as a service until the budget.
-pub fn candidate_refuses_a_reclaiming_watch(ctx: &Ctx) -> TestResult {
-    ctx.scratch.mkdirs("release-watch/target", 0o700, TESTER)?;
-    let keep = ctx.scratch.write_file(
-        "release-watch/target/keep",
-        b"a refused watch must preserve this",
-        0o600,
-        TESTER,
-    )?;
-    let roots = ctx.scratch.path("release-watch");
-    let roots = roots
-        .to_str()
-        .ok_or_else(|| format!("non-UTF-8 path {}", roots.display()))?;
-    let want = "a reclaiming `watch` is not in diskgc ";
-    let watch = [
-        "watch",
-        "--min-free",
-        "1G",
-        "--target-free",
-        "2G",
-        "--select",
-        "profile:cargo-target",
-        "--roots",
-        roots,
-        "/nonexistent-release-watch",
-    ];
-    let refused = run(ctx, &watch, 2)?;
-    ensure!(
-        refused.stdout.is_empty()
-            && refused
-                .stderr
-                .starts_with(&format!("diskgc: error: {want}")),
-        "reclaiming watch was not refused as such: {refused:?}"
-    );
-    let mut with_json = watch.to_vec();
-    with_json.push("--json");
-    let refused = run(ctx, &with_json, 2)?;
-    let error: Value = serde_json::from_str(&refused.stdout)
-        .map_err(|e| format!("parse refusal: {e}: {}", refused.stdout))?;
-    ensure!(
-        error["status"] == "usage_error"
-            && error["errors"][0]["cause"] == "usage"
-            && error["errors"][0]["message"]
-                .as_str()
-                .is_some_and(|m| m.starts_with(want)),
-        "reclaiming watch --json was not refused as such: {error}"
-    );
-    ensure!(keep.exists(), "a refused watch mutated the fixture");
     Ok(())
 }
 

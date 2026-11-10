@@ -7,8 +7,13 @@ nix-shell runs in `/tmp`, the dead paths of a multi-user Nix store
 (through the system Nix daemon's own garbage collector), and in the
 project trees you name, pytest, Python bytecode and mypy caches and
 Python virtual environments idle for 30 days, plus Node's compile cache
-in `/tmp`, and the pip, uv, pnpm and ccache
-caches, emptied by each tool's own cleaner. `ensure` brings one filesystem up to a free-space
+in `/tmp`, the pip, uv, pnpm and ccache
+caches, emptied by each tool's own cleaner, Go's module cache, Bun's
+install cache and Nix's user caches, and CMake, Meson, Autotools and
+West build directories idle for three days whose source still exists
+(not one in a Buildroot, OpenWrt or Yocto package build, a Bazel output
+base or npm's `node_modules`; other build systems' trees are not
+recognised, see the release notes' Known limits). `ensure` brings one filesystem up to a free-space
 goal once and exits with a code a CI hook or an agent script can branch on.
 Unlike age-only cleanup (`find -mtime +N -delete`, systemd-tmpfiles age
 rules), diskgc deletes only when free space is short, and checks every
@@ -26,10 +31,13 @@ In use).
   `lib/systemd/system/diskgc-watch@.service`: the `watch` service
   templates, one instance per filesystem (`reference.md`, Watch as a
   systemd service). The first lines of `RELEASE-NOTES.md` say which
-  `watch` this package runs. Where it runs none that reclaims (0.2 so far
-  runs only `watch --tally-only`, which keeps the index warm and never
-  deletes), an instance's `DISKGC_WATCH_ARGS` needs `--tally-only`, and a
-  reclaiming instance exits 2 at start.
+  `watch` this package runs: 0.2 runs a reclaiming one (below
+  `--min-free` it reclaims as `ensure` does, up to `--target-free`) and
+  `--tally-only`, which keeps the index warm and never deletes. The
+  thresholds go in the instance's `DISKGC_WATCH_ARGS`; a dry run with
+  `ensure --dry-run` and the same `--min-free` shows what a cycle would
+  take. On NixOS, use the flake's `nixosModules.default` at this
+  release's tag instead (`RELEASE-NOTES.md`, Install).
 - `share/doc/diskgc/`: this README; `RELEASE-NOTES.md` (what this version
   does, install, known limits, the JSON contract); `reference.md` (commands,
   exit codes, JSON output, configuration, profiles); `safety.md` (every

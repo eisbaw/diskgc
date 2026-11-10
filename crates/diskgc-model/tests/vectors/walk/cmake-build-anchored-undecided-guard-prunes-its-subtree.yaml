@@ -1,0 +1,39 @@
+# TASK-367: a nested-build guard that cannot decide prunes like a veto.
+# The guard's listing of `pkg`, the parent of the recently changed CMake
+# build `pkg/out`, fails once (EACCES, its third listing, the dry run's
+# judgement; at discovery, the second, an undecided guard leaves `out` a
+# candidate): `out` is a visible refusal (`unreadable`) and, a candidate,
+# is not entered, so the old build `pkg/out/a/b/inner` below it, whose own
+# guard finds nothing, is not planned. In the reclaim the third listing is
+# the index walk's discovery of `out` again (its guard is report-only, so
+# `out` stays a candidate); its judgement lists `pkg` again, clears `out`
+# and keeps it `not_idle`; a candidate, nothing below it is entered.
+profile_vector: 1
+select: profile:cmake-build-anchored
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/pkg/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/pkg/out: {.: {mtime: 2026-10-15T02:00:00Z}, CMakeCache.txt: {mtime: 2026-10-15T02:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/pkg\n"}, CMakeFiles: {.: {mtime: 2026-10-15T02:00:00Z}}, new.o: {mtime: 2026-10-15T02:00:00Z, size: 8K}}
+    /home/tester/src/pkg/out/a: {.: {mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/pkg/out/a/b: {.: {mtime: 2026-10-01T00:00:00Z}}
+    /home/tester/src/pkg/out/a/b/inner: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/pkg\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, old.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+  events:
+    - {at: {op: read_dir, path: /home/tester/src/pkg, nth: 3, when: before}, fail: EACCES}
+expect:
+  plan:
+    - {candidate: /home/tester/src/pkg/out, reason: unreadable, source: /home/tester/src/pkg}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/src/pkg/out, reason: not_idle}
+  preserved: [/home/tester/src/pkg/out/new.o, /home/tester/src/pkg/out/a/b/inner/old.o]

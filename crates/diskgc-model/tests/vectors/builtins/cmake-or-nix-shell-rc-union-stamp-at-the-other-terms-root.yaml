@@ -1,0 +1,32 @@
+# TASK-367, Codex's third review, case 2 (a union's roots):
+# `profile:cmake-build-anchored || profile:nix-shell-rc`, cmake rooted at
+# /tmp/pkg, nix-shell-rc at its fixed /tmp. `/tmp/.built`; /tmp/pkg/out an
+# old CMake build. A guard bounded by cmake's own root missed the stamp in
+# nix-shell-rc's root: `out` was deleted. The climb does not depend on any
+# term's roots: `out` stays.
+profile_vector: 1
+select: profile:cmake-build-anchored || profile:nix-shell-rc
+roots: [/tmp/pkg]
+path: /tmp
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /tmp, fs: tmpfs, dev: "0:40", size: 4G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/bash: {}
+    /tmp/.built: {mtime: 2026-10-01T00:00:00Z}
+    /tmp/pkg/CMakeLists.txt: {content: "project(p)\n"}
+    /tmp/pkg/out: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/tmp/pkg\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, old.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+  processes:
+    - {pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
+expect:
+  plan: []
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/tmp/pkg/out/old.o]

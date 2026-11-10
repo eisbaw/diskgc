@@ -1291,24 +1291,28 @@ pub(super) fn union_checkout_refusal(
 }
 
 /// Retention belongs to every source that discovered this inode, regardless
-/// of which source's evidence eventually admits it. Checkout policy remains
-/// a separate decision over admitted terms only.
-pub(super) fn union_guard_veto<H: Host>(
+/// of which source's evidence eventually admits it: the terms that admitted
+/// it and the structural matches of version guards ([`FsUnionCandidate::
+/// contributors`]), so the selection's nested-build guard (TASK-367) judges
+/// it whichever term found it. Checkout policy remains a separate decision
+/// over admitted terms only. A veto names the contributor: its source index
+/// and what it found.
+pub(super) fn union_guard_veto<'c, H: Host>(
     host: &H,
-    candidate: &FsUnionCandidate,
+    candidate: &'c FsUnionCandidate,
     sources: &[FsUnionSourceRef<'_>],
     rules: &Rules<'_>,
     space: crate::places::Space,
     deadline: Option<MonoTime>,
-) -> Result<Option<(usize, Skip)>, Stop> {
+) -> Result<Option<(usize, &'c fs_kind::Found, Skip)>, Stop> {
     let evaluation_rules = Rules {
         checkouts: Checkouts::Allow,
         ..*rules
     };
-    let alternatives: Vec<_> = candidate
-        .guard_by
+    let contributors = candidate.contributors();
+    let alternatives: Vec<_> = contributors
         .iter()
-        .map(|(index, found)| {
+        .map(|(index, found, _)| {
             let source = &sources[*index];
             fs_kind::Alternative {
                 judge: fs_kind::Judge {
@@ -1323,7 +1327,12 @@ pub(super) fn union_guard_veto<H: Host>(
             }
         })
         .collect();
-    fs_kind::retention_guard_veto(host, &alternatives, deadline)
+    Ok(
+        fs_kind::retention_guard_veto(host, &alternatives, deadline)?.map(|(at, skip)| {
+            let (index, found, _) = contributors[at];
+            (index, found, skip)
+        }),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1416,11 +1425,10 @@ pub(super) fn plan_fs_union<H: Host>(
         }
         read_ahead.judging(judged, |path| host.read_ahead(path));
         match union_guard_veto(host, candidate, &sources, rules, space, deadline) {
-            Ok(Some((index, skip))) => {
-                let (source_index, found) = &candidate.guard_by[index];
+            Ok(Some((source_index, found, skip))) => {
                 let mut entry = plan_skip(tier, &skip.path, &skip);
-                entry.profile = sources[*source_index].profile.to_owned();
-                entry.checkouts = sources[*source_index].checkouts;
+                entry.profile = sources[source_index].profile.to_owned();
+                entry.checkouts = sources[source_index].checkouts;
                 entry.build_evidence = skipped_build_evidence(found.source_evidence.as_ref());
                 planned.skipped.push(entry);
                 continue;

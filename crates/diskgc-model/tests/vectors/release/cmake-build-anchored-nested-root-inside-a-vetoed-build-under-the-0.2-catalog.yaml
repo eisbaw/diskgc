@@ -1,0 +1,33 @@
+# Under the 0.2 release catalog (TASK-370). TASK-367, Codex's second review, scenario 1 (several roots): roots R and
+# R/pkg/out/a. R holds `.built`; R/pkg/out is a recently changed CMake
+# build (vetoed: the stamp one directory above its parent, not entered);
+# R/pkg/out/a holds the source of an old CMake build `inner`. The second
+# root starts inside the vetoed `out`, and its own bound used to hide the
+# stamp: `inner` was deleted. The climb does not stop at a root (the
+# verdict is a function of the path): `inner` is vetoed too.
+profile_vector: 1
+catalog: release-0.2
+select: profile:cmake-build-anchored
+roots: [/home/tester/src, /home/tester/src/pkg/out/a]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/.built: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/pkg/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/pkg/out: {.: {mtime: 2026-10-15T02:00:00Z}, CMakeCache.txt: {mtime: 2026-10-15T02:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/pkg\n"}, CMakeFiles: {.: {mtime: 2026-10-15T02:00:00Z}}, new.o: {mtime: 2026-10-15T02:00:00Z, size: 8K}}
+    /home/tester/src/pkg/out/a/CMakeLists.txt: {mtime: 2026-10-01T00:00:00Z, content: "project(q)\n"}
+    /home/tester/src/pkg/out/a/inner: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/pkg/out/a\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, old.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+expect:
+  plan: []
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/home/tester/src/pkg/out/new.o, /home/tester/src/pkg/out/a/inner/old.o]

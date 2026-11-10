@@ -22,7 +22,7 @@ use crate::resolve::{ResolveError, Resolved, Want, open_beneath, resolve_in};
 /// source top (Makefile `CONFIG_DIR`). An output elsewhere holds its own
 /// `.config` and is never a candidate.
 const BUILDROOT_OUTPUT: &str = "output";
-const BUILDROOT_MARKER: &str = ".br2-external.mk";
+pub(super) const BUILDROOT_MARKER: &str = ".br2-external.mk";
 const MAX_BR2_EXTERNAL_BYTES: u64 = 1024 * 1024;
 const BUILDROOT_BUILD_FILE: &str = "Config.in";
 const BUILDROOT_TREE: &[&str] = &[
@@ -34,7 +34,7 @@ const BUILDROOT_TREE: &[&str] = &[
 
 /// OE-core's sanity check writes TMPDIR's own path here (meta/lib/oe/
 /// sanity.py) and refuses to build in a TMPDIR that moved.
-const YOCTO_MARKER: &str = "saved_tmpdir";
+pub(super) const YOCTO_MARKER: &str = "saved_tmpdir";
 const MAX_SAVED_TMPDIR_BYTES: u64 = 4096;
 const YOCTO_ABI: &str = "abi_version";
 const YOCTO_LAYERS: &str = "conf/bblayers.conf";
@@ -44,7 +44,7 @@ const YOCTO_LAYER_CONF: &str = "conf/layer.conf";
 
 /// Bazel writes the workspace path, without a newline, here
 /// (BlazeWorkspace.writeDoNotBuildHereFile).
-const BAZEL_MARKER: &str = "DO_NOT_BUILD_HERE";
+pub(super) const BAZEL_MARKER: &str = "DO_NOT_BUILD_HERE";
 const MAX_BAZEL_MARKER_BYTES: u64 = 4096;
 /// The files that make a directory a Bazel workspace root, in Bazel's order
 /// of preference; the first present one is the recorded identity.
@@ -520,7 +520,7 @@ fn open_dir<H: Host>(
 
 /// An entry `rel` below `dir` (reached as `dir_path`) of any type, without
 /// following symlinks. `None`: absent.
-fn entry<H: Host>(
+pub(super) fn entry<H: Host>(
     host: &H,
     candidate: &Path,
     dir: &H::Fd,

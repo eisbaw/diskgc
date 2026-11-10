@@ -1048,6 +1048,20 @@ impl<H: Host> Walk<'_, H> {
         } else {
             None
         };
+        // The selection's nested-build guard (TASK-367), asked by every
+        // term of it, only so that a build it vetoes is left out of the
+        // report without a row (an outer match, not entered, as any
+        // candidate). One it cannot clear stays a candidate: every
+        // judgement asks the guard again as a retention rule
+        // (`Judge::version_where`), and that answer, a refusal or not, is
+        // the path's one verdict for the run, never a discovery row beside
+        // another term's (the architecture review of round 6). No deletion
+        // depends on this.
+        if self.find.nested_build_guard
+            && let Ok(Some(_)) = source_anchor::outer_build(self.host, at, self.deadline)?
+        {
+            return Ok(true);
+        }
         // A restricted walk cannot tell which name of a multiply linked
         // file discovery meets first (the dedupe below), nor whether that
         // name is refused (a keep marker on its way, a retention guard among

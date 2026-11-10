@@ -670,17 +670,18 @@ profile library](#built-in-profile-library)) ship the two templates of
 `lib/systemd/system/diskgc-watch@.service`, whose `ExecStart` runs
 `/usr/local/bin/diskgc`.
 
-**Which package.** A reclaiming instance needs a release package that
-runs a reclaiming `watch`; none does yet. The `release-candidate`
-package runs only `watch --tally-only` while TASK-276 is open: a
-reclaiming instance exits 2 at start and stays failed. The development
-package refuses
-to delete outside test containers
+**Which package.** A reclaiming instance needs a release package: 0.2
+runs a reclaiming `watch` and `watch --tally-only` (Mark, 2026-11-05,
+TASK-276; TASK-362), with the 0.2 catalog only, as its `ensure`
+([Built-in profile library](#built-in-profile-library)). The
+development package refuses to delete outside test containers
 ([safety.md](safety.md#pre-release-sandbox-gate)): its reclaiming
 `watch` exits 2 at start naming the sandbox gate, and the unit stays
-failed. Outside test containers it supports only `--tally-only`
-instances (Tally only), such as the CI runner's below. The steps are
-the same for both.
+failed; outside test containers it supports only `--tally-only`
+instances (Tally only), such as the CI runner's below. A
+`release-candidate` package built from master is a development version
+for disposable test environments only (PRD, Safety boundaries). The
+steps are the same for every package.
 
 Install once, as root, from the package:
 
@@ -2172,7 +2173,7 @@ the built-in profile has no implicit or fixed temp root.
 | `has_dir` | contains a directory of this name directly in the candidate directory (not followed); checked again under the candidate lock before reclaim | `fs` source only |
 | `app_not_running` | A path to this application's Chromium-family `SingletonLock` symlink, absolute or relative to each source root (for a home root, `.config/BraveSoftware/Brave-Browser/SingletonLock`). The candidate is eligible only when the lock is absent in a safely reached directory. Every present lock retains it, even if its PID appears gone: that PID may be live in another namespace sharing the home directory. Unreadable locks and unsafe paths also retain it. Each source names one application's lock. | `fs` sources only |
 | `lacks_entry` | contains no entry of this name directly in the candidate directory, of any type (file, directory, symlink, FIFO, socket, or device); checked again under the candidate lock before reclaim | `fs` source only |
-| `source_anchor` | `cmake`: require `CMakeCache.txt` to record a normalized `CMAKE_HOME_DIRECTORY` that is a strict ancestor of the candidate under its bound root, with a regular `CMakeLists.txt` that survives outside the candidate; `meson`: require regular generated `meson-info/meson-info.json` with matching build and info paths, a normalized strict-ancestor source under the root, regular `meson-private/coredata.dat` and surviving regular source `meson.build`; `autotools`: require regular `config.status`, `config.log`, and `Makefile`, with the status script recording the exact build path and a strict-ancestor source that still contains regular `configure.ac`. Development library only, pending Mark's admission (TASK-101): `buildroot`: a candidate named `output` with no `.config` entry and a regular `.br2-external.mk` whose single generated `BR2_EXTERNAL ?=` line lists no br2-external tree (it is Buildroot's only record of them), whose parent keeps regular `Config.in`, `Makefile`, `.config`, `package/Config.in` and `support/scripts/br2-external`; `yocto`: a regular `saved_tmpdir` holding exactly the candidate's path and a regular `abi_version`, whose parent keeps regular `conf/local.conf` and a `conf/bblayers.conf` with one literal `BBLAYERS ?=` or `=` assignment of normalized absolute layers, each keeping `conf/layer.conf`, and no other line naming `BBLAYERS` and no `include`, `include_all`, `require`, `inherit`, `addfragments`, `export` or `unset` line; `bazel`: a regular `DO_NOT_BUILD_HERE` holding one normalized absolute workspace path outside the candidate, which keeps `MODULE.bazel`, `REPO.bazel`, `WORKSPACE.bazel` or `WORKSPACE`. The source tree must be on the candidate's filesystem and none of its files may lie inside the candidate; Yocto layers may lie anywhere but inside the candidate. Source identity and metadata are rechecked under the candidate lock. | `fs` source only |
+| `source_anchor` | `cmake`: require `CMakeCache.txt` to record a normalized `CMAKE_HOME_DIRECTORY` that is a strict ancestor of the candidate under its bound root, with a regular `CMakeLists.txt` that survives outside the candidate; `meson`: require regular generated `meson-info/meson-info.json` with matching build and info paths, a normalized strict-ancestor source under the root, regular `meson-private/coredata.dat` and surviving regular source `meson.build`; `autotools`: require regular `config.status`, `config.log`, and `Makefile`, with the status script recording the exact build path and a strict-ancestor source that still contains regular `configure.ac`. None of these three, nor any other source selected with one of them, takes a build directory inside another build system's managed tree: beside its stamps (Buildroot's `.stamp_*`, OpenWrt's `.built`, `.configured*`, `.prepared*`) in the parent or the three directories above it or above any build directory it lies in, whatever the roots, anywhere below a Buildroot output, Yocto TMPDIR or Bazel output base, or below npm's `node_modules` ([safety.md](safety.md#builds-inside-another-build-systems-tree)). Development library only, pending Mark's admission (TASK-101): `buildroot`: a candidate named `output` with no `.config` entry and a regular `.br2-external.mk` whose single generated `BR2_EXTERNAL ?=` line lists no br2-external tree (it is Buildroot's only record of them), whose parent keeps regular `Config.in`, `Makefile`, `.config`, `package/Config.in` and `support/scripts/br2-external`; `yocto`: a regular `saved_tmpdir` holding exactly the candidate's path and a regular `abi_version`, whose parent keeps regular `conf/local.conf` and a `conf/bblayers.conf` with one literal `BBLAYERS ?=` or `=` assignment of normalized absolute layers, each keeping `conf/layer.conf`, and no other line naming `BBLAYERS` and no `include`, `include_all`, `require`, `inherit`, `addfragments`, `export` or `unset` line; `bazel`: a regular `DO_NOT_BUILD_HERE` holding one normalized absolute workspace path outside the candidate, which keeps `MODULE.bazel`, `REPO.bazel`, `WORKSPACE.bazel` or `WORKSPACE`. The source tree must be on the candidate's filesystem and none of its files may lie inside the candidate; Yocto layers may lie anywhere but inside the candidate. Source identity and metadata are rechecked under the candidate lock. | `fs` source only |
 | `keep_newest` | keep the newest positive N matching siblings by directory/file mtime; equal mtimes break by descending name bytes. Missing mtime or incomplete sibling listing keeps the candidate. For Cursor extensions `newest_group: cursor_extension` ranks each extension id separately; unknown name layouts are kept. | `fs` |
 | `protect_links` / `protect_link_dirs` / `protect_parent_link` | keep a candidate containing a resolved symlink target. `protect_links` lists exact paths, `protect_link_dirs` scans every symlink in directories relative to the bound root, literal but for at most one whole `*` segment, which stands for every directory of that level (`.kani/*`, listed afresh at each judgement), and `protect_parent_link` names a symlink beside the candidate's parent (e.g. a package's `current` beside `releases/`). An unsafe or unreadable directory, incomplete listing, ambiguous target, or missing named link retains the candidate. An unrelated launcher resolving outside the bound root is ignored; a dangling external launcher is ignored only after every existing prefix was checked for symlinks. Target paths with internal `..` are ambiguous and retain the candidate. Links are re-read during reclaim under the candidate lock. | `fs` |
 | `liveness_contract` | a code-backed producer liveness contract (`nix-shell`, `pytest`; designed: `node-project`, `python-project`): the candidate is eligible only when the contract permits it, judged from the same process scan as the in-use check, in the plan and again immediately before deletion ([Liveness contract predicate](#liveness-contract-predicate)) | `fs` source only |
@@ -2557,22 +2558,18 @@ combines it with `diskgc-linux/release-without-sandbox-gate` for
 disposable-container testing; it is not approved for deployment. It is a
 release only when built from that release's tag; built from master it is a
 development version of release 0.2's row (`diskgc 0.2.0-dev (COMMIT)`),
-for disposable test containers only. The 0.2 row is provisional: while no
-release decision covers a reclaiming `watch` (TASK-276), it runs `watch
---tally-only` only, and a reclaiming `watch` exits 2 before it looks at
-the machine ("a reclaiming `watch` is not in diskgc VERSION yet; its
-commands are ensure, watch --tally-only, check and profiles"), as every
-`watch` did in 0.1.0; its `--help` shows only the commands it runs, and
-its package ships the two `watch` unit templates for `--tally-only`
-instances. Adding `watch` to the row's commands is the code switch (the
-binary, the packages, the NixOS module and the tests follow the row);
-the prose that names TASK-276 or says no package runs a reclaiming
-`watch` follows by hand: `rg 'TASK-276|none does yet' docs packaging
-diskgc-e2e crates` lists it (this paragraph, Watch as a systemd service,
-the release notes' status and Not in the release catalog,
-architecture.md's NixOS module `package` row, the release suite's
-refusal test, the module checks' reclaiming case). The development build
-keeps a
+for disposable test containers only. The 0.2 row runs `ensure`, a
+reclaiming `watch` and `watch --tally-only`, `check` and `profiles`
+(Mark, 2026-11-05, TASK-276: "Reclaiming watch in 0.2"; TASK-362), and
+refuses `survey` (exit 2 before it looks at the machine, naming the
+commands it has); its `--help` shows only the commands it runs, and its
+package ships the two `watch` unit templates. Its `watch`, in either
+mode, loads the configuration and `--select` through the same narrowing
+as its `ensure`: the 0.2 catalog below, no user profile or override,
+and a built-in it does not ship refused at start (exit 2). A row that
+runs only `watch --tally-only` would refuse a reclaiming one the same
+way ("a reclaiming `watch` is not in diskgc VERSION yet; its commands
+are ..."); 0.1.0 refused every `watch`. The development build keeps a
 reclaiming `watch`, behind the sandbox gate. The 0.2 row's catalog is
 builtin.yaml's label `0.2` (`catalog: "0.2"`): 0.1's built-ins, which
 list both labels, plus `nix-garbage` (Mark, 2026-11-04, TASK-335), five
@@ -2583,7 +2580,12 @@ package-manager caches whose tool's own cleaner is safe against a run of
 that tool in flight, `pip-cache`, `uv-cache`,
 `pnpm-store` and `ccache` (Mark, 2026-11-05, TASK-360: "only the
 lock-safe five"; the fifth, `jest-cache`, left after review: its clear
-can fail a run in flight). A release runs a command action only when its
+can fail a run in flight), three runtime caches deleted whole,
+`go-mod-cache`, `bun-cache` and `nix-user-cache`, and four
+source-anchored build outputs, `cmake-build-anchored`,
+`meson-build-anchored`, `autotools-build-anchored` and
+`west-build-anchored` (Mark, 2026-11-07, TASK-370; cmake and meson once
+TASK-367's guard kept builds inside another build system's tree). A release runs a command action only when its
 row lists the built-in with exactly that command (`command_actions`:
 argv and `cwd`); the 0.2 row lists those four, and the catalog is refused
 for a command action the row does not list, or for a listed one the
@@ -2593,8 +2595,8 @@ catalog does not hold with that command, so no other cleaner (not
 Docker or Podman prune and no operator-written command runs in 0.2. So
 the candidate keeps `cargo-target`, the two `/tmp` built-ins with a
 liveness contract (`nix-shell-rc`, `pytest-tmp`; TASK-65, Mark
-2026-10-24), `nix-garbage`, those five, those four and the seven idle
-filters, and rejects every operator-authored profile, including
+2026-10-24), `nix-garbage`, those five, those four, those three, those
+four builds and the seven idle filters, and rejects every operator-authored profile, including
 overrides. It also refuses configured tiers and `--select` expressions that
 refer to excluded built-ins, even during a dry run. `profiles list`,
 `profiles show`, `check` and help use the same narrowed library.
@@ -2602,8 +2604,9 @@ refer to excluded built-ins, even during a dry run. `profiles list`,
 refuse` on any of them (on `nix-garbage` it changes nothing: a GC has no
 file candidates), `allow` only where the built-in already allows
 (`cargo-target`, `pytest-tmp`); `allow` on `nix-shell-rc`, `nix-garbage`,
-one of the five project-tree sources or one of the four caches (`uv-cache`
-included: its built-in tolerates only its own empty marker) is refused, as
+one of the five project-tree sources, one of the four caches (`uv-cache`
+included: its built-in tolerates only its own empty marker) or one of
+TASK-370's seven is refused, as
 are policies for excluded sources, including `npm-cache`, at load time. The other `/tmp` proposals stay out: `nix-shell-tmpdir`, `mktemp-dir`
 and `tmp-entry` have no owner evidence ([Liveness
 contracts](#liveness-contracts)). Operator-authored `fs` and delete policies
@@ -2613,7 +2616,7 @@ remain a release decision under TASK-67.
 |---|---|---|---|
 | test | `pytest-tmp` | pytest session directories `pytest-of-*/pytest-*`, one candidate per session (Mark, 2026-10-23), under `/tmp`'s temp-prefix v1 preset; `liveness_contract: pytest`, `min_idle_for: 1h` ([Liveness contracts](#liveness-contracts)); `checkouts: allow`: tests create Git repositories as fixtures in their temp directories, which are the run's own output | `delete` |
 | test | `pytest-cache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359): `.pytest_cache` (roots required) | `delete` |
-| nix | `nix-user-cache` | `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
+| nix | `nix-user-cache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-07, TASK-370): `.cache/nix/{gitv3,tarball-cache,tarball-cache-v2,eval-cache-v*}` below a supplied home root | `delete` |
 | nix | `nix-shell-rc` | rc directories `nix-shell-*-*` and `nix-develop-*-*` directly in `/tmp` (not below shell temp directories); `liveness_contract: nix-shell`, `min_idle_for: 1h` ([Liveness contracts](#liveness-contracts)) | `delete` |
 | nix | `nix-shell-tmpdir` | planned: `nix-shell.*` directories under `/tmp`'s temp-prefix v1 preset, including below `/tmp/claude-{uid}`; dormant shells can use them without an observable descriptor or initial environment path | no safe action yet |
 | nix | `nix-garbage` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-04, TASK-335): dead store paths of the bound multi-user daemon (`{kind: nix-store, find: {roots: daemon}}`), Nix's own choice ([safety.md](safety.md#nix-store)) | one bounded `nix-store --gc` |
@@ -2632,25 +2635,25 @@ remain a release decision under TASK-67.
 | browsers | `brave-browser-cache`, `chrome-browser-cache`, `chromium-browser-cache`, `edge-browser-cache` | Only `Cache` and `Code Cache` directories in `Default` and `Profile *` under the corresponding browser's `.cache` directory below a supplied home root; each source requires its own `.config/.../SingletonLock` to be absent | `delete` |
 | electron | `teams-for-linux-electron-cache`, `figma-linux-electron-cache` | development library only, pending Mark's admission of the app names: only `Cache`, `Code Cache` and `GPUCache` directories in the app's user-data directory `.config/<app>` below a supplied home root (teams-for-linux also in each `Partitions/*`); each source requires its own `.config/<app>/SingletonLock` to be absent | `delete` |
 | caches | `pip-cache`, `go-build-cache`, `npm-cache`, `ccache` | the tool's cache dir (roots required); `pip-cache` and `ccache` in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-360), `go-build-cache` and `npm-cache` development library only | `command` with the tool's own cleaner |
-| caches | `go-mod-cache` | `go/pkg/mod` below a supplied home root | `delete` with `make_writable` |
+| caches | `go-mod-cache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-07, TASK-370): `go/pkg/mod` below a supplied home root | `delete` with `make_writable` |
 | caches | `huggingface-hub-repos` | development library only, pending Mark's admission (TASK-40): one candidate per repository directory (`models--*`, `datasets--*`, `spaces--*`) of the Hugging Face hub cache `.cache/huggingface/hub` below a supplied home root; never the hub's `.locks`, the login token or the xet cache; `min_idle_for: 1h` | `delete` |
 | rust | `cargo-registry-src` | development library only, pending Mark's admission (TASK-40): one candidate per crate source `.cargo/registry/src/*/*` below a supplied home root holding a regular `.cargo-ok` (an extraction Cargo completed); never the `.crate` downloads, the index or `bin`; `min_idle_for: 1h` | `delete` |
 | python / js | `node-gyp-headers`, `electron-download-cache` | development library only, pending Mark's admission (TASK-40): node-gyp's header versions `.cache/node-gyp/*` holding a regular `installVersion`, and @electron/get's download directories `.cache/electron/*` (one per URL hash), below a supplied home root; `min_idle_for: 1h` | `delete` |
 | python / js | `uv-cache`, `pnpm-store`, `yarn-cache` | the tool's cache dir (roots required); `uv-cache` and `pnpm-store` in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-360), `yarn-cache` development library only. `uv-cache` refuses checkouts but tolerates the empty `sdists-v*/.git` file every uv cache holds (`empty_checkout_markers`) | `command` (`uv cache clean`, `pnpm store prune`, `yarn cache clean`) |
-| python / js | `bun-cache` | `.bun/install/cache` or `.cache/.bun/install/cache` below a supplied home root | `delete` |
+| python / js | `bun-cache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-07, TASK-370): `.bun/install/cache` or `.cache/.bun/install/cache` below a supplied home root | `delete` |
 | python / js | `python-pycache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359): `__pycache__` directories at relative depths 1 through 5 below each supplied project root | `delete` |
 | python / js | `mypy-cache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359): `.mypy_cache` directories at relative depths 1 through 5 below each supplied project root, with a regular `CACHEDIR.TAG` file | `delete` |
 | python / js | `node-modules`, `python-venv` | `node_modules` directories beside a regular `package.json`, and `.venv` directories holding `pyvenv.cfg` beside a Python project manifest, at relative depths 1 through 5 below a supplied project or workspace root, with no hidden directory between the root and them (`find.exclude`: tool-managed installs such as `~/.npm/_npx`, editor extensions and `~/.cache` are not the user's projects), and inside no other dependency directory; `liveness_contract: node-project` or `python-project`, `min_idle_for: 30d`, judged by their project's activity ([Liveness contracts](#liveness-contracts)); `checkouts: refuse`. `python-venv` is in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359); `node-modules` is in the development library only (Mark held it, 2026-11-06, TASK-365; successor TASK-357) | `delete` |
 | python / js | `jest-cache` | Jest's default `jest_*` cache under `/tmp` or `/var/tmp`, including the temp-prefix v1 preset below | `jest --config '{}' --cacheDirectory '{path}' --clearCache` from the checked parent; Jest removes the measured directory itself |
 | python / js | `node-compile-cache` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-05, TASK-359): `node-compile-cache` under `/tmp`'s temp-prefix v1 preset | `delete` |
-| c / c++ | `cmake-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `CMakeCache.txt`, a direct `CMakeFiles/` directory, no `CMakeLists.txt` entry, and a surviving recorded CMake source ancestor; minimum 3-day idle age and `checkouts: refuse` | `delete` |
-| c / c++ | `meson-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `build.ninja`, a direct `meson-private/` directory containing regular `coredata.dat`, generated `meson-info/meson-info.json` recording this exact build directory and a surviving Meson source ancestor, and no `meson.build` entry; minimum 3-day idle age and `checkouts: refuse` | `delete` |
-| c / c++ | `autotools-build-anchored` | directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with regular `config.status`, `config.log`, and `Makefile`, status script recording this exact build directory and a surviving `configure.ac` source ancestor, and no `configure.ac` entry in the output; minimum 3-day idle age and `checkouts: refuse` | `delete` |
+| c / c++ | `cmake-build-anchored` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-07, TASK-370): directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `CMakeCache.txt`, a direct `CMakeFiles/` directory, no `CMakeLists.txt` entry, and a surviving recorded CMake source ancestor; minimum 3-day idle age and `checkouts: refuse`; never inside another build system's tree ([safety.md](safety.md#builds-inside-another-build-systems-tree)) | `delete` |
+| c / c++ | `meson-build-anchored` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-07, TASK-370): directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with a regular `build.ninja`, a direct `meson-private/` directory containing regular `coredata.dat`, generated `meson-info/meson-info.json` recording this exact build directory and a surviving Meson source ancestor, and no `meson.build` entry; minimum 3-day idle age and `checkouts: refuse`; never inside another build system's tree ([safety.md](safety.md#builds-inside-another-build-systems-tree)) | `delete` |
+| c / c++ | `autotools-build-anchored` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-07, TASK-370): directories of any name at relative depths 1 through 5 below a supplied project or workspace root, with regular `config.status`, `config.log`, and `Makefile`, status script recording this exact build directory and a surviving `configure.ac` source ancestor, and no `configure.ac` entry in the output; minimum 3-day idle age and `checkouts: refuse`; never inside another build system's tree ([safety.md](safety.md#builds-inside-another-build-systems-tree)) | `delete` |
 | embedded | `buildroot-output-anchored` | development library only, pending Mark's admission (TASK-101): Buildroot's in-tree `output/` through depth five below a supplied root, holding a regular `.br2-external.mk`, a direct `build/` and no `.config` entry, beside a Buildroot source that keeps regular `Config.in`, `Makefile`, `.config`, `package/Config.in` and `support/scripts/br2-external`; the generated file names no br2-external tree; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | embedded | `yocto-tmpdir-anchored` | development library only, pending Mark's admission (TASK-101): a Yocto TMPDIR of any name through depth five below a supplied root, whose `saved_tmpdir` records exactly its own path, with `abi_version` and a direct `stamps/`, beside a build directory that keeps regular `conf/local.conf` and `conf/bblayers.conf`; every layer `BBLAYERS` lists (literal absolute paths only) keeps `conf/layer.conf`; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | build | `bazel-output-base-anchored` | development library only, pending Mark's admission (TASK-101): Bazel output bases `_bazel_*/*` below a supplied output user root (by default `~/.cache/bazel`), excluding `_bazel_*/cache` and `_bazel_*/install`, holding `DO_NOT_BUILD_HERE` and a direct `execroot/`, whose recorded workspace survives on the same filesystem with `MODULE.bazel`, `REPO.bazel`, `WORKSPACE.bazel` or `WORKSPACE`; the workspace's `bazel-*` convenience symlinks are never followed; minimum 3-day idle age and `checkouts: refuse` | `delete` |
 | jvm | `gradle-caches`, `maven-repo` | planned: `~/.gradle/caches`, `~/.m2/repository` (roots required) | no verified whole-directory cleaner: Gradle maintains cache entries by retention after a build, while Maven's dependency purge applies only to a project's dependencies |
-| embedded | `west-build-anchored` | Zephyr `build/` dirs through depth five below supplied project roots; regular `CMakeCache.txt`, direct `zephyr/` directory, no `CMakeLists.txt` entry, surviving recorded CMake source ancestor under the root, and mandatory 3-day idle age | `delete` |
+| embedded | `west-build-anchored` | in the 0.2 catalog, not 0.1's (Mark, 2026-11-07, TASK-370): Zephyr `build/` dirs through depth five below supplied project roots; regular `CMakeCache.txt`, direct `zephyr/` directory, no `CMakeLists.txt` entry, surviving recorded CMake source ancestor under the root, and mandatory 3-day idle age; never inside another build system's tree ([safety.md](safety.md#builds-inside-another-build-systems-tree)) | `delete` |
 | embedded | `platformio-cache` | development library only (left out of 0.2, TASK-360): `.platformio/.cache` below a supplied home root; PlatformIO's default `core_dir/.cache` | `pio system prune --cache --force` with `PLATFORMIO_CACHE_DIR=.cache`, starting in the checked `.platformio` parent; PIO re-resolves the path as described in [safety.md](safety.md#command-actions) |
 | generic | `tmp-entry` | planned: top-level regular files and directories in `/tmp`, `/var/tmp`; a dormant process can use an entry without an observable descriptor or initial environment path | no safe action yet |
 | generic | `mktemp-dir` | planned: `tmp.*` directories under `/tmp`'s temp-prefix v1 preset; a live shell can use one as `TMPDIR` after exec, invisible to the process scan | no safe action yet |
@@ -2842,7 +2845,13 @@ name (e.g. `pytest-tmp-2`). An old name is never redefined; a new config
 `version` may retire it (using a retired name is then a load-time error). Narrowing is not safe either: a narrower profile protects
 less where it is used in `!profile:` or `protect`. Each built-in profile has
 a golden match set over fixtures; any change to it fails CI unless the
-profile was renamed.
+profile was renamed. Pending Mark's ruling (TASK-367): built-ins no
+tagged release has shipped have been narrowed under their names
+(`buildroot-output-anchored`, TASK-354; `cmake-build-anchored`,
+`meson-build-anchored`, `autotools-build-anchored` and
+`west-build-anchored`, TASK-367, before 0.2 admits them), as builtin.yaml's
+comments allow for never-released definitions; whether this rule allows
+that until a name's first tagged release is his to confirm.
 
 ### Liveness contracts
 
@@ -2902,10 +2911,10 @@ package itself.
 | `python-pycache` | CPython 3.13.15 (importlib); CPython 3.14.7 and pytest 9.1.1's assertion rewriting in the container (TASK-350: a Python whose bytecode is reclaimed while it runs imports another module and caches it again) | consumer tolerance: a missing or stale `.pyc` is recompiled from its source, a failed bytecode write is ignored, and a `.pyc` in `__pycache__` is never imported without its source (PEP 3147), so the directory never holds code Python would import | tolerant | Recompilation on the next import; a read-only tree stays uncached (time only). A `__pycache__` whose `.pyc` files are tracked in Git (seen on the development host, 2026-11-05, some with no source beside them) is deleted too: `git status` then shows them deleted, recoverable from Git; an untracked `.pyc` whose source is gone would be the only copy of that compiled code. | Shipped; in the 0.2 catalog, not 0.1's (admitted by Mark, 2026-11-05, TASK-359, with the tracked-bytecode residual; a narrower successor is TASK-358's). Container tests: `python_pycache_real_imports_reclaim_then_a_live_importer_recompiles` and, through the gate-lifted package, `release_candidate_python_pycache_reclaim_then_a_live_importer_recompiles`; `candidate_catalog_project_tree_family_matches_the_development_build`. |
 | `mypy-cache` | mypy 1.11.2 (cache layout); write paths read in mypy 1.9.0's source (TASK-122), not re-read for 1.11.2; mypy 2.1.0 in the container (TASK-350): its default cache is SQLite shards `<python version>/cache.N.db` behind `CACHEDIR.TAG`, every one of which a run was seen holding open while it parses a module | in use; consumer tolerance between runs: a module whose cache entry is missing is checked again; `CACHEDIR.TAG` required | verified heuristic | The next run is a full check (time). A run whose cache directory disappears while it writes stops with mypy's blocking "Error writing plugins snapshot" or fine-grained dependency error (read for 1.x's JSON cache; 2.1.0 with `sqlite_cache = false` not tested): one failed, retryable run (the in-use scan sees the run only while it holds a file there). With mypy 2.1.0's default SQLite cache a run was seen holding every shard open while it parses (container test), so the in-use scan sees it then; whether it holds them through its whole write phase was not tested. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), ratified by Mark, 2026-11-05 (TASK-359), with the residuals named here: tolerant between runs, not for a run in flight. In the 0.2 catalog, not 0.1's (admitted by Mark, 2026-11-05, TASK-359). Vector: `mypy-cache-run-in-flight-residual`. Container tests: `mypy_cache_real_mypy_reclaim_then_recheck_and_a_run_in_flight_is_kept` and, through the gate-lifted package, `release_candidate_mypy_cache_reclaim_and_a_run_in_flight_is_kept`; `candidate_catalog_project_tree_family_matches_the_development_build`. |
 | `node-compile-cache` | Node.js 24.21.0 (probe, TASK-122: a cold cache, a warm cache with hits, the directory renamed away mid-run and a path below a regular file all exit 0; the mid-run write fails with "no such file or directory" and is ignored); the same Node in the container (TASK-350: caches of `module.enableCompileCache()` under `/tmp` and a `nix-shell.*` `TMPDIR`; a Node whose cache is reclaimed while it runs loads another module and exits 0) | consumer tolerance: entries are keyed by Node version and content hash, and every read or write failure is a miss | tolerant | Recompilation on the next start (time only). | Shipped; in the 0.2 catalog, not 0.1's (admitted by Mark, 2026-11-05, TASK-359). Container tests: `node_compile_cache_real_node_reclaim_then_a_live_process_recompiles` and, through the gate-lifted package, `release_candidate_node_compile_cache_reclaim_then_a_live_process_recompiles`; `candidate_catalog_project_tree_family_matches_the_development_build`. |
-| `nix-user-cache` | Nix 2.34.8 (probe, TASK-122, private `XDG_CACHE_HOME`: `tarball-cache-v2` moved away while `fetcher-cache-v4.sqlite` stayed; `fetchTarball` over HTTP downloaded again and returned the same store path, exit 0). Nix 2.34.9 in the Nix container (TASK-352, a local store below the home): `fetchGit` of a dumb-HTTP repository, `fetchTarball` and a flake attribute fill `gitv3`, `tarball-cache-v2` and `eval-cache-v6`; after their reclaim the same commands fill them again (`fetcher-cache-v4.sqlite` stays); a `fetchGit` in flight holds `gitv3/HASH.lock` open and runs Git with its working directory in `gitv3/HASH`. On the development host (2026-11-06) `eval-cache-v6` and `tarball-cache-v2` had changed minutes before a dry run: in use between evaluations, with no floor | in use (a reading process maps the Git cache's pack files); consumer tolerance between runs: Nix refetches or re-evaluates what its cache lacks | verified heuristic | A process between two reads of a Git cache can fail once (retryable). Refetching needs the network, so an offline build fails until the cache is repopulated. Not rebuildable: a source whose upstream is gone and whose store path was collected is lost with its cache copy. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: the lost-upstream residual is a dated exception (safety.md, Producer liveness). Vector: `nix-user-cache-mapped-pack-in-use-and-run-between-reads-residual`. Container tests: `nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_flight_is_kept` (a fetch in flight kept `in_use`, `cwd`), `candidate_catalog_runtime_cache_family_matches_the_development_build` (TASK-352). In no release catalog: Mark's decision. |
-| `go-mod-cache` | Go 1.26.7 (`go env GOMODCACHE`; Go's own `go clean -modcache` removes the same whole directory); Go 1.26.8 in the Nix container (TASK-352): a build downloads modules from a `GOPROXY` into read-only directories (reclaimed with `make_writable`) and downloads them again; the go command passes `GOMODCACHE` to every tool it runs, so a build in flight holds no file there but its compile names the cache in its initial environment | in use (for a build in flight, its subprocesses' initial environment); consumer tolerance between runs: a missing module is downloaded again and checked against `go.sum` | verified heuristic | A build reading module sources while they are deleted can fail once (retryable): the go command alone, between its subprocesses, names nothing (not reproduced). Needs the network: `GOPROXY=off` or offline builds fail until re-download. Not rebuildable: a module version neither the proxy nor its origin still serves. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: the unserved-module residual is a dated exception (safety.md, Producer liveness). Vector: `go-mod-cache-build-in-flight-residual`. Container tests: `go_mod_cache_real_go_downloads_reclaim_then_redownload_and_a_build_in_flight_is_kept` (`GOPROXY=off` fails after the reclaim), `candidate_catalog_runtime_cache_family_matches_the_development_build` (TASK-352). In no release catalog: Mark's decision. |
-| `bun-cache` | Bun 1.3.3 (`bun pm cache`; Bun's own `bun pm cache rm` removes the same whole directory); Bun 1.4.2 in the Nix container (TASK-352): installs from a local registry fill both matched paths (the second through `BUN_INSTALL_CACHE_DIR`), hardlinked into `node_modules`, which still load after the reclaim; an install in flight holds the cache directory and its `.tmp` open. The symlink backend not probed | in use; consumer tolerance between runs: an install hardlinks or copies from the cache (Linux default), so installed `node_modules` keep their data; a missing package is downloaded again | verified heuristic | An install in flight can fail once (retryable). Needs the network. Projects installed with the non-default `--backend=symlink` point into the cache and break until reinstalled. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: the backend claim is unprobed. Vector: `bun-cache-symlink-backend-and-install-in-flight-residual`. Container tests: `bun_cache_real_bun_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept` (an install in flight kept `in_use`, `fd`), `candidate_catalog_runtime_cache_family_matches_the_development_build` (TASK-352). In no release catalog: Mark's decision. |
-| `cmake-build-anchored`, `meson-build-anchored`, `autotools-build-anchored`, `west-build-anchored` | CMake 3.30.5 (development host), and in the Nix container (TASK-354) CMake 4.4.3 with Ninja 1.13.2 and GNU Make 4.4.1, Meson 1.12.1, GNU Autoconf 2.73, West 1.5.0 with Zephyr 4.3.0 build directories; the producer (`cmake --build`, `ninja`, `make`, `west build`) runs with the build directory as its working directory for the whole build | in use (a running build's cwd, a running built program's executable or mappings), `min_idle_for: 3d`, the recorded source survives (source anchor), `checkouts: refuse` | verified heuristic | (1) Configure choices kept only in the build directory (`CMakeCache.txt` `-D` values, Meson options, `./configure` arguments in `config.status`) must be entered again. (2) Files a user put in a build directory by hand are deleted with it: a user's own work, outside the rule's loss bound (vector `cmake-build-anchored-hand-placed-file-residual`). (3) A dormant IDE or debugger configured on the directory finds it gone and rebuilds. (4) Pending Mark's decision (TASK-354), not covered by the admission above: a package build inside another build system's own tree matches within depth five when it is out of source with its source as parent: in OpenWrt's `build_dir` (meson.mk's `openwrt-build`, every Meson package; CMake packages that set `CMAKE_BINARY_SUBDIR`) and in Buildroot's `output/build/<pkg>/buildroot-build` (pkg-meson.mk always; pkg-cmake.mk without in-source builds). That build system's stamps still say the package is built; from pkg-cmake.mk, pkg-meson.mk and OpenWrt's include/*.mk, its next rebuild of the package fails until it is reconfigured or cleaned (`<pkg>-reconfigure`, `<pkg>-dirclean`, `make package/<pkg>/clean`), not reproduced. Matched in the container tests (OpenWrt's layout, a Buildroot output), not on the development host. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122). Residuals (1) and (2) fall under the dated exception in safety.md (Source-anchored CMake output); remedy `.diskgc-keep` or `protect`. Vectors: `cmake-build-anchored-hand-placed-file-residual`, `cmake-build-anchored-configure-choices-and-dormant-ide-residual`. Container tests: `cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_build_in_flight_is_kept`, `meson_build_anchored_real_meson_builds_reclaim_then_reconfigure_and_a_ninja_in_flight_is_kept`, `autotools_build_anchored_real_configure_builds_reclaim_then_reconfigure_and_a_make_in_flight_is_kept`, `west_build_anchored_real_west_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept`, `candidate_catalog_build_output_family_matches_the_development_build` (TASK-354: a build in flight keeps its output `in_use` by its working directory; the tool rebuilds the reclaimed output). |
+| `nix-user-cache` | Nix 2.34.8 (probe, TASK-122, private `XDG_CACHE_HOME`: `tarball-cache-v2` moved away while `fetcher-cache-v4.sqlite` stayed; `fetchTarball` over HTTP downloaded again and returned the same store path, exit 0). Nix 2.34.9 in the Nix container (TASK-352, a local store below the home): `fetchGit` of a dumb-HTTP repository, `fetchTarball` and a flake attribute fill `gitv3`, `tarball-cache-v2` and `eval-cache-v6`; after their reclaim the same commands fill them again (`fetcher-cache-v4.sqlite` stays); a `fetchGit` in flight holds `gitv3/HASH.lock` open and runs Git with its working directory in `gitv3/HASH`. On the development host (2026-11-06) `eval-cache-v6` and `tarball-cache-v2` had changed minutes before a dry run: in use between evaluations, with no floor | in use (a reading process maps the Git cache's pack files); consumer tolerance between runs: Nix refetches or re-evaluates what its cache lacks | verified heuristic | A process between two reads of a Git cache can fail once (retryable). Refetching needs the network, so an offline build fails until the cache is repopulated. Not rebuildable: a source whose upstream is gone and whose store path was collected is lost with its cache copy. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: the lost-upstream residual is a dated exception (safety.md, Producer liveness). Vector: `nix-user-cache-mapped-pack-in-use-and-run-between-reads-residual`. Container tests: `nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_flight_is_kept` (a fetch in flight kept `in_use`, `cwd`), `candidate_catalog_runtime_cache_family_matches_the_development_build` (TASK-352). In the 0.2 catalog, not 0.1's (Mark, 2026-11-07, TASK-370: "go-mod, bun, nix-user"); through the release-candidate package: `release_candidate_nix_user_cache_reclaim_then_refetch_and_a_fetch_in_flight_is_kept`. |
+| `go-mod-cache` | Go 1.26.7 (`go env GOMODCACHE`; Go's own `go clean -modcache` removes the same whole directory); Go 1.26.8 in the Nix container (TASK-352): a build downloads modules from a `GOPROXY` into read-only directories (reclaimed with `make_writable`) and downloads them again; the go command passes `GOMODCACHE` to every tool it runs, so a build in flight holds no file there but its compile names the cache in its initial environment | in use (for a build in flight, its subprocesses' initial environment); consumer tolerance between runs: a missing module is downloaded again and checked against `go.sum` | verified heuristic | A build reading module sources while they are deleted can fail once (retryable): the go command alone, between its subprocesses, names nothing (not reproduced). Needs the network: `GOPROXY=off` or offline builds fail until re-download. Not rebuildable: a module version neither the proxy nor its origin still serves. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: the unserved-module residual is a dated exception (safety.md, Producer liveness). Vector: `go-mod-cache-build-in-flight-residual`. Container tests: `go_mod_cache_real_go_downloads_reclaim_then_redownload_and_a_build_in_flight_is_kept` (`GOPROXY=off` fails after the reclaim), `candidate_catalog_runtime_cache_family_matches_the_development_build` (TASK-352). In the 0.2 catalog, not 0.1's (Mark, 2026-11-07, TASK-370: "go-mod, bun, nix-user"; its `make_writable` delete is kind `fs`'s own action, which 0.2 admits); through the release-candidate package: `release_candidate_go_mod_cache_reclaim_then_redownload_and_a_build_in_flight_is_kept`. |
+| `bun-cache` | Bun 1.3.3 (`bun pm cache`; Bun's own `bun pm cache rm` removes the same whole directory); Bun 1.4.2 in the Nix container (TASK-352): installs from a local registry fill both matched paths (the second through `BUN_INSTALL_CACHE_DIR`), hardlinked into `node_modules`, which still load after the reclaim; an install in flight holds the cache directory and its `.tmp` open. The symlink backend not probed | in use; consumer tolerance between runs: an install hardlinks or copies from the cache (Linux default), so installed `node_modules` keep their data; a missing package is downloaded again | verified heuristic | An install in flight can fail once (retryable). Needs the network. Projects installed with the non-default `--backend=symlink` point into the cache and break until reinstalled. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122), with the residuals named here: the backend claim is unprobed. Vector: `bun-cache-symlink-backend-and-install-in-flight-residual`. Container tests: `bun_cache_real_bun_installs_reclaim_then_refetch_and_an_install_in_flight_is_kept` (an install in flight kept `in_use`, `fd`), `candidate_catalog_runtime_cache_family_matches_the_development_build` (TASK-352). In the 0.2 catalog, not 0.1's (Mark, 2026-11-07, TASK-370: "go-mod, bun, nix-user"); through the release-candidate package: `release_candidate_bun_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept`. |
+| `cmake-build-anchored`, `meson-build-anchored`, `autotools-build-anchored`, `west-build-anchored` | CMake 3.30.5 (development host), and in the Nix container (TASK-354) CMake 4.4.3 with Ninja 1.13.2 and GNU Make 4.4.1, Meson 1.12.1, GNU Autoconf 2.73, West 1.5.0 with Zephyr 4.3.0 build directories; the producer (`cmake --build`, `ninja`, `make`, `west build`) runs with the build directory as its working directory for the whole build | in use (a running build's cwd, a running built program's executable or mappings), `min_idle_for: 3d`, the recorded source survives (source anchor), `checkouts: refuse` | verified heuristic | (1) Configure choices kept only in the build directory (`CMakeCache.txt` `-D` values, Meson options, `./configure` arguments in `config.status`) must be entered again. (2) Files a user put in a build directory by hand are deleted with it: a user's own work, outside the rule's loss bound (vector `cmake-build-anchored-hand-placed-file-residual`). (3) A dormant IDE or debugger configured on the directory finds it gone and rebuilds. (4) Package builds inside another build system's tree are not taken (TASK-367, Mark 2026-11-07; [safety.md](safety.md#builds-inside-another-build-systems-tree)): one near Buildroot's or OpenWrt's stamps (the parent and the three directories above it or above any build directory it lies in, whatever the roots), one below a Buildroot output, Yocto TMPDIR or Bazel output base, and one below npm's `node_modules` (a cmake-js addon). Outside that guard: a meta-build system or package manager it does not know (dpkg-buildpackage, Spack, conda-build, a build below a Python `.venv`), stamps further up, and a build root reached through a bind mount; there the outer system's next rebuild of the package fails until it is cleaned. | Shipped, admitted by mark-emulator for Mark, 2026-10-24 (TASK-122). Residuals (1) and (2) fall under the dated exception in safety.md (Source-anchored CMake output); remedy `.diskgc-keep` or `protect`. Vectors: `cmake-build-anchored-hand-placed-file-residual`, `cmake-build-anchored-configure-choices-and-dormant-ide-residual`. Container tests: `cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_build_in_flight_is_kept`, `meson_build_anchored_real_meson_builds_reclaim_then_reconfigure_and_a_ninja_in_flight_is_kept`, `autotools_build_anchored_real_configure_builds_reclaim_then_reconfigure_and_a_make_in_flight_is_kept`, `west_build_anchored_real_west_builds_reclaim_then_rebuild_and_a_build_in_flight_is_kept`, `candidate_catalog_build_output_family_matches_the_development_build` (TASK-354: a build in flight keeps its output `in_use` by its working directory; the tool rebuilds the reclaimed output). In the 0.2 catalog, not 0.1's (Mark, 2026-11-07, TASK-370: "autotools, west"; cmake and meson with TASK-367's nested-build guard, his option "1"). Through the release-candidate package, the keep side of the three-day floor only (it reads no clock offset): `release_candidate_build_outputs_keep_builds_inside_the_3_day_floor` (CMake, Meson, Autotools, and an OpenWrt package build never planned), `release_candidate_west_build_keeps_a_build_inside_the_3_day_floor` (full suite only). |
 | `buildroot-output-anchored` | Buildroot (master `Makefile`: `CONFIG_DIR` is the source top for the default `O=output` and the output itself otherwise; `support/scripts/br2-external` writes `.br2-external.mk`; sources read 2026-11-03; no Buildroot tree on the development host) | in use, `min_idle_for: 3d`, the Buildroot source with its `.config` survives and the output names no br2-external tree (source anchor `buildroot`), `checkouts: refuse` | verified heuristic | (1) `output/images` is deleted with the rest; it is rebuilt from the surviving source and `.config` at full-build cost, but an image built from an older source revision needs that revision. (2) Edits made directly in `output/build/<package>` (instead of `<PKG>_OVERRIDE_SRCDIR`) are lost: the user's own work; so is a configuration changed with `linux-menuconfig`, `busybox-menuconfig` and the like and not saved with their `update-defconfig` or `update-config` targets. (3) A source tarball missing from `dl/` is downloaded again, and one its upstream no longer serves fails the rebuild. (4) Buildroot runs its recipes from the top directory: a build is seen only through its recipe shells' exported `BASE_DIR`, `HOST_DIR` and the like (`environment`); while Make reads its makefiles (it runs the compiler then, to probe it: seen in the container, TASK-354) and between two steps, Make and its `$(shell)` children name nothing in `output/`, so a reclaim in that window deletes the output under a live build: a failed or full rebuild (not reproduced). | Decision pending (Mark's admission, TASK-101, including residual 2): in no catalog. Container tests: `buildroot_output_anchored_real_buildroot_reclaim_then_rebuild_and_a_build_in_flight_is_kept`, `candidate_catalog_build_output_family_matches_the_development_build` (TASK-354: Buildroot 2026.08.1 `defconfig` and local host packages; a recipe step in flight kept `in_use` by `BASE_DIR`). Vectors: `buildroot-output-anchored` (builtins). |
 | `yocto-tmpdir-anchored` | BitBake with OpenEmbedded-Core (master `meta/lib/oe/sanity.py`: `saved_tmpdir` holds TMPDIR's path and a moved TMPDIR is refused, "delete it and rebuild"; `abi_version`; `bblayers.conf.sample`; sources read 2026-11-03; no Yocto tree on the development host) | in use (a running task's cwd, open files, mappings), `min_idle_for: 3d`, the build directory's `conf/` and every listed layer survive (source anchor `yocto`), `checkouts: refuse` | verified heuristic | (1) Images and packages in `tmp/deploy` are deleted; they are rebuilt from the shared-state cache (outside TMPDIR) or from source, but an image of an older layer revision needs that revision. (2) Edits made in `tmp/work` (a `devshell` session) and a configuration changed with `bitbake -c menuconfig` and not saved with `diffconfig` or `savedefconfig` are lost: the user's own work; `devtool`'s workspace lies outside TMPDIR. (3) The fetcher's git clones (`S = "${WORKDIR}/git"`) put `.git` in most real TMPDIRs, so `checkouts: refuse` keeps them; `profile_policies` `checkouts: allow` reclaims them at the cost of (2); seen with BitBake 2.20.0's Git fetcher in the container (TASK-354). | Decision pending (Mark's admission, TASK-101, including residual 2): in no catalog. Container tests: `yocto_tmpdir_anchored_real_bitbake_reclaim_then_rebuild_and_a_task_in_flight_is_kept`, `candidate_catalog_build_output_family_matches_the_development_build` (TASK-354: BitBake 2.20.0 with OE-Core yocto-6.1 run to a task after `do_unpack`, offline; a task in flight keeps TMPDIR by the FIFO BitBake makes in its `temp/` (`contains_ipc`), its working directory in `tmp/work` behind that). Vectors: `yocto-tmpdir-anchored` (builtins). |
 | `bazel-output-base-anchored` | Bazel (master `BlazeWorkspace.java`: the output base's `README` and `DO_NOT_BUILD_HERE` record the workspace path; `bazel clean --expunge` removes the same directory; source read 2026-11-03; no Bazel output base on the development host) | in use (a running server holds its `java.log` and server files open), `min_idle_for: 3d`, the recorded workspace survives with a boundary file (source anchor `bazel`), `checkouts: refuse` | verified heuristic | (1) Repositories in `external/` are fetched again; the repository cache (`_bazel_*/cache`, excluded) keeps content-addressed downloads, and an upstream that no longer serves one fails the rebuild. (2) The workspace's `bazel-*` convenience links dangle until the next build. (3) A `git_repository` clone in `external/` makes the checkout guard keep the whole output base. (4) The output base of a Git workspace is always kept (`contains_checkout`): the execroot links every top-level entry of the workspace, `.git` included, and the guard counts a symlink named `.git` as a checkout (TASK-331, confirmed with Bazel 7.6.0, TASK-354); `checkouts: allow` reclaims it, and with it (3). | Decision pending (Mark's admission, TASK-101): in no catalog. Container tests: `bazel_output_base_anchored_real_bazel_reclaim_then_rebuild_and_a_live_server_is_kept`, `candidate_catalog_build_output_family_matches_the_development_build` (TASK-354: Bazel 7.6.0 genrules in WORKSPACE mode; an idle server and a build in flight keep their output bases `in_use`). Vectors: `bazel-output-base-anchored` (builtins). |
@@ -2933,8 +2942,9 @@ package itself.
 
 ### Release notes (next release, draft)
 
-**Status: draft** for the release after 0.1.0, whose scope is not decided
-(TASK-276). This describes the `release-candidate` package as master
+**Status: draft** for 0.2, whose scope Mark decided in TASK-276 (the
+descriptor's 0.2 row with a reclaiming `watch`, 2026-11-05; the NixOS
+module, 2026-11-06). This describes the `release-candidate` package as master
 builds it ([Built-in profile library](#built-in-profile-library)): the
 package ships this section as `RELEASE-NOTES.md`, under a header that
 lists what it runs and installs. 0.1.0's own notes are frozen at its tag
@@ -3109,9 +3119,12 @@ line says it was reproduced.
   not a tagged release (`diskgc 0.2.0-dev (COMMIT)`). 0.1.0: not
   affected; it is the tag and prints `diskgc 0.1.0`.
 - TASK-289: the package ships the two `watch` unit templates (Install,
-  item 5) for `watch --tally-only` instances, and `--help` shows only the
-  commands this package runs. 0.1.0: not affected; it ran no `watch` and
-  shipped no templates.
+  item 5), and `--help` shows only the commands this package runs.
+  0.1.0: not affected; it ran no `watch` and shipped no templates.
+- TASK-362: the package runs `watch`, reclaiming and `--tally-only`
+  (What it does; its limits under Known limits), and the flake's NixOS
+  module ships with it (Install, item 6). 0.1.0: not affected; it ran no
+  `watch` and had no module.
 - TASK-335: the catalog adds `nix-garbage`, a garbage collection of the
   system Nix store (What it does; its limits under Known limits). 0.1.0:
   not affected; it shipped no Nix kind.
@@ -3126,6 +3139,16 @@ line says it was reproduced.
   The checkout guard tolerates the empty `sdists-v*/.git` file every uv
   cache holds, and only that. 0.1.0: not affected; it ran no command
   action.
+- TASK-370: the catalog adds three caches deleted whole, `go-mod-cache`,
+  `bun-cache` and `nix-user-cache`, and four build-output sources,
+  `cmake-build-anchored`, `meson-build-anchored`,
+  `autotools-build-anchored` and `west-build-anchored` (What it does;
+  their limits under Known limits). TASK-367: those four, and any
+  other source selected with one of them, never take a build directory
+  they recognise as inside another build system's tree
+  (near Buildroot's or OpenWrt's stamps, or below a Buildroot output,
+  Yocto TMPDIR, Bazel output base or npm's `node_modules`). 0.1.0: not
+  affected; it shipped none of them.
 - TASK-291: a command line that is not understood (a mistyped flag) is
   exit 2 naming it before anything on the machine is read, as TASK-272
   made a bad configuration. 0.1.0: yes; it ran the host's startup first,
@@ -3179,8 +3202,8 @@ line says it was reproduced.
   lasting cause, or one stuck for 30 s, still keeps every project. 0.1.0:
   no (it has no project contracts).
 
-**What it does.** One command frees space, a service keeps its index
-warm, two read-only ones explain it:
+**What it does.** One command frees space once, a service keeps it
+free, two read-only ones explain it:
 
 - `diskgc ensure --min-free SIZE PATH` brings the filesystem of `PATH` up
   to a free-space goal, once, and exits with a code a CI pre-job hook or
@@ -3192,11 +3215,23 @@ warm, two read-only ones explain it:
   synchronous tally, bounded by `--tally-budget`) and saves that index as
   a snapshot in the user's state directory, which its next run starts
   from; `--no-index` neither reads nor writes it ([`ensure`](#ensure)).
-  `diskgc watch --tally-only PATH` keeps the snapshot warm as a service
-  and never deletes ([Tally only](#tally-only); Install, item 5).
+- `diskgc watch --min-free SIZE --target-free SIZE PATH` (new in 0.2) is
+  the long-running form of `ensure`, run as a service (Install, items 5
+  and 6): it samples `PATH`'s filesystem every `--interval` (default
+  `10s`), and when available space falls below `--min-free` it runs one
+  reclaim cycle, the same walk with the same checks as `ensure`, up to
+  `--target-free`; between the two it deletes nothing. Each cycle has its
+  own cooperative `--timeout` (default `10m`) and backs off after a cycle
+  that ends below `--min-free` (a minute, doubling, after one the host
+  may recover from; 15 minutes after one that took everything it could).
+  A background tally at idle priority keeps its index warm and writes the
+  snapshot `ensure` starts from. It stops on SIGTERM, SIGINT or SIGHUP
+  with exit 0; with `--json` it writes one JSON line per cycle
+  ([`watch`](#watch)). `diskgc watch --tally-only PATH` only keeps the
+  snapshot warm and never deletes ([Tally only](#tally-only)).
 - `diskgc check` validates a configuration without touching the machine;
   `diskgc profiles list|show|test` shows the built-in catalog.
-- The catalog is thirteen sources and the seven idle filters (`idle-1h` to
+- The catalog is twenty sources and the seven idle filters (`idle-1h` to
   `idle-30d`): `cargo-target` (Cargo `target/` directories under supplied
   roots, reclaimed by Cargo's lock protocol), `nix-shell-rc` (rc
   directories of ended `nix-shell` and `nix develop` shells directly in
@@ -3230,18 +3265,38 @@ warm, two read-only ones explain it:
   cleaner must be on `PATH`: a tier whose tool is not installed is
   skipped (`missing`), and whatever version is first on `PATH` runs
   (diskgc checks no version). Like every command action, never as root.
-  `nix-shell-rc` and
+  Also new in 0.2, three caches diskgc deletes whole, each below a
+  supplied home root: `go-mod-cache` (Go's module cache `go/pkg/mod`,
+  whose read-only directories diskgc makes writable to delete them),
+  `bun-cache` (`.bun/install/cache`, or `.cache/.bun/install/cache`) and
+  `nix-user-cache` (Nix's Git, tarball and evaluation caches in
+  `.cache/nix`); the tool downloads or evaluates again what it misses.
+  And four kinds of build directory, through five levels below a
+  supplied project root, each only while the source it was configured
+  from still exists above it, and not one diskgc recognises as inside
+  another build system's tree (a Buildroot, OpenWrt or Yocto package
+  build, a Bazel output base, an addon in npm's `node_modules`; Known
+  limits names the rest):
+  `cmake-build-anchored` (a CMake build directory of any name),
+  `meson-build-anchored` (a Meson build directory),
+  `autotools-build-anchored` (an out-of-source `configure` build) and
+  `west-build-anchored` (a Zephyr `build/` directory). `nix-shell-rc` and
   `pytest-tmp` keep anything changed in the last hour (`min_idle_for:
-  1h`); the limits of each source are its row in
-  [Liveness contracts](#liveness-contracts), and those of `nix-garbage`
-  and the project-tree sources also under Known limits. Select
+  1h`), the four build sources anything changed in the last three days
+  (`min_idle_for: 3d`); the three caches have no such floor. The limits
+  of each source are its row in
+  [Liveness contracts](#liveness-contracts), and those of `nix-garbage`,
+  the project-tree sources and the 0.2 caches and builds also under
+  Known limits. Select
   `nix-garbage` on its own (`--select profile:nix-garbage /nix/store`, or
   a tier of its own): it takes no filter and needs no `--roots`. The
   project-tree sources but `node-compile-cache` need the directories to
   look in, as `--roots` or a tier's `roots:` (your projects' parent, such
   as `--select profile:python-venv --roots ~/src ~`); the cache sources
   need the home directory as their root (`--select
-  profile:uv-cache --roots ~ ~`). A configuration may
+  profile:uv-cache --roots ~ ~`), the build sources the directories
+  holding your projects (`--select profile:cmake-build-anchored --roots
+  ~/src ~`). A configuration may
   use `profile_policies` only to narrow a built-in's checkout guard; user
   profiles and overrides are refused.
 
@@ -3272,10 +3327,25 @@ warm, two read-only ones explain it:
 5. `lib/systemd/user/diskgc-watch@.service` and
    `lib/systemd/system/diskgc-watch@.service`, the `watch` unit
    templates, one instance per filesystem
-   ([Watch as a systemd service](#watch-as-a-systemd-service)). Where this
-   package runs no reclaiming `watch` (its header says), an instance's
-   environment file needs `--tally-only` (`DISKGC_WATCH_ARGS=--tally-only
-   --min-free 50G`); a reclaiming one exits 2 at start and stays failed.
+   ([Watch as a systemd service](#watch-as-a-systemd-service)): the
+   thresholds go in the instance's environment file
+   (`DISKGC_WATCH_ARGS=--min-free 30G --target-free 60G`; a CI runner's
+   warm index, `--tally-only --min-free 50G`). The user template needs
+   no root; the system template needs the host lock (item 2) and a
+   `User=` drop-in. `Restart=always` restarts an instance 30 s after any
+   end but `systemctl stop` (a SIGHUP applies an edited configuration
+   that way), except exit 2, a refusal at start, which stays failed;
+   diskgc's message is in the journal (`systemctl status` usually shows
+   it; a process that exits at once can lose its unit field to a
+   journald race, measured in the VM test).
+6. On NixOS, the flake's `nixosModules.default` (`services.diskgc`) at
+   this release's tag, whose default `package` is this package: it
+   renders the configuration, checks it with this binary's `diskgc check`
+   when the system is built (so a profile or tier 0.2 refuses fails the
+   build), provisions the host lock and starts the instances (its
+   options: the source tree's docs/architecture.md, NixOS module). From
+   master the
+   module's default is the development package, which does not delete.
 
 Start with a dry run (`diskgc ensure --dry-run --min-free 50G PATH`); it
 reads only and lists what a reclaim would take and why the rest is kept.
@@ -3483,6 +3553,75 @@ skips it as `locked` while such a build runs ([safety.md](safety.md),
 - **`ccache`.** The next compiles miss and run the compiler again (time).
   Both `~/.cache/ccache` and `~/.ccache` are found. Remote or secondary
   storage was not tested.
+- **`watch`.** It protects against running out only as fast as it
+  samples and reclaims: a burst that writes more than the gap below
+  `--min-free` within one `--interval` plus the slowest tier fills the
+  disk anyway, so leave that gap above write rate × (interval + slowest
+  tier). It reads its configuration once: an edit takes effect at a
+  restart (`systemctl restart`, or a SIGHUP under `Restart=always`, 30 s
+  later). One `watch` per filesystem and state directory: a second exits
+  2. A cycle on a busy host waits holding the host lock (the background
+  tally paused) until the host settles or the cycle's `--timeout`; an
+  `ensure` meanwhile waits for the lock and can exit 75, and a cycle
+  waiting behind another reclaim for longer than its `--timeout` ends
+  `lock_timeout`; either ends in a `retry` back-off of 1, 2, 4, 8 minutes
+  (at most 15), so the next cycle comes later, not sooner. After a cycle
+  that took everything it could (`exhausted`), the next waits 15 minutes,
+  or until available space falls by `max(1 GiB, 1 %)` more (tentative
+  constants: [The reclaim cycle](#the-reclaim-cycle)). Percentages
+  are resolved against the filesystem's size at start. The background
+  tally's pressure brake needs the kernel's PSI and reacts to its
+  10-second average; it does not limit the reclaim itself, which runs at
+  the unit's priority. A failed write of a `--json` record ends `watch`
+  with exit 3 (the unit restarts it). Not shown by a test yet: a
+  root instance (`--allow-root`) that reclaims (its capability set is
+  only checked to be applied), a `watch` cycle running the Nix GC, and a
+  watcher's memory over days (TASK-134).
+- **`go-mod-cache`, `bun-cache` and `nix-user-cache`** are deleted whole,
+  with no age floor: a cache the tool used a minute ago is a candidate.
+  diskgc keeps one while a process it can see holds a file in it or, for
+  Go, names it in its starting environment (a `go build` in flight), but
+  a tool between two reads can fail once (retry it). Each tool fetches
+  again what it misses, so a build afterwards needs the network (Go with
+  `GOPROXY=off` and offline Nix builds fail until it is back), and a
+  module, package or source its upstream no longer serves is lost with
+  the cache. A cache at a non-default place (`GOMODCACHE`,
+  `BUN_INSTALL_CACHE_DIR` outside `.cache/.bun`, `XDG_CACHE_HOME`) is
+  not found.
+- **`go-mod-cache`.** Go makes its module directories read-only; diskgc
+  adds write permission to each directory as it deletes it, only inside
+  the cache it checked.
+- **`bun-cache`.** Projects installed with `bun install
+  --backend=symlink` point into the cache and break until reinstalled;
+  the default (hardlinks or copies) keeps installed packages.
+- **`nix-user-cache`.** Nix uses these caches between evaluations
+  without holding a file open (seen: an evaluation cache changed minutes
+  before a dry run), and nothing keeps a recently used cache: the next
+  `nix` command fetches or evaluates again (time and network). It is
+  not the Nix store; use `nix-garbage` for that.
+- **The four build sources** (`cmake-build-anchored`,
+  `meson-build-anchored`, `autotools-build-anchored`,
+  `west-build-anchored`). A build directory unchanged for three days is
+  deleted whole once its source is found above it, including what only
+  it held: configure choices (`-D` values, Meson options, `./configure`
+  arguments), which you must enter again, and files you put there by
+  hand. Keep such a directory with a `.diskgc-keep` file in it or a
+  `protect` entry. A build in progress is kept while a process it runs
+  has its working directory or a file there; an IDE or debugger
+  configured on the directory but not running finds it gone. diskgc
+  checks that the source's build description still exists, not that
+  every dependency can still be fetched. A build inside another build
+  system's tree is not taken when Buildroot's or OpenWrt's stamps are in
+  its parent or the three directories above it, or above any build
+  directory it lies in, when a Buildroot output, Yocto TMPDIR or Bazel
+  output base lies above it, or when it is below npm's `node_modules` (a
+  cmake-js addon), whatever roots or `PATH` you give diskgc; a union
+  with another profile keeps such a build too. Other
+  systems' package builds (Debian's `dpkg-buildpackage`, Spack,
+  conda-build, a build below a Python `.venv`) are not recognised, nor a
+  build tree reached through a bind mount of a directory inside it, and
+  deleting such a build leaves that system believing the package is
+  built until you clean it there.
 - **Deadlines are cooperative.** `--timeout` is checked between
   operations; one filesystem operation blocked in the kernel (a dead
   network mount, a slow disk) overruns it, and the overrun is reported
@@ -3526,20 +3665,26 @@ string; `--select` runs are named `select`; `find.roots` is always a
 list, with `find.backend` beside it. Scripts match `status`, `cause`,
 `reason` and the exit code; message text and human output may change.
 `index` is still always `null` (0.1.0 had no index; this package has
-one, and the report's `index` block is still to come, TASK-244). The
+one, and the report's `index` block is still to come, TASK-244).
+`watch`'s JSON lines (one `ensure`-shaped record per cycle, plus its
+`watch` block: [Watch JSON lines](#watch-json-lines)), its exit codes and
+the module's options are new in 0.2, and their contract review is
+pending (Mark). The
 command-action and
 Docker parts of the profile schema stay provisional until the v1
 release review (task-49); the `nix-store` profile shape is final
 ([Profiles](#profiles)). `just docs-vs-binary BIN` runs what this
 reference documents against a build and reports any drift.
 
-**Not in the release catalog.** A reclaiming `watch` and `survey` (both
-exit 2; `watch --tally-only` runs), the Docker kinds, every command action
+**Not in the release catalog.** `survey` (exit 2), the Docker kinds, every command action
 but the four caches' cleaners (`npm-cache`, `go-build-cache`, `yarn-cache`,
 `platformio-cache` and `jest-cache` stay out, TASK-360; each one's reason
 is in its row of [Liveness contracts](#liveness-contracts)), user profiles and overrides, `ipc: live-only` in `ensure`, and every other
 built-in in the [library](#built-in-profile-library) (`node-modules`
-among them, held by Mark, TASK-365), including the other
+among them, held by Mark, TASK-365; and `huggingface-hub-repos`,
+`electron-download-cache`, `node-gyp-headers`, `cargo-registry-src`,
+`buildroot-output-anchored`, `yocto-tmpdir-anchored` and
+`bazel-output-base-anchored`, not admitted, TASK-370), including the other
 `/tmp` entries (`nix-shell.*` TMPDIRs themselves, `tmp.*`, anything
 else). The `docs/ci-pre-job.sh` example stays in the source tree; the
 package does not install it.
@@ -3548,12 +3693,16 @@ Evidence for the candidate package, and what it does not cover:
 
 | Candidate deployment question | Evidence and current limit |
 |---|---|
-| Package contents | The actual `release-candidate` derivation passes the static ELF and installed-file check (the binary is byte-identical to its compile; the file list is exactly its release row's, each copy byte for byte; the notes' header and `--help`'s `watch` lines follow the row); its tmpfiles rule and example config are exercised in disposable Nix and Debian containers, and its `watch --tally-only` starts, writes its snapshot, stops on SIGTERM with exit 0 and deletes nothing there. Its unit templates are checked by `systemd-analyze verify` only as the development package's (byte-identical sources) and in the module's drop-in verification; no live `systemd` runs them from this package. |
+| Package contents | The actual `release-candidate` derivation passes the static ELF and installed-file check (the binary is byte-identical to its compile; the file list is exactly its release row's, each copy byte for byte; the notes' header and `--help`'s `watch` lines follow the row); its tmpfiles rule and example config are exercised in disposable Nix and Debian containers, and its `watch --tally-only` starts, writes its snapshot, stops on SIGTERM with exit 0 and deletes nothing there. Its unit templates are checked by `systemd-analyze verify` as the development package's (byte-identical sources) and in the module's drop-in verification, and run under a live `systemd` (below). |
+| Reclaiming `watch` | In disposable containers sharing the host's PID namespace, the packaged binary's `watch` reclaims `pytest-cache` candidates below `--min-free` up to `--target-free` and stops there, keeps one a process holds open (`in_use`), writes no record between the thresholds, backs off `hold` after an `exhausted` cycle, and stops on SIGHUP and SIGINT with exit 0; its cycle and an `ensure` take turns through the host lock (the `ensure` exits 75 `lock_timeout` while the cycle's cleaner holds it; a cycle waiting behind an `ensure` ends `interrupted` at SIGTERM); a user profile or a built-in 0.2 does not ship is refused at start. In a NixOS VM (`vm-release-watch`), the package's files installed as the generic-Linux steps say: the user template as the user, the system template with a `User=` drop-in, each watching a small ext4 that a fill drives below `--min-free`; each instance reclaims real pytest caches up to `--target-free`, the user instance keeping one a process holds; the background tally brakes under a fork storm; a cycle on a busy host (a fork storm beside 1,000 idle processes of the user) waits it out instead of giving its candidate up, then reclaims; a cycle behind an `ensure` whose cleaner holds the lock ends `lock_timeout`, one whose own cleaner outlasts its `--timeout` ends `deadline`, and each is followed one minute later by a cycle that reclaims; SIGHUP restarts the user instance after 30 s from its snapshot, an exit 2 is not restarted, and `systemctl stop` ends the system instance with exit 0. Not shown: an `--allow-root` instance that reclaims, `nix-garbage` or a cleaner in a `watch` cycle on a VM, a watcher over days. |
+| NixOS module | With this package as `services.diskgc.package`, the module's build-time check refuses a user profile and a built-in 0.2 does not ship (the system build fails: `nixos-module-bad-config`); in a NixOS VM (`vm-nixos-module`), a reclaiming user instance reclaims a filled filesystem to its `--target-free` and keeps a held cache, and tally-only, root and refused instances behave as on the development package. |
 | Cargo operator journey | Those containers run the packaged, gate-lifted binary against real Cargo targets: dry run, busy-lock preservation, eligible deletion judged by the filesystem oracle, and a successful rebuild. Default and explicit `checkouts: allow`, and explicit `checkouts: refuse`, are checked on vendored checkout content. |
-| Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp`, `nix-garbage`, `pytest-cache`, `python-pycache`, `mypy-cache`, `python-venv`, `node-compile-cache`, `pip-cache`, `uv-cache`, `pnpm-store`, `ccache` and the seven idle filters. Excluded built-ins (the other five cleaners and `node-modules` among them) and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
+| Catalog and excluded actions | The packaged binary exposes only `cargo-target`, `nix-shell-rc`, `pytest-tmp`, `nix-garbage`, `pytest-cache`, `python-pycache`, `mypy-cache`, `python-venv`, `node-compile-cache`, `pip-cache`, `uv-cache`, `pnpm-store`, `ccache`, `go-mod-cache`, `bun-cache`, `nix-user-cache`, `cmake-build-anchored`, `meson-build-anchored`, `autotools-build-anchored`, `west-build-anchored` and the seven idle filters. Excluded built-ins (the other five cleaners and `node-modules` among them) and operator-authored command/delete policies are rejected before execution; backend spy files and the deletion oracle remain untouched. |
 | Package-manager caches | In disposable Nix containers sharing the host's PID namespace, with the pinned real tools (pip 26.1.2, uv 0.13.0, pnpm 12.9.0, ccache 4.14.1) and a registry the test serves, the packaged binary runs the development build's scenarios: the tool fills its cache, a dry run plans exactly it with the profile's command and no lookalike or cache at a non-default place, a reclaim under the deletion oracle runs the cleaner, and the tool fetches or builds again; a run held in flight is kept `in_use` (uv, pnpm) or survives the cleaner (pip, ccache; each also held after its cache lookup, so that it only writes afterwards); for `uv-cache`, dry runs with a `.git` directory, a non-empty `.git` file, an empty `.git` elsewhere and a checkout-shaped `.git` below `git-v0` keep the cache. Not run through the package: for uv and pnpm, the tool's own cleaner run directly against the install in flight and its lock wait (the release variants stop at diskgc's `in_use` verdict); the missing-tool and any-version-on-`PATH` scenario (development build only); a real `git` dependency in a uv cache (no network, no git in the image). |
 | Nix GC journey | In the Nix GC image (a container's own CppNix 2.34.8 store and daemon), the packaged binary plans `nix-garbage` in a dry run that deletes nothing, then runs one GC bounded by the asked need: a direct root, an out-link, system and per-user generations, a running build's input and a store file a process holds open all survive, and the dead paths go, judged by the deletion oracle. Every other Nix GC scenario (refusals, signals, the pinned socket) runs the e2e harness's development build, which shares the kind's code. |
 | Project-tree caches | In disposable Nix containers sharing the host's PID namespace, with the pinned real tools (pytest 9.1.1, CPython 3.14.7, mypy 2.1.0, Node.js 24.21.0, uv 0.13.0), the packaged binary runs the development build's scenarios for `pytest-cache`, `python-pycache`, `mypy-cache` and `node-compile-cache`: the tool makes the caches, a dry run plans exactly them and no lookalike, and a reclaim under the deletion oracle deletes exactly those it may while a pytest session, an importing Python and a Node keep running (each finishes and writes its cache again), and keeps a paused mypy run's cache `in_use`; the tools then rebuild. For `python-venv` it shows only the keep side of the 30-day floor: environments made by `python -m venv` and `uv venv` are kept `not_idle` and nothing is deleted. Their reclaim after the floor, the live-use and residual scenarios ran the development build, and the release build's catalog path only gated with a test clock offset; the gate-lifted binary has no clock offset, and no guest with a held-back clock has run it. |
+| Runtime caches | In disposable Nix containers sharing the host's PID namespace, with the pinned real tools (Go 1.26.8, Bun 1.4.2, Nix 2.34.9) and a registry or module proxy the test serves, the packaged binary runs the development build's scenarios for `go-mod-cache`, `bun-cache` and `nix-user-cache`: the tool fills its cache, a dry run plans exactly it and no lookalike or cache at a non-default place, a reclaim under the deletion oracle deletes it (Go's read-only module directories through `make_writable`), and the tool fetches again; a `go build`, `bun install` and `fetchGit` held in flight keep their cache `in_use`, and each then completes. |
+| Build outputs | Only the keep side of the three-day floor runs through the packaged binary: real CMake, Meson and Autoconf builds (and, in the full suite only, a West build) made now, which the gated development package plans reclaimable past the floor, are kept `not_idle` and nothing is deleted; a CMake package build beside OpenWrt's stamps is planned by neither. Their reclaims past the floor, the builds in flight, the moved and copied builds, the reconfigure and rebuild, and the nested-build guard on Buildroot's real package directories ran the development build, and the reclaims also the release build's catalog path gated with a test clock offset. |
 | Host and filesystem deployment | The candidate has no approval for an operator host or its filesystem, mount, permissions and running-work mix. Container results establish behavior only in those disposable fixtures. |
 | Race and temporary paths | Cargo race protocol tests use a separate development test driver, so they do not establish packaged-binary race behavior. The `nix-shell-rc` and `pytest-tmp` contracts' container tests run the development binary; their packaged binary's `/tmp` evidence is the release vectors (ModelHost) and a recorded walk in a disposable container (TASK-65), not a container suite, because `min_idle_for: 1h` meets the kernel's ctime and the gate-lifted binary has no test clock offset. |
 | Operator policy and rollout | Operator-authored `fs`/delete and command actions are excluded; the final policy contract, installation environment and rollout evidence are unresolved. Do not deploy the candidate built from master. |

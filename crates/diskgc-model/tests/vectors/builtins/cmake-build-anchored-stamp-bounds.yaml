@@ -1,0 +1,38 @@
+# TASK-367: the stamp signal's bound. Stamps count in the build
+# directory's parent and the three directories above it, whatever the
+# roots: a stamp in the fourth directory up keeps edge/x/y/z/build, and one
+# just above the second root keeps near/build (the root does not bound
+# the climb: Codex's third review, a filtered or narrower root set must
+# not hide a stamp). One in the fifth directory up (the first root itself,
+# for a/b/c/d/build, with no build directory on the way) is not looked at,
+# so that build stays eligible.
+profile_vector: 1
+select: profile:cmake-build-anchored
+roots: [/home/tester/src, /home/tester/w]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/.built: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/a/b/c/d/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/a/b/c/d/build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/a/b/c/d\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/.stamp_built: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/w/near/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/w/near/build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/w/near\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+    /home/tester/src/edge/x/y/z/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/edge/.stamp_built: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/edge/x/y/z/build: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/edge/x/y/z\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+expect:
+  plan:
+    - {candidate: /home/tester/src/a/b/c/d/build, source: /home/tester/src/a/b/c/d}
+  reclaim_exit: 1
+  actions: [/home/tester/src/a/b/c/d/build]
+  removed: [/home/tester/src/a/b/c/d/build]
+  skipped: []
+  preserved: [/home/tester/w/near/build/a.o, /home/tester/src/a/b/c/d/CMakeLists.txt, /home/tester/src/edge/x/y/z/build/a.o, /home/tester/.stamp_built, /home/tester/src/.built]

@@ -19,14 +19,17 @@ use crate::resolve::{ResolveError, Resolved, Want, open_beneath, resolve_in};
 // output (Buildroot, Yocto, Bazel); pending Mark's admission.
 mod build_trees;
 use build_trees::{bazel, buildroot, yocto};
+// TASK-367: no CMake, Meson or Autotools build inside another build
+// system's managed tree.
+mod nested;
 
-const CMAKE_CACHE: &str = "CMakeCache.txt";
+pub(super) const CMAKE_CACHE: &str = "CMakeCache.txt";
 const CMAKE_SOURCE_KEY: &[u8] = b"CMAKE_HOME_DIRECTORY:INTERNAL=";
 const MAX_CMAKE_CACHE_BYTES: u64 = 2 * 1024 * 1024;
 const MESON_INFO: &str = "meson-info/meson-info.json";
-const MESON_CORE_DATA: &str = "meson-private/coredata.dat";
+pub(super) const MESON_CORE_DATA: &str = "meson-private/coredata.dat";
 const MAX_MESON_INFO_BYTES: u64 = 1024 * 1024;
-const AUTOTOOLS_STATUS: &str = "config.status";
+pub(super) const AUTOTOOLS_STATUS: &str = "config.status";
 const MAX_AUTOTOOLS_STATUS_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Deserialize into structs so duplicate `directories`, `source` or `build`
@@ -154,6 +157,44 @@ pub(super) fn check_opened<H: Host>(
         SourceAnchor::Buildroot => buildroot(host, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Yocto => yocto(host, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Bazel => bazel(host, candidate, candidate_fd, mount_id, deadline),
+    }
+}
+
+/// Whether an anchor of `kind` brings the nested-build guard to its
+/// selection (TASK-367).
+pub(super) fn nested_build_guarded(kind: Option<SourceAnchor>) -> bool {
+    kind.is_some_and(|kind| nested::GUARDED.contains(&kind))
+}
+
+/// The nested-build guard's verdict on `candidate` (TASK-367; see
+/// [`nested`]): `Some` names the outer build system's signal, the
+/// candidate a build directory inside its tree; a refusal when the guard
+/// cannot decide.
+pub(super) fn outer_build<H: Host>(
+    host: &H,
+    candidate: &Path,
+    deadline: Option<MonoTime>,
+) -> Judged<Option<String>> {
+    nested::verdict(host, candidate, deadline)
+}
+
+/// The nested-build guard as a retention rule after discovery: a veto is
+/// `changed` (discovery leaves out what it vetoes then, so a veto now is
+/// news since), an undecided guard its own refusal.
+pub(super) fn nested_build_veto<H: Host>(
+    host: &H,
+    candidate: &Path,
+    deadline: Option<MonoTime>,
+) -> Judged<()> {
+    match judged!(outer_build(host, candidate, deadline)) {
+        None => Ok(Ok(())),
+        Some(why) => Ok(Err(Skip::new(
+            Reason::Changed,
+            candidate.to_owned(),
+            format!(
+                "now inside another build system's tree ({why}): the nested-build guard keeps it"
+            ),
+        ))),
     }
 }
 
@@ -606,6 +647,22 @@ fn unreachable_build(
             at.display(),
             skip.detail
         ),
+    ))
+}
+
+/// The refusal of `candidate` when `at`, a directory checked for `what`,
+/// cannot be reached.
+fn unreachable_root_as(
+    candidate: &Path,
+    at: &Path,
+    what: &str,
+    error: ResolveError,
+) -> Result<Skip, crate::outcome::Stop> {
+    let skip = unreachable_root(at, error)?;
+    Ok(Skip::new(
+        skip.reason,
+        candidate.to_owned(),
+        format!("cannot check {} for {what}: {}", at.display(), skip.detail),
     ))
 }
 

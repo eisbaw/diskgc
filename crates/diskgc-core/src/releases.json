@@ -42,7 +42,7 @@
     },
     "0.2": {
       "tag": null,
-      "commands": ["ensure", "watch --tally-only", "check", "profiles"],
+      "commands": ["ensure", "watch", "watch --tally-only", "check", "profiles"],
       "catalog": "0.2",
       "command_actions": {
         "ccache": { "command": ["env", "CCACHE_DIR={path}", "ccache", "--clear"], "cwd": "candidate" },

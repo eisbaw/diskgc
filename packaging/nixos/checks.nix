@@ -14,6 +14,9 @@
   # The module's own default (packages.default, stamped with the commit);
   # only compared by evaluation, never built here.
   defaultPackage,
+  # The module's default package by version (flake.nix): the attribute of
+  # packages it picks for a version string.
+  moduleDefaultAttrFor,
   # packages.release-candidate's unstamped build (flake.nix,
   # mkReleasePackage): its release row's commands and files.
   releasePackage,
@@ -160,8 +163,9 @@ let
   };
 
   # The release candidate as the package (TASK-289): it ships both
-  # templates and runs `watch --tally-only`, so a tally-only instance of
-  # each scope evaluates; a reclaiming one is refused at evaluation.
+  # templates and runs a reclaiming `watch` beside `--tally-only` (0.2,
+  # TASK-362), so a tally-only and a reclaiming instance evaluate in each
+  # scope (the reclaiming case below asserts the same from its row).
   release = evalSystem {
     users.users.gitlab-runner = {
       isSystemUser = true;
@@ -187,6 +191,19 @@ let
         path = "/home/mark";
         user = "mark";
         tallyOnly = true;
+      };
+      instances.laptop = {
+        path = "/srv/laptop";
+        user = "mark";
+        minFree = "30G";
+        targetFree = "60G";
+      };
+      instances.builds = {
+        scope = "system";
+        user = "gitlab-runner";
+        path = "/srv/builds";
+        minFree = "50G";
+        targetFree = "80G";
       };
     };
   };
@@ -275,9 +292,10 @@ let
         )
       ];
     };
-    # Its release refuses a reclaiming watch while TASK-276 is open: a
-    # reclaiming instance fails evaluation instead of a unit that stays
-    # failed (exit 2). Derived from its row, so the decision is the row's.
+    # A reclaiming instance evaluates exactly when its row runs a reclaiming
+    # watch, else it fails evaluation instead of a unit that stays failed
+    # (exit 2). Derived from the row; 0.2's runs one (TASK-362), so the
+    # want is empty, and a row reverted to tally-only fails the pin below.
     release-candidate-reclaiming = {
       got = failedAssertions {
         services.diskgc.package = releasePackage;
@@ -289,6 +307,32 @@ let
         };
       };
       want = lib.optional (!lib.elem "watch" releasePackage.diskgcBuild.commands) "services.diskgc.instances.home: ${releasePackage.name} does not run `watch` (its commands: ${lib.concatStringsSep ", " releasePackage.diskgcBuild.commands}); set tallyOnly = true, or use a package whose release runs a reclaiming watch.";
+    };
+    # TASK-362: the 0.2 row's decision, pinned (Mark, 2026-11-05: "Reclaiming
+    # watch in 0.2").
+    release-candidate-runs-reclaiming-watch = {
+      got = lib.elem "watch" releasePackage.diskgcBuild.commands;
+      want = true;
+    };
+    release-candidate-reclaiming-exec = {
+      got = linesWith "ExecStart=" (systemUnit release "diskgc-watch@srv-builds");
+      want = [
+        "ExecStart="
+        (
+          "ExecStart="
+          + lib.concatMapStringsSep " " q [
+            (lib.getExe releasePackage)
+            "watch"
+            "--config"
+            "/etc/diskgc/config.yaml"
+            "--min-free"
+            "50G"
+            "--target-free"
+            "80G"
+            "/srv/builds"
+          ]
+        )
+      ];
     };
     # TASK-289 review (Codex 2): a mode flag in extraArgs, here hidden as
     # --config's value so diskgc would parse a reclaiming watch, is refused
@@ -331,6 +375,34 @@ let
       };
       want = [
         "services.diskgc.instances.home: extraArgs holds --min-free=1G, --target-free, --dry-run; set the mode with tallyOnly, minFree and targetFree instead."
+      ];
+    };
+    # A row that runs only `watch --tally-only` (as 0.2's did before
+    # TASK-362): a reclaiming instance fails evaluation, a tally-only one
+    # does not; the path no shipped row takes any more.
+    assert-package-tally-only-row = {
+      got = failedAssertions {
+        services.diskgc.package = releasePackage // {
+          diskgcBuild = releasePackage.diskgcBuild // {
+            commands = lib.remove "watch" releasePackage.diskgcBuild.commands;
+          };
+        };
+        services.diskgc.instances.home = {
+          path = "/home";
+          user = "mark";
+          minFree = "30G";
+          targetFree = "60G";
+        };
+        services.diskgc.instances.warm = {
+          path = "/srv";
+          user = "mark";
+          tallyOnly = true;
+        };
+      };
+      want = [
+        "services.diskgc.instances.home: ${releasePackage.name} does not run `watch` (its commands: ${
+          lib.concatStringsSep ", " (lib.remove "watch" releasePackage.diskgcBuild.commands)
+        }); set tallyOnly = true, or use a package whose release runs a reclaiming watch."
       ];
     };
     # A package without the templates, and one that does not say.
@@ -489,6 +561,22 @@ let
     laptop-tmpfiles = {
       got = lib.elem package laptop.systemd.tmpfiles.packages;
       want = true;
+    };
+    # TASK-362: a -dev version (master) defaults to the gated development
+    # package, a release version (the RC commit, the tag) to the release's.
+    module-default-by-version = {
+      got = map moduleDefaultAttrFor [
+        "0.2.0-dev"
+        "0.2.1-dev"
+        "0.2.0"
+        "0.3.0"
+      ];
+      want = [
+        "default"
+        "default"
+        "release-candidate"
+        "release-candidate"
+      ];
     };
     module-default-package = {
       got = lib.unsafeDiscardStringContext
@@ -791,12 +879,61 @@ in
         };
       };
       failed = pkgs.testers.testBuildFailure bad.environment.etc."diskgc/config.yaml".source;
+      # TASK-362: with the release candidate as the package, the build-time
+      # check is the release's own `check`, which narrows to its catalog:
+      # a user profile and a built-in it does not ship (`node-modules`,
+      # held out of 0.2) fail the system build, as its `watch` would refuse
+      # them at start.
+      releaseBad = evalSystem {
+        services.diskgc = {
+          enable = true;
+          package = releasePackage;
+          settings = {
+            version = 1;
+            profiles = [
+              {
+                name = "junk";
+                find = {
+                  roots = [ "/srv/junk" ];
+                  paths = [ "junk-*" ];
+                  type = "dir";
+                };
+                action = "delete";
+                examples.match = [ "/srv/junk/junk-0" ];
+              }
+            ];
+            groups = [
+              {
+                name = "stale";
+                tiers = [
+                  {
+                    name = "mine";
+                    select = "profile:junk";
+                  }
+                  {
+                    name = "held-out";
+                    select = "profile:node-modules";
+                    roots = [ "/srv/src" ];
+                  }
+                ];
+              }
+            ];
+          };
+        };
+      };
+      releaseFailed = pkgs.testers.testBuildFailure releaseBad.environment.etc."diskgc/config.yaml".source;
     in
     pkgs.runCommand "diskgc-nixos-module-bad-config" { } ''
       log=${failed}/testBuildFailure.log
       cat $log
       test "$(cat ${failed}/testBuildFailure.exit)" = 1
       grep -F "no profile or filter is named \`cargo-taget\`" $log
+      grep -F "error: diskgc check rejected services.diskgc configuration 'config'; nothing was deployed" $log
+      log=${releaseFailed}/testBuildFailure.log
+      cat $log
+      test "$(cat ${releaseFailed}/testBuildFailure.exit)" = 1
+      grep -F "\`junk\` is a user profile; diskgc ${lib.versions.majorMinor releasePackage.version} runs only its built-ins" $log
+      grep -F "\`node-modules\` is a built-in that diskgc ${lib.versions.majorMinor releasePackage.version} does not ship" $log
       grep -F "error: diskgc check rejected services.diskgc configuration 'config'; nothing was deployed" $log
       touch $out
     '';

@@ -1,0 +1,48 @@
+# TASK-367, the sixth review's B2: a command-action union with a guarded
+# term. `cmake-clean` (a CMake anchor, the nested-build guard) and
+# `out-clean` (no anchor) find the same build and run the same cleaner.
+# OpenWrt's `.built` appears in the package directory right after the
+# candidate lock. Under the lock cmake-clean's anchor vetoes the build,
+# but before the fix the command protocol honoured neither that veto for
+# the union nor a last guard check, so out-clean selected it and the
+# cleaner ran. The guard is the selection's, checked under the lock and
+# again right before the command: no cleaner runs.
+profile_vector: 1
+user_profiles:
+  - name: cmake-clean
+    find: {roots: required, paths: ["*", "*/*"], type: dir}
+    where: {has: CMakeCache.txt, has_dir: CMakeFiles, lacks_entry: CMakeLists.txt, source_anchor: cmake}
+    action: {command: [tool, clean, "{path}"], cwd: parent}
+    examples: {match: [/home/tester/w/pkg/out]}
+  - name: out-clean
+    find: {roots: required, paths: ["pkg/out"], type: dir}
+    action: {command: [tool, clean, "{path}"], cwd: parent}
+    examples: {match: [/home/tester/w/pkg/out]}
+select: profile:cmake-clean || profile:out-clean
+roots: [/home/tester/w]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /usr/bin/tool: {mode: "0755"}
+    /home/tester/w/pkg/CMakeLists.txt: {mtime: 2026-10-01T00:00:00Z, content: "project(p)\n"}
+    /home/tester/w/pkg/out: {.: {mtime: 2026-10-01T00:00:00Z}, CMakeCache.txt: {mtime: 2026-10-01T00:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/w/pkg\n"}, CMakeFiles: {.: {mtime: 2026-10-01T00:00:00Z}}, a.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+  events:
+    - at: {op: flock, path: /home/tester/w/pkg/out, nth: 1, when: after}
+      create: /home/tester/w/pkg/.built
+expect:
+  plan:
+    - {candidate: /home/tester/w/pkg/out, source: /home/tester/w/pkg}
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped:
+    - {candidate: /home/tester/w/pkg/out, reason: changed}
+  preserved: [/home/tester/w/pkg/out/a.o]
+  commands: []

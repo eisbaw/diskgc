@@ -235,6 +235,15 @@ impl Tier {
             checkouts: source.checkouts,
             negated: &source.negated,
         }));
+        // The nested-build guard is the selection's (`from_checked` sets
+        // it on every term): a term without it would take what it keeps.
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.find.nested_build_guard == find.nested_build_guard),
+            "the nested-build guard differs between the terms of `{}`",
+            self.select
+        );
         sources
     }
 }
@@ -455,6 +464,21 @@ impl Tier {
                     checkouts: tier.checkouts,
                     negated: tier.negated.clone(),
                 });
+            }
+            // The nested-build guard keeps a build from the whole selection
+            // (TASK-367, the sixth review): a build another term finds is
+            // judged by it too, by its path alone, whatever the guarded
+            // term's own discovery saw of it.
+            let SourceKind::Fs(first_find) = &mut first.source else {
+                unreachable!("checked above: a filesystem union")
+            };
+            if first_find.nested_build_guard
+                || extra.iter().any(|term| term.find.nested_build_guard)
+            {
+                first_find.nested_build_guard = true;
+                for term in &mut extra {
+                    term.find.nested_build_guard = true;
+                }
             }
             first.fs_union = extra;
             first.select = checked.expr().to_string();

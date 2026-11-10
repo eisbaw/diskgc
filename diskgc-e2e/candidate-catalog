@@ -8,20 +8,17 @@
 # (Mark, 2026-11-06, TASK-365) and awaits TASK-357.
 node-modules
 #
-# TASK-352's language and runtime cache family, awaiting Mark's decision:
-go-mod-cache
-bun-cache
+# TASK-352's language and runtime cache family: go-mod-cache, bun-cache
+# and nix-user-cache are in the real 0.2 catalog (Mark, 2026-11-07,
+# TASK-370); these four were not admitted:
 node-gyp-headers
 electron-download-cache
 huggingface-hub-repos
 cargo-registry-src
-nix-user-cache
 #
-# TASK-354's build-output family, awaiting Mark's decision:
-cmake-build-anchored
-meson-build-anchored
-autotools-build-anchored
-west-build-anchored
+# TASK-354's build-output family: cmake-, meson-, autotools- and
+# west-build-anchored are in the real 0.2 catalog (Mark, 2026-11-07,
+# TASK-370); these three were not admitted:
 buildroot-output-anchored
 yocto-tmpdir-anchored
 bazel-output-base-anchored

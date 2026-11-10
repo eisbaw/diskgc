@@ -43,6 +43,13 @@
       url = "github:openembedded/bitbake/yocto-6.1";
       flake = false;
     };
+    # TASK-367: OpenWrt's make rules, read (never run) by the nested-build
+    # scenarios for its stamp names and package build directories
+    # (include/package.mk, host-build.mk, cmake.mk, meson.mk).
+    openwrt-src = {
+      url = "github:openwrt/openwrt/v25.12.6";
+      flake = false;
+    };
   };
 
   outputs =
@@ -59,6 +66,7 @@
       buildroot-src,
       oe-core-src,
       bitbake-src,
+      openwrt-src,
     }:
     let
       # diskgc is Linux-only. Only x86_64 is built and tested; another system
@@ -108,7 +116,8 @@
       # commit in `diskgc --version`; a release version never does
       # (crates/diskgc/src/main.rs, version_line; docs/reference.md,
       # `diskgc --version`; docs/architecture.md, Release procedure).
-      isDevVersion = lib.hasInfix "-" version;
+      isDevVersionOf = v: lib.hasInfix "-" v;
+      isDevVersion = isDevVersionOf version;
       # The commit the shipped packages are built from: a dirty tree has
       # only dirtyShortRev ("<rev>-dirty", the base commit), a source
       # without Git (a tarball, a path: input) neither.
@@ -560,6 +569,22 @@
         gnutar gzip bzip2 xz zstd cpio unzip rsync wget file perl which
         patch gnumake stdenv.cc binutils git util-linux
       ];
+      # TASK-367: host-pkgconf's source, which Buildroot's cmake-package
+      # infrastructure depends on (pkg-cmake.mk), for an offline build of a
+      # real cmake-package; Buildroot checks it against
+      # package/pkgconf/pkgconf.hash. Only the four OpenWrt make rules the
+      # scenarios read, not its 88 MiB tree.
+      buildrootPkgconfSource = pkgs.fetchurl {
+        urls = [
+          "https://distfiles.ariadne.space/pkgconf/pkgconf-2.3.0.tar.xz"
+          "https://sources.buildroot.net/pkgconf/pkgconf-2.3.0.tar.xz"
+        ];
+        sha256 = "3a9080ac51d03615e7c1910a0a2a8df08424892b5f13b0628a204d3fcce0ea8b";
+      };
+      openwrtRules = pkgs.runCommand "diskgc-e2e-openwrt-rules" { } ''
+        mkdir -p $out
+        cp ${openwrt-src}/include/{package,host-build,cmake,meson}.mk $out/
+      '';
       buildrootTools = pkgs.buildEnv {
         name = "diskgc-e2e-buildroot-tools";
         paths = buildOutputBaseTools ++ [ pkgs.bc pkgs.cmake ];
@@ -701,6 +726,8 @@
         # host tools and locale Buildroot and BitBake require.
         ln -s ${pkgs.bazel_7}/bin/bazel $out/bin/bazel
         ln -s ${buildroot-src} $out/bin/buildroot-src
+        ln -s ${buildrootPkgconfSource} $out/bin/buildroot-dl-pkgconf-2.3.0.tar.xz
+        ln -s ${openwrtRules} $out/bin/openwrt-rules
         ln -s ${oe-core-src} $out/bin/oe-core-src
         ln -s ${bitbake-src} $out/bin/bitbake-src
         ln -s ${buildrootTools}/bin $out/bin/buildroot-tools
@@ -1270,6 +1297,12 @@
         release = diskgcReleaseTested;
         versionLine = testedVersionLine;
       };
+      # TASK-362: the release package's reclaiming watch under a live
+      # systemd, installed from its files as on generic Linux.
+      vmReleaseWatch = import ./diskgc-e2e/vm-release-watch.nix {
+        inherit pkgs;
+        release = diskgcReleaseTested;
+      };
       vmColdScale = import ./diskgc-e2e/vm-cold-scale.nix {
         inherit pkgs;
         image = e2eVmImage;
@@ -1333,6 +1366,7 @@
         vm-tally-pressure = vmTallyPressure;
         vm-real-kernel = vmRealKernel;
         vm-release-tmp-reclaim = vmReleaseTmpReclaim;
+        vm-release-watch = vmReleaseWatch;
         vm-old-kernel-pidfd = vmOldKernelPidfd;
         vm-pidfd-linux-6-1 = vmPidfdLinux61;
         vm-pidfd-linux-6-12 = vmPidfdLinux612;
@@ -1342,12 +1376,22 @@
         vm-nixos-module = vmNixosModule;
       };
       # The NixOS module (docs/architecture.md, NixOS module). Its default
-      # package is the development package of the evaluating system.
+      # package follows the version, like `diskgc --version`: a release
+      # version (the RC commit and its tag, v0.2.0 onwards) defaults to that
+      # release's package (packages.release-candidate, which the tag makes
+      # the release), so the module a release ships runs its reclaiming
+      # watch; a development version (master, 0.2.0-dev) to the gated
+      # development package, so a module taken from master never deletes
+      # outside test containers by default (TASK-362).
+      moduleDefaultAttrFor = v: if isDevVersionOf v then "default" else "release-candidate";
+      moduleDefaultAttr = moduleDefaultAttrFor version;
+      moduleDefaultPackage = self.packages.${system}.${moduleDefaultAttr};
       nixosModule = import ./packaging/nixos/module.nix {
         defaultPackage =
           p:
-          self.packages.${p.stdenv.hostPlatform.system}.default
+          self.packages.${p.stdenv.hostPlatform.system}.${moduleDefaultAttr}
             or (throw "diskgc: no package for ${p.stdenv.hostPlatform.system}; only ${system} is built");
+        defaultPackageText = "diskgc.packages.\${system}.${moduleDefaultAttr}";
       };
       # Its checks: evaluation and the build-time check (no VM), and one
       # NixOS VM test, run by `just e2e-full` only (docs/testing.md,
@@ -1357,13 +1401,17 @@
         inherit pkgs lib nixpkgs systemdVerify;
         module = nixosModule;
         package = diskgcTested;
-        defaultPackage = diskgc;
+        defaultPackage = moduleDefaultPackage;
+        inherit moduleDefaultAttrFor;
         releasePackage = diskgcReleaseTested;
       };
+      # The module VM runs the release candidate, the package 0.2 ships the
+      # module with (TASK-362); the development package only for its gate.
       vmNixosModule = import ./packaging/nixos/vm-test.nix {
         inherit pkgs;
         module = nixosModule;
-        package = diskgcTested;
+        package = diskgcReleaseTested;
+        devPackage = diskgcTested;
       };
     in
     {

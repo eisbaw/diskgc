@@ -44,8 +44,9 @@ use crate::{
     engine_suite, ensure_suite, fs_reclaim_suite, fuse_stall_suite, host_suite, inuse_suite,
     laptop_tmp_journey, lifecycle_suite, meson_suite, nix_gc_suite, owner_pid_suite,
     packaging_suite, pkg_cache_suite, profile_vector_suite, project_cache_suite,
-    project_tree_suite, pytest_contract_suite, release_suite, runtime_cache_suite, scale_suite,
-    signal_suite, stdout_suite, survey_suite, temp_safety_suite, watch_suite,
+    project_tree_suite, pytest_contract_suite, release_suite, release_watch_suite,
+    runtime_cache_suite, scale_suite, signal_suite, stdout_suite, survey_suite, temp_safety_suite,
+    watch_suite,
 };
 
 /// Which gate runs a test.
@@ -319,6 +320,27 @@ pub static NIX_ONLY_TESTS: &[(&str, &str)] = &[
         "candidate_catalog_build_output_family_matches_the_development_build",
         "needs the pinned build system and host tools from the Nix store",
     ),
+    // TASK-370: the seven admitted to 0.2 through the release candidate.
+    (
+        "release_candidate_go_mod_cache_reclaim_then_redownload_and_a_build_in_flight_is_kept",
+        "needs the pinned Go in the Nix image",
+    ),
+    (
+        "release_candidate_bun_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+        "needs the pinned Bun from the Nix store and npm in the Nix image",
+    ),
+    (
+        "release_candidate_nix_user_cache_reclaim_then_refetch_and_a_fetch_in_flight_is_kept",
+        "needs the pinned Nix in the Nix image and Git from the Nix store",
+    ),
+    (
+        "release_candidate_build_outputs_keep_builds_inside_the_3_day_floor",
+        "needs the pinned build system and host tools from the Nix store",
+    ),
+    (
+        "release_candidate_west_build_keeps_a_build_inside_the_3_day_floor",
+        "needs the pinned build system and host tools from the Nix store",
+    ),
     ("pip_cache_cleaner", "needs the pinned pip in the Nix image"),
     ("uv_cache_cleaner", "needs the pinned uv in the Nix image"),
     (
@@ -574,6 +596,15 @@ pub static HOST_PID_NAMESPACE_TESTS: &[&str] = &[
     "candidate_catalog_runtime_cache_family_matches_the_development_build",
     // TASK-354: the build-output family through the candidate-catalog build.
     "candidate_catalog_build_output_family_matches_the_development_build",
+    // TASK-362: the release candidate's reclaiming watch.
+    "release_candidate_watch_reclaims_to_target_keeps_in_use_and_stops_on_sighup",
+    "release_candidate_watch_and_ensure_take_turns_through_the_host_lock",
+    // TASK-370: the seven admitted to 0.2 through the release candidate.
+    "release_candidate_go_mod_cache_reclaim_then_redownload_and_a_build_in_flight_is_kept",
+    "release_candidate_bun_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+    "release_candidate_nix_user_cache_reclaim_then_refetch_and_a_fetch_in_flight_is_kept",
+    "release_candidate_build_outputs_keep_builds_inside_the_3_day_floor",
+    "release_candidate_west_build_keeps_a_build_inside_the_3_day_floor",
 ];
 
 /// The one test whose container receives the pinned Buildah closure.
@@ -605,6 +636,8 @@ pub static RUNTIME_CACHE_STORE_TESTS: &[&str] = &[
     "huggingface_hub_repos_real_hub_downloads_reclaim_then_redownload_and_runs_in_flight_are_kept",
     "nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_flight_is_kept",
     "candidate_catalog_runtime_cache_family_matches_the_development_build",
+    "release_candidate_bun_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+    "release_candidate_nix_user_cache_reclaim_then_refetch_and_a_fetch_in_flight_is_kept",
 ];
 
 /// TASK-354's build-output tests: CMake, Meson, Autoconf, West, Bazel,
@@ -619,6 +652,8 @@ pub static BUILD_OUTPUT_STORE_TESTS: &[&str] = &[
     "yocto_tmpdir_anchored_real_bitbake_reclaim_then_rebuild_and_a_task_in_flight_is_kept",
     "bazel_output_base_anchored_real_bazel_reclaim_then_rebuild_and_a_live_server_is_kept",
     "candidate_catalog_build_output_family_matches_the_development_build",
+    "release_candidate_build_outputs_keep_builds_inside_the_3_day_floor",
+    "release_candidate_west_build_keeps_a_build_inside_the_3_day_floor",
 ];
 
 /// The registry. Names are stable: `just e2e-one NAME` uses them.
@@ -650,6 +685,20 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Full,
         expect: Expect::Pass,
         run: build_output_suite::bazel_output_base_anchored_real_bazel_reclaim_then_rebuild_and_a_live_server_is_kept,
+    },
+    // TASK-370: West's keep side through the release candidate, full suite
+    // only like the West scenario.
+    Test {
+        name: "release_candidate_west_build_keeps_a_build_inside_the_3_day_floor",
+        tier: Tier::Full,
+        expect: Expect::Pass,
+        run: build_output_suite::release_candidate_west_build_keeps_a_build_inside_the_3_day_floor,
+    },
+    Test {
+        name: "release_candidate_build_outputs_keep_builds_inside_the_3_day_floor",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: build_output_suite::release_candidate_build_outputs_keep_builds_inside_the_3_day_floor,
     },
     Test {
         name: "cmake_build_anchored_real_cmake_builds_reclaim_then_reconfigure_and_a_build_in_flight_is_kept",
@@ -1495,11 +1544,24 @@ pub static TESTS: &[Test] = &[
         expect: Expect::Pass,
         run: release_suite::candidate_rejects_docker_command_and_arbitrary_delete_policy,
     },
+    // TASK-362: 0.2's reclaiming watch through the release candidate.
     Test {
-        name: "release_candidate_refuses_a_reclaiming_watch",
+        name: "release_candidate_watch_refuses_user_profiles_and_unshipped_builtins",
         tier: Tier::Fast,
         expect: Expect::Pass,
-        run: release_suite::candidate_refuses_a_reclaiming_watch,
+        run: release_watch_suite::release_candidate_watch_refuses_user_profiles_and_unshipped_builtins,
+    },
+    Test {
+        name: "release_candidate_watch_reclaims_to_target_keeps_in_use_and_stops_on_sighup",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: release_watch_suite::release_candidate_watch_reclaims_to_target_keeps_in_use_and_stops_on_sighup,
+    },
+    Test {
+        name: "release_candidate_watch_and_ensure_take_turns_through_the_host_lock",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: release_watch_suite::release_candidate_watch_and_ensure_take_turns_through_the_host_lock,
     },
     Test {
         name: "release_candidate_runs_watch_tally_only",
@@ -1707,6 +1769,25 @@ pub static TESTS: &[Test] = &[
         tier: Tier::Fast,
         expect: Expect::Pass,
         run: runtime_cache_suite::nix_user_cache_real_nix_fetches_reclaim_then_refetch_and_a_fetch_in_flight_is_kept,
+    },
+    // TASK-370: three of them through the release candidate.
+    Test {
+        name: "release_candidate_go_mod_cache_reclaim_then_redownload_and_a_build_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: runtime_cache_suite::release_candidate_go_mod_cache_reclaim_then_redownload_and_a_build_in_flight_is_kept,
+    },
+    Test {
+        name: "release_candidate_bun_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: runtime_cache_suite::release_candidate_bun_cache_reclaim_then_refetch_and_an_install_in_flight_is_kept,
+    },
+    Test {
+        name: "release_candidate_nix_user_cache_reclaim_then_refetch_and_a_fetch_in_flight_is_kept",
+        tier: Tier::Fast,
+        expect: Expect::Pass,
+        run: runtime_cache_suite::release_candidate_nix_user_cache_reclaim_then_refetch_and_a_fetch_in_flight_is_kept,
     },
     Test {
         name: "candidate_catalog_runtime_cache_family_matches_the_development_build",

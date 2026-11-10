@@ -8,7 +8,10 @@
 # resets EnvironmentFile= and adds User= or ConditionUser=. Restart and
 # hardening lines stay the template's, so generic Linux and NixOS run one
 # unit text.
-{ defaultPackage }:
+# `defaultPackage` (a function of pkgs) and its text: the flake's choice by
+# version (flake.nix, moduleDefaultAttr): a release's package at a release
+# version, the gated development package on master.
+{ defaultPackage, defaultPackageText }:
 {
   config,
   lib,
@@ -331,8 +334,8 @@ in
     package = mkOption {
       type = types.package;
       default = defaultPackage pkgs;
-      defaultText = lib.literalExpression "diskgc.packages.\${system}.default";
-      description = "The diskgc package; the default development package refuses to delete, so a reclaiming instance needs a release package whose release runs a reclaiming `watch` (asserted from its passthru.diskgcBuild, as are the `watch` templates).";
+      defaultText = lib.literalExpression defaultPackageText;
+      description = "The diskgc package. From a release's tag (v0.2.0 onwards) the default is that release's package, which runs a reclaiming `watch`; from master (a -dev version) it is the development package, which refuses to delete outside test containers, so a reclaiming instance there exits 2. Its commands and `watch` templates are asserted from its passthru.diskgcBuild.";
     };
     settings = mkOption {
       type = types.nullOr yaml.type;

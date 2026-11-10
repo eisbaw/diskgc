@@ -1,0 +1,35 @@
+# Under the 0.2 release catalog (TASK-370). TASK-367, Codex's second review, scenario 2 (a union across profiles):
+# `profile:cmake-build-anchored || profile:meson-build-anchored`. R holds
+# `.built`; R/pkg/out is a recently changed CMake build (vetoed by its own
+# guard); R/pkg/out/a holds a meson.build, and R/pkg/out/a/b/inner is an
+# old Meson build of it, whose own climb (its parent and the three above)
+# stops below R. Meson's discovery entered the CMake `out` and deleted
+# `inner`. The climb widens past every build directory on the path (here
+# `out`, by its CMakeCache.txt): `inner` is vetoed, in whatever order or
+# term it is found.
+profile_vector: 1
+catalog: release-0.2
+select: profile:cmake-build-anchored || profile:meson-build-anchored
+roots: [/home/tester/src]
+path: /home
+min_free: 100%
+host:
+  host_model: 1
+  clock: 2026-10-15T03:00:00Z
+  mounts:
+    - {id: 1, at: /, fs: ext4, dev: "254:1", size: 10G}
+    - {id: 2, at: /home, fs: ext4, dev: "254:2", size: 10G, parent: 1}
+  tree:
+    /run/diskgc/lock: {uid: 0, gid: 0}
+    /home/tester/src/.built: {mtime: 2026-10-01T00:00:00Z}
+    /home/tester/src/pkg/CMakeLists.txt: {content: "project(p)\n"}
+    /home/tester/src/pkg/out: {.: {mtime: 2026-10-15T02:00:00Z}, CMakeCache.txt: {mtime: 2026-10-15T02:00:00Z, content: "CMAKE_HOME_DIRECTORY:INTERNAL=/home/tester/src/pkg\n"}, CMakeFiles: {.: {mtime: 2026-10-15T02:00:00Z}}, new.o: {mtime: 2026-10-15T02:00:00Z, size: 8K}}
+    /home/tester/src/pkg/out/a/meson.build: {mtime: 2026-10-01T00:00:00Z, content: "project('q')\n"}
+    /home/tester/src/pkg/out/a/b/inner: {.: {mtime: 2026-10-01T00:00:00Z}, build.ninja: {mtime: 2026-10-01T00:00:00Z}, meson-private: {.: {mtime: 2026-10-01T00:00:00Z}, coredata.dat: {mtime: 2026-10-01T00:00:00Z, content: coredata}}, meson-info: {.: {mtime: 2026-10-01T00:00:00Z}, meson-info.json: {mtime: 2026-10-01T00:00:00Z, content: "{\"directories\":{\"source\":\"/home/tester/src/pkg/out/a\",\"build\":\"/home/tester/src/pkg/out/a/b/inner\",\"info\":\"/home/tester/src/pkg/out/a/b/inner/meson-info\"},\"error\":false}"}}, old.o: {mtime: 2026-10-01T00:00:00Z, size: 8K}}
+expect:
+  plan: []
+  reclaim_exit: 1
+  actions: []
+  removed: []
+  skipped: []
+  preserved: [/home/tester/src/pkg/out/new.o, /home/tester/src/pkg/out/a/b/inner/old.o]

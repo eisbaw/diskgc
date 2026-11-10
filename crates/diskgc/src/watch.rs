@@ -414,6 +414,96 @@ mod tests {
         assert_eq!(object["errors"][0]["cause"], "host", "{object}");
     }
 
+    /// TASK-362: a release build's `watch` narrows to its release's
+    /// catalog exactly as its `ensure` does (both load through
+    /// `invocation::load` with [`crate::catalog`], whatever the mode): a
+    /// user profile, an override of a built-in and a built-in the release
+    /// does not ship (`node-modules`, held out of 0.2) are each exit 2
+    /// with the usage-error object, before the host starts. A shipped
+    /// built-in passes the same step (the host's failure is then exit 3).
+    /// `--tally-only`, as every host test of `watch` (docs/testing.md,
+    /// Safety interlock); the reclaiming form of these refusals runs in a
+    /// container (`release_candidate_watch_refuses_user_profiles_and_unshipped_builtins`).
+    #[cfg(feature = "release-catalog")]
+    #[test]
+    fn a_release_watch_runs_only_its_catalog() {
+        let user_profile = crate::tests::ConfigFixture::new(
+            "watch-release-user-profile",
+            "version: 1\nprofiles:\n  - name: junk\n    find: {roots: [/tmp], paths: [\"junk-*\"], type: dir}\n    action: delete\n    examples: {match: [/tmp/junk-0]}\ngroups:\n  - name: g\n    tiers:\n      - name: t\n        select: profile:junk\n",
+        );
+        let override_builtin = crate::tests::ConfigFixture::new(
+            "watch-release-override",
+            "version: 1\nprofiles:\n  - name: pytest-cache\n    override: true\n    find: {roots: required, paths: [\".pytest_cache\"], type: dir}\n    action: delete\n    examples: {match: [/tmp/.pytest_cache]}\n",
+        );
+        let empty = crate::tests::ConfigFixture::new("watch-release-empty", "version: 1\n");
+        let tally_only = |extra: &[&str]| {
+            let mut line = vec!["--tally-only"];
+            line.extend_from_slice(extra);
+            line.push("/tmp");
+            parse(&line).expect("parses")
+        };
+        let start = Start {
+            read_config: &crate::read_config,
+            startup: &|_| {
+                Err(crate::StartupFailure::Host(
+                    "open /proc: EACCES (a test: the host never starts here)".to_owned(),
+                ))
+            },
+        };
+        let refused = [
+            (
+                tally_only(&["--config", &user_profile.path()]),
+                "`junk` is a user profile",
+            ),
+            (
+                tally_only(&["--config", &override_builtin.path()]),
+                "`pytest-cache` is a user profile",
+            ),
+            (
+                tally_only(&[
+                    "--config",
+                    &empty.path(),
+                    "--select",
+                    "profile:node-modules",
+                    "--roots",
+                    "/tmp",
+                ]),
+                "`node-modules` is a built-in that diskgc 0.2 does not ship",
+            ),
+        ];
+        for (args, name) in refused {
+            let mut out = Vec::new();
+            assert_eq!(
+                watch_with(&args, true, &start, &mut out),
+                ExitCode::from(2),
+                "{name}"
+            );
+            let object: serde_json::Value = serde_json::from_slice(&out).expect("one JSON object");
+            assert_eq!(object["exit_code"], 2, "{object}");
+            assert!(
+                object["errors"][0]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains(name)),
+                "{name}: {object}"
+            );
+        }
+        // The same watch with a shipped built-in loads, and only the host
+        // stops it.
+        let shipped = tally_only(&[
+            "--config",
+            &empty.path(),
+            "--select",
+            "profile:pytest-cache",
+            "--roots",
+            "/tmp",
+        ]);
+        let mut out = Vec::new();
+        assert_eq!(
+            watch_with(&shipped, true, &start, &mut out),
+            ExitCode::from(3)
+        );
+    }
+
     /// TASK-272 review (Codex 1): a valid configuration that cannot be
     /// read because `/proc` is unavailable: exit 3 with the error object
     /// (cause `host`), the host not started.

@@ -148,6 +148,23 @@
         "type": "github"
       }
     },
+    "openwrt-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792282260,
+        "narHash": "sha256-BsZuOH7MP3x9W6upca9XV3AI71iVAuWM8hEXe7HZCYM=",
+        "owner": "openwrt",
+        "repo": "openwrt",
+        "rev": "64900e756efa667774214f9c6b17c113222e01f7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "openwrt",
+        "ref": "v25.12.6",
+        "repo": "openwrt",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "bitbake-src": "bitbake-src",
@@ -159,6 +176,7 @@
         "nixpkgs68": "nixpkgs68",
         "nixpkgsNixUnderTest": "nixpkgsNixUnderTest",
         "oe-core-src": "oe-core-src",
+        "openwrt-src": "openwrt-src",
         "rust-overlay": "rust-overlay",
         "zephyr-src": "zephyr-src"
       }

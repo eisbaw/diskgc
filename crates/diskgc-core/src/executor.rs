@@ -2304,8 +2304,7 @@ impl<H: Delete> Reclaim<'_, '_, H> {
                 return self.stop(&Stop::DeadlinePassed { path: path.clone() });
             }
             match guard {
-                Ok(Some((index, skip))) => {
-                    let source_index = candidate.guard_by[index].0;
+                Ok(Some((source_index, _, skip))) => {
                     self.skip_as(&skip.path, sources[source_index].profile, &skip);
                     continue;
                 }

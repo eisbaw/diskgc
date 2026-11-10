@@ -86,13 +86,14 @@ fn the_0_1_row_is_what_v0_1_0_shipped() {
 
 /// 0.2's catalog is 0.1's plus `nix-garbage` (Mark, 2026-11-04, TASK-335),
 /// five of TASK-350's project-tree sources (Mark, 2026-11-05, TASK-359;
-/// `node-modules` held out, Mark, 2026-11-06, TASK-365) and
+/// `node-modules` held out, Mark, 2026-11-06, TASK-365),
 /// four delegated cleaners (Mark, 2026-11-05, TASK-360; `jest-cache` left
-/// after review), through the same
+/// after review), three runtime caches and four source-anchored build
+/// outputs (Mark, 2026-11-07, TASK-370), through the same
 /// narrowing the binary uses; 0.1's stays without them.
 #[test]
-fn the_0_2_catalog_is_0_1_plus_nix_garbage_the_project_tree_caches_and_four_cleaners() {
-    const ADDED: [&str; 10] = [
+fn the_0_2_catalog_is_0_1_plus_nix_garbage_the_project_tree_caches_cleaners_and_builds() {
+    const ADDED: [&str; 17] = [
         "nix-garbage",
         "pytest-cache",
         "python-pycache",
@@ -103,6 +104,13 @@ fn the_0_2_catalog_is_0_1_plus_nix_garbage_the_project_tree_caches_and_four_clea
         "uv-cache",
         "pnpm-store",
         "ccache",
+        "go-mod-cache",
+        "bun-cache",
+        "nix-user-cache",
+        "cmake-build-anchored",
+        "meson-build-anchored",
+        "autotools-build-anchored",
+        "west-build-anchored",
     ];
     let names = |release: &str| -> Vec<String> {
         let library = Catalog::from(super::release(release).expect(release))
@@ -119,7 +127,18 @@ fn the_0_2_catalog_is_0_1_plus_nix_garbage_the_project_tree_caches_and_four_clea
     want.extend(ADDED.iter().map(|n| (*n).to_owned()));
     want.sort();
     let got = names("0.2");
-    assert!(!got.iter().any(|n| n == "node-modules"), "{got:?}");
+    for held in [
+        "node-modules",
+        "huggingface-hub-repos",
+        "electron-download-cache",
+        "node-gyp-headers",
+        "cargo-registry-src",
+        "buildroot-output-anchored",
+        "yocto-tmpdir-anchored",
+        "bazel-output-base-anchored",
+    ] {
+        assert!(!got.iter().any(|n| n == held), "{held}: {got:?}");
+    }
     assert_eq!(got, want);
     assert_eq!(release("0.2").expect("0.2").catalog, Some(Release::V0_2));
 }
@@ -338,18 +357,28 @@ fn each_rule_refuses_its_edit() {
     Descriptor::parse(&embedded().to_string()).expect("the real file");
 }
 
-/// The reclaiming-watch decision (TASK-276) is one row's data: adding
-/// `watch` to a release's commands is all it takes, and the phrase the
-/// binary refuses and helps with follows.
+/// 0.2 runs a reclaiming `watch` and keeps `watch --tally-only` (Mark,
+/// 2026-11-05, TASK-276: "Reclaiming watch in 0.2"; TASK-362), with both
+/// unit templates, and still no `survey`. Reverting the row to
+/// tally-only fails here, in the binary's help test
+/// (`the_help_follows_the_rows_commands_and_files`), in the module's
+/// evaluation (`release-candidate-runs-reclaiming-watch`) and in the release suite
+/// (`release_candidate_watch_*`).
 #[test]
-fn allowing_a_reclaiming_watch_is_a_one_row_change() {
-    let mut value = embedded();
-    value["releases"]["0.2"]["commands"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!("watch"));
-    let edited = Descriptor::parse(&value.to_string()).expect("still valid");
-    let row = &edited.releases["0.2"];
-    assert!(row.allows(Command::Watch));
+fn the_0_2_row_runs_a_reclaiming_watch_and_tally_only() {
+    let row = release("0.2").expect("0.2");
+    assert_eq!(
+        row.commands,
+        [
+            Command::Ensure,
+            Command::Watch,
+            Command::WatchTallyOnly,
+            Command::Check,
+            Command::Profiles
+        ]
+    );
+    assert!(!row.allows(Command::Survey));
     assert_eq!(row.commands_phrase(), "ensure, watch, check and profiles");
+    let units = &descriptor().expect("descriptor").watch_units;
+    assert!(!units.is_empty() && units.iter().all(|u| row.ships.contains(u)));
 }
