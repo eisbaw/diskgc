@@ -145,6 +145,12 @@ pub struct Fs {
     /// A btrfs's member block devices ([`crate::spec::MountSpec::members`]);
     /// empty for any other filesystem.
     pub members: Vec<Dev>,
+    /// [`crate::spec::MountSpec::free_lag`].
+    pub free_lag: Option<Duration>,
+    /// Bytes an `unlinkat` freed and when they show (run time,
+    /// [`State::elapsed`]): available space leaves out those not shown
+    /// yet. Only with `free_lag`; one entry per unlink that freed blocks.
+    pub freed_later: Vec<(Duration, u64)>,
     pub root: u64,
     /// Private, so every change goes through `State::fs_mut` or
     /// [`Fs::add`], which drop the cached [`Links`].
@@ -173,6 +179,8 @@ impl Fs {
             other_used,
             missing: BTreeSet::new(),
             members: Vec::new(),
+            free_lag: None,
+            freed_later: Vec::new(),
             root,
             inodes: BTreeMap::from([(root, Inode::new(Kind::Dir(BTreeMap::new()), now))]),
             links: RefCell::new(None),
@@ -1122,18 +1130,30 @@ impl State {
         live
     }
 
-    pub fn space(&self, mnt: u64) -> Space {
-        let fs = self.fs(mnt);
-        let allocated: u64 = self
-            .live(fs.dev)
+    /// The blocks of every live inode of a filesystem.
+    fn allocated_live(&self, dev: Dev) -> u64 {
+        let fs = &self.fss[&dev];
+        self.live(dev)
             .iter()
             .map(|ino| fs.inodes[ino].allocated())
+            .sum()
+    }
+
+    pub fn space(&self, mnt: u64) -> Space {
+        let fs = self.fs(mnt);
+        let allocated = self.allocated_live(fs.dev);
+        let not_shown: u64 = fs
+            .freed_later
+            .iter()
+            .filter(|(shows_at, _)| *shows_at > self.elapsed)
+            .map(|(_, bytes)| bytes)
             .sum();
         Space {
             avail_bytes: fs
                 .size
                 .saturating_sub(fs.other_used)
-                .saturating_sub(allocated),
+                .saturating_sub(allocated)
+                .saturating_sub(not_shown),
             size_bytes: fs.size,
             block_bytes: BLOCK,
         }
@@ -1713,10 +1733,30 @@ impl State {
             (Some(entries), true) if !entries.is_empty() => return Err(Errno::ENOTEMPTY),
             _ => {}
         }
+        // With `free_lag`, what the unlink frees is the live blocks before
+        // it less those after it (an inode still open or linked elsewhere
+        // frees nothing): two passes over the live inodes per unlink, only
+        // on such a filesystem; `freed_later` keeps every entry (bounded by
+        // the unlinks of a test run).
+        let dev = self.mount(dir.mnt).dev;
+        let lag = self.fss[&dev].free_lag;
+        let allocated_before = lag.map(|_| self.allocated_live(dev));
         self.unlink_entry(dir, name).map_err(|fault| match fault {
             Fault::Errno(e) => e,
             Fault::Model(m) => panic!("model bug: {m}"),
         })?;
+        if let (Some(lag), Some(before)) = (lag, allocated_before) {
+            let after = self.allocated_live(dev);
+            assert!(after <= before, "an unlink allocated blocks");
+            if before > after {
+                let shows_at = self.elapsed + lag;
+                self.fss
+                    .get_mut(&dev)
+                    .expect("the unlink's filesystem")
+                    .freed_later
+                    .push((shows_at, before - after));
+            }
+        }
         Ok(target)
     }
 }

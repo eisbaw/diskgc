@@ -228,7 +228,10 @@ The model is data, not a second Linux:
   replaced between the identity check and the unlink" are expressible.
 - **Derived, not duplicated**: available space is computed (filesystem size
   − allocated blocks, each inode counted once − `other_used`), so deleting
-  something in the model frees space in the model.
+  something in the model frees space in the model. A mount's `free_lag`
+  shows what an `unlinkat` frees only that much model time later (a
+  filesystem that releases blocks asynchronously; TASK-334's wait rule,
+  `crates/diskgc-model/tests/space_wait.rs`).
 - **Grown on demand**: mounts (ids, parents, types including nfs/btrfs,
   bind and stacked mounts), trees with owners, locks (holders and waiters),
   processes (exe, cwd, root, initial environ, uid, open fds including

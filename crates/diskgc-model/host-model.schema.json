@@ -1151,6 +1151,17 @@
           "description": "Device number `major:minor`. Reuse requires `bind_of`.",
           "$ref": "#/$defs/Dev"
         },
+        "free_lag": {
+          "description": "The blocks an `unlinkat` frees show in `statvfs` only this long\nafter the call, as on a filesystem that releases blocks\nasynchronously (docs/architecture.md, Measuring space; TASK-334).\nAbsent: at once. Only blocks the call itself frees lag; an event's\n`remove` frees at once. Not with `bind_of` or `overlay_upper` (they\nshare another mount's filesystem).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Elapsed"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "fs": {
           "description": "Filesystem type, e.g. `ext4`, `tmpfs`, `nfs`, `btrfs`.",
           "type": "string"

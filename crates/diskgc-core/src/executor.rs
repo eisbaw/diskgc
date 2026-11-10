@@ -878,6 +878,78 @@ enum Protect {
     Stopped,
 }
 
+/// How long after an action, or before the final sample, diskgc
+/// re-samples available space at most while freed space that could reach
+/// the goal has not shown yet (docs/architecture.md, Measuring space).
+const RESAMPLE_WINDOW: Duration = Duration::from_secs(2);
+/// The pause between those samples.
+const RESAMPLE_EVERY: Duration = Duration::from_millis(250);
+
+/// How [`resample_while`] ended.
+enum Resampled {
+    /// What it waited for came, or the deadline ended it: the last sample.
+    Reached(u64),
+    /// The window ended first: the last sample.
+    RanOut(u64),
+    /// A signal ended it: the last sample.
+    Interrupted(u64),
+    /// A sample failed.
+    Failed(String),
+}
+
+/// Re-samples the available space every [`RESAMPLE_EVERY`] while
+/// `wanted(last sample)`, for at most [`RESAMPLE_WINDOW`], never past
+/// `deadline` (a sample's own overrun recorded) and never after a signal:
+/// freed blocks may show after the call that freed them returns
+/// (docs/architecture.md, Measuring space). The one wait for freed space:
+/// after an action, before a tier that reads the remaining need, and at the
+/// final sample.
+fn resample_while<H: Host>(
+    host: &H,
+    measured: &Measured<H::Fd>,
+    deadline: Option<MonoTime>,
+    report: &mut Report,
+    mut observed: u64,
+    wanted: impl Fn(u64) -> bool,
+) -> Resampled {
+    let Some(window_end) = host.now().checked_add(RESAMPLE_WINDOW) else {
+        return Resampled::Reached(observed);
+    };
+    while wanted(observed) {
+        if host.now() >= window_end {
+            return Resampled::RanOut(observed);
+        }
+        if host.interrupted().is_some() {
+            return Resampled::Interrupted(observed);
+        }
+        if deadline_passed(host, deadline) {
+            break;
+        }
+        let mut wait = RESAMPLE_EVERY.min(window_end.saturating_since(host.now()));
+        if let Some(deadline) = deadline {
+            wait = wait.min(deadline.saturating_since(host.now()));
+        }
+        if wait.is_zero() {
+            // The deadline (the window's end returned above).
+            break;
+        }
+        host.sleep(wait);
+        if host.interrupted().is_some() {
+            return Resampled::Interrupted(observed);
+        }
+        if deadline_passed(host, deadline) {
+            break;
+        }
+        let started = host.now();
+        match sample(host, measured) {
+            Ok(space) => observed = space.avail_bytes,
+            Err(error) => return Resampled::Failed(error),
+        }
+        record_deadline_overrun(host, report, deadline, started, "statvfs", &measured.path);
+    }
+    Resampled::Reached(observed)
+}
+
 /// One reclaim of the tier, under the host lock.
 struct Reclaim<'a, 'l, H: Delete> {
     host: &'a H,
@@ -926,6 +998,13 @@ struct Reclaim<'a, 'l, H: Delete> {
     /// What a second signal does to a running child's grace: `watch`'s
     /// policy or `ensure`'s ([`SecondSignal`]).
     second_signal: SecondSignal,
+    /// The run's, across its tiers: the available space it expects once
+    /// what its tallied actions freed shows (the highest sample after an
+    /// action, or more while tallied bytes are still to show); `None`
+    /// before the first action. Decides whether waiting for freed space
+    /// could matter ([`Reclaim::record_as`], TASK-334), and for the final
+    /// sample and a tier that reads the remaining need ([`entry`]).
+    expected_avail: &'a mut Option<u64>,
 }
 
 /// After this many candidates in a row of one tier end `in_use_unknown`
@@ -2690,56 +2769,83 @@ impl<H: Delete> Reclaim<'_, '_, H> {
             sample_started,
             self.host.now(),
         );
-        // Filesystems may release blocks after unlink returns. Recheck for at
-        // most two seconds when this action has freed less than its tally (or
-        // the remaining target for an action without a tally). The goal is
-        // decided only by the last observed sample.
+        // Filesystems may release blocks after unlink returns
+        // (docs/architecture.md, Measuring space). The wait exists so that
+        // what the run decides next does not miss freed space that is not
+        // visible yet. In a tier that decides by the goal alone
+        // ([`Tier::decides_by_goal_only`]) it can matter only when the space
+        // the run expects (`eventual`: the highest sample so far, or more
+        // while tallied bytes of earlier actions are still to show, plus
+        // this action's estimate) reaches the target; otherwise the next
+        // candidate is taken whatever the wait shows (TASK-334). A tier
+        // whose next pop, command or GC reads the remaining need always
+        // waits. As `eventual` is at least `before` plus this action's
+        // estimate, the wait runs whenever the per-action rule before it
+        // did, given that it can matter. The goal is decided only by the
+        // last observed sample.
         let acted = outcome.removed_entries > 0 || outcome.attempted_command;
-        if acted && !self.run_stopped && !self.past_deadline() && !self.stop_if_interrupted() {
-            let expected = outcome
-                .expected_bytes
-                .unwrap_or_else(|| self.measured.target.saturating_sub(outcome.before));
-            let window_end = self.host.now().checked_add(Duration::from_secs(2));
-            if let (Some(mut observed), Some(window_end)) = (after, window_end) {
-                while observed < self.measured.target
-                    && observed.saturating_sub(outcome.before) < expected
-                    && self.host.now() < window_end
-                {
-                    if self.stop_if_interrupted() || self.past_deadline() {
-                        break;
-                    }
-                    let remaining = window_end.saturating_since(self.host.now());
-                    let wait = Duration::from_millis(250).min(remaining);
-                    let wait = self.deadline.map_or(wait, |deadline| {
-                        wait.min(deadline.saturating_since(self.host.now()))
-                    });
-                    if wait.is_zero() {
-                        break;
-                    }
-                    self.host.sleep(wait);
-                    if self.stop_if_interrupted() || self.past_deadline() {
-                        break;
-                    }
-                    let retry_started = self.host.now();
-                    match sample(self.host, self.measured) {
-                        Ok(space) => {
-                            observed = space.avail_bytes;
-                            after = Some(observed);
-                        }
-                        Err(error) => {
-                            self.host_failure(error);
-                            after = None;
-                            break;
-                        }
-                    }
-                    self.record_overrun(
-                        "statvfs",
-                        &self.measured.path,
-                        retry_started,
-                        self.host.now(),
-                    );
+        // Only a complete deletion's tally is what it frees. Any other
+        // action (a part-way deletion, a command, a GC, an untallied
+        // candidate) expects the remaining target: it waits as before and
+        // adds nothing to what later ones expect.
+        let tallied_estimate = !outcome.attempted_command
+            && outcome.expected_bytes.is_some()
+            && matches!(outcome.end, ReclaimEnd::Complete);
+        let target = self.measured.target;
+        let estimate = match outcome.expected_bytes {
+            Some(tally) if tallied_estimate => tally,
+            _ => target.saturating_sub(outcome.before),
+        };
+        let eventual = self
+            .expected_avail
+            .unwrap_or(0)
+            .max(outcome.before)
+            .saturating_add(estimate);
+        let could_matter = eventual >= target || !self.tier.decides_by_goal_only();
+        // A wait that ran out its window short of `eventual`: what has not
+        // shown by then is not taken to come (the window bounds the lag
+        // diskgc allows for), so one estimate above what an action frees
+        // costs one window, not one per later action.
+        let mut ran_out = false;
+        if acted
+            && could_matter
+            && !self.run_stopped
+            && !self.past_deadline()
+            && !self.stop_if_interrupted()
+            && let Some(observed) = after
+        {
+            match resample_while(
+                self.host,
+                self.measured,
+                self.deadline,
+                self.report,
+                observed,
+                |seen| seen < target && seen < eventual,
+            ) {
+                Resampled::Reached(seen) => after = Some(seen),
+                Resampled::RanOut(seen) => {
+                    after = Some(seen);
+                    ran_out = true;
+                }
+                Resampled::Interrupted(seen) => {
+                    after = Some(seen);
+                    self.stop_if_interrupted();
+                }
+                Resampled::Failed(error) => {
+                    self.host_failure(error);
+                    after = None;
                 }
             }
+        }
+        if acted && let Some(observed) = after {
+            let expected = if ran_out {
+                observed
+            } else if tallied_estimate {
+                eventual
+            } else {
+                self.expected_avail.unwrap_or(0)
+            };
+            *self.expected_avail = Some(expected.max(observed));
         }
         if self.past_deadline() {
             self.deadline_hit = true;
