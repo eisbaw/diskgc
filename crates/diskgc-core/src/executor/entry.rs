@@ -47,9 +47,9 @@ use super::preflight::{
 use super::prune_backend::{self, Bound, Which};
 use super::tier_policy::Protection;
 use super::{
-    NotesOncePerRun, Reclaim, Request, SourceKind, Tier, attempted_lock, deadline_of,
+    NotesOncePerRun, Reclaim, Request, Resampled, SourceKind, Tier, attempted_lock, deadline_of,
     deadline_passed, final_sample, host_error, indexed, lock_refusal, record_deadline_overrun,
-    record_error, run_error, sample, skip_entry, taken, timed_report_from, usage,
+    record_error, resample_while, run_error, sample, skip_entry, taken, timed_report_from, usage,
 };
 
 /// Brings `PATH`'s filesystem to the goal with the request's tier (see the
@@ -401,11 +401,32 @@ enum Ending {
     /// `protect` that cannot be enumerated), when the space was there under
     /// the lock, or when the deadline stopped the run (`deadline_hit`).
     /// `at` is the tier the run was at (in preparation or reclaiming), to
-    /// which a failure of that sample is attributed.
-    Concluded { deadline_hit: bool, at: usize },
+    /// which a failure of that sample is attributed. `expected_avail`: the
+    /// space the run's actions lead it to expect once their freed blocks
+    /// show (`Reclaim::expected_avail`; `None` before any action), which
+    /// the final sample may wait for ([`settle_final`]).
+    Concluded {
+        deadline_hit: bool,
+        at: usize,
+        expected_avail: Option<u64>,
+    },
 }
 
 impl Ending {
+    /// A concluding ending of a run whose actions expect `expected_avail`.
+    fn expecting(self, expected_avail: Option<u64>) -> Self {
+        match self {
+            Self::Concluded {
+                deadline_hit, at, ..
+            } => Self::Concluded {
+                deadline_hit,
+                at,
+                expected_avail,
+            },
+            other => other,
+        }
+    }
+
     fn conclude<H: Delete>(
         self,
         run: &Tallied<'_, H>,
@@ -423,16 +444,59 @@ impl Ending {
                 report.status =
                     after_lock_timeout(Final::of(report.avail_after_bytes, measured.min));
             }
-            Self::Concluded { deadline_hit, at } => {
+            Self::Concluded {
+                deadline_hit,
+                at,
+                expected_avail,
+            } => {
                 let tier = &run.tiers[at].0;
                 report.avail_after_bytes =
                     final_sample(host, measured, deadline, report, log, tier);
+                if let (Some(observed), Some(expected)) = (report.avail_after_bytes, expected_avail)
+                {
+                    report.avail_after_bytes =
+                        settle_final(run, observed, expected, report, log, tier);
+                }
                 report.status = conclude(
                     Final::of(report.avail_after_bytes, measured.min),
                     deadline_hit || deadline_passed(host, deadline),
                     !report.errors.is_empty(),
                 );
             }
+        }
+    }
+}
+
+/// The final sample, `observed`, re-sampled like an action's
+/// ([`resample_while`]) while it is below the target and the space the run's
+/// actions lead it to expect (`expected`) is more: their own waits are
+/// skipped when the goal was out of reach (TASK-334), and this sample
+/// decides the exit code and is the reported `avail_after_bytes`. At most
+/// one window per run; none once the target is observed. `None` when a
+/// re-sample fails (a run error, as for the final sample).
+fn settle_final<H: Delete>(
+    run: &Tallied<'_, H>,
+    observed: u64,
+    expected: u64,
+    report: &mut Report,
+    log: &mut dyn FnMut(&str),
+    tier: &Tier,
+) -> Option<u64> {
+    let target = run.measured.target;
+    match resample_while(
+        run.host,
+        run.measured,
+        run.deadline,
+        report,
+        observed,
+        |seen| seen < target && seen < expected,
+    ) {
+        Resampled::Reached(seen) | Resampled::RanOut(seen) | Resampled::Interrupted(seen) => {
+            Some(seen)
+        }
+        Resampled::Failed(error) => {
+            record_error(report, log, host_error(tier, error));
+            None
         }
     }
 }
@@ -528,6 +592,7 @@ impl<H: Delete> Tallied<'_, H> {
         let past_deadline = Ending::Concluded {
             deadline_hit: true,
             at: 0,
+            expected_avail: None,
         };
         if deadline_passed(host, deadline) {
             return Err(past_deadline);
@@ -544,6 +609,7 @@ impl<H: Delete> Tallied<'_, H> {
                 return Err(Ending::Concluded {
                     deadline_hit: false,
                     at: 0,
+                    expected_avail: None,
                 });
             }
             Ok(_) => {}
@@ -584,6 +650,7 @@ impl<H: Delete> Tallied<'_, H> {
             return Err(Ending::Concluded {
                 deadline_hit: true,
                 at,
+                expected_avail: None,
             });
         }
         enumerated.map_err(|error| {
@@ -591,6 +658,7 @@ impl<H: Delete> Tallied<'_, H> {
             Ending::Concluded {
                 deadline_hit: false,
                 at,
+                expected_avail: None,
             }
         })
     }
@@ -605,6 +673,7 @@ impl<H: Delete> Tallied<'_, H> {
         let past_deadline = |at| Ending::Concluded {
             deadline_hit: true,
             at,
+            expected_avail: None,
         };
         let mut prepared = Vec::with_capacity(self.tiers.len());
         for (at, (tier, _)) in self.tiers.iter().enumerate() {
@@ -635,6 +704,9 @@ impl<H: Delete> Tallied<'_, H> {
         // The tier the run is at: the last one that began.
         let mut at = 0;
         let mut a_tier_ran = false;
+        // Across tiers: a tier boundary is no reason to forget freed bytes
+        // that have not shown yet.
+        let mut expected_avail = None;
         for (index_of_tier, (prepared, (_, tier_timeout))) in
             prepared.into_iter().zip(self.tiers).enumerate()
         {
@@ -651,13 +723,40 @@ impl<H: Delete> Tallied<'_, H> {
                 let started = host.now();
                 let sampled = sample(host, measured);
                 record_deadline_overrun(host, report, deadline, started, "statvfs", &measured.path);
-                match sampled {
-                    Ok(space) if space.avail_bytes >= measured.target => break,
-                    Ok(_) => {}
+                let mut avail = match sampled {
+                    Ok(space) => space.avail_bytes,
                     Err(error) => {
                         record_error(report, log, host_error(&tier, error));
                         break;
                     }
+                };
+                // Earlier tiers may have skipped their waits (TASK-334);
+                // a tier that reads the remaining need gets the wait they
+                // would have had, so it reads the need they would have left.
+                if !tier.decides_by_goal_only()
+                    && let Some(expected) = expected_avail
+                {
+                    let target = measured.target;
+                    match resample_while(host, measured, deadline, report, avail, |seen| {
+                        seen < target && seen < expected
+                    }) {
+                        Resampled::Reached(seen) => avail = seen,
+                        // As at the loop's top: nothing more after a signal.
+                        Resampled::Interrupted(_) => break,
+                        // As after an action: what did not show in the
+                        // window is not taken to come.
+                        Resampled::RanOut(seen) => {
+                            avail = seen;
+                            expected_avail = Some(seen);
+                        }
+                        Resampled::Failed(error) => {
+                            record_error(report, log, host_error(&tier, error));
+                            break;
+                        }
+                    }
+                }
+                if avail >= measured.target {
+                    break;
                 }
             }
             if deadline_passed(host, deadline) {
@@ -674,7 +773,7 @@ impl<H: Delete> Tallied<'_, H> {
             if a_tier_ran {
                 match self.protect(at, report, log) {
                     Ok(enumerated) => protection = enumerated,
-                    Err(ending) => return ending,
+                    Err(ending) => return ending.expecting(expected_avail),
                 }
             }
             a_tier_ran = true;
@@ -704,6 +803,7 @@ impl<H: Delete> Tallied<'_, H> {
                 } else {
                     SecondSignal::WaitOutGrace
                 },
+                expected_avail: &mut expected_avail,
             };
             reclaim.run(self.owners);
             let (timed_out, stopped) = (reclaim.deadline_hit, reclaim.run_stopped);
@@ -728,7 +828,11 @@ impl<H: Delete> Tallied<'_, H> {
                 break;
             }
         }
-        Ending::Concluded { deadline_hit, at }
+        Ending::Concluded {
+            deadline_hit,
+            at,
+            expected_avail,
+        }
     }
 
     /// `tier`'s run-time checks under the host lock, before any tier may

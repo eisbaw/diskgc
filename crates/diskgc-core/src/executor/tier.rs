@@ -150,6 +150,22 @@ pub(super) struct FsUnionSourceRef<'a> {
 }
 
 impl Tier {
+    /// Whether everything this tier decides from the available space is
+    /// "is the goal reached?": candidates taken oldest first, removed by
+    /// diskgc's own deletion or the Cargo protocol. A `best-fit` pop, a
+    /// command's `DISKGC_NEED_BYTES`, a prune or a Nix GC's `--max-freed`
+    /// read the remaining need instead, so for them a sample that misses
+    /// freed blocks not shown yet changes what is done; only in a tier like
+    /// this can the wait for them be skipped when it could not reach the
+    /// goal (docs/architecture.md, Measuring space; TASK-334).
+    pub(crate) fn decides_by_goal_only(&self) -> bool {
+        self.order == Order::Oldest
+            && matches!(
+                self.action,
+                Action::Delete { .. } | Action::CargoLockProtocol
+            )
+    }
+
     /// The hash of the source profile's definition (kind, `find` with its
     /// `where`, action) that the index's finders carry
     /// (docs/architecture.md, The index: Finders): a unit enters this

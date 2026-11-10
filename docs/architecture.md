@@ -941,11 +941,56 @@ reclaim(min, goal, filesystem, deadline):
 - **Available space** = `f_bavail × f_frsize` from `statvfs`: what an
   unprivileged writer can use, never the root reserve. No `syncfs` (it
   waits for unrelated I/O and cannot be cancelled). Some filesystems free
-  blocks asynchronously, so if a sample after an action shows less than
-  expected, diskgc re-samples a few times over at most 2 s.
+  blocks asynchronously, so diskgc re-samples every 250 ms over at most
+  2 s while a sample shows less than it expects, but only where that could
+  change what it does next (TASK-334). The run keeps the space it expects:
+  the highest sample since its first action, raised by each completely
+  deleted candidate's tally, so it carries bytes earlier actions freed
+  that have not shown yet, across tiers.
+  - *After an action in a tier that decides by the goal alone* (`oldest`
+    order, diskgc's own deletion or the Cargo protocol): it waits only
+    when the expected space would reach the goal. Below that, even a wait
+    that saw every expected byte would leave the goal unmet and the next
+    candidate would be taken anyway, so it is taken at once.
+  - *After an action in any other tier* (`best-fit`, commands, Docker and
+    Podman prunes, a Nix GC): it always waits, as before. A `best-fit` pop,
+    a command's `DISKGC_NEED_BYTES` and a GC's `--max-freed` read the
+    remaining need; the prunes are whole operations kept on the old rule.
+    Before such a tier runs, the sample between tiers waits the same way
+    for bytes earlier tiers left unseen. An action without a complete
+    tally (a part-way deletion, an untallied candidate) expects the rest
+    of the goal, so it waits too. A wait that runs out its window short of
+    the expected space resets it to the sample: blocks not shown within
+    the window are not taken to come, so a tally above what a deletion
+    frees (shared extents, hard links) costs one window.
+  - *The final sample* waits the same way while it is below the target
+    and the expected space is more, once per run: it decides the exit code
+    and is the reported `avail_after_bytes`.
+  - *Decision-preserving where the wait could work:* with right estimates,
+    no other process freeing space, every action's blocks showing within
+    the 2 s window, and no deadline or signal ending the run first, the
+    run deletes the same candidates and exits the same as with a wait
+    after every short action. A run that `--timeout` or a signal cuts
+    short gets further than before, as it no longer spends those waits:
+    more candidates, and an exit 0 where the old rule's run ran out of
+    time, always on an observed sample (model properties
+    for one `oldest` tier and one `best-fit` tier with a fixed lag per
+    filesystem, and scenarios across tiers and into a command's need,
+    `space_wait.rs`). A writer that uses space makes the run expect more
+    than will show, so it waits as before, and near the goal the saving is
+    lost. An action that frees more than its tally (a tree that grew after
+    the tally), or another process freeing space, can make the run skip
+    a wait the old rule took and take one more candidate. Where blocks
+    show later than the window, the old rule's waits also aged earlier
+    actions' blocks, so skipping them can take more candidates before the
+    space appears (Stopping, below).
 - **`avail_delta`** is the observed net change around an action, signed:
   concurrent writers can make it negative, unrelated deletions can inflate
-  it. Success is judged only by the final sample.
+  it, and so can blocks an earlier action freed that show only now (its
+  wait skipped, above), while that action's own change is then smaller.
+  Blocks that show between two actions (between tiers, during a busy
+  host's back-off) are in no action's change, so the changes need not add
+  up to the run's. Success is judged only by the final sample.
 - **Stopping:** diskgc stops as soon as an observed sample reaches the goal.
   It does not bound eventual reclamation: if a filesystem frees blocks later
   than the re-sampling window, further candidates may already have been

@@ -355,6 +355,14 @@ pub struct MountSpec {
     /// `/`). Missing directories are created, as for a mount point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_root: Option<PathBuf>,
+    /// The blocks an `unlinkat` frees show in `statvfs` only this long
+    /// after the call, as on a filesystem that releases blocks
+    /// asynchronously (docs/architecture.md, Measuring space; TASK-334).
+    /// Absent: at once. Only blocks the call itself frees lag; an event's
+    /// `remove` frees at once. Not with `bind_of` or `overlay_upper` (they
+    /// share another mount's filesystem).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_lag: Option<Elapsed>,
     /// An overlayfs mount (`fs: overlay`) whose upper directory is this
     /// path, on a mount declared earlier (missing directories are
     /// created): the mount shows that directory's tree, under its own

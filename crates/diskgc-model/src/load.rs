@@ -407,6 +407,12 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
                 "members needs fs: btrfs on an anonymous device (major 0), without bind_of",
             ));
         }
+        if spec.free_lag.is_some() && (spec.bind_of.is_some() || spec.overlay_upper.is_some()) {
+            return Err(LoadError::new(
+                &at,
+                "free_lag is the filesystem's: not on a bind or an overlay",
+            ));
+        }
         if !spec.idmap.is_empty() && spec.overlay_upper.is_some() {
             return Err(LoadError::new(&at, "an overlay is not idmapped here"));
         }
@@ -528,6 +534,7 @@ fn load_mounts(state: &mut State, model: &HostModel) -> Result<(), LoadError> {
                 let mut fs = Fs::new(dev, spec.fs.clone(), spec.size.0, spec.other_used.0, now);
                 fs.missing = spec.statx_missing.iter().copied().collect();
                 fs.members = spec.members.iter().map(|d| d.0).collect();
+                fs.free_lag = spec.free_lag.map(|lag| lag.0);
                 let root = fs.root;
                 state.fss.insert(dev, fs);
                 root
