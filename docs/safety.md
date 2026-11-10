@@ -2826,15 +2826,14 @@ Delete the inner build directory and the outer stamp still says
 package is cleaned there (with Buildroot 2026.08.1, `make
 host-cmk-rebuild` fails once `buildroot-build` is gone).
 
-After the source anchor has accepted a candidate, the guard looks for
-three signals. Any one keeps the output (not a candidate, no skip
-reason), and discovery does not enter it: a build nested in it lies in
-the same tree although its own climb may not reach the signal (a stamp
-past the four directories), so it is not a candidate either (Codex's
-counterexample, vector
-`cmake-build-anchored-old-build-below-a-vetoed-active-one-survives`).
-An output whose anchor finds no evidence at all is still entered, as
-any other directory:
+**The guard is the selection's** (the sixth review of TASK-367). Every
+term of a selection that holds one of those profiles brings it: a
+candidate that holds a build directory's marker (`CMakeCache.txt`,
+`meson-private/coredata.dat` or `config.status`, of any type) is judged
+by it whichever term found it, by its path alone, so a pytest session
+that is also a CMake build is kept from `pytest-tmp` in a union with
+`cmake-build-anchored` whatever cmake's own discovery saw of it. It
+looks for three signals; any one keeps the build:
 
 - **A stamp** in the build directory's parent or one of the three
   directories above it, and in the four above every build directory it
@@ -2867,25 +2866,51 @@ directories in the container (`host-cmk`, a cmake-package, and
 include/package.mk and include/host-build.mk, read but not run (its SDK
 needs the network); the build-root markers are the anchors' own; npm's
 from cmake-js's documentation, with a real CMake build in that layout in
-the container. The
-guard runs at discovery, again at every judgement (the plan's, the
-tally's, the locked one) and, for every admitted guarded term, once more
-in the last checks right before the delete (Codex's fourth review); a
-stamp that appears after discovery keeps the output (`changed`). A
-directory on the way that cannot be reached, or one of the four that
-cannot be listed (or holds more than the entry limit), is a visible
-refusal of the candidate, which is not entered either (vector
-`cmake-build-anchored-undecided-guard-prunes-its-subtree`). A veto or
-an undecided guard at any of these judgements is the candidate's verdict
-for every term of a union (`changed`, or the guard's own reason), never
-only its own term's refusal: another term never takes what the guard
-keeps. The window after the last check, the delete itself, is the
+the container.
+
+The guard is one of the retention rules (beside `keep_newest` and the
+link guards; `Judge::version_where` in the code), so it is asked where
+they are: at each term's judgement, and in the union-wide retention pass
+over every term that found the candidate, in the plan, in the reclaim's
+tally (a candidate it refuses is not queued), before the candidate lock,
+under it, and as the last check before the delete or the command (the
+only check after the locked walk). A veto there is `changed`; a build
+marker, a directory on the way or one of the four that cannot be read
+(or holds more than the entry limit) is the guard's own visible refusal
+(`unreadable`, `too_many_entries`, ...), never "no build" or "no stamp".
+Discovery asks the guard too, but only for the report: a build it vetoes
+is left out without a row, an outer match that is not entered, as any
+candidate is; one it cannot clear stays a candidate, and the judgement's
+answer is its one verdict for the run (vector
+`cmake-build-anchored-undecided-guard-prunes-its-subtree`). A build
+nested in a vetoed one is kept by its own climb, which widens past every
+build directory above it (vector
+`cmake-build-anchored-old-build-below-a-vetoed-active-one-survives`). No
+deletion depends on discovery's answer: every later check asks again.
+Since every term of the selection brings the guard, the union-wide pass
+also reaches each term's candidate again from that term's root (its
+place, keep markers on the way): a refusal there refuses the candidate
+for the whole union, as for the other retention rules.
+A guard that could not decide at one check refuses there; a later check
+that decides is the verdict from then on, and the last one before the
+delete is the last word. The window after it, the delete itself, is the
 check-to-delete limit (Deletion). Vectors (each also under the 0.2
 catalog): `cmake-build-anchored-stamp-before-the-judgements-anchor-read`,
 `cmake-build-anchored-stamp-after-the-lock`,
 `cmake-build-anchored-stamp-during-the-locked-walk`, their
-`cmake-or-pytest-tmp-...-keeps-the-union` counterparts, and
-`cmake-or-pytest-tmp-undecided-guard-at-judgement-keeps-the-union`.
+`cmake-or-pytest-tmp-...-keeps-the-union` counterparts,
+`cmake-or-pytest-tmp-undecided-guard-at-judgement-keeps-the-union`,
+`cmake-or-pytest-tmp-undecided-guard-in-the-tally-keeps-the-union`,
+`cmake-or-pytest-tmp-session-build-below-a-vetoed-build-is-kept`, and,
+where cmake's own discovery refuses the session (a `statx` of its
+`CMakeCache.txt`, a read of it or the open of its source failing once),
+`cmake-or-pytest-tmp-marker-statx-failing-in-the-guarded-discovery-keeps-the-session`
+and its `marker-read` and `source-open` counterparts, and
+`cmake-or-pytest-tmp-session-unlisted-by-cmake-is-kept` (cmake cannot
+list the session's parent once); a command-action
+union (user profiles, which 0.2 does not load):
+`cmake-command-union-stamp-after-the-lock-runs-no-cleaner` and
+`cmake-command-union-stamp-during-the-locked-walk-runs-no-cleaner`.
 
 **The guard only adds protection** (Mark, 2026-11-09, after Codex's
 second and third reviews of TASK-367). Its verdict is a function of the
@@ -2896,13 +2921,22 @@ however it is reached: from a second root that starts inside the
 vetoed build or reaches it again, from a root on another filesystem
 than the stamp's directory, through another profile of a union (a Meson
 build inside a vetoed CMake build: the climb widens past the CMake
-build's marker), from a narrower `survey` `PATH`, through the index.
-And a union keeps an object a guarded term vetoed whatever its other
-terms say: without the guard that term would have found it and brought
-its own protections (a refused checkout, a retention guard), which the
-other terms must not lose (a pytest session that is also a CMake build
-holding a Git checkout stays, as it did as `contains_checkout` without
-the guard). Vectors (each also under the 0.2 catalog):
+build's marker; a pytest session that is a CMake build below one), from
+a narrower `survey` `PATH`, through the index. And a union keeps a build
+the guard vetoes whatever its other terms say: without the guard the
+guarded term would have found it and brought its own protections (a
+refused checkout, a retention guard), which the other terms must not
+lose (a pytest session that is also a CMake build holding a Git
+checkout stays, as it did as `contains_checkout` without the guard). A
+selection with no guarded term is not judged by the guard at all, nor
+is another tier: a configuration with a `cmake-build-anchored` tier and
+a separate `pytest-tmp` tier, or `--select profile:pytest-tmp` alone,
+does not bring the guard to `pytest-tmp` (the guard is a selection's,
+like the other retention rules). Since
+the guard judges what any term finds, it also keeps a build in a
+stamped tree that the guarded term's own anchor would not have taken
+(its source gone, say) from another term: more protection, which the
+rule allows. Vectors (each also under the 0.2 catalog):
 `cmake-build-anchored-nested-root-inside-a-vetoed-build`,
 `cmake-or-meson-union-meson-build-inside-a-vetoed-cmake-build`,
 `cmake-build-anchored-vetoed-build-reached-again-from-a-nested-root`,
@@ -2913,9 +2947,12 @@ survey tests `survey_reports_no_build_inside_a_vetoed_one_as_a_candidate`
 and `a_narrower_survey_path_does_not_report_a_vetoed_build`. The
 property test `crates/diskgc-model/tests/guard_props.rs` checks it over
 generated trees, root sets (nested, overlapping, on another
-filesystem), unions, catalogs, `PATH`s, the index on or off and stamps
-made during the run (after discovery, after the lock, during the locked
-walk): what
+filesystem), unions, catalogs, `PATH`s, with and without the index
+snapshot (`--no-index`; the run still tallies with an in-memory index),
+stamps made during the run (after discovery, after the lock, during the
+locked walk) and one operation failing once anywhere in the run (a
+listing of the tree's top, the package or the build; a `statx`, read
+or open of the build's marker; the open of its anchor's source): what
 the dry run plans and `survey` reports eligible with the guard's
 signals is a subset of the same without them, the reclaim removes
 nothing below no candidate the run without them planned or took, and
@@ -2929,10 +2966,13 @@ than four directories above the build directory and every build
 directory it lies in; a build tree reached through a bind mount of a
 directory inside it (the climb follows the path, so the root's marker
 above the bind's source is not seen; stamps in the four directories
-still are). Another profile's candidate that holds a vetoed build (a
-pytest session holding one) is that profile's to judge: the guard keeps
-the build from the four build profiles, and from a union that includes
-them, not from a profile whose candidate merely contains it. Since the
+still are). The guard keeps builds, the candidates that hold a build
+directory's marker themselves: another profile's candidate that holds a
+vetoed build deeper inside (a pytest session holding one), or that lies
+inside one but is no build (a plain pytest session below a vetoed CMake
+build: `pytest-1`, the positive control of vector
+`cmake-or-pytest-tmp-session-build-below-a-vetoed-build-is-kept`), is
+that profile's to judge, as without the guard. Since the
 climb lists directories above the roots, a directory there that cannot
 be listed, or holds more than the entry limit, refuses the builds below
 it (visibly). A stray stamp-like name (a `.built` file of the user's

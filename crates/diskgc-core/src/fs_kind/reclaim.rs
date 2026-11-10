@@ -92,8 +92,10 @@ pub struct Alternative<'a> {
 }
 
 /// A positive retention rule on any discovering source vetoes the shared
-/// inode. No term-local admission decision is used here. An uncertain guard
-/// path or version state is a refusal, and a host failure stops the run.
+/// inode: the version and current-installation rules and the selection's
+/// nested-build guard ([`super::Find::retains`]). No term-local admission
+/// decision is used here. An uncertain guard path or version state is a
+/// refusal, and a host failure stops the run.
 pub fn retention_guard_veto<H: Host>(
     host: &H,
     alternatives: &[Alternative<'_>],
@@ -101,7 +103,7 @@ pub fn retention_guard_veto<H: Host>(
 ) -> Result<Option<(usize, Skip)>, Stop> {
     if !alternatives
         .iter()
-        .any(|alternative| alternative.judge.find.has_retention_guard())
+        .any(|alternative| alternative.judge.find.retains())
     {
         return Ok(None);
     }
@@ -118,15 +120,24 @@ pub fn retention_guard_veto<H: Host>(
     Ok(None)
 }
 
-/// The extra candidate-wide pass belongs to unions. A single-source
-/// protocol retains its established term-local evidence-before-version
-/// ordering inside `Judge::contents`.
+/// The protocols' candidate-wide pass: before the lock, under it, and as
+/// the last check before the delete or the command. It belongs to unions,
+/// and to every candidate under the nested-build guard (TASK-367), whose
+/// stamp can appear after the locked judgement (a candidate found by one
+/// term is one alternative); for such a term the pass also runs its other
+/// retention rules, before its evidence (the built-ins under the guard
+/// have none). Any other single-source protocol retains its established
+/// term-local evidence-before-version ordering inside `Judge::contents`.
 pub(super) fn runtime_retention_guard_veto<H: Host>(
     host: &H,
     alternatives: &[Alternative<'_>],
     deadline: Option<MonoTime>,
 ) -> Result<Option<(usize, Skip)>, Stop> {
-    if alternatives.len() < 2 {
+    if alternatives.len() < 2
+        && !alternatives
+            .iter()
+            .any(|alternative| alternative.judge.find.nested_build_guard)
+    {
         return Ok(None);
     }
     retention_guard_veto(host, alternatives, deadline)
@@ -393,12 +404,6 @@ fn protocol<H: Delete>(
             deadline,
         )? {
             Ok(walked) => walked,
-            // The nested-build guard's veto under the lock keeps the
-            // candidate for every term (TASK-367).
-            Err(skip) if skip.nested_build_veto => {
-                done.selected = Some(index);
-                return Err(skip.into());
-            }
             Err(skip) => {
                 first_skip.get_or_insert(skip);
                 continue;
@@ -522,22 +527,6 @@ fn protocol<H: Delete>(
             {
                 done.selected = Some(guard_index);
                 return Err(NotDeleted::Skipped(skip));
-            }
-            // The nested-build guard of every admitted term once more: a
-            // stamp made during the locked walk keeps the candidate
-            // (TASK-367, Codex's fourth review).
-            for (admitted_at, alternative) in admitted_index.iter().zip(&admitted) {
-                if let Err(skip) = super::source_anchor::guard_again(
-                    host,
-                    alternative.judge.find.source_anchor,
-                    &alternative.found.path,
-                    deadline,
-                )
-                .map_err(NotDeleted::Stopped)?
-                {
-                    done.selected = Some(*admitted_at);
-                    return Err(NotDeleted::Skipped(skip));
-                }
             }
             // The checks above can take a while (the policy may scan other
             // trees): the path once more as the last check before the

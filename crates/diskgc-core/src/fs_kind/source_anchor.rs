@@ -56,43 +56,6 @@ pub struct SourceEvidence {
     pub source_file: Identity,
 }
 
-/// What an anchor says of a candidate directory.
-#[derive(Debug)]
-pub(super) enum Anchored {
-    /// Its recorded source survives: a candidate.
-    Evidence(SourceEvidence),
-    /// No evidence that it is a rebuildable output: not a candidate, and
-    /// discovery may look below it as below any other directory.
-    NoEvidence,
-    /// A build directory inside another build system's managed tree, or
-    /// one the nested-build guard could not clear (`Some`: the visible
-    /// refusal), TASK-367. Not a candidate, and nothing below it is: a
-    /// build nested in it lies in the same tree, though its own climb may
-    /// not reach the signal (a stamp past the four directories), so
-    /// discovery does not enter it.
-    Vetoed(Option<Skip>),
-}
-
-impl Anchored {
-    /// For a judgement, which compares with what discovery recorded. A
-    /// veto, or a guard that could not decide, is a refusal marked
-    /// [`Skip::nested_build_veto`]: the candidate's verdict for every term
-    /// of a union, whatever discovery saw (TASK-367, Codex's fourth review).
-    pub(super) fn evidence(self, candidate: &Path) -> Result<Option<SourceEvidence>, Skip> {
-        match self {
-            Self::Evidence(evidence) => Ok(Some(evidence)),
-            Self::NoEvidence => Ok(None),
-            Self::Vetoed(None) => Err(Skip::new(
-                Reason::Changed,
-                candidate.to_owned(),
-                "now inside another build system's tree: the nested-build guard keeps it",
-            )
-            .nested_build_veto()),
-            Self::Vetoed(Some(skip)) => Err(skip.nested_build_veto()),
-        }
-    }
-}
-
 /// Evidence the caller expects from a particular candidate. Discovery and
 /// locked judgement use the same values and differ only in how they reach it.
 #[derive(Clone, Copy)]
@@ -127,7 +90,7 @@ pub(super) fn check<H: Host>(
     request: AnchorCheck<'_>,
     parent: &Resolved<H::Fd>,
     name: &OsStr,
-) -> Judged<Anchored> {
+) -> Judged<Option<SourceEvidence>> {
     let AnchorCheck {
         candidate,
         expected,
@@ -163,7 +126,7 @@ pub(super) fn check_opened<H: Host>(
     request: AnchorCheck<'_>,
     candidate_fd: &H::Fd,
     mount_id: u64,
-) -> Judged<Anchored> {
+) -> Judged<Option<SourceEvidence>> {
     let AnchorCheck {
         kind,
         root,
@@ -185,7 +148,7 @@ pub(super) fn check_opened<H: Host>(
             "the reached candidate is not the one whose source was discovered",
         )));
     }
-    let evidence = judged!(match kind {
+    match kind {
         SourceAnchor::Cmake => cmake(host, root, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Meson => meson(host, root, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Autotools => {
@@ -194,47 +157,44 @@ pub(super) fn check_opened<H: Host>(
         SourceAnchor::Buildroot => buildroot(host, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Yocto => yocto(host, candidate, candidate_fd, mount_id, deadline),
         SourceAnchor::Bazel => bazel(host, candidate, candidate_fd, mount_id, deadline),
-    });
-    let Some(evidence) = evidence else {
-        return Ok(Ok(Anchored::NoEvidence));
-    };
-    // Another build system's package build is that system's to clean
-    // (TASK-367): never a candidate, nor anything below it.
-    if nested::GUARDED.contains(&kind) {
-        match nested::outer_build(host, candidate, deadline)? {
-            Ok(None) => {}
-            Ok(Some(_)) => return Ok(Ok(Anchored::Vetoed(None))),
-            Err(skip) => return Ok(Ok(Anchored::Vetoed(Some(skip)))),
-        }
     }
-    Ok(Ok(Anchored::Evidence(evidence)))
 }
 
-/// The nested-build guard once more on a candidate of `kind` (none: no
-/// anchor), right before it is deleted (TASK-367, Codex's fourth review):
-/// a stamp made during the locked walk keeps it. A refusal is marked
-/// [`Skip::nested_build_veto`]. The window after this check is the
-/// documented check-to-delete limit.
-pub(super) fn guard_again<H: Host>(
+/// Whether an anchor of `kind` brings the nested-build guard to its
+/// selection (TASK-367).
+pub(super) fn nested_build_guarded(kind: Option<SourceAnchor>) -> bool {
+    kind.is_some_and(|kind| nested::GUARDED.contains(&kind))
+}
+
+/// The nested-build guard's verdict on `candidate` (TASK-367; see
+/// [`nested`]): `Some` names the outer build system's signal, the
+/// candidate a build directory inside its tree; a refusal when the guard
+/// cannot decide.
+pub(super) fn outer_build<H: Host>(
     host: &H,
-    kind: Option<SourceAnchor>,
+    candidate: &Path,
+    deadline: Option<MonoTime>,
+) -> Judged<Option<String>> {
+    nested::verdict(host, candidate, deadline)
+}
+
+/// The nested-build guard as a retention rule after discovery: a veto is
+/// `changed` (discovery leaves out what it vetoes then, so a veto now is
+/// news since), an undecided guard its own refusal.
+pub(super) fn nested_build_veto<H: Host>(
+    host: &H,
     candidate: &Path,
     deadline: Option<MonoTime>,
 ) -> Judged<()> {
-    if !kind.is_some_and(|kind| nested::GUARDED.contains(&kind)) {
-        return Ok(Ok(()));
-    }
-    match nested::outer_build(host, candidate, deadline)? {
-        Ok(None) => Ok(Ok(())),
-        Ok(Some(why)) => Ok(Err(Skip::new(
+    match judged!(outer_build(host, candidate, deadline)) {
+        None => Ok(Ok(())),
+        Some(why) => Ok(Err(Skip::new(
             Reason::Changed,
             candidate.to_owned(),
             format!(
                 "now inside another build system's tree ({why}): the nested-build guard keeps it"
             ),
-        )
-        .nested_build_veto())),
-        Err(skip) => Ok(Err(skip.nested_build_veto())),
+        ))),
     }
 }
 

@@ -1,9 +1,13 @@
 # TASK-367, Codex's fourth review: an undecided guard at the locked
-# judgement in `cmake-build-anchored || pytest-tmp`: the guard's listing
-# of the session's parent fails (EACCES, its fifth listing, the locked
-# judgement's). The refusal (`unreadable`) is the candidate's verdict for
-# the whole union; before the fix it was cmake's term's only and
-# pytest-tmp took the session.
+# judgement in `cmake-build-anchored || pytest-tmp`: the guard cannot
+# look up a build marker in the session's parent (EACCES on its ninth
+# probe of `config.status`, one per climb of the guard: two in discovery,
+# four in the tally, two before the lock, then the first under it, the
+# union-wide retention pass's; the dry run climbs six times). The refusal
+# (`unreadable`) is the candidate's verdict for the whole union; before
+# the fix it was cmake's term's only and pytest-tmp took the session.
+# (Until the sixth review the fault was the parent's fifth listing; the
+# dry run now lists it more often than the reclaim before its lock.)
 profile_vector: 1
 select: profile:cmake-build-anchored || profile:pytest-tmp
 roots: [/tmp]
@@ -26,7 +30,7 @@ host:
   processes:
     - {pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{path: /usr/bin/bash}]}
   events:
-    - {at: {op: read_dir, path: /tmp/nix-shell.AB/pytest-of-tester, nth: 5, when: before}, fail: EACCES}
+    - {at: {op: openat2, path: /tmp/nix-shell.AB/pytest-of-tester/config.status, nth: 9, when: before}, fail: EACCES}
 expect:
   plan:
     - {candidate: /tmp/nix-shell.AB/pytest-of-tester/pytest-0, source: /tmp/nix-shell.AB/pytest-of-tester}

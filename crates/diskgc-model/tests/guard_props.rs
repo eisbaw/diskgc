@@ -7,9 +7,14 @@
 //! output), generated root sets (nested, overlapping, one on a filesystem
 //! of its own, either one the `PATH`), unions of a guarded profile with
 //! other profiles (Meson, Autotools, `nix-shell-rc`, `pytest-tmp`), both
-//! catalogs, the index on or off, and the stamp present from the start or
+//! catalogs, with and without the index snapshot (`--no-index`: the run
+//! still tallies with an index of its own), and the stamp present from the start or
 //! made by a host event during the run (Codex's fourth review: after
-//! discovery, after the lock, during the locked walk):
+//! discovery, after the lock, during the locked walk), and one operation
+//! failing once at its first to sixth call, whoever makes it: a listing
+//! of the tree's top, the package or the build (Codex's fifth review), a
+//! `statx`, read or open of the build's marker, or the open of its
+//! anchor's source file (the sixth review):
 //!
 //! 1. **Only adds protection.** What the dry run plans eligible and what
 //!    `survey` reports eligible are each a subset of the same on the same
@@ -80,13 +85,33 @@ enum Root {
 /// event during the run (Codex's fourth review): (a) after discovery,
 /// before a judgement's anchor read (CMakeCache.txt's second read); (b)
 /// right after the candidate lock; (c) during the locked contents walk
-/// (after the build's second listing).
+/// (after the build's third listing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Made {
     Before,
     AfterDiscovery,
     AfterLock,
     DuringWalk,
+}
+
+/// One operation that fails once (EACCES) at its `nth` call, whoever
+/// makes it: a guarded term's discovery, `where`, anchor, tally or guard,
+/// or another term's (Codex's fifth review; the sixth review's B1 for the
+/// file operations). In both runs, with and without the signals: a
+/// fault, not a signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaultAt {
+    /// The listing of the tree's top, the package or the build.
+    Top,
+    Pkg,
+    Out,
+    /// The build's marker, `out/CMakeCache.txt`: its `statx` (a `where`),
+    /// its read (the anchor) or its open (the anchor, the guard's probe).
+    MarkerStatx,
+    MarkerRead,
+    MarkerOpen,
+    /// The open of the anchor's source file, `pkg/CMakeLists.txt`.
+    SourceOpen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +131,7 @@ struct Scenario {
     out: &'static str,
     stamp: Option<(StampAt, &'static str)>,
     made: Made,
+    fault: Option<(FaultAt, u8)>,
     br_marker: bool,
     out_recent: bool,
     nested: Nested,
@@ -355,20 +381,41 @@ impl Scenario {
         let yaml = format!(
             "host_model: 1\nclock: 2026-10-15T03:00:00Z\nmounts:\n{}\ntree:\n{tree}\nprocesses:\n    - {{pid: 500, exe: /usr/bin/bash, cwd: /, maps: [/usr/bin/bash], environ: [HOME=/home/tester], fds: [{{path: /usr/bin/bash}}]}}\n{}",
             mounts.join("\n"),
-            if signals {
-                self.events()
-            } else {
-                String::new()
-            },
+            self.events(signals),
         );
         (yaml, paths)
     }
 
     /// The host event that makes the stamp during the run, if any.
-    fn events(&self) -> String {
-        let Some((at, name)) = self.stamp else {
-            return String::new();
-        };
+    fn events(&self, signals: bool) -> String {
+        let mut events = Vec::new();
+        if let Some((at, nth)) = self.fault {
+            let marker = format!("{}/CMakeCache.txt", self.out_path());
+            let (op, path) = match at {
+                FaultAt::Top => ("read_dir", self.top.to_owned()),
+                FaultAt::Pkg => ("read_dir", self.pkg_path()),
+                FaultAt::Out => ("read_dir", self.out_path()),
+                FaultAt::MarkerStatx => ("statx", marker),
+                FaultAt::MarkerRead => ("read_head", marker),
+                FaultAt::MarkerOpen => ("openat2", marker),
+                FaultAt::SourceOpen => ("openat2", format!("{}/CMakeLists.txt", self.pkg_path())),
+            };
+            events.push(format!(
+                "    - {{at: {{op: {op}, path: {path}, nth: {nth}, when: before}}, fail: EACCES}}"
+            ));
+        }
+        if let Some(stamp) = self.stamp_event().filter(|_| signals) {
+            events.push(stamp);
+        }
+        if events.is_empty() {
+            String::new()
+        } else {
+            format!("events:\n{}\n", events.join("\n"))
+        }
+    }
+
+    fn stamp_event(&self) -> Option<String> {
+        let (at, name) = self.stamp?;
         let dir = if at == StampAt::Top {
             self.top.to_owned()
         } else {
@@ -376,17 +423,17 @@ impl Scenario {
         };
         let out = self.out_path();
         let trigger = match self.made {
-            Made::Before => return String::new(),
+            Made::Before => return None,
             Made::AfterDiscovery => {
                 format!("{{op: read_head, path: {out}/CMakeCache.txt, nth: 2, when: before}}")
             }
             Made::AfterLock => format!("{{op: flock, path: {out}, nth: 1, when: after}}"),
-            // The build's third listing: in the cases without the index
+            // The build's third listing: in the `--no-index` cases
             // the locked walk's (after the tally's and the ordering walk's),
             // so after the locked anchor check and its guard.
             Made::DuringWalk => format!("{{op: read_dir, path: {out}, nth: 3, when: after}}"),
         };
-        format!("events:\n    - at: {trigger}\n      create: {dir}/{name}\n")
+        Some(format!("    - at: {trigger}\n      create: {dir}/{name}"))
     }
 
     fn vector(&self, signals: bool) -> (String, Vec<PathBuf>) {
@@ -476,12 +523,12 @@ fn seen(scenario: &Scenario, signals: bool) -> Result<Seen, String> {
     })
 }
 
-fn scenario() -> impl Strategy<Value = Scenario> {
+fn general_scenario() -> impl Strategy<Value = Scenario> {
     let layout = prop_oneof![
-        Just(("/home/tester/w", "pkg", "out")),
-        Just(("/home/tester/w", "p1/p2/p3/pkg", "out")),
-        Just(("/tmp", "pkg", "out")),
-        Just(("/tmp", "nix-shell.AB/pytest-of-tester", "pytest-0")),
+        2 => Just(("/home/tester/w", "pkg", "out")),
+        1 => Just(("/home/tester/w", "p1/p2/p3/pkg", "out")),
+        2 => Just(("/tmp", "pkg", "out")),
+        3 => Just(("/tmp", "nix-shell.AB/pytest-of-tester", "pytest-0")),
     ];
     let stamp = prop_oneof![
         1 => Just(None),
@@ -504,12 +551,13 @@ fn scenario() -> impl Strategy<Value = Scenario> {
         Just(Nested::AutotoolsA),
     ];
     let roots = prop::sample::subsequence(vec![Root::Top, Root::Pkg, Root::OutA], 1..=3);
+    // pytest-tmp, the term whose candidates can also be CMake builds, most.
     let union = prop_oneof![
-        Just(Union::Cmake),
-        Just(Union::Meson),
-        Just(Union::Autotools),
-        Just(Union::NixShellRc),
-        Just(Union::PytestTmp),
+        2 => Just(Union::Cmake),
+        2 => Just(Union::Meson),
+        1 => Just(Union::Autotools),
+        1 => Just(Union::NixShellRc),
+        4 => Just(Union::PytestTmp),
     ];
     (
         (
@@ -534,6 +582,14 @@ fn scenario() -> impl Strategy<Value = Scenario> {
             any::<bool>(),
         ),
         made,
+        // Weighted to the package directory and its first listings, where
+        // one failed listing hides a build from a guarded term's discovery,
+        // and to the build's marker and source, whose failure refuses it
+        // in one term's discovery only (the sixth review's B1).
+        prop_oneof![
+            1 => Just(None),
+            1 => (fault_at(), prop_oneof![2 => 1u8..=2, 1 => 3u8..=6]).prop_map(Some),
+        ],
     )
         .prop_map(
             |(
@@ -541,6 +597,7 @@ fn scenario() -> impl Strategy<Value = Scenario> {
                 (git_in_out, keep_at_top, roots, other_fs, path_at_pkg),
                 (union, no_index, release, survey_top, survey_pkg),
                 made,
+                fault,
             )| {
                 // nix-shell-rc and pytest-tmp have /tmp roots of their own.
                 let union = match union {
@@ -553,6 +610,7 @@ fn scenario() -> impl Strategy<Value = Scenario> {
                     out,
                     stamp,
                     made,
+                    fault,
                     br_marker,
                     out_recent,
                     nested,
@@ -571,6 +629,56 @@ fn scenario() -> impl Strategy<Value = Scenario> {
         )
 }
 
+/// Where a generated fault lands: listings and the build's file operations
+/// about equally.
+fn fault_at() -> impl Strategy<Value = FaultAt> {
+    prop_oneof![
+        1 => Just(FaultAt::Top),
+        3 => Just(FaultAt::Pkg),
+        1 => Just(FaultAt::Out),
+        1 => Just(FaultAt::MarkerStatx),
+        1 => Just(FaultAt::MarkerRead),
+        2 => Just(FaultAt::MarkerOpen),
+        1 => Just(FaultAt::SourceOpen),
+    ]
+}
+
+/// The generated scenarios: the general family, and one in four from a
+/// family aimed at a guarded term's incomplete view (Codex's fifth
+/// review): a union with another term that finds the same objects, the
+/// stamp in place, one listing failing at any point of the run.
+fn scenario() -> impl Strategy<Value = Scenario> {
+    let focused = (
+        general_scenario(),
+        prop_oneof![
+            3 => Just(Union::PytestTmp),
+            1 => Just(Union::NixShellRc),
+            1 => Just(Union::Meson),
+        ],
+        (fault_at(), prop_oneof![3 => Just(1u8), 1 => 2u8..=6]),
+        prop::bool::weighted(0.75),
+    )
+        .prop_map(|(base, union, fault, pytest_layout)| {
+            let (pkg, out) = if pytest_layout {
+                ("nix-shell.AB/pytest-of-tester", "pytest-0")
+            } else {
+                ("pkg", "out")
+            };
+            Scenario {
+                top: "/tmp",
+                pkg,
+                out,
+                union,
+                fault: Some(fault),
+                made: Made::Before,
+                stamp: base.stamp.or(Some((StampAt::Pkg, ".built"))),
+                out_recent: false,
+                ..base
+            }
+        });
+    prop_oneof![3 => general_scenario(), 1 => focused]
+}
+
 /// Both properties for one scenario, and what the run without the
 /// guard's signals did ([`Vacuity`]).
 fn check(scenario: &Scenario) -> Result<Vacuity, TestCaseError> {
@@ -582,39 +690,46 @@ fn check(scenario: &Scenario) -> Result<Vacuity, TestCaseError> {
             scenario.vector(true).0
         ))
     };
-    // 1. Only adds protection. The plans (a dry run, a survey) change
-    // nothing, so they compare object for object.
-    for (what, with, without) in [
-        ("planned eligible", &on.eligible, &off.eligible),
-        ("surveyed eligible", &on.surveyed, &off.surveyed),
-    ] {
-        let extra: Vec<_> = with.difference(without).collect();
+    // 1. Only adds protection, compared on fault-free runs: a one-shot
+    // fault at a directory's nth listing lands on another reader once the
+    // guard lists less (a stamp in the parent ends its climb), so the two
+    // runs would not see the same fault. Faults are judged by 2.
+    if scenario.fault.is_none() {
+        // The plans (a dry run, a survey) change nothing, so they compare
+        // object for object.
+        for (what, with, without) in [
+            ("planned eligible", &on.eligible, &off.eligible),
+            ("surveyed eligible", &on.surveyed, &off.surveyed),
+        ] {
+            let extra: Vec<_> = with.difference(without).collect();
+            if !extra.is_empty() {
+                return Err(fail(
+                    "the guard removed a protection",
+                    format!("{what} with the guard's signals but not without: {extra:?}"),
+                ));
+            }
+        }
+        // A reclaim deletes in order, and a deletion changes its parent's
+        // mtime, so which later candidate is still idle depends on what went
+        // before (seen: without the guard a nested build's deletion made the
+        // pytest session holding it look new). What it removes must lie at or
+        // below something the run without the signals planned or took.
+        let allowed: Vec<&PathBuf> = off.eligible.iter().chain(&off.actions).collect();
+        let extra: Vec<_> = on
+            .removed
+            .iter()
+            .filter(|path| !allowed.iter().any(|a| path.starts_with(a)))
+            .collect();
         if !extra.is_empty() {
             return Err(fail(
                 "the guard removed a protection",
-                format!("{what} with the guard's signals but not without: {extra:?}"),
+                format!(
+                    "removed with the guard's signals, below nothing the run without them planned or took: {extra:?}"
+                ),
             ));
         }
     }
-    // A reclaim deletes in order, and a deletion changes its parent's
-    // mtime, so which later candidate is still idle depends on what went
-    // before (seen: without the guard a nested build's deletion made the
-    // pytest session holding it look new). What it removes must lie at or
-    // below something the run without the signals planned or took.
-    let allowed: Vec<&PathBuf> = off.eligible.iter().chain(&off.actions).collect();
-    let extra: Vec<_> = on
-        .removed
-        .iter()
-        .filter(|path| !allowed.iter().any(|a| path.starts_with(a)))
-        .collect();
-    if !extra.is_empty() {
-        return Err(fail(
-            "the guard removed a protection",
-            format!(
-                "removed with the guard's signals, below nothing the run without them planned or took: {extra:?}"
-            ),
-        ));
-    }
+
     // 2. Independent of the view: a covered build is never a candidate
     // the run takes, plans or reports eligible (another profile's
     // candidate holding it, a pytest session, is judged by that profile:
@@ -656,6 +771,8 @@ fn check(scenario: &Scenario) -> Result<Vacuity, TestCaseError> {
     Ok(Vacuity {
         removed: !off.removed.is_empty(),
         surveyed: !off.surveyed.is_empty(),
+        fired: on.fired,
+        out_removed: on.removed.contains(&PathBuf::from(scenario.out_path())),
     })
 }
 
@@ -665,6 +782,11 @@ fn check(scenario: &Scenario) -> Result<Vacuity, TestCaseError> {
 struct Vacuity {
     removed: bool,
     surveyed: bool,
+    /// The run with the signals fired every host event (a runtime stamp
+    /// was made in the reclaim).
+    fired: bool,
+    /// The run with the signals removed `out`.
+    out_removed: bool,
 }
 
 #[test]
@@ -683,16 +805,18 @@ fn the_nested_build_guard_only_adds_protection() {
     }) {
         panic!("{error}");
     }
-    // Not vacuous: without the signals survey reports builds eligible.
+    // Not vacuous: without the signals survey reports builds eligible (in
+    // about a quarter of the cases; faults and recent builds take some).
     assert!(
-        surveying.get() * 4 >= cases(),
+        surveying.get() * 6 >= cases(),
         "only {} of {} cases surveyed anything eligible without the guard's signals",
         surveying.get(),
         cases()
     );
-    // Not vacuous: without the signals the reclaims do delete.
+    // Not vacuous: without the signals the reclaims do delete (in about a
+    // fifth of the cases; faults, recent builds and checkouts keep some).
     assert!(
-        removing.get() * 4 >= cases(),
+        removing.get() * 6 >= cases(),
         "only {} of {} cases removed anything without the guard's signals",
         removing.get(),
         cases()
@@ -709,6 +833,7 @@ fn codex_third_review_cases_hold_both_properties() {
         out: "out",
         stamp: Some((StampAt::Top, ".built")),
         made: Made::Before,
+        fault: None,
         br_marker: false,
         out_recent: false,
         nested: Nested::None,
@@ -781,8 +906,8 @@ fn codex_third_review_cases_hold_both_properties() {
 /// (b) right after the lock, (c) during the locked walk, each for
 /// cmake-build-anchored alone and in a union with pytest-tmp (the session
 /// a CMake build too, with and without a Git checkout), both catalogs,
-/// without the index (so the reclaim judges the candidate itself, not a
-/// re-match).
+/// with `--no-index` (no snapshot is read: the reclaim discovers and
+/// tallies the tier itself, with an index of its own in memory).
 #[test]
 fn codex_fourth_review_runtime_stamps_hold_both_properties() {
     let alone = Scenario {
@@ -791,6 +916,7 @@ fn codex_fourth_review_runtime_stamps_hold_both_properties() {
         out: "out",
         stamp: Some((StampAt::Top, ".built")),
         made: Made::Before,
+        fault: None,
         br_marker: false,
         out_recent: false,
         nested: Nested::None,
@@ -832,10 +958,128 @@ fn codex_fourth_review_runtime_stamps_hold_both_properties() {
                     release,
                     ..base.clone()
                 };
+                // Codex's fifth review: each case must reach the phase it
+                // names (its event fires in the reclaim), except where the
+                // checkout keeps the session before the lock: a case of its
+                // own, whose event must not fire and whose session stays.
+                let early_checkout = base.git_in_out && made != Made::AfterDiscovery;
+                let name = format!("{made:?} {shape} (release {release})");
                 match check(&scenario) {
-                    Ok(v) if v.removed => {}
-                    Ok(_) => failed.push(format!("{made:?} {shape} (release {release}): vacuous")),
-                    Err(e) => failed.push(format!("{made:?} {shape} (release {release}): {e}")),
+                    Err(e) => failed.push(format!("{name}: {e}")),
+                    Ok(v) if !v.removed => failed.push(format!("{name}: vacuous")),
+                    Ok(v) if early_checkout && (v.fired || v.out_removed) => failed.push(format!(
+                        "{name}: expected the checkout to keep the session before the lock \
+                         (event fired {}, session removed {})",
+                        v.fired, v.out_removed
+                    )),
+                    Ok(v) if !early_checkout && !v.fired => {
+                        failed.push(format!("{name}: its event never fired"))
+                    }
+                    Ok(_) => {}
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+}
+
+/// Codex's fifth review, item 2: incomplete guarded coverage. The stamp is
+/// there from the start; the first listing of the package directory (a
+/// guarded term's discovery's) fails once, so no guarded term finds the
+/// build: another term must not take it. Both catalogs, with and without
+/// the index snapshot.
+#[test]
+fn codex_fifth_review_unlisted_by_a_guarded_term_holds_both_properties() {
+    let base = Scenario {
+        top: "/tmp",
+        pkg: "nix-shell.AB/pytest-of-tester",
+        out: "pytest-0",
+        stamp: Some((StampAt::Pkg, ".built")),
+        made: Made::Before,
+        fault: Some((FaultAt::Pkg, 1)),
+        br_marker: false,
+        out_recent: false,
+        nested: Nested::None,
+        git_in_out: false,
+        keep_at_top: false,
+        roots: vec![Root::Top],
+        other_fs: false,
+        path_at_pkg: false,
+        union: Union::PytestTmp,
+        no_index: false,
+        release: false,
+        survey_top: true,
+        survey_pkg: false,
+    };
+    let mut failed = Vec::new();
+    for release in [false, true] {
+        for no_index in [false, true] {
+            let scenario = Scenario {
+                release,
+                no_index,
+                ..base.clone()
+            };
+            match check(&scenario) {
+                Ok(v) if v.fired => {}
+                Ok(_) => failed.push(format!(
+                    "release {release}, no_index {no_index}: the fault never fired"
+                )),
+                Err(e) => failed.push(format!("release {release}, no_index {no_index}: {e}")),
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n\n"));
+}
+
+/// The sixth review's B1: with the stamp in place, the session's marker
+/// cannot be `statx`ed, read or opened once, or the anchor's source not
+/// opened, by whoever comes first (cmake's discovery): cmake refuses the
+/// session and never joins the union's view of it. The guard is the
+/// selection's, so pytest-tmp's view must keep it too. Both catalogs,
+/// with and without the index snapshot; each fault must fire.
+#[test]
+fn sixth_review_a_guarded_term_refusing_the_build_holds_both_properties() {
+    let base = Scenario {
+        top: "/tmp",
+        pkg: "nix-shell.AB/pytest-of-tester",
+        out: "pytest-0",
+        stamp: Some((StampAt::Pkg, ".built")),
+        made: Made::Before,
+        fault: None,
+        br_marker: false,
+        out_recent: false,
+        nested: Nested::None,
+        git_in_out: false,
+        keep_at_top: false,
+        roots: vec![Root::Top],
+        other_fs: false,
+        path_at_pkg: false,
+        union: Union::PytestTmp,
+        no_index: false,
+        release: false,
+        survey_top: true,
+        survey_pkg: false,
+    };
+    let mut failed = Vec::new();
+    for at in [
+        FaultAt::MarkerStatx,
+        FaultAt::MarkerRead,
+        FaultAt::MarkerOpen,
+        FaultAt::SourceOpen,
+    ] {
+        for release in [false, true] {
+            for no_index in [false, true] {
+                let scenario = Scenario {
+                    fault: Some((at, 1)),
+                    release,
+                    no_index,
+                    ..base.clone()
+                };
+                let name = format!("{at:?} (release {release}, no_index {no_index})");
+                match check(&scenario) {
+                    Ok(v) if v.fired => {}
+                    Ok(_) => failed.push(format!("{name}: the fault never fired")),
+                    Err(e) => failed.push(format!("{name}: {e}")),
                 }
             }
         }

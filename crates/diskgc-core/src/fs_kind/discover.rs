@@ -99,10 +99,6 @@ pub struct Discovery {
     /// Structural matches of a guarding union source, recorded before
     /// source-owned evidence or anchors decide action admission.
     pub guard_candidates: Vec<Found>,
-    /// Objects the nested-build guard vetoed or could not clear (TASK-367),
-    /// by identity: never candidates, not entered, and kept by a union
-    /// whatever its other terms say (the guard only adds protection).
-    pub vetoed: Vec<DevIno>,
     /// Roots and directories on the way that could not be read or must not
     /// be (a missing root, a root on a network filesystem or reached through
     /// a symlink, an unreadable directory, a candidate whose own `where`
@@ -1042,16 +1038,8 @@ impl<H: Host> Walk<'_, H> {
                 dir,
                 name,
             )? {
-                Ok(source_anchor::Anchored::Evidence(evidence)) => Some(evidence),
-                Ok(source_anchor::Anchored::NoEvidence) => return Ok(false),
-                // Inside another build system's tree (TASK-367): neither
-                // a candidate nor entered, so a build nested in it is not
-                // one either; a guard that could not decide is refused.
-                Ok(source_anchor::Anchored::Vetoed(refused)) => {
-                    self.out.refused.extend(refused);
-                    self.out.vetoed.push(identity.id);
-                    return Ok(true);
-                }
+                Ok(Some(evidence)) => Some(evidence),
+                Ok(None) => return Ok(false),
                 Err(skip) => {
                     self.out.refused.push(skip);
                     return Ok(false);
@@ -1060,6 +1048,20 @@ impl<H: Host> Walk<'_, H> {
         } else {
             None
         };
+        // The selection's nested-build guard (TASK-367), asked by every
+        // term of it, only so that a build it vetoes is left out of the
+        // report without a row (an outer match, not entered, as any
+        // candidate). One it cannot clear stays a candidate: every
+        // judgement asks the guard again as a retention rule
+        // (`Judge::version_where`), and that answer, a refusal or not, is
+        // the path's one verdict for the run, never a discovery row beside
+        // another term's (the architecture review of round 6). No deletion
+        // depends on this.
+        if self.find.nested_build_guard
+            && let Ok(Some(_)) = source_anchor::outer_build(self.host, at, self.deadline)?
+        {
+            return Ok(true);
+        }
         // A restricted walk cannot tell which name of a multiply linked
         // file discovery meets first (the dedupe below), nor whether that
         // name is refused (a keep marker on its way, a retention guard among

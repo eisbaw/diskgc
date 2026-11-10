@@ -12,7 +12,7 @@ use crate::host::{DevIno, Host, MonoTime, Timestamp};
 use crate::inuse::{BusyBackOff, Checker, PlanScan};
 use crate::profile::{Action, IdleWindow};
 use crate::report::{BuildEvidence, PlanEntry, Report, RunTerm, Status};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -1100,11 +1100,9 @@ pub(super) fn discover_fs_union<H: Host>(
     let mut candidates: Vec<FsUnionCandidate> = Vec::new();
     let mut by_inode: HashMap<DevIno, usize> = HashMap::new();
     let mut refused = Vec::new();
-    let mut vetoed: HashSet<DevIno> = HashSet::new();
     for (source_index, source) in sources.iter().enumerate() {
         let (discovery, stopped) =
             fs_kind::discover_union(host, source.roots, source.find, deadline);
-        vetoed.extend(discovery.vetoed.iter().copied());
         for found in discovery.guard_candidates {
             merge_fs_union_found(
                 &mut candidates,
@@ -1139,19 +1137,10 @@ pub(super) fn discover_fs_union<H: Host>(
             );
         }
         if let Some(stop) = stopped {
-            candidates.retain(|candidate| !vetoed.contains(&candidate.identity.id));
             return (candidates, refused, Some(stop));
         }
     }
-    // A term's nested-build veto (TASK-367) keeps the object for the whole
-    // union: without the guard that term would have found it and brought
-    // its own protections (a refused checkout, a retention guard), which
-    // the other terms must not lose.
-    candidates.retain(|candidate| {
-        !candidate.invalid
-            && !candidate.found_by.is_empty()
-            && !vetoed.contains(&candidate.identity.id)
-    });
+    candidates.retain(|candidate| !candidate.invalid && !candidate.found_by.is_empty());
     (candidates, refused, None)
 }
 
@@ -1302,24 +1291,28 @@ pub(super) fn union_checkout_refusal(
 }
 
 /// Retention belongs to every source that discovered this inode, regardless
-/// of which source's evidence eventually admits it. Checkout policy remains
-/// a separate decision over admitted terms only.
-pub(super) fn union_guard_veto<H: Host>(
+/// of which source's evidence eventually admits it: the terms that admitted
+/// it and the structural matches of version guards ([`FsUnionCandidate::
+/// contributors`]), so the selection's nested-build guard (TASK-367) judges
+/// it whichever term found it. Checkout policy remains a separate decision
+/// over admitted terms only. A veto names the contributor: its source index
+/// and what it found.
+pub(super) fn union_guard_veto<'c, H: Host>(
     host: &H,
-    candidate: &FsUnionCandidate,
+    candidate: &'c FsUnionCandidate,
     sources: &[FsUnionSourceRef<'_>],
     rules: &Rules<'_>,
     space: crate::places::Space,
     deadline: Option<MonoTime>,
-) -> Result<Option<(usize, Skip)>, Stop> {
+) -> Result<Option<(usize, &'c fs_kind::Found, Skip)>, Stop> {
     let evaluation_rules = Rules {
         checkouts: Checkouts::Allow,
         ..*rules
     };
-    let alternatives: Vec<_> = candidate
-        .guard_by
+    let contributors = candidate.contributors();
+    let alternatives: Vec<_> = contributors
         .iter()
-        .map(|(index, found)| {
+        .map(|(index, found, _)| {
             let source = &sources[*index];
             fs_kind::Alternative {
                 judge: fs_kind::Judge {
@@ -1334,7 +1327,12 @@ pub(super) fn union_guard_veto<H: Host>(
             }
         })
         .collect();
-    fs_kind::retention_guard_veto(host, &alternatives, deadline)
+    Ok(
+        fs_kind::retention_guard_veto(host, &alternatives, deadline)?.map(|(at, skip)| {
+            let (index, found, _) = contributors[at];
+            (index, found, skip)
+        }),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1427,11 +1425,10 @@ pub(super) fn plan_fs_union<H: Host>(
         }
         read_ahead.judging(judged, |path| host.read_ahead(path));
         match union_guard_veto(host, candidate, &sources, rules, space, deadline) {
-            Ok(Some((index, skip))) => {
-                let (source_index, found) = &candidate.guard_by[index];
+            Ok(Some((source_index, found, skip))) => {
                 let mut entry = plan_skip(tier, &skip.path, &skip);
-                entry.profile = sources[*source_index].profile.to_owned();
-                entry.checkouts = sources[*source_index].checkouts;
+                entry.profile = sources[source_index].profile.to_owned();
+                entry.checkouts = sources[source_index].checkouts;
                 entry.build_evidence = skipped_build_evidence(found.source_evidence.as_ref());
                 planned.skipped.push(entry);
                 continue;
@@ -1550,17 +1547,6 @@ pub(super) fn plan_fs_union<H: Host>(
                 // meanwhile.
                 Ok(TermVerdict::InUse(skip)) => {
                     first_skip = Some((*index, found.path.as_path(), skip));
-                    break;
-                }
-                // The nested-build guard's veto at this judgement keeps the
-                // candidate for the whole union, as discovery's does
-                // (TASK-367): a term admitted before it does not take it.
-                Ok(TermVerdict::Refused(skip)) if skip.nested_build_veto => {
-                    first_skip = Some((*index, found.path.as_path(), skip));
-                    selected = None;
-                    selected_record = None;
-                    admitted.clear();
-                    checkout_marker = None;
                     break;
                 }
                 Ok(TermVerdict::Refused(skip)) => {

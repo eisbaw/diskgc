@@ -8,11 +8,20 @@
 //! saying "configured" or "built", and the outer system's next build fails
 //! until the package is cleaned there.
 //!
-//! Three signals, data below; any vetoes the output (`Anchored::Vetoed`:
-//! not a candidate, and discovery does not enter it, since a build nested
-//! in it is in the same tree though its own climb may not reach a stamp),
-//! and an ancestor that cannot be reached or read is a visible refusal,
-//! pruned the same way:
+//! The guard belongs to the selection, not to one term (the sixth review):
+//! every term of a selection that holds a guarded anchor carries it
+//! ([`crate::fs_kind::Find::nested_build_guard`]), and [`verdict`] is asked
+//! of every candidate that holds a build marker, whichever term found it.
+//! It is one of the retention rules (`Judge::version_where`), so it runs
+//! wherever they run: each term's judgement and the union-wide retention
+//! pass of the plan, the tally, the protocols before and under the lock
+//! and their last check before the delete or the command. Discovery asks
+//! it too, only to leave a vetoed build out of the report silently, as an
+//! outer match (not entered); an undecided one stays a candidate for the
+//! judgement to ask again. No deletion depends on discovery's answer.
+//!
+//! Three signals, data below; any vetoes the output, and a marker or an
+//! ancestor that cannot be reached or read is a visible refusal:
 //!
 //! - **Stamps** ([`OuterBuild::stamps`]) in the build directory's parent and
 //!   the three directories above it, and in the four directories above
@@ -42,10 +51,10 @@ use super::{AUTOTOOLS_STATUS, CMAKE_CACHE, MESON_CORE_DATA, unreachable_root_as}
 use crate::engine::{DEFAULT_MAX_ENTRIES, Reason, Skip};
 use crate::fs_kind::discover::check_deadline;
 use crate::fs_kind::judge::skip_or_stop;
-use crate::host::{DirListing, Host, MonoTime};
+use crate::host::{DirListing, FileType, Host, MonoTime, MountEntry};
 use crate::outcome::Judged;
 use crate::profile::SourceAnchor;
-use crate::resolve::{Want, resolve_in};
+use crate::resolve::{Resolved, Want, resolve_in};
 
 /// The anchors whose build directory lies inside its own source, as a
 /// meta-build system's per-package build directory does. The build-tree
@@ -126,16 +135,17 @@ pub(super) const STAMP_LEVELS: usize = 4;
 /// directories above it.
 const BUILD_MARKERS: &[&str] = &[CMAKE_CACHE, MESON_CORE_DATA, AUTOTOOLS_STATUS];
 
-/// Why `candidate`, a build directory found below `root`, lies inside
-/// another build system's managed tree; `None` when no signal says so.
-pub(super) fn outer_build<H: Host>(
+/// The guard's one verdict on `candidate`, whichever term of a selection
+/// found it (TASK-367, the sixth review): why it is a build directory
+/// inside another build system's managed tree; `None` when it holds no
+/// [`BUILD_MARKERS`] entry (not a build: the guard does not apply) or no
+/// signal says so. A marker or a signal that cannot be read is a refusal,
+/// never "no build" or "no signal". Reads the candidate's path alone.
+pub(super) fn verdict<H: Host>(
     host: &H,
     candidate: &Path,
     deadline: Option<MonoTime>,
 ) -> Judged<Option<String>> {
-    if let Some(found) = named_tree(candidate) {
-        return Ok(Ok(Some(found)));
-    }
     let mounts = match host.mountinfo() {
         Ok(mounts) => mounts,
         Err(error) => {
@@ -146,12 +156,72 @@ pub(super) fn outer_build<H: Host>(
             )));
         }
     };
+    check_deadline(host, deadline, candidate)?;
+    let dir = match resolve_in(host, &mounts, candidate, Want::Any) {
+        Ok(dir) => dir,
+        Err(error) => {
+            return Ok(Err(unreachable_root_as(
+                candidate,
+                candidate,
+                "a build directory's marker",
+                error,
+            )?));
+        }
+    };
+    if dir.stat.file_type != Some(FileType::Directory)
+        || !judged!(holds_build_marker(
+            host, candidate, &dir, candidate, deadline
+        ))
+    {
+        return Ok(Ok(None));
+    }
+    outer_build(host, &mounts, candidate, deadline)
+}
+
+/// Whether `dir` (at `dir_path`) holds a [`BUILD_MARKERS`] entry, of any
+/// type; one that cannot be looked up refuses `candidate`.
+fn holds_build_marker<H: Host>(
+    host: &H,
+    candidate: &Path,
+    dir: &Resolved<H::Fd>,
+    dir_path: &Path,
+    deadline: Option<MonoTime>,
+) -> Judged<bool> {
+    for marker in BUILD_MARKERS {
+        if judged!(entry(
+            host,
+            candidate,
+            &dir.fd,
+            dir_path,
+            dir.mount.id,
+            marker,
+            deadline
+        ))
+        .is_some()
+        {
+            return Ok(Ok(true));
+        }
+    }
+    Ok(Ok(false))
+}
+
+/// Why `candidate`, a build directory, lies inside another build system's
+/// managed tree; `None` when no signal says so.
+fn outer_build<H: Host>(
+    host: &H,
+    mounts: &[MountEntry],
+    candidate: &Path,
+    deadline: Option<MonoTime>,
+) -> Judged<Option<String>> {
+    if let Some(found) = named_tree(candidate) {
+        return Ok(Ok(Some(found)));
+    }
     // Stamps count up to this level (0: the parent): the candidate's four,
     // widened past every build directory it lies in.
     let mut reach = STAMP_LEVELS - 1;
     for (level, dir_path) in candidate.ancestors().skip(1).enumerate() {
         check_deadline(host, deadline, dir_path)?;
-        let dir = match resolve_in(host, &mounts, dir_path, Want::Directory) {
+        let dir = match resolve_in(host, mounts, dir_path, Want::Directory) {
             Ok(dir) => dir,
             Err(error) => {
                 return Ok(Err(unreachable_root_as(
@@ -184,23 +254,12 @@ pub(super) fn outer_build<H: Host>(
                 ))));
             }
         }
-        if level + STAMP_LEVELS > reach {
-            for marker in BUILD_MARKERS {
-                if judged!(entry(
-                    host,
-                    candidate,
-                    &dir.fd,
-                    dir_path,
-                    dir.mount.id,
-                    marker,
-                    deadline
-                ))
-                .is_some()
-                {
-                    reach = level + STAMP_LEVELS;
-                    break;
-                }
-            }
+        if level + STAMP_LEVELS > reach
+            && judged!(holds_build_marker(
+                host, candidate, &dir, dir_path, deadline
+            ))
+        {
+            reach = level + STAMP_LEVELS;
         }
         if level > reach {
             continue;

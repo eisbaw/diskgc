@@ -85,7 +85,8 @@ pub struct ProfileVector {
     /// binary cannot set, so `too_many_entries` fits in a small model.
     #[serde(default)]
     pub entry_budget: Option<usize>,
-    /// `--no-index`: plan and reclaim without the index.
+    /// `--no-index`: the run neither reads nor writes the index snapshot
+    /// (it still tallies and queues with an index of its own, in memory).
     #[serde(default)]
     pub no_index: bool,
     pub host: HostModel,

@@ -90,6 +90,12 @@ pub struct Find {
     /// An entry of any type at this name must be absent.
     pub lacks_entry: Option<String>,
     pub source_anchor: Option<crate::profile::SourceAnchor>,
+    /// Whether the nested-build guard (TASK-367) judges this term's
+    /// candidates: set from a guarded source anchor, and by the tier on
+    /// every term of a selection that holds one, since the guard keeps a
+    /// build from the whole selection whichever term found it. One of the
+    /// retention rules ([`Self::retains`]).
+    pub nested_build_guard: bool,
     /// The producer liveness contract its candidates must pass
     /// ([`liveness`], judged from the in-use check's scan).
     pub liveness_contract: Option<crate::profile::LivenessContract>,
@@ -135,8 +141,17 @@ pub struct NegatedMixedFilter {
 }
 
 impl Find {
-    /// Positive version and current-installation rules protect an inode
-    /// independently of the evidence that admits a union term.
+    /// Whether any retention rule judges its candidates: the version and
+    /// current-installation rules, or the nested-build guard. Each protects
+    /// an inode independently of the evidence that admits a union term.
+    pub fn retains(&self) -> bool {
+        self.has_retention_guard() || self.nested_build_guard
+    }
+
+    /// Positive version and current-installation rules, which judge a
+    /// candidate by its term's own root and path: a union records this
+    /// term's structural matches for them ([`discover_union`]). The
+    /// nested-build guard reads the candidate's path alone and needs none.
     pub fn has_retention_guard(&self) -> bool {
         self.keep_newest.is_some()
             || !self.protect_links.is_empty()
@@ -257,6 +272,7 @@ impl Find {
                 .map(|path| std::path::PathBuf::from(path.replace("{uid}", &uid.to_string()))),
             lacks_entry: where_.lacks_entry.clone(),
             source_anchor: where_.source_anchor,
+            nested_build_guard: source_anchor::nested_build_guarded(where_.source_anchor),
             liveness_contract: where_.liveness_contract,
             keep_newest: where_.keep_newest,
             newest_group: where_.newest_group,
