@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-01T16:39:00Z'
+updated_date: '2026-11-10T12:20:00Z'
 labels:
   - safety
   - performance
@@ -19,3 +20,9 @@ priority: medium
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Periodic full review #3 on master fc33d98 (2026-11-01; Codex tmp/reviews/codex-full3.md + mped), static reading. mped SHOULD 1+2: policy.rs judge (Refresh), tier_policy.rs DeletePolicy::skip and policy_skip each decide when to re-enumerate; skip re-implements judge by hand; overlaps_checked_in/_until and excluded_by_in/_until differ only in reading mountinfo. Any mount change anywhere (docker overlay mounts, snap refresh, FUSE portal) makes mounts != protection.mounts and forces full protect+negated re-enumeration per candidate; a CI host with Docker can spend the whole --timeout. Fix: one judge with Refresh from (stage, action, staleness); staleness compares only ancestry of each protect/negated root and the candidate plus mounts within/at them (Mounts::unchanged_for). Input to TASK-274 and TASK-294. Measure with Docker churning during a reclaim with protect configured.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Mark 2026-11-10 ('do all first four', TASK-334 step 4): do it, after TASK-334's profile.
+<!-- SECTION:NOTES:END -->

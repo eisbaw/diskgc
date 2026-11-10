@@ -3,9 +3,10 @@ id: TASK-334
 title: >-
   Reclaim walk ~0.6 s per candidate on the laptop: 5,453 pytest-tmp sessions
   took 54 min, 146k nix-shell-rc dirs would take ~a day
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-04T14:58:00Z'
+updated_date: '2026-11-10T12:20:00Z'
 labels:
   - performance
   - dogfood
@@ -28,3 +29,9 @@ Evidence: tmp/walks/2026-11-04-dogfood/ (a2-*.json/.err, a2b-*.json/.err with pe
 
 Open: profile where the walk spends its time (scan vs walk vs final checks vs the actions JSON cap at 1,001); whether one scan can serve more consecutive tiny fs candidates within FRESHNESS (safety.md In use: Freshness) without weakening it; whether the human/JSON report should say the time spent outside actions.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Mark 2026-11-10: 'do all first four' of the proposed order: (1) profile one reclaim in a container on a large fixture (scan, mountinfo, walk, final checks, report); (2) bring the dry run's batched scan (TASK-325) to the reclaim, inside the existing 500 ms reuse and 1 s freshness bounds; (3) TASK-294's mount-table reuse while poll on /proc/self/mountinfo reports no change; (4) TASK-300's verdict-relevant mount comparison. Step 5 (bytes-per-second ordering for tiny candidates) not chosen. Order after the profile follows what it shows. Starts on the guard stack (t370) once that is committed: both touch executor.rs and fs_kind/reclaim.rs.
+<!-- SECTION:NOTES:END -->
