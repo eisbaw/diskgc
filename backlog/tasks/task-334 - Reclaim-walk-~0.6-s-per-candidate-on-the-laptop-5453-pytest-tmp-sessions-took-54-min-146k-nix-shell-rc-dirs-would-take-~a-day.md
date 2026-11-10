@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-04T14:58:00Z'
-updated_date: '2026-11-10T12:20:00Z'
+updated_date: '2026-11-10T14:38:00Z'
 labels:
   - performance
   - dogfood
@@ -34,4 +34,6 @@ Open: profile where the walk spends its time (scan vs walk vs final checks vs th
 
 <!-- SECTION:NOTES:BEGIN -->
 Mark 2026-11-10: 'do all first four' of the proposed order: (1) profile one reclaim in a container on a large fixture (scan, mountinfo, walk, final checks, report); (2) bring the dry run's batched scan (TASK-325) to the reclaim, inside the existing 500 ms reuse and 1 s freshness bounds; (3) TASK-294's mount-table reuse while poll on /proc/self/mountinfo reports no change; (4) TASK-300's verdict-relevant mount comparison. Step 5 (bytes-per-second ordering for tiny candidates) not chosen. Order after the profile follows what it shows. Starts on the guard stack (t370) once that is committed: both touch executor.rs and fs_kind/reclaim.rs.
+
+2026-11-10 step 1 (profile) done; evidence tmp/t334/. Laptop dogfood a2b: ~77% of the 0.59 s per pytest candidate is record_as waiting up to 2 s (250 ms re-samples) for freed space to show, on nearly every candidate whose freed bytes fell short of the tally estimate; the goal was unreachable so the wait could not change a decision. Reproduced in the container with a writer (15 of 15 candidates waited 2.0 s). The wait also ages the process scan past the 1 s bound, forcing a rescan per waited candidate. Container floor per candidate: rc ~3.2 ms, pytest ~15 ms. Bounds: scan batching <=9% laptop, TASK-294 <0.5% laptop / 13-36% container floor, TASK-300 0 without mount churn. New step 0 (not among the four Mark approved, for his veto): skip the wait when the outstanding shortfall could not reach the goal. Order now: step 0, TASK-294, re-measure, scan batching, TASK-300. Unexplained: nix-shell-rc a4 ~115 ms per candidate outside the actions.
 <!-- SECTION:NOTES:END -->
